@@ -50,7 +50,7 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],form[data-model-retry]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind],form[data-privacy-form]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
@@ -102,6 +102,8 @@ function mountDashboardController(options) {
         return "Starting sync…";
       case "set_embedding_priority":
         return "Saving…";
+      case "retry_model":
+        return "Starting the download again…";
       default:
         return "Working…";
     }
@@ -122,6 +124,8 @@ function mountDashboardController(options) {
         return "Disconnected. This card updates when Olympus confirms it.";
       case "unpair":
         return "Unpaired on this computer.";
+      case "retry_model":
+        return "Downloading again. This row updates as it goes.";
       default:
         return "Saved.";
     }
@@ -256,6 +260,10 @@ function mountDashboardController(options) {
     }
     if (form.hasAttribute("data-embedding-kind")) {
       return { action: "set_embedding_priority", on: body.on === "true" };
+    }
+    if (form.hasAttribute("data-model-retry")) {
+      const model = form.dataset.modelRetry;
+      return model === "embedding" || model === "answers" ? { action: "retry_model", model } : undefined;
     }
     if (form.hasAttribute("data-disconnect-kind")) {
       return {
@@ -585,7 +593,7 @@ function mountDashboardController(options) {
       return "";
     if (node.id)
       return `#${node.id}`;
-    const action = node.getAttribute("data-connect-kind") || node.getAttribute("data-sync-kind") || node.getAttribute("data-embedding-kind") || node.getAttribute("data-disconnect-kind") || node.getAttribute("data-unpair-kind");
+    const action = node.getAttribute("data-connect-kind") || node.getAttribute("data-sync-kind") || node.getAttribute("data-embedding-kind") || node.getAttribute("data-model-retry") || node.getAttribute("data-disconnect-kind") || node.getAttribute("data-unpair-kind");
     if (action)
       return `${node.tagName}:${action}`;
     return node.textContent?.trim().slice(0, 120) || "";
@@ -660,6 +668,8 @@ function mountDashboardController(options) {
       return;
     if (!force && query("[data-remote-terms]:not([hidden])"))
       return;
+    if (!force && query('form[data-privacy-form][data-dirty="true"],[data-privacy-panel]:not([hidden]),[data-privacy-confirm],[data-privacy-conflict]'))
+      return;
     if (!force && hasDirtyInput())
       return;
     if (!force && hasFocusedControl()) {
@@ -690,6 +700,650 @@ function mountDashboardController(options) {
       refreshNow(false);
     }, pollIntervalMs) : undefined;
   }
+  function privacyCopy(form) {
+    try {
+      return JSON.parse(form.dataset.copy || "{}");
+    } catch {
+      return {};
+    }
+  }
+  function privacyFill(template, values) {
+    let out = template || "";
+    for (const key of Object.keys(values))
+      out = out.split(`{${key}}`).join(values[key]);
+    return out;
+  }
+  function privacyJson(value, fallback) {
+    try {
+      const parsed = JSON.parse(value || "");
+      return parsed ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  function privacyFolderSources(form) {
+    const list = privacyJson(form.dataset.folderSources, []);
+    return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === "string") : [];
+  }
+  function privacySourceNames(form) {
+    const names = privacyJson(form.dataset.sourceNames, {});
+    return names && typeof names === "object" ? names : {};
+  }
+  function privacyLogicFor(form) {
+    return options.privacyLogic ? options.privacyLogic({ mailSourceId: "gmail.email", folderSources: privacySourceNames(form) }) : undefined;
+  }
+  function privacyDisplay(form, logic, rule) {
+    const names = privacySourceNames(form);
+    return logic.displayOf(rule, privacyFill(privacyCopy(form).folderUnnamed || "", { source: names[rule.source_id] || rule.source_id }));
+  }
+  function privacyKindText(form, rule) {
+    const copy = privacyCopy(form);
+    if (rule.kind === "sender")
+      return copy.kindSender || "";
+    if (rule.kind === "label")
+      return copy.kindLabel || "";
+    const names = privacySourceNames(form);
+    return privacyFill(copy.kindFolder || "", { source: names[rule.source_id] || rule.source_id });
+  }
+  function privacyViewRules(form) {
+    return Array.from(form.querySelectorAll("[data-privacy-rule]")).flatMap((row) => {
+      const rule = privacyJson(row.getAttribute("data-privacy-rule") || undefined, null);
+      if (!rule || typeof rule.kind !== "string" || typeof rule.source_id !== "string")
+        return [];
+      const saved = row.hasAttribute("data-privacy-saved");
+      const view2 = {
+        kind: rule.kind,
+        source_id: rule.source_id,
+        display: row.querySelector(".sline.strong")?.textContent || "",
+        removed: row.hasAttribute("data-removed"),
+        saved,
+        ...typeof rule.key === "string" ? { key: rule.key } : {},
+        ...typeof rule.value === "string" ? { value: rule.value } : {},
+        ...saved ? { raw: rule } : {}
+      };
+      return [view2];
+    });
+  }
+  function privacyKept(form) {
+    return privacyViewRules(form).filter((rule) => !rule.removed);
+  }
+  function privacyRulesOut(form, logic) {
+    const hidden = privacyJson(form.dataset.hidden, []);
+    return privacyKept(form).map((rule) => logic.ruleOut(rule)).concat(Array.isArray(hidden) ? hidden : []);
+  }
+  function setPrivacyDirty(form) {
+    form.dataset.dirty = "true";
+    form.querySelectorAll("[data-privacy-confirm]").forEach((node) => node.remove());
+    const empty = form.querySelector("[data-privacy-empty]");
+    if (empty)
+      empty.hidden = privacyKept(form).length > 0;
+  }
+  function privacyRow(form, logic, rule) {
+    const view2 = rule;
+    const display = typeof view2.display === "string" && view2.display ? view2.display : privacyDisplay(form, logic, rule);
+    const copy = privacyCopy(form);
+    const row = document.createElement("div");
+    row.className = "srow nodot prule";
+    row.setAttribute("data-privacy-rule", JSON.stringify(view2.saved && view2.raw ? view2.raw : logic.ruleOut({ ...rule, display })));
+    if (view2.saved)
+      row.setAttribute("data-privacy-saved", "");
+    const main = document.createElement("div");
+    main.className = "smain";
+    const name = document.createElement("p");
+    name.className = "sline strong";
+    name.textContent = display;
+    const kind = document.createElement("p");
+    kind.className = "sline";
+    kind.textContent = privacyKindText(form, rule);
+    main.append(name, kind);
+    const actions = document.createElement("div");
+    actions.className = "sact";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn";
+    remove.setAttribute("data-privacy-remove", "");
+    remove.setAttribute("aria-label", privacyFill(copy.removeFor || "", { name: display }));
+    remove.textContent = copy.remove || "Remove";
+    actions.append(remove);
+    row.append(main, actions);
+    if (view2.removed)
+      markPrivacyRemoved(form, row, true);
+    return row;
+  }
+  function addPrivacyRule(form, rule) {
+    const logic = privacyLogicFor(form);
+    if (!logic)
+      return false;
+    const identity = logic.identity(rule);
+    const existing = Array.from(form.querySelectorAll("[data-privacy-rule]")).find((row) => {
+      const current = privacyJson(row.getAttribute("data-privacy-rule") || undefined, null);
+      return current !== null && logic.identity(current) === identity;
+    });
+    if (existing) {
+      if (!existing.hasAttribute("data-removed"))
+        return false;
+      togglePrivacyRemoved(form, existing);
+      return true;
+    }
+    form.querySelector("[data-privacy-rules]")?.append(privacyRow(form, logic, rule));
+    setPrivacyDirty(form);
+    return true;
+  }
+  function markPrivacyRemoved(form, row, removed) {
+    const copy = privacyCopy(form);
+    const name = row.querySelector(".sline.strong")?.textContent || "";
+    const button = row.querySelector("[data-privacy-remove]");
+    row.toggleAttribute("data-removed", removed);
+    row.classList.toggle("removed", removed);
+    if (button) {
+      button.textContent = removed ? copy.undo || "Undo" : copy.remove || "Remove";
+      button.setAttribute("aria-label", removed ? privacyFill(copy.undoFor || "", { name }) : privacyFill(copy.removeFor || "", { name }));
+    }
+  }
+  function togglePrivacyRemoved(form, row) {
+    const copy = privacyCopy(form);
+    const name = row.querySelector(".sline.strong")?.textContent || "";
+    const removed = !row.hasAttribute("data-removed");
+    markPrivacyRemoved(form, row, removed);
+    setPrivacyDirty(form);
+    say(form, removed ? privacyFill(copy.removed || "", { name }) : "");
+  }
+  function privacyPanel(form, kind) {
+    return form.querySelector(`[data-privacy-panel="${kind}"]`);
+  }
+  function panelSay(panel, message) {
+    const slot = panel.querySelector("[data-privacy-panel-message]");
+    if (slot)
+      slot.textContent = message;
+  }
+  function openPrivacyPanel(form, kind) {
+    form.querySelectorAll("[data-privacy-panel]").forEach((panel2) => {
+      panel2.hidden = panel2.dataset.privacyPanel !== kind;
+    });
+    const panel = privacyPanel(form, kind);
+    if (!panel)
+      return;
+    if (kind === "sender") {
+      panel.querySelector("[data-privacy-sender]")?.focus();
+      return;
+    }
+    if (kind === "label" && panel.dataset.loaded !== "true")
+      loadPrivacyLabels(form, panel);
+    if (kind === "folder") {
+      const sources = privacyFolderSources(form);
+      const holder = panel.querySelector("[data-privacy-folder-sources]");
+      if (holder && holder.childElementCount === 0 && sources.length > 1) {
+        for (const source of sources) {
+          const choose = document.createElement("button");
+          choose.type = "button";
+          choose.className = "btn";
+          choose.setAttribute("data-privacy-folder-source", source.id);
+          choose.textContent = source.label;
+          holder.append(choose);
+        }
+      }
+      if (!panel.dataset.source && sources[0])
+        loadPrivacyFolders(form, panel, sources[0].id, []);
+    }
+    if (!panel.hasAttribute("tabindex"))
+      panel.setAttribute("tabindex", "-1");
+    panel.focus();
+  }
+  function closePrivacyPanel(panel) {
+    panel.hidden = true;
+    panelSay(panel, "");
+    const form = panel.closest("form[data-privacy-form]");
+    const opener = form?.querySelector(`[data-privacy-add="${panel.dataset.privacyPanel}"]`);
+    opener?.focus();
+  }
+  function privacyPickRow(form, label, rule, open) {
+    const copy = privacyCopy(form);
+    const row = document.createElement("div");
+    row.className = "srow nodot";
+    const main = document.createElement("div");
+    main.className = "smain";
+    const name = document.createElement("p");
+    name.className = "sline strong";
+    name.textContent = label;
+    main.append(name);
+    const actions = document.createElement("div");
+    actions.className = "sact";
+    if (open) {
+      const inside = document.createElement("button");
+      inside.type = "button";
+      inside.className = "btn";
+      inside.setAttribute("data-privacy-folder-open", JSON.stringify(open));
+      inside.textContent = copy.folderOpen || "Open";
+      actions.append(inside);
+    }
+    const logic = privacyLogicFor(form);
+    const already = !!logic && privacyKept(form).some((current) => logic.identity(current) === logic.identity(rule));
+    const make = document.createElement("button");
+    make.type = "button";
+    make.className = "btn";
+    make.setAttribute("data-privacy-make-private", JSON.stringify(rule));
+    make.textContent = already ? copy.alreadyPrivate || "Already private" : copy.makePrivate || "Make private";
+    make.disabled = already;
+    actions.append(make);
+    row.append(main, actions);
+    return row;
+  }
+  async function loadPrivacyLabels(form, panel) {
+    const copy = privacyCopy(form);
+    const list = panel.querySelector("[data-privacy-list]");
+    if (!list || panel.dataset.loading === "true")
+      return;
+    panel.dataset.loading = "true";
+    panelSay(panel, copy.loading || "");
+    let draft;
+    try {
+      draft = JSON.parse(form.dataset.mailDraft || "null");
+    } catch {
+      draft = null;
+    }
+    try {
+      const result = await options.transport.control({
+        action: "browse_mail_scope",
+        source_id: "gmail.email",
+        draft
+      });
+      if (disposed || !root.contains(form))
+        return;
+      const summary = result.body.summary && typeof result.body.summary === "object" ? result.body.summary : undefined;
+      const labels = summary && Array.isArray(summary.labels) ? summary.labels : undefined;
+      if (result.status < 200 || result.status >= 300 || !labels) {
+        panelSay(panel, copy.loadFailed || "");
+        return;
+      }
+      list.replaceChildren();
+      const own = labels.filter((label) => typeof label.id === "string" && typeof label.name === "string" && label.system !== true);
+      for (const label of own) {
+        list.append(privacyPickRow(form, String(label.name), {
+          kind: "label",
+          source_id: "gmail.email",
+          key: String(label.id),
+          value: String(label.name)
+        }));
+      }
+      panel.dataset.loaded = "true";
+      panelSay(panel, own.length === 0 ? copy.noLabels || "" : "");
+    } catch {
+      if (!disposed)
+        panelSay(panel, copy.loadFailed || "");
+    } finally {
+      delete panel.dataset.loading;
+    }
+  }
+  async function loadPrivacyFolders(form, panel, sourceId, path, cursor) {
+    const copy = privacyCopy(form);
+    const list = panel.querySelector("[data-privacy-list]");
+    if (!list || panel.dataset.loading === "true")
+      return;
+    panel.dataset.loading = "true";
+    panelSay(panel, copy.loading || "");
+    const parent = path.length > 0 ? path[path.length - 1].key : undefined;
+    try {
+      const result = await options.transport.control({
+        action: "browse_folder_scope",
+        source_id: sourceId,
+        ...parent ? { parent_key: parent } : {},
+        ...cursor ? { cursor } : {}
+      });
+      if (disposed || !root.contains(form))
+        return;
+      const page = result.body.scope_browser;
+      if (result.status < 200 || result.status >= 300 || !page || !Array.isArray(page.nodes)) {
+        panelSay(panel, copy.loadFailed || "");
+        return;
+      }
+      panel.dataset.source = sourceId;
+      panel.dataset.path = JSON.stringify(path);
+      panel.querySelectorAll("[data-privacy-folder-source]").forEach((choice) => {
+        choice.setAttribute("aria-pressed", choice.dataset.privacyFolderSource === sourceId ? "true" : "false");
+      });
+      if (!cursor)
+        list.replaceChildren();
+      list.querySelector("[data-privacy-folder-more]")?.remove();
+      const where = panel.querySelector("[data-privacy-folder-path]");
+      if (where) {
+        where.replaceChildren();
+        if (path.length > 0) {
+          const up = document.createElement("button");
+          up.type = "button";
+          up.className = "btn";
+          up.setAttribute("data-privacy-folder-up", "");
+          up.textContent = copy.folderUp || "Back";
+          const name = document.createElement("span");
+          name.textContent = ` ${path.map((step) => step.name).join(" / ")}`;
+          where.append(up, name);
+        }
+      }
+      for (const node of page.nodes) {
+        if (typeof node.key !== "string" || typeof node.name !== "string" || node.selectable === false)
+          continue;
+        list.append(privacyPickRow(form, node.name, { kind: "folder", source_id: sourceId, key: node.key, display: node.name }, node.has_children ? { key: node.key, name: node.name } : undefined));
+      }
+      if (page.next_cursor) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "btn";
+        more.setAttribute("data-privacy-folder-more", page.next_cursor);
+        more.textContent = copy.folderMore || "Load more folders";
+        list.append(more);
+      }
+      panelSay(panel, list.querySelector("[data-privacy-make-private]") ? "" : copy.folderEmpty || "");
+    } catch {
+      if (!disposed)
+        panelSay(panel, copy.loadFailed || "");
+    } finally {
+      delete panel.dataset.loading;
+    }
+  }
+  function privacyPath(panel) {
+    try {
+      const path = JSON.parse(panel.dataset.path || "[]");
+      return Array.isArray(path) ? path : [];
+    } catch {
+      return [];
+    }
+  }
+  function addPrivacySender(form) {
+    const copy = privacyCopy(form);
+    const panel = privacyPanel(form, "sender");
+    const field = panel?.querySelector("[data-privacy-sender]");
+    if (!panel || !field)
+      return;
+    const value = privacyLogicFor(form)?.senderValue(field.value) || "";
+    if (!value) {
+      panelSay(panel, copy.senderInvalid || "");
+      field.focus();
+      return;
+    }
+    if (!addPrivacyRule(form, { kind: "sender", source_id: "gmail.email", value })) {
+      panelSay(panel, copy.senderDuplicate || "");
+      return;
+    }
+    field.value = "";
+    panelSay(panel, "");
+    field.focus();
+  }
+  function privacySavedDescription(form) {
+    return form.dataset.savedDescription || "";
+  }
+  function privacyLowering(form, logic) {
+    const field = form.querySelector('textarea[name="description"]');
+    const change = logic.lowering(privacyViewRules(form), field ? field.value : privacySavedDescription(form), privacySavedDescription(form));
+    return { removed: change.removed.map((rule) => rule.display), description: change.described };
+  }
+  function clearPrivacyPrompts(form) {
+    form.querySelectorAll("[data-privacy-confirm],[data-privacy-conflict]").forEach((node) => node.remove());
+  }
+  function privacyPrompt(form, kind, lines, items, buttons) {
+    clearPrivacyPrompts(form);
+    const box = document.createElement("div");
+    box.className = "pprompt";
+    box.setAttribute(`data-privacy-${kind}`, "");
+    box.setAttribute("role", "alert");
+    for (const line of lines) {
+      const text = document.createElement("p");
+      text.textContent = line;
+      box.append(text);
+    }
+    if (items.length > 0) {
+      const list = document.createElement("ul");
+      for (const item of items) {
+        const entry = document.createElement("li");
+        entry.textContent = item;
+        list.append(entry);
+      }
+      box.append(list);
+    }
+    const row = document.createElement("div");
+    row.className = "pbuttons";
+    for (const [attribute, label] of buttons) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn";
+      button.setAttribute(attribute, "");
+      button.textContent = label;
+      row.append(button);
+    }
+    box.append(row);
+    const footer = form.querySelector(".pfooter");
+    (footer || form).prepend(box);
+    row.querySelector("button")?.focus();
+  }
+  function showPrivacyConfirm(form, lowering) {
+    const copy = privacyCopy(form);
+    const lines = [];
+    if (lowering.removed.length > 0)
+      lines.push(privacyFill(copy.confirmRemoves || "", { list: lowering.removed.join(", ") }));
+    if (lowering.description)
+      lines.push(copy.confirmDescription || "");
+    privacyPrompt(form, "confirm", lines, [], [
+      ["data-privacy-confirm-yes", copy.confirm || "Confirm"],
+      ["data-privacy-confirm-no", copy.cancel || "Cancel"]
+    ]);
+  }
+  function showPrivacyConflict(form, logic, current) {
+    const copy = privacyCopy(form);
+    const description = typeof current.description === "string" ? current.description.trim() : "";
+    const rules = Array.isArray(current.rules) ? current.rules.filter((rule) => logic.validRule(rule)) : [];
+    const items = [description ? privacyFill(copy.conflictDescription || "", { text: description }) : copy.conflictNoDescription || ""];
+    if (rules.length === 0)
+      items.push(copy.rulesEmpty || "");
+    for (const rule of rules)
+      items.push(`${privacyDisplay(form, logic, rule)} · ${privacyKindText(form, rule)}`);
+    privacyPrompt(form, "conflict", [copy.conflict || "", copy.conflictNow || ""], items, [
+      ["data-privacy-apply-again", copy.applyAgain || "Apply my changes again"],
+      ["data-privacy-discard-mine", copy.discardMine || "Discard my changes"]
+    ]);
+  }
+  function privacyApplyAgain(form) {
+    const logic = privacyLogicFor(form);
+    const current = privacyJson(form.dataset.server, null);
+    if (!logic || !current)
+      return;
+    const field = form.querySelector('textarea[name="description"]');
+    const draft = {
+      rules: privacyViewRules(form),
+      description: field ? field.value : privacySavedDescription(form),
+      savedDescription: privacySavedDescription(form)
+    };
+    const saved = Array.isArray(current.rules) ? current.rules : [];
+    const fresh = saved.filter((rule) => logic.validRule(rule)).map((rule) => logic.viewRule(rule, privacyDisplay(form, logic, rule)));
+    const replayed = logic.replay(draft, fresh);
+    const description = typeof current.description === "string" ? current.description : "";
+    form.dataset.revision = typeof current.revision === "string" ? current.revision : "";
+    form.dataset.savedDescription = description;
+    form.dataset.hidden = JSON.stringify(saved.filter((rule) => !logic.validRule(rule)));
+    delete form.dataset.server;
+    const list = form.querySelector("[data-privacy-rules]");
+    if (list)
+      list.replaceChildren(...replayed.rules.map((rule) => privacyRow(form, logic, rule)));
+    if (field) {
+      field.defaultValue = description;
+      field.value = replayed.description !== null ? replayed.description : description;
+    }
+    setPrivacyDirty(form);
+    clearPrivacyPrompts(form);
+    savePrivacy(form);
+  }
+  async function savePrivacy(form, confirmed = false) {
+    const copy = privacyCopy(form);
+    const logic = privacyLogicFor(form);
+    if (!logic)
+      return;
+    if (!canWrite && !csrfToken) {
+      say(form, "Your OpenClaw connection has read-only access.");
+      return;
+    }
+    if (pendingForms.has(form) || form.dataset.server)
+      return;
+    const lowering = privacyLowering(form, logic);
+    const lowers = lowering.removed.length > 0 || lowering.description;
+    if (lowers && !confirmed) {
+      showPrivacyConfirm(form, lowering);
+      return;
+    }
+    clearPrivacyPrompts(form);
+    const field = form.querySelector('textarea[name="description"]');
+    const description = field ? field.value.trim() : undefined;
+    const revision = form.dataset.revision || "";
+    setFormPending(form, true, copy.saving || "Saving…");
+    let result;
+    try {
+      result = await options.transport.control({
+        action: "save_privacy",
+        ...description !== undefined ? { description } : {},
+        rules: privacyRulesOut(form, logic),
+        revision,
+        ...lowers ? { confirm: true } : {}
+      });
+    } catch {
+      say(form, copy.saveFailed || "Could not reach Olympus.");
+      return;
+    } finally {
+      setFormPending(form, false);
+    }
+    if (result.status === 401 || result.status === 403) {
+      if (options.authority === "worker-session") {
+        csrfToken = "";
+        say(form, "The control session expired — unlock controls in Setup, then try again.");
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, "Your write access expired. Reconnect with operator.write access, then try again.");
+      }
+      return;
+    }
+    const error = result.body.error && typeof result.body.error === "object" ? result.body.error : {};
+    if (result.status === 409 && error.code === "conflict") {
+      const current = result.body.settings && typeof result.body.settings === "object" ? result.body.settings : {};
+      form.dataset.server = JSON.stringify(current);
+      form.dataset.dirty = "true";
+      say(form, "");
+      showPrivacyConflict(form, logic, current);
+      return;
+    }
+    if (result.status === 409 && error.code === "privacy_owner_only") {
+      showPrivacyConfirm(form, privacyLowering(form, logic));
+      return;
+    }
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      say(form, result.status === 400 ? errorMessage(result) : copy.saveFailed || errorMessage(result));
+      return;
+    }
+    delete form.dataset.dirty;
+    if (field)
+      field.defaultValue = field.value;
+    say(form, copy.saved || "Saved.");
+    await refreshNow(true);
+    const next = query("form[data-privacy-form]");
+    if (next)
+      say(next, copy.saved || "Saved.");
+  }
+  function onPrivacyClick(target, event) {
+    const form = target.closest("form[data-privacy-form]");
+    if (!form)
+      return false;
+    const remove = target.closest("[data-privacy-remove]");
+    if (remove) {
+      const row = remove.closest("[data-privacy-rule]");
+      if (row)
+        togglePrivacyRemoved(form, row);
+      return true;
+    }
+    const add = target.closest("[data-privacy-add]");
+    if (add) {
+      openPrivacyPanel(form, add.dataset.privacyAdd || "");
+      return true;
+    }
+    const close = target.closest("[data-privacy-panel-close]");
+    if (close) {
+      const panel2 = close.closest("[data-privacy-panel]");
+      if (panel2)
+        closePrivacyPanel(panel2);
+      return true;
+    }
+    if (target.closest("[data-privacy-sender-add]")) {
+      addPrivacySender(form);
+      return true;
+    }
+    if (target.closest("[data-privacy-confirm-yes]")) {
+      savePrivacy(form, true);
+      return true;
+    }
+    if (target.closest("[data-privacy-confirm-no]")) {
+      clearPrivacyPrompts(form);
+      form.querySelector('button[type="submit"]')?.focus();
+      return true;
+    }
+    if (target.closest("[data-privacy-apply-again]")) {
+      privacyApplyAgain(form);
+      return true;
+    }
+    if (target.closest("[data-privacy-discard-mine]")) {
+      delete form.dataset.dirty;
+      delete form.dataset.server;
+      clearPrivacyPrompts(form);
+      const field = form.querySelector('textarea[name="description"]');
+      if (field)
+        field.value = field.defaultValue;
+      refreshNow(true);
+      return true;
+    }
+    const make = target.closest("[data-privacy-make-private]");
+    if (make) {
+      try {
+        const rule = JSON.parse(make.dataset.privacyMakePrivate || "");
+        if (addPrivacyRule(form, rule)) {
+          make.textContent = privacyCopy(form).alreadyPrivate || "Already private";
+          make.disabled = true;
+        }
+      } catch {}
+      return true;
+    }
+    const panel = target.closest('[data-privacy-panel="folder"]');
+    if (panel) {
+      const source = target.closest("[data-privacy-folder-source]");
+      if (source) {
+        loadPrivacyFolders(form, panel, source.dataset.privacyFolderSource || "", []);
+        return true;
+      }
+      const open = target.closest("[data-privacy-folder-open]");
+      if (open && panel.dataset.source) {
+        try {
+          const step = JSON.parse(open.dataset.privacyFolderOpen || "");
+          loadPrivacyFolders(form, panel, panel.dataset.source, [...privacyPath(panel), step]);
+        } catch {}
+        return true;
+      }
+      if (target.closest("[data-privacy-folder-up]") && panel.dataset.source) {
+        loadPrivacyFolders(form, panel, panel.dataset.source, privacyPath(panel).slice(0, -1));
+        return true;
+      }
+      const more = target.closest("[data-privacy-folder-more]");
+      if (more && panel.dataset.source) {
+        loadPrivacyFolders(form, panel, panel.dataset.source, privacyPath(panel), more.dataset.privacyFolderMore || undefined);
+        return true;
+      }
+    }
+    const cancel = target.closest("[data-privacy-cancel]");
+    if (cancel) {
+      const field = form.querySelector('textarea[name="description"]');
+      const edited = form.dataset.dirty === "true" || field !== null && field.value !== field.defaultValue;
+      if (edited && !window.confirm(privacyCopy(form).discard || "Discard your changes?")) {
+        event.preventDefault();
+        return true;
+      }
+      delete form.dataset.dirty;
+      if (field)
+        field.value = field.defaultValue;
+      return false;
+    }
+    return false;
+  }
   function onSubmit(event) {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
     if (!form || !root.contains(form))
@@ -707,7 +1361,12 @@ function mountDashboardController(options) {
       submitAgentControl(form);
       return;
     }
-    if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]"))
+    if (form.hasAttribute("data-privacy-form")) {
+      event.preventDefault();
+      savePrivacy(form);
+      return;
+    }
+    if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-model-retry],[data-disconnect-kind],[data-unpair-kind],[data-model-check]"))
       return;
     event.preventDefault();
     const submittedValues = formRecord(form);
@@ -751,6 +1410,8 @@ function mountDashboardController(options) {
       }
       return;
     }
+    if (onPrivacyClick(target, event))
+      return;
     if (target.closest("[data-remote-terms-cancel]")) {
       hideRemoteTerms();
       return;
@@ -903,11 +1564,33 @@ function mountDispositionsController(options) {
     metadata_only: "Names only",
     exclude: "Skipped"
   };
+  const SCOPE_STATES = ["ingest", "metadata_only", "exclude"];
+  const MAX_SCOPE_RULES = 100;
+  const ACCOUNT_KEY = "@account";
   const scopeDrafts = new Map;
+  const scopeCopies = new WeakMap;
   function scopeMessage(form, text) {
     const slot = form.querySelector("[data-scope-message]");
     if (slot)
       slot.textContent = text;
+  }
+  function scopeCopy(form) {
+    let copy = scopeCopies.get(form);
+    if (!copy) {
+      try {
+        copy = JSON.parse(form.dataset.scopeCopy || "{}");
+      } catch {
+        copy = {};
+      }
+      scopeCopies.set(form, copy);
+    }
+    return copy;
+  }
+  function fillText(template, values) {
+    let out = template || "";
+    for (const key of Object.keys(values))
+      out = out.split(`{${key}}`).join(String(values[key]));
+    return out;
   }
   function scopeDraft(form) {
     let draft = scopeDrafts.get(form);
@@ -916,20 +1599,21 @@ function mountDispositionsController(options) {
         generation: form.dataset.accountGeneration || "",
         revision: form.dataset.scopeRevision || "",
         selections: new Map,
-        names: new Map,
         ancestors: new Map,
         nodes: [],
         catalog: new Map,
         branches: new Map,
         branchCursors: new Map,
-        expanded: new Set,
+        path: [],
         loaded: false,
         loadAttempted: false,
         loading: false,
         busy: false,
+        saving: false,
         invalid: false,
         edited: false,
-        whole: form.querySelector("[data-scope-whole-account]")?.checked === true
+        whole: false,
+        wholeConfirmed: false
       };
       scopeDrafts.set(form, draft);
     }
@@ -938,21 +1622,26 @@ function mountDispositionsController(options) {
   function scopeAllowed(form, draft) {
     return canWrite && form.dataset.connected === "true" && !draft.busy && !draft.invalid;
   }
-  function inheritedScopeState(draft, key) {
-    let state = draft.whole ? "ingest" : undefined;
+  function scopeInherited(draft, key) {
+    let state = draft.whole ? "ingest" : "";
+    let from = draft.whole ? ACCOUNT_KEY : "";
     for (const ancestor of draft.ancestors.get(key) || []) {
       const choice = draft.selections.get(ancestor);
-      if (choice === "exclude")
-        return "exclude";
-      if (choice === "metadata_only")
+      if (choice === "exclude") {
+        state = "exclude";
+        from = ancestor;
+      } else if (choice === "metadata_only" && state !== "exclude") {
         state = "metadata_only";
-      else if (choice === "ingest" && state === undefined)
+        from = ancestor;
+      } else if (choice === "ingest" && (state === "" || state === "ingest")) {
         state = "ingest";
+        from = ancestor;
+      }
     }
-    return state;
+    return { state, from };
   }
   function effectiveScopeState(draft, key) {
-    const inherited = inheritedScopeState(draft, key);
+    const inherited = scopeInherited(draft, key).state;
     const own = draft.selections.get(key);
     if (inherited === "exclude" || own === "exclude")
       return "exclude";
@@ -960,193 +1649,339 @@ function mountDispositionsController(options) {
       return "metadata_only";
     return own || inherited || "exclude";
   }
-  function scopeChoiceAllowed(draft, state) {
-    if (!draft.selected?.selectable)
-      return false;
-    const inherited = inheritedScopeState(draft, draft.selected.key);
+  function shownScopeState(draft, key) {
+    return draft.selections.has(key) || scopeInherited(draft, key).state ? effectiveScopeState(draft, key) : "";
+  }
+  function scopeChoiceAllowed(draft, key, state) {
+    const inherited = scopeInherited(draft, key).state;
     if (inherited === "exclude")
       return state === "exclude";
     if (inherited === "metadata_only")
-      return state === "metadata_only" || state === "exclude";
-    return state === "ingest" || state === "metadata_only" || state === "exclude";
-  }
-  function scopeControls(form, draft) {
-    const allowed = scopeAllowed(form, draft);
-    const loading = form.querySelector("[data-scope-loading]");
-    if (loading)
-      loading.hidden = !draft.loading;
-    form.querySelector("[data-scope-nodes]")?.setAttribute("aria-busy", String(draft.loading));
-    form.querySelectorAll("button").forEach((button) => {
-      button.disabled = !allowed;
-    });
-    form.querySelectorAll("input").forEach((input) => {
-      input.disabled = !allowed || !draft.loaded;
-    });
-    form.querySelectorAll("[data-scope-state]").forEach((button) => {
-      button.disabled = !allowed || !scopeChoiceAllowed(draft, button.dataset.scopeState || "");
-      button.classList.toggle("on", draft.selected !== undefined && effectiveScopeState(draft, draft.selected.key) === button.dataset.scopeState);
-    });
-    const hasSelection = Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude");
-    const confirmation = form.querySelector("[data-scope-whole-confirm]");
-    const submit = form.querySelector("[data-scope-start]");
-    if (submit)
-      submit.disabled = !allowed || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !hasSelection && !draft.edited || draft.whole && confirmation?.checked !== true;
-    if (submit)
-      submit.textContent = draft.whole || hasSelection ? "Save scope and start" : "Save scope (nothing indexed)";
-    const cancel = form.querySelector("[data-scope-cancel]");
-    if (cancel)
-      cancel.disabled = draft.busy;
-    const confirmationLabel = form.querySelector(".scope-whole-confirm");
-    if (confirmationLabel)
-      confirmationLabel.hidden = !draft.whole;
+      return state !== "ingest";
+    return true;
   }
   function scopeMixed(draft, key) {
     const own = effectiveScopeState(draft, key);
     for (const other of draft.selections.keys()) {
-      if (other !== key && (draft.ancestors.get(other) || []).includes(key) && effectiveScopeState(draft, other) !== own)
-        return true;
+      if (other === key || !(draft.ancestors.get(other) || []).includes(key))
+        continue;
+      const theirs = effectiveScopeState(draft, other);
+      if (theirs !== own)
+        return theirs;
     }
-    return false;
+    return "";
   }
-  function scopeStatusText(draft, key) {
-    if (scopeMixed(draft, key))
-      return "Mixed";
-    const inherited = inheritedScopeState(draft, key);
-    const chosen = draft.selections.has(key);
-    return chosen || inherited ? `${labels[effectiveScopeState(draft, key)]}${inherited && !chosen ? " · inherited" : ""}` : "Not selected";
+  function scopeExceptions(draft) {
+    return Array.from(draft.selections.keys()).filter((key) => draft.selections.get(key) !== scopeInherited(draft, key).state);
   }
-  function scopeConsequence(draft) {
-    const counts = { ingest: 0, metadata_only: 0, exclude: 0 };
-    for (const key of draft.selections.keys())
-      counts[effectiveScopeState(draft, key)] += 1;
-    const folders = (count) => `${count} ${count === 1 ? "folder" : "folders"}`;
-    const entries = [["fully indexed", counts.ingest], ["names only", counts.metadata_only], ["skipped", counts.exclude]];
-    const phrase = (list) => list.filter(([, count]) => count > 0).map(([what, count], index) => `${index === 0 ? folders(count) : count} ${what}`);
-    if (draft.whole) {
-      const exceptions = phrase(entries.slice(1));
-      return `Entire account, including future folders, fully indexed${exceptions.length > 0 ? `; ${exceptions.join(", ")}` : ""}.`;
-    }
-    const parts = phrase(entries);
-    if (counts.ingest + counts.metadata_only === 0)
-      return "No folders selected. Nothing will be indexed.";
-    return `${parts.join(", ")}. All other folders stay out.`;
+  function scopeAnyChosen(draft) {
+    return Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude");
   }
-  function renderScopeReview(form, draft) {
-    const summary = form.querySelector("[data-scope-summary]");
-    if (summary)
-      summary.textContent = scopeConsequence(draft);
-    const list = form.querySelector("[data-scope-selections]");
-    if (list) {
-      list.replaceChildren();
-      for (const [key, state] of draft.selections) {
-        const item = root.ownerDocument.createElement("li");
-        item.textContent = `${labels[effectiveScopeState(draft, key)]} — ${draft.names.get(key) || key}`;
-        list.appendChild(item);
-      }
-    }
-    scopeControls(form, draft);
+  function scopeNameOf(form, draft, key) {
+    const Q = scopeCopy(form);
+    if (key === ACCOUNT_KEY)
+      return fillText(Q.accountRow, { source: form.dataset.scopeLabel || "" });
+    const node = draft.catalog.get(key);
+    if (node?.name)
+      return node.name;
+    const above = (draft.ancestors.get(key) || []).filter((ancestor) => draft.catalog.get(ancestor)?.name);
+    return above.length ? fillText(Q.insideFolder, { name: draft.catalog.get(above[above.length - 1]).name }) : Q.unknownFolder;
   }
-  function updateScopeRows(form, draft) {
-    form.querySelectorAll(".scope-folder").forEach((row) => {
-      const key = row.querySelector("[data-scope-select]")?.dataset.scopeSelect;
-      if (!key)
-        return;
-      row.classList.toggle("selected", draft.selected?.key === key);
-      const status = row.querySelector(".scope-folder-status");
-      if (status) {
-        status.textContent = scopeStatusText(draft, key);
-        status.classList.toggle("mixed", status.textContent === "Mixed");
-      }
-    });
-    renderScopeReview(form, draft);
+  function scopeShortPath(form, draft, key) {
+    const node = draft.catalog.get(key);
+    if (!node?.name)
+      return scopeNameOf(form, draft, key);
+    const ancestors = draft.ancestors.get(key) || [];
+    const parent = ancestors.length ? draft.catalog.get(ancestors[ancestors.length - 1]) : undefined;
+    return parent?.name ? `${parent.name} / ${node.name}` : node.name;
   }
   function scopeTrail(draft, key) {
-    return [...draft.ancestors.get(key) || [], key].map((ancestor) => ({ key: ancestor, name: draft.catalog.get(ancestor)?.name || ancestor }));
+    return [...draft.ancestors.get(key) || [], key];
   }
-  function renderScopeNodes(form, draft) {
-    const list = form.querySelector("[data-scope-nodes]");
-    if (!list)
-      return;
-    list.replaceChildren();
-    const appendNodes = (host, nodes, seen = new Set) => {
-      const sorted = [...nodes].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.key.localeCompare(b.key));
-      for (const node of sorted) {
-        if (seen.has(node.key))
-          continue;
-        const wrapper = root.ownerDocument.createElement("div");
-        wrapper.className = "node";
-        const row = root.ownerDocument.createElement("div");
-        row.className = "folder-row scope-folder";
-        row.setAttribute("role", "listitem");
-        row.classList.toggle("selected", draft.selected?.key === node.key);
-        const disclosure = root.ownerDocument.createElement(node.has_children ? "button" : "span");
-        disclosure.className = "disclosure";
-        if (disclosure instanceof HTMLButtonElement) {
-          disclosure.type = "button";
-          disclosure.dataset.scopeOpen = node.key;
-          disclosure.textContent = draft.expanded.has(node.key) ? "▾" : "▸";
-          disclosure.setAttribute("aria-label", `${draft.expanded.has(node.key) ? "Collapse" : "Expand"} ${node.name}`);
-          disclosure.setAttribute("aria-expanded", String(draft.expanded.has(node.key)));
-        }
-        const select = root.ownerDocument.createElement("button");
-        select.type = "button";
-        select.dataset.scopeSelect = node.key;
-        select.textContent = node.name;
-        const status = root.ownerDocument.createElement("span");
-        status.className = "scope-folder-status";
-        status.textContent = scopeStatusText(draft, node.key);
-        status.classList.toggle("mixed", status.textContent === "Mixed");
-        const icon = root.ownerDocument.createElement("span");
-        icon.className = "folder-icon";
-        icon.textContent = "▰";
-        row.append(disclosure, icon, select, status);
-        wrapper.appendChild(row);
-        if (draft.expanded.has(node.key)) {
-          const children = root.ownerDocument.createElement("div");
-          children.className = "children";
-          children.setAttribute("role", "group");
-          children.setAttribute("aria-label", node.name);
-          appendNodes(children, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
-          if (draft.branchCursors.has(node.key)) {
-            const more2 = root.ownerDocument.createElement("button");
-            more2.type = "button";
-            more2.dataset.scopeMore = node.key;
-            more2.textContent = (draft.branches.get(node.key)?.length || 0) >= 20 ? "Show more folders" : "Continue loading folders";
-            children.appendChild(more2);
-          }
-          wrapper.appendChild(children);
-        }
-        host.appendChild(wrapper);
+  function scopeEl(tag, className = "", text) {
+    const node = root.ownerDocument.createElement(tag);
+    if (className)
+      node.className = className;
+    if (text !== undefined)
+      node.textContent = text;
+    return node;
+  }
+  function scopeButton(className, text, focusKey, enabled) {
+    const button = scopeEl("button", className, text);
+    button.type = "button";
+    button.dataset.scopeFocus = focusKey;
+    button.disabled = !enabled;
+    return button;
+  }
+  function scopeSegments(form, draft, key, name, enabled) {
+    const Q = scopeCopy(form);
+    const account = key === ACCOUNT_KEY;
+    const own = account ? draft.whole ? "ingest" : "" : draft.selections.get(key) || "";
+    const from = account ? { state: "", from: "" } : scopeInherited(draft, key);
+    const now = account ? own : shownScopeState(draft, key);
+    const node = draft.catalog.get(key);
+    const capped = !account && !own && draft.selections.size >= MAX_SCOPE_RULES;
+    const group = scopeEl("div", "seg");
+    group.setAttribute("role", "group");
+    group.setAttribute("aria-label", fillText(Q.choiceGroup, { name }));
+    const buttons = [];
+    for (const state of SCOPE_STATES) {
+      const [long, short] = Q.segments[state];
+      const pressed = own === state;
+      const inherited = !pressed && (own ? now !== own && now === state : from.state === state);
+      const button = scopeButton(`seg-opt${pressed ? " on" : inherited ? " inherited" : ""}`, "", `seg:${key}:${state}`, enabled);
+      button.dataset.scopeKey = key;
+      button.dataset.scopeState = state;
+      button.setAttribute("aria-label", long);
+      button.setAttribute("aria-pressed", String(pressed));
+      button.append(scopeEl("span", "seg-long", long), scopeEl("span", "seg-short", short));
+      const fromName = from.from ? scopeNameOf(form, draft, from.from) : "";
+      const blocked = pressed ? "" : account ? state === "ingest" ? "" : Q.wholeOnlyFull : node && !node.selectable ? Q.cannotChoose : from.state && !scopeChoiceAllowed(draft, key, state) ? fillText(Q.notPossible, { parent: fromName, state: Q.statesLower[from.state] }) : capped ? fillText(Q.capReached, { max: MAX_SCOPE_RULES }) : "";
+      const note = blocked || (own === state && now && now !== own ? fillText(Q.overridden, { own: Q.states[own], parent: fromName, state: Q.states[now] }) : "") || (!own && from.from && from.state === state ? fillText(Q.inheritedFrom, { parent: fromName }) : "");
+      if (note) {
+        button.setAttribute("aria-description", note);
+        button.title = note;
       }
-    };
-    appendNodes(list, draft.nodes);
-    if (draft.nodes.length === 0) {
-      const empty = root.ownerDocument.createElement("p");
-      empty.textContent = "No folders returned in this page.";
-      list.appendChild(empty);
+      if (blocked)
+        button.disabled = true;
+      buttons.push(button);
+      group.appendChild(button);
     }
-    const needle = form.querySelector("[data-scope-search]")?.value.trim().toLowerCase() || "";
-    list.querySelectorAll(".scope-folder").forEach((row) => {
-      row.hidden = !!needle && !(row.textContent || "").toLowerCase().includes(needle);
-    });
-    const more = form.querySelector('[data-scope-more=""]');
+    const live = buttons.filter((button) => !button.disabled);
+    const home = live.find((button) => button.dataset.scopeFocus === draft.focus) || live.find((button) => button.classList.contains("on")) || live.find((button) => button.classList.contains("inherited")) || live[0] || buttons[0];
+    for (const button of buttons)
+      button.tabIndex = button === home ? 0 : -1;
+    return group;
+  }
+  function scopeNameCell(form, draft, node, enabled) {
+    const Q = scopeCopy(form);
+    let label;
+    if (node.has_children) {
+      const open = scopeButton("fname", "", `open:${node.key}`, enabled && !draft.loading);
+      open.dataset.scopeOpen = node.key;
+      open.setAttribute("aria-label", fillText(Q.openFolder, { name: node.name }));
+      const chevron = scopeEl("span", "fopen", "›");
+      chevron.setAttribute("aria-hidden", "true");
+      open.appendChild(chevron);
+      label = open;
+    } else {
+      label = scopeEl("p", "fname leaf");
+      const gap = scopeEl("span", "fopen-gap");
+      gap.setAttribute("aria-hidden", "true");
+      label.appendChild(gap);
+    }
+    label.title = node.name;
+    const main = scopeEl("span", "fname-main");
+    main.appendChild(scopeEl("span", "fname-text", node.name));
+    const differs = scopeMixed(draft, node.key);
+    if (differs) {
+      const tag = scopeEl("span", "ftag", Q.mixed);
+      tag.title = fillText(Q.mixedSome, { state: Q.statesLower[differs] });
+      main.appendChild(tag);
+    }
+    label.appendChild(main);
+    return label;
+  }
+  function scopeLevelList(form, draft, parent, nodes, more, enabled) {
+    const Q = scopeCopy(form);
+    const list = scopeEl("ul", "flist");
+    list.dataset.scopeNodes = parent;
+    list.setAttribute("aria-busy", String(draft.loading));
+    const seen = new Set;
+    for (const node of nodes) {
+      if (seen.has(node.key))
+        continue;
+      seen.add(node.key);
+      const row = scopeEl("li", "frow seg-row");
+      row.dataset.scopeRow = node.key;
+      row.append(scopeNameCell(form, draft, node, enabled), scopeSegments(form, draft, node.key, node.name, enabled && !draft.saving));
+      list.appendChild(row);
+    }
+    if (!nodes.length && draft.loaded && !draft.loading)
+      list.appendChild(scopeEl("li", "fempty", Q.noFolders));
     if (more) {
-      more.hidden = !draft.nextCursor;
-      more.textContent = draft.nodes.length >= 20 ? "Show more folders" : "Continue loading folders";
+      const item = scopeEl("li", "fmore");
+      const button = scopeButton("secondary", draft.loading ? Q.loadingFolders : Q.loadMore, `more:${parent}`, enabled && !draft.loading);
+      button.dataset.scopeMore = parent;
+      item.appendChild(button);
+      list.appendChild(item);
     }
-    renderScopeReview(form, draft);
+    return list;
+  }
+  function scopeTopRow(text, control, className = "") {
+    const row = scopeEl("div", `this-row${className ? ` ${className}` : ""}`);
+    row.append(scopeEl("p", "this-label", text), control);
+    return row;
+  }
+  function scopeRootScreen(form, draft, view, enabled) {
+    const Q = scopeCopy(form);
+    const source = form.dataset.scopeLabel || "";
+    const accountName = fillText(Q.accountRow, { source });
+    view.appendChild(scopeTopRow(accountName, scopeSegments(form, draft, ACCOUNT_KEY, accountName, enabled && draft.loaded && !draft.saving), "account-row"));
+    if (draft.whole && !draft.wholeConfirmed) {
+      const box = scopeEl("div", "confirm-box");
+      box.dataset.scopeConfirm = "";
+      const actions = scopeEl("div", "actions");
+      const yes = scopeButton("danger", Q.wholeConfirm, "whole-yes", enabled && !draft.saving);
+      yes.dataset.scopeWholeConfirm = "";
+      const no = scopeButton("secondary", Q.wholeCancel, "whole-no", enabled && !draft.saving);
+      no.dataset.scopeWholeCancel = "";
+      actions.append(yes, no);
+      box.append(scopeEl("p", "strong", fillText(Q.wholePrompt, { source })), actions);
+      view.appendChild(box);
+    }
+    const exceptions = draft.loaded ? scopeExceptions(draft) : [];
+    if (exceptions.length) {
+      const section = scopeEl("section", "fsection exceptions");
+      section.appendChild(scopeEl("h2", "", fillText(Q.exceptions, { n: exceptions.length })));
+      const list = scopeEl("ul", "flist");
+      for (const key of exceptions) {
+        const state = draft.selections.get(key);
+        const jump = scopeButton("jump-btn", "", `jump:${key}`, enabled && !draft.loading);
+        jump.dataset.scopeJump = key;
+        jump.title = scopeShortPath(form, draft, key);
+        const chevron = scopeEl("span", "chev", "›");
+        chevron.setAttribute("aria-hidden", "true");
+        jump.append(scopeEl("span", "fname-text", scopeShortPath(form, draft, key)), scopeEl("span", `jtag jtag-${state}`, Q.segments[state][0]), chevron);
+        const item = scopeEl("li", "frow jump");
+        item.appendChild(jump);
+        list.appendChild(item);
+      }
+      section.appendChild(list);
+      view.appendChild(section);
+    }
+    const folders = scopeEl("section", "fsection");
+    folders.appendChild(scopeEl("h2", "", Q.foldersHeading));
+    folders.appendChild(scopeLevelList(form, draft, "", draft.nodes, !!draft.nextCursor, enabled));
+    view.appendChild(folders);
+  }
+  function scopeFolderScreen(form, draft, view, enabled) {
+    const Q = scopeCopy(form);
+    const key = draft.path[draft.path.length - 1];
+    const up = scopeButton("secondary back", Q.up, "up", !draft.saving);
+    up.dataset.scopeUp = "";
+    view.appendChild(up);
+    const names = [form.dataset.scopeLabel || "", ...draft.path.map((entry) => scopeNameOf(form, draft, entry))];
+    const shown = names.length > 3 ? [Q.pathMore, ...names.slice(-2)] : names;
+    const head = scopeEl("h2", "fpath");
+    shown.forEach((name, index) => {
+      head.appendChild(index === shown.length - 1 ? scopeEl("span", "fpath-here", name) : scopeEl("span", "fpath-up", `${name} / `));
+    });
+    view.appendChild(head);
+    view.appendChild(scopeTopRow(Q.thisFolder, scopeSegments(form, draft, key, scopeNameOf(form, draft, key), enabled && !draft.saving)));
+    view.appendChild(scopeLevelList(form, draft, key, draft.branches.get(key) || [], draft.branchCursors.has(key), enabled));
+  }
+  function scopeFooter(form, draft) {
+    const Q = scopeCopy(form);
+    const allowed = scopeAllowed(form, draft);
+    const totals = { ingest: 0, metadata_only: 0, exclude: 0 };
+    for (const key of draft.selections.keys())
+      totals[effectiveScopeState(draft, key)] += 1;
+    const parts = [];
+    for (const [state, template] of [["ingest", Q.summaryIngest], ["metadata_only", Q.summaryMetadata], ["exclude", Q.summaryExclude]]) {
+      const n = totals[state];
+      if (!n)
+        continue;
+      parts.push(fillText(template, { n: parts.length ? String(n) : `${n} ${n === 1 ? Q.summaryFolder.one : Q.summaryFolder.many}` }));
+    }
+    const lines = [];
+    if (draft.whole)
+      lines.push(fillText(Q.summaryWhole, { source: form.dataset.scopeLabel || "" }));
+    if (parts.length)
+      lines.push(parts.join(", "));
+    else if (!draft.whole)
+      lines.push(Q.summaryNone);
+    if (draft.selections.size >= MAX_SCOPE_RULES)
+      lines.push(fillText(Q.capReached, { max: MAX_SCOPE_RULES }));
+    const summary = form.querySelector("[data-scope-summary]");
+    if (summary)
+      summary.replaceChildren(...lines.map((line) => scopeEl("p", "", line)));
+    const chosen = scopeAnyChosen(draft);
+    const ready = allowed && draft.loaded && !!draft.generation && !!draft.revision && draft.selections.size <= MAX_SCOPE_RULES;
+    const blocker = draft.whole && !draft.wholeConfirmed ? Q.needConfirm : !draft.whole && !chosen && !draft.edited ? Q.needChoice : "";
+    const submit = form.querySelector("[data-scope-start]");
+    if (submit) {
+      submit.disabled = !ready || blocker !== "";
+      submit.textContent = draft.saving ? Q.saving : draft.whole || chosen ? Q.saveFolders : Q.saveNoStart;
+      submit.setAttribute("aria-busy", String(draft.saving));
+    }
+    const reason = form.querySelector("[data-scope-reason]");
+    if (reason)
+      reason.textContent = draft.saving || form.dataset.connected !== "true" ? "" : blocker;
+    const cancel = form.querySelector("[data-scope-cancel]");
+    if (cancel)
+      cancel.disabled = !canWrite || draft.busy || !draft.edited && !draft.invalid;
+  }
+  function renderScope(form, draft) {
+    const Q = scopeCopy(form);
+    const allowed = scopeAllowed(form, draft);
+    const loading = form.querySelector("[data-scope-loading]");
+    if (loading)
+      loading.hidden = !draft.loading;
+    const back = form.closest("[data-scope-panel]")?.querySelector(".scope-back");
+    if (back)
+      back.hidden = draft.path.length > 0;
+    const view = form.querySelector("[data-scope-view]");
+    const connected = form.dataset.connected === "true";
+    if (view)
+      view.hidden = !connected;
+    const footer = form.querySelector(".picker-footer");
+    if (footer)
+      footer.hidden = !connected;
+    if (view && connected) {
+      const tree = root.getRootNode();
+      const active = tree instanceof ShadowRoot ? tree.activeElement : root.ownerDocument.activeElement;
+      const keep = draft.focus || (active instanceof HTMLElement && view.contains(active) ? active.dataset.scopeFocus : undefined);
+      view.replaceChildren();
+      if (draft.retry && !draft.loading) {
+        const banner = scopeEl("div", "scope-error");
+        banner.setAttribute("role", "alert");
+        const retry = scopeButton("secondary", Q.tryAgain, "retry", canWrite && !draft.invalid);
+        retry.dataset.scopeBrowseRoot = "";
+        banner.append(scopeEl("p", "", Q.loadFailed), retry);
+        view.appendChild(banner);
+      }
+      if (draft.path.length)
+        scopeFolderScreen(form, draft, view, allowed);
+      else
+        scopeRootScreen(form, draft, view, allowed);
+      if (!allowed)
+        view.querySelectorAll("button:not([data-scope-up])").forEach((button) => {
+          button.disabled = true;
+        });
+      draft.focus = undefined;
+      if (keep) {
+        const controls = Array.from(view.querySelectorAll("button[data-scope-focus]"));
+        let target = controls.find((node) => node.dataset.scopeFocus === keep && !node.disabled);
+        if (!target && !draft.busy) {
+          const key = keep.startsWith("seg:") ? keep.slice(4, keep.lastIndexOf(":")) : "";
+          const same = controls.filter((node) => !node.disabled && key !== "" && node.dataset.scopeKey === key);
+          target = same.find((node) => node.classList.contains("inherited")) || same.find((node) => node.classList.contains("on")) || same[0] || controls.find((node) => !node.disabled);
+        }
+        target?.focus();
+      }
+    }
+    scopeFooter(form, draft);
   }
   async function browseScope(form, trail, append = false) {
     const draft = scopeDraft(form);
+    const Q = scopeCopy(form);
     if (!scopeAllowed(form, draft) || !options.transport.read)
-      return;
-    const parent = trail.at(-1)?.key;
+      return false;
+    const parent = trail.at(-1);
     const cursor = append ? parent ? draft.branchCursors.get(parent) : draft.nextCursor : undefined;
     draft.loadAttempted = true;
     draft.loading = true;
     draft.busy = true;
-    scopeControls(form, draft);
-    scopeMessage(form, "Loading folders…");
+    draft.retry = undefined;
+    scopeMessage(form, "");
+    renderScope(form, draft);
+    let listed = false;
+    const again = parent && !append ? () => {
+      drillScope(form, draft, parent);
+    } : () => {
+      browseScope(form, trail, append);
+    };
     try {
       const result = await options.transport.read({
         view: "dispositions",
@@ -1156,21 +1991,26 @@ function mountDispositionsController(options) {
         ...cursor ? { cursor } : {}
       });
       if (disposed || options.signal.aborted || !root.contains(form))
-        return;
+        return false;
       if (result.status === 401 || result.status === 403 || !result.can_write) {
         canWrite = false;
-        scopeMessage(form, "Write access expired. Reconnect before browsing private folders.");
-        return;
+        scopeMessage(form, Q.readOnly);
+        return false;
       }
       const page = result.scope_browser;
       if (result.status < 200 || result.status >= 300 || !page || page.source_id !== form.dataset.folderScopeSource || !page.account_generation || !page.scope_revision || !Array.isArray(page.nodes) || page.nodes.some((node) => typeof node.key !== "string" || typeof node.name !== "string" || node.kind !== "folder" || typeof node.selectable !== "boolean")) {
-        scopeMessage(form, "Could not list folders. Check the connection and reopen this picker.");
-        return;
+        draft.retry = again;
+        return false;
       }
       if (draft.loaded && (draft.generation !== page.account_generation || draft.revision !== page.scope_revision)) {
         draft.invalid = true;
-        scopeMessage(form, "The account or saved scope changed. Reopen this picker before applying choices.");
-        return;
+        scopeMessage(form, Q.conflict);
+        return false;
+      }
+      if (page.nodes.some((node) => trail.includes(node.key))) {
+        draft.invalid = true;
+        scopeMessage(form, Q.cycle);
+        return false;
       }
       if (!draft.loaded) {
         draft.generation = page.account_generation;
@@ -1178,21 +2018,14 @@ function mountDispositionsController(options) {
         draft.selections = new Map(page.selections.map((selection) => [selection.key, selection.state]));
         page.selections.forEach((selection) => draft.ancestors.set(selection.key, selection.ancestor_keys || []));
         draft.whole = page.whole_account_selected;
-        const whole = form.querySelector("[data-scope-whole-account]");
-        if (whole)
-          whole.checked = draft.whole;
-      }
-      if (page.nodes.some((node) => trail.some((ancestor) => ancestor.key === node.key))) {
-        scopeMessage(form, "The folder listing contains a cycle. Reopen the picker before continuing.");
-        draft.invalid = true;
-        return;
+        draft.wholeConfirmed = false;
       }
       draft.loaded = true;
-      const previous = parent ? draft.branches.get(parent) || [] : draft.nodes;
-      const nodes = append ? [...previous, ...page.nodes.filter((node) => !previous.some((old) => old.key === node.key))] : page.nodes;
+      const previous = append ? parent ? draft.branches.get(parent) || [] : draft.nodes : [];
+      const fresh = page.nodes.filter((node) => !previous.some((old) => old.key === node.key));
+      const nodes = [...previous, ...fresh].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.key.localeCompare(b.key));
       if (parent) {
         draft.branches.set(parent, nodes);
-        draft.expanded.add(parent);
         if (page.next_cursor)
           draft.branchCursors.set(parent, page.next_cursor);
         else
@@ -1203,37 +2036,91 @@ function mountDispositionsController(options) {
         if (!append) {
           draft.branches.clear();
           draft.branchCursors.clear();
-          draft.expanded.clear();
-          draft.catalog.clear();
+          draft.path = [];
         }
       }
       page.nodes.forEach((node) => {
         draft.catalog.set(node.key, node);
-        draft.names.set(node.key, [...trail.map((entry) => entry.name), node.name].join(" / "));
-        draft.ancestors.set(node.key, trail.map((entry) => entry.key));
+        draft.ancestors.set(node.key, trail.slice());
       });
-      renderScopeNodes(form, draft);
-      scopeMessage(form, "Only folder names were listed. Review your choices, then save and start.");
+      listed = true;
+      return true;
     } catch {
-      if (!disposed && root.contains(form))
-        scopeMessage(form, "Folder browsing failed. Your choices are still here; retry when the connection is ready.");
+      if (!disposed && root.contains(form)) {
+        draft.retry = again;
+        scopeMessage(form, Q.browseFailed);
+      }
+      return false;
     } finally {
       draft.loading = false;
       draft.busy = false;
-      if (!disposed && root.contains(form))
-        scopeControls(form, draft);
+      if (!disposed && root.contains(form) && (!listed || !parent || append)) {
+        if (listed && append)
+          draft.focus = `more:${parent || ""}`;
+        renderScope(form, draft);
+      }
     }
+  }
+  async function drillScope(form, draft, key) {
+    const trail = scopeTrail(draft, key);
+    if (!draft.branches.has(key) && !await browseScope(form, trail))
+      return;
+    if (disposed || !root.contains(form))
+      return;
+    draft.path = trail;
+    draft.focus = "up";
+    renderScope(form, draft);
+  }
+  async function jumpScope(form, draft, key) {
+    const trail = scopeTrail(draft, key);
+    for (let index = 0;index < trail.length; index += 1) {
+      if (draft.branches.has(trail[index]))
+        continue;
+      if (!await browseScope(form, trail.slice(0, index + 1)))
+        return;
+      if (disposed || !root.contains(form))
+        return;
+    }
+    draft.path = trail;
+    draft.focus = "up";
+    renderScope(form, draft);
+  }
+  function chooseScope(form, draft, key, state) {
+    if (draft.saving)
+      return;
+    if (key === ACCOUNT_KEY) {
+      const whole = state === "ingest";
+      if (whole === draft.whole)
+        return;
+      draft.whole = whole;
+      draft.wholeConfirmed = false;
+      draft.edited = true;
+      draft.focus = whole ? "whole-yes" : `seg:${ACCOUNT_KEY}:ingest`;
+    } else {
+      if (state && (!scopeChoiceAllowed(draft, key, state) || draft.catalog.get(key)?.selectable === false))
+        return;
+      if (state && !draft.selections.has(key) && draft.selections.size >= MAX_SCOPE_RULES)
+        return;
+      if (state)
+        draft.selections.set(key, state);
+      else
+        draft.selections.delete(key);
+      draft.edited = true;
+      draft.focus = `seg:${key}:${state || scopeInherited(draft, key).state || "ingest"}`;
+    }
+    renderScope(form, draft);
   }
   async function approveScope(form) {
     const draft = scopeDraft(form);
-    const confirmation = form.querySelector("[data-scope-whole-confirm]")?.checked === true;
-    if (!scopeAllowed(form, draft) || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !draft.edited && !Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude") || draft.whole && !confirmation) {
-      scopeMessage(form, "Choose folders first. Entire-account access also needs explicit confirmation.");
+    const Q = scopeCopy(form);
+    if (!scopeAllowed(form, draft) || !draft.loaded || !draft.generation || !draft.revision || draft.selections.size > MAX_SCOPE_RULES || !draft.whole && !draft.edited && !scopeAnyChosen(draft) || draft.whole && !draft.wholeConfirmed) {
+      scopeMessage(form, draft.whole && !draft.wholeConfirmed ? Q.needConfirm : Q.needChoice);
       return;
     }
     draft.busy = true;
-    scopeControls(form, draft);
-    scopeMessage(form, "Saving your approved scope…");
+    draft.saving = true;
+    scopeMessage(form, "");
+    renderScope(form, draft);
     try {
       const result = await options.transport.control({
         action: "approve_source_scope_and_start",
@@ -1242,7 +2129,7 @@ function mountDispositionsController(options) {
         expected_scope_revision: draft.revision,
         selections: Array.from(draft.selections.keys(), (key) => ({ key, state: effectiveScopeState(draft, key), ancestor_keys: draft.ancestors.get(key) || [] })),
         whole_account: draft.whole,
-        explicit_whole_account_confirmation: confirmation
+        explicit_whole_account_confirmation: draft.whole && draft.wholeConfirmed
       });
       if (disposed || options.signal.aborted || !root.contains(form))
         return;
@@ -1253,22 +2140,132 @@ function mountDispositionsController(options) {
           draft.invalid = true;
         const error = result.body.error;
         const message2 = error && typeof error === "object" ? error.message : undefined;
-        scopeMessage(form, typeof message2 === "string" ? message2 : "Scope was not activated. Your choices are still here.");
+        scopeMessage(form, typeof message2 === "string" ? message2 : Q.saveFailed);
         return;
       }
       draft.edited = false;
-      scopeMessage(form, "Scope saved. Opening the source status…");
+      scopeMessage(form, Q.saved);
       if (!dirty && !Array.from(scopeDrafts.values()).some((other) => other.edited)) {
         options.navigate(`/dashboard?source=${encodeURIComponent(form.dataset.folderScopeSource || "")}`);
       }
     } catch {
       if (!disposed && root.contains(form))
-        scopeMessage(form, "Could not confirm the result. Reopen the picker to check saved scope before retrying.");
+        scopeMessage(form, Q.unconfirmed);
     } finally {
       draft.busy = false;
+      draft.saving = false;
       if (!disposed && root.contains(form))
-        scopeControls(form, draft);
+        renderScope(form, draft);
     }
+  }
+  function scopeClick(target) {
+    const form = target.closest("form[data-folder-scope-source]");
+    if (!form || !root.contains(form))
+      return false;
+    const draft = scopeDraft(form);
+    const Q = scopeCopy(form);
+    const control = target.closest("button");
+    if (control?.disabled)
+      return true;
+    if (target.closest("[data-scope-cancel]")) {
+      if (draft.busy)
+        return true;
+      scopeDrafts.delete(form);
+      const fresh = scopeDraft(form);
+      renderScope(form, fresh);
+      scopeMessage(form, Q.discarded);
+      browseScope(form, []);
+      return true;
+    }
+    if (target.closest("[data-scope-up]")) {
+      if (draft.saving)
+        return true;
+      const left = draft.path.pop();
+      draft.focus = left ? `open:${left}` : undefined;
+      renderScope(form, draft);
+      return true;
+    }
+    if (!scopeAllowed(form, draft))
+      return true;
+    if (target.closest("[data-scope-browse-root]")) {
+      if (draft.retry)
+        draft.retry();
+      else
+        browseScope(form, []);
+      return true;
+    }
+    const more = target.closest("[data-scope-more]");
+    if (more) {
+      const key2 = more.dataset.scopeMore || "";
+      if (key2 && draft.branchCursors.has(key2))
+        browseScope(form, scopeTrail(draft, key2), true);
+      else if (!key2 && draft.nextCursor)
+        browseScope(form, [], true);
+      return true;
+    }
+    const open = target.closest("[data-scope-open]");
+    if (open?.dataset.scopeOpen) {
+      drillScope(form, draft, open.dataset.scopeOpen);
+      return true;
+    }
+    const jump = target.closest("[data-scope-jump]");
+    if (jump?.dataset.scopeJump) {
+      jumpScope(form, draft, jump.dataset.scopeJump);
+      return true;
+    }
+    if (target.closest("[data-scope-whole-confirm]")) {
+      draft.wholeConfirmed = true;
+      draft.focus = `seg:${ACCOUNT_KEY}:ingest`;
+      renderScope(form, draft);
+      return true;
+    }
+    if (target.closest("[data-scope-whole-cancel]")) {
+      chooseScope(form, draft, ACCOUNT_KEY, "");
+      return true;
+    }
+    const segment = target.closest("[data-scope-key][data-scope-state]");
+    const key = segment?.dataset.scopeKey;
+    const state = segment?.dataset.scopeState;
+    if (key && state && SCOPE_STATES.includes(state)) {
+      const own = key === ACCOUNT_KEY ? draft.whole ? "ingest" : "" : draft.selections.get(key) || "";
+      chooseScope(form, draft, key, own === state ? "" : state);
+    }
+    return true;
+  }
+  function scopeKeydown(event) {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const form = target?.closest("form[data-folder-scope-source]");
+    if (!target || !form || !root.contains(form))
+      return;
+    const draft = scopeDraft(form);
+    if (event.key === "Escape" && draft.path.length && !draft.saving) {
+      event.preventDefault();
+      const left = draft.path.pop();
+      draft.focus = left ? `open:${left}` : undefined;
+      renderScope(form, draft);
+      return;
+    }
+    const group = target.closest(".seg");
+    if (!group || !target.matches(".seg-opt"))
+      return;
+    const live = Array.from(group.querySelectorAll(".seg-opt")).filter((button) => !button.disabled);
+    const at = live.indexOf(target);
+    let next;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown")
+      next = live[(at + 1) % live.length];
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp")
+      next = live[(at - 1 + live.length) % live.length];
+    else if (event.key === "Home")
+      next = live[0];
+    else if (event.key === "End")
+      next = live[live.length - 1];
+    if (!next)
+      return;
+    event.preventDefault();
+    group.querySelectorAll(".seg-opt").forEach((button) => {
+      button.tabIndex = button === next ? 0 : -1;
+    });
+    next.focus();
   }
   const mailDrafts = new Map;
   function mailState(form) {
@@ -1535,96 +2532,6 @@ function mountDispositionsController(options) {
     }
     return false;
   }
-  function scopeClick(target) {
-    const form = target.closest("form[data-folder-scope-source]");
-    if (!form || !root.contains(form))
-      return false;
-    const draft = scopeDraft(form);
-    if (target.closest("[data-scope-cancel]")) {
-      if (draft.busy)
-        return true;
-      scopeDrafts.delete(form);
-      const list = form.querySelector("[data-scope-nodes]");
-      list?.replaceChildren();
-      form.querySelectorAll("input").forEach((input) => {
-        input.checked = input.defaultChecked;
-      });
-      const empty = form.querySelector("[data-scope-inspector-empty]");
-      if (empty)
-        empty.hidden = false;
-      const content = form.querySelector("[data-scope-inspector-content]");
-      if (content)
-        content.hidden = true;
-      form.querySelectorAll("[data-scope-more]").forEach((element) => {
-        element.hidden = true;
-      });
-      const location = form.querySelector("[data-scope-location]");
-      if (location)
-        location.textContent = "Folders";
-      const fresh = scopeDraft(form);
-      renderScopeReview(form, fresh);
-      scopeMessage(form, "Changes cancelled. Loading saved folders…");
-      browseScope(form, []);
-      return true;
-    }
-    if (!scopeAllowed(form, draft))
-      return true;
-    if (target.closest("[data-scope-browse-root]")) {
-      browseScope(form, []);
-      return true;
-    }
-    const more = target.closest("[data-scope-more]");
-    if (more) {
-      const key = more.dataset.scopeMore;
-      if (key && draft.branchCursors.has(key))
-        browseScope(form, scopeTrail(draft, key), true);
-      else if (!key && draft.nextCursor)
-        browseScope(form, [], true);
-      return true;
-    }
-    const open = target.closest("[data-scope-open]");
-    if (open) {
-      const node = draft.catalog.get(open.dataset.scopeOpen || "");
-      if (node && draft.expanded.has(node.key)) {
-        draft.expanded.delete(node.key);
-        renderScopeNodes(form, draft);
-      } else if (node && draft.branches.has(node.key)) {
-        draft.expanded.add(node.key);
-        renderScopeNodes(form, draft);
-      } else if (node)
-        browseScope(form, scopeTrail(draft, node.key));
-      return true;
-    }
-    const select = target.closest("[data-scope-select]");
-    if (select) {
-      draft.selected = draft.catalog.get(select.dataset.scopeSelect || "");
-      const empty = form.querySelector("[data-scope-inspector-empty]");
-      if (empty)
-        empty.hidden = !!draft.selected;
-      const content = form.querySelector("[data-scope-inspector-content]");
-      if (content)
-        content.hidden = !draft.selected;
-      const name = form.querySelector("[data-scope-selected-name]");
-      if (name)
-        name.textContent = draft.selected?.name || "";
-      const path = form.querySelector("[data-scope-selected-path]");
-      if (path)
-        path.textContent = draft.selected ? draft.names.get(draft.selected.key) || draft.selected.name : "";
-      const note = form.querySelector("[data-scope-selected-note]");
-      if (note)
-        note.textContent = "This choice applies to this folder and its contents. Review narrower choices before starting.";
-      updateScopeRows(form, draft);
-      return true;
-    }
-    const choice = target.closest("[data-scope-state]");
-    const state = choice?.dataset.scopeState;
-    if (draft.selected?.selectable && state && scopeChoiceAllowed(draft, state) && (state === "ingest" || state === "metadata_only" || state === "exclude")) {
-      draft.selections.set(draft.selected.key, state);
-      draft.edited = true;
-      updateScopeRows(form, draft);
-    }
-    return true;
-  }
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -1672,7 +2579,7 @@ function mountDispositionsController(options) {
   function applyWriteCapability() {
     root.querySelectorAll("form[data-folder-scope-source]").forEach((form) => {
       const draft = scopeDraft(form);
-      scopeControls(form, draft);
+      renderScope(form, draft);
       if (presented && !form.closest("[data-scope-panel]")?.hidden && !draft.loadAttempted && scopeAllowed(form, draft))
         browseScope(form, []);
     });
@@ -1824,8 +2731,11 @@ function mountDispositionsController(options) {
     navigator.clipboard.writeText(source.value);
   }
   function onKeydown(event) {
-    if (event.target instanceof Element && event.target.closest("form[data-folder-scope-source]"))
+    if (event.target instanceof Element && event.target.closest("form[data-folder-scope-source]")) {
+      if (event instanceof KeyboardEvent)
+        scopeKeydown(event);
       return;
+    }
     if (!(event instanceof KeyboardEvent) || event.key !== "Enter" && event.key !== " ")
       return;
     const row = event.target instanceof Element ? event.target.closest(".folder-row") : null;
@@ -1841,27 +2751,6 @@ function mountDispositionsController(options) {
       state.edited = true;
       mailControls(mailForm, state);
       return;
-    }
-    if (event.target instanceof HTMLInputElement && root.contains(event.target)) {
-      const form2 = event.target.closest("form[data-folder-scope-source]");
-      if (form2 && event.target.matches("[data-scope-search]")) {
-        renderScopeNodes(form2, scopeDraft(form2));
-        return;
-      }
-      if (form2 && (event.target.matches("[data-scope-whole-account]") || event.target.matches("[data-scope-whole-confirm]"))) {
-        const draft = scopeDraft(form2);
-        if (!scopeAllowed(form2, draft) || !draft.loaded)
-          return;
-        draft.whole = form2.querySelector("[data-scope-whole-account]")?.checked === true;
-        if (!draft.whole) {
-          const confirm = form2.querySelector("[data-scope-whole-confirm]");
-          if (confirm)
-            confirm.checked = false;
-        }
-        draft.edited = true;
-        renderScopeReview(form2, draft);
-        return;
-      }
     }
     const input = event.target instanceof HTMLInputElement && event.target.matches("[data-folder-search]") ? event.target : null;
     if (!input || !root.contains(input))
@@ -2040,10 +2929,12 @@ var DASHBOARD_THEME_TOKENS = {
   t3: "#A9ABB3",
   t4: "#8C8E97",
   good: "#6CC08B",
-  warn: "#E3AA45",
-  run: "#AE9EF0",
+  warn: "#FB8C3C",
+  run: "#FACC15",
   bad: "#F08276",
   off: "#8C8E97",
+  runFill: "#FACC15",
+  warnFill: "#FB8C3C",
   warnBg: "#261E10",
   warnLine: "#8A6A2A",
   errBg: "#2B1614",
@@ -2054,6 +2945,34 @@ var DASHBOARD_THEME_TOKENS = {
   onAccent: "#FFFFFF",
   field: "#6A6D77",
   selected: "#2C4485"
+};
+var DASHBOARD_THEME_TOKENS_LIGHT = {
+  bg: "#FFFFFF",
+  panel: "#F7F7F8",
+  panel2: "#F0F0F2",
+  line: "#D9D9DE",
+  line2: "#E8E8EC",
+  t1: "#0D0D0D",
+  t2: "#353740",
+  t3: "#55575F",
+  t4: "#62646C",
+  good: "#22693F",
+  warn: "#A84A06",
+  run: "#735600",
+  bad: "#B42318",
+  off: "#6B6E76",
+  runFill: "#F5C518",
+  warnFill: "#EA6C0A",
+  warnBg: "#FFF4E5",
+  warnLine: "#B45309",
+  errBg: "#FDECEA",
+  errLine: "#B42318",
+  link: "#1F4FBF",
+  linkLine: "#3E63C8",
+  accent: "#3E63C8",
+  onAccent: "#FFFFFF",
+  field: "#767680",
+  selected: "#DCE5FB"
 };
 var DASHBOARD_PAGE_BACKDROP = DASHBOARD_THEME_TOKENS.bg;
 var DASHBOARD_TYPE_SCALE = {
@@ -2078,14 +2997,6 @@ var DASHBOARD_CONTRAST_PAIRS = [
   { fg: "errLine", bg: "bg", min: 3 },
   { fg: "good", bg: "bg", min: 3 }
 ];
-var DASHBOARD_STATUS_COLORS = {
-  Fresh: DASHBOARD_THEME_TOKENS.good,
-  Working: DASHBOARD_THEME_TOKENS.run,
-  Waiting: DASHBOARD_THEME_TOKENS.off,
-  "Needs you": DASHBOARD_THEME_TOKENS.warn,
-  Failing: DASHBOARD_THEME_TOKENS.bad,
-  Off: DASHBOARD_THEME_TOKENS.line
-};
 var CSS_VARIABLE_NAMES = {
   bg: "--bg",
   panel: "--panel",
@@ -2101,6 +3012,8 @@ var CSS_VARIABLE_NAMES = {
   run: "--run",
   bad: "--bad",
   off: "--off",
+  runFill: "--run-fill",
+  warnFill: "--warn-fill",
   warnBg: "--warn-bg",
   warnLine: "--warn-line",
   errBg: "--err-bg",
@@ -2112,10 +3025,22 @@ var CSS_VARIABLE_NAMES = {
   field: "--field",
   selected: "--selected"
 };
-var PAGE_BACKDROP = DASHBOARD_PAGE_BACKDROP;
+var DASHBOARD_STATUS_TOKENS = {
+  Fresh: "good",
+  Working: "runFill",
+  Waiting: "off",
+  "Needs you": "warnFill",
+  Failing: "bad",
+  Off: "off"
+};
+var DASHBOARD_STATUS_COLORS = Object.fromEntries(Object.keys(DASHBOARD_STATUS_TOKENS).map((status) => [status, `var(${dashboardThemeVariable(DASHBOARD_STATUS_TOKENS[status])})`]));
+function dashboardThemeVariable(token) {
+  return CSS_VARIABLE_NAMES[token];
+}
 var MONO_STACK = '"Berkeley Mono","SF Mono",Menlo,Consolas,monospace';
 var ROOT_BLOCK = [
   ":root {",
+  "  color-scheme: light dark;",
   ...Object.keys(CSS_VARIABLE_NAMES).map((key) => `  ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS[key]};`),
   `  --mono: ${MONO_STACK};`,
   `  --fs-title: ${DASHBOARD_TYPE_SCALE.title};`,
@@ -2123,12 +3048,17 @@ var ROOT_BLOCK = [
   `  --fs-row: ${DASHBOARD_TYPE_SCALE.row};`,
   `  --fs-body: ${DASHBOARD_TYPE_SCALE.body};`,
   `  --fs-caption: ${DASHBOARD_TYPE_SCALE.caption};`,
+  "}",
+  "@media (prefers-color-scheme: light) {",
+  "  :root {",
+  ...Object.keys(CSS_VARIABLE_NAMES).map((key) => `    ${CSS_VARIABLE_NAMES[key]}: ${DASHBOARD_THEME_TOKENS_LIGHT[key]};`),
+  "  }",
   "}"
 ].join(`
 `);
 var DASHBOARD_THEME_CSS = `${ROOT_BLOCK}
 * { box-sizing: border-box; }
-body { margin: 0; background: ${PAGE_BACKDROP}; color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
+body { margin: 0; background: var(--bg); color: var(--t1); font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 0 24px 80px; }
 a { color: var(--link); }
 /* No card around the page: the page is the surface, as wide as a reading
    layout allows, and every row below shares its left and right edges. */
@@ -2147,16 +3077,18 @@ a { color: var(--link); }
 .sect.sub { font-size: var(--fs-body); color: var(--t2); margin: 18px 0 8px; }
 .sect.sub.attn { color: var(--warn); }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.hollow { background: transparent; border: 2px solid var(--off); }
 /* Every row is the same shape: a 20px lead column (icon or dot), the text,
    then the controls, so names line up from section to section. */
 .attncard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 52px; }
 .attncard::before { content: ''; flex: 0 0 20px; align-self: center; }
 /* A problem is a tinted row with a 1px border and an icon, never a stripe. */
 .attncard:not(.plain) { background: var(--warn-bg); border-color: var(--warn-line); }
-.attncard:not(.plain)::before { content: '!'; height: 20px; border-radius: 50%; background: var(--warn); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.attncard:not(.plain)::before { content: '!'; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
 .attncard.error { background: var(--err-bg); border-color: var(--err-line); }
 .attncard.error::before { background: var(--bad); }
 .attncard.plain { background: var(--panel); border-color: var(--line); }
+.attncard.plain[data-remote-access]::before, .attncard.plain[data-agent-connection]::before { display: none; }
 .attncard .grow { flex: 1; }
 /* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
@@ -2232,7 +3164,7 @@ a.card.cardlink:hover { border-color: var(--link-line); }
 a.card.cardlink:hover .hd { color: var(--link); }
 a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
-.bar i { display: block; height: 100%; background: var(--run); }
+.bar i { display: block; height: 100%; background: var(--run-fill); }
 .foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 22px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
@@ -2271,10 +3203,13 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 table { border-collapse: collapse; width: 100%; font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
 th { text-align: left; color: var(--t3); font-size: var(--fs-caption); font-weight: 600; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
 td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(--t2); }
-.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 8px; min-height: 52px; }
+/* A not-connected source: one flat list row, like the source rows above it. */
+.setrow { display: grid; grid-template-columns: 20px minmax(140px, 200px) 1fr auto; gap: 12px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; min-height: 52px; }
 .setrow > .dot { justify-self: center; }
 .setrow.noblurb { grid-template-columns: 20px 1fr auto; }
 .setrow .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); }
+.setrow a.name { text-decoration: none; }
+.setrow a.name:hover { color: var(--link); text-decoration: underline; }
 .setrow .blurb { color: var(--t2); font-size: var(--fs-body); }
 .setrow .blurb .caveat { color: var(--warn); font-weight: 600; }
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
@@ -2342,7 +3277,9 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
 .bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
 .minibar { display: block; width: 64px; height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; justify-self: end; }
-.minibar i { display: block; height: 100%; background: var(--run); }
+.minibar i { display: block; height: 100%; background: var(--run-fill); }
+/* Finished work is not in progress: a full bar reads ready, never yellow. */
+.minibar.done i { background: var(--good); }
 /* A bar always carries its number: the percent sits beside the track. */
 .labeledbar { display: flex; align-items: center; gap: 8px; justify-self: stretch; }
 .labeledbar .minibar { flex: 1; width: auto; }
@@ -2379,7 +3316,7 @@ var DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520px; }
 .phase.waiting .bar { background: var(--line2); }
 .phase.waiting .bar i { display: none; }
 .bar.indet.working { position: relative; }
-.bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
+.bar.indet.working i { width: 34%; background: var(--run-fill); animation: dashsweep 1.6s ease-in-out infinite; }
 @keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
 .settled { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; color: var(--t2); font-size: var(--fs-body); max-width: 520px; }
 .banner { margin-bottom: 6px; }
@@ -2393,11 +3330,7 @@ var DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520px; }
   .bar.indet.working i { animation: none; width: 100%; background: var(--line2); }
 }
 `;
-var DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.catrow .name { font-weight: 600; color: var(--t2); }
-.catrow .what { color: var(--t4); font-size: var(--fs-caption); }
-.catrow .tier { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
-.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
+var DASHBOARD_POLICY_CSS = `.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
 .scoperow .rid { font-family: var(--mono); font-size: var(--fs-caption); font-weight: 600; color: var(--t2); }
 .scoperow .what { color: var(--t3); font-size: var(--fs-caption); }
 .sect.gap { margin-top: 44px; }
@@ -2412,9 +3345,6 @@ var DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140p
 .chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: var(--fs-caption); }
 .chip b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-@media (max-width: 700px) {
-  .catrow { grid-template-columns: 1fr; gap: 4px; }
-}
 `;
 var DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; background: var(--bg); padding-top: 2px; }
 .dnav { position: sticky; top: 39px; z-index: 11; display: flex; gap: 4px; margin: -8px 0 22px; border-bottom: 1px solid var(--line2); background: var(--bg); }
@@ -2555,23 +3485,78 @@ var DISPOSITIONS_CSS = `
       .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
       .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
       .scope-connection, .scope-browser-note { color: var(--t3); font-size: var(--fs-caption); padding: 8px 12px; }
-      .scope-browser-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line2); }
-      .scope-browser-toolbar button, .scope-browser-list button, [data-scope-more] { color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; }
-      .scope-browser-list .scope-folder { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
-      .scope-folder [data-scope-select] { flex: 1; border: 0; background: transparent; padding: 0; color: inherit; text-align: left; overflow-wrap: anywhere; }
-      .scope-folder.selected [data-scope-select] { background: transparent; }
-      .scope-folder [data-scope-open] { padding: 0; width: 14px; border: 0; background: transparent; color: inherit; }
-      .scope-folder-status { color: var(--t3); font-size: var(--fs-caption); }
-      .scope-folder.selected .scope-folder-status { color: var(--t1); }
-      .scope-folder-status.mixed, .node-state.mixed { color: var(--warn); font-weight: 600; }
-      .scope-whole-account, .scope-whole-confirm { margin: 12px; font-size: var(--fs-caption); color: var(--t2); }
-      .scope-whole-account { display: block; }
-      .scope-whole-confirm:not([hidden]) { display: block; color: var(--warn); }
-      [data-folder-scope-source] input[type="checkbox"] { width: auto; display: inline-block; margin: 0 6px 0 0; vertical-align: middle; }
-      [data-folder-scope-source] [hidden] { display: none !important; }
-      .scope-review { border-top: 1px solid var(--line2); margin: 12px; padding-top: 12px; font-size: var(--fs-caption); }
-      .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
-      [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
+      /* The folder picker (Dropbox, Google Drive): the approved ChatGPT
+         layout. One level per screen, one thin line per folder with the
+         drill-in chevron beside the name, and one pill control flush right. */
+      .scope-picker { max-width: 760px; }
+      .scope-picker form { display: block; container-type: inline-size; }
+      .scope-picker [hidden] { display: none !important; }
+      .scope-back a, .scope-picker button.back { display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--t1); font-size: var(--fs-caption); font-weight: 500; text-decoration: none; }
+      .scope-picker button.back::before { content: "\\2190\\00a0"; }
+      .scope-locations { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+      .scope-locations .location { padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--t2); text-decoration: none; }
+      .scope-locations .location.selected { border-color: var(--field); background: var(--panel2); color: var(--t1); }
+      .scope-locations .folder-icon { display: none; }
+      .scope-picker .scope-browser-note { padding: 0; margin: 0 0 8px; }
+      .scope-picker .fpath { margin: 14px 0 12px; color: var(--t1); font-size: var(--fs-section); font-weight: 600; }
+      .scope-picker .fpath-up { color: var(--t3); font-weight: 400; }
+      .scope-picker .this-row { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 4px 4px 4px 12px; margin: 0 0 12px; background: var(--panel); border-radius: 12px; }
+      .scope-picker .this-label { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--t1); font-weight: 600; }
+      .scope-picker .fsection { margin-top: 18px; }
+      .scope-picker .fsection h2 { margin: 0 0 6px; color: var(--t1); font-size: var(--fs-row); }
+      .scope-picker .flist { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line2); }
+      .scope-picker .frow { display: flex; align-items: center; gap: 4px; min-height: 48px; border-bottom: 1px solid var(--line2); }
+      .scope-picker .fname { position: relative; flex: 1 1 auto; display: flex; align-items: center; gap: 0 8px; min-width: 44px; height: 44px; margin: 0; padding: 0 0 0 23px; border: 0; border-radius: 8px; background: none; color: var(--t1); font: inherit; font-weight: 500; text-align: left; white-space: nowrap; overflow: hidden; cursor: pointer; }
+      .scope-picker .fname.leaf { cursor: default; }
+      .scope-picker .fopen, .scope-picker .fopen-gap { position: absolute; left: 0; top: 0; width: 18px; height: 44px; line-height: 44px; text-align: center; }
+      .scope-picker .fopen { color: var(--t3); font-size: var(--fs-title); }
+      .scope-picker button.fname:hover:not(:disabled) .fopen { color: var(--t1); }
+      .scope-picker button.fname:disabled { cursor: default; }
+      .scope-picker .fname-main { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+      .scope-picker .fname-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .scope-picker .ftag { flex: none; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--t3); font-size: var(--fs-caption); font-weight: 500; line-height: 20px; }
+      .scope-picker .seg { flex: none; margin-left: auto; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); }
+      .scope-picker .seg-opt { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 44px; height: 32px; margin: 0; padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--t1); font: inherit; font-size: var(--fs-caption); font-weight: 500; white-space: nowrap; cursor: pointer; }
+      .scope-picker .seg-opt::before { content: ""; position: absolute; inset: -7px 0; }
+      .scope-picker .seg-opt + .seg-opt::after { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
+      .scope-picker .seg-opt.on::after, .scope-picker .seg-opt.on + .seg-opt::after, .scope-picker .seg-opt.inherited::after, .scope-picker .seg-opt.inherited + .seg-opt::after { display: none; }
+      .scope-picker .seg-opt:hover:not(:disabled):not(.on) { background: var(--panel2); }
+      .scope-picker .seg-opt.on { background: var(--t1); color: var(--bg); font-weight: 600; }
+      .scope-picker .seg-opt.inherited { background: var(--panel2); box-shadow: inset 0 0 0 1px var(--t3); }
+      .scope-picker .seg-opt:disabled { color: var(--t3); opacity: .5; cursor: not-allowed; }
+      .scope-picker .seg-opt:disabled.inherited, .scope-picker .seg-opt:disabled.on { opacity: 1; }
+      .scope-picker .seg-short { display: none; }
+      @container (max-width: 420px) {
+        .scope-picker .seg-long { display: none; }
+        .scope-picker .seg-short { display: inline; }
+        .scope-picker .seg-opt { padding: 0 8px; }
+        .scope-picker .picker-footer { padding: 12px; }
+        .scope-picker :is(.actions, .fmore, .scope-error) button { padding: 0 12px; }
+      }
+      @media (max-width: 720px) {
+        .picker-page { padding: 20px 16px 56px; }
+      }
+      .scope-picker .jump-btn { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px; margin: 0; padding: 0; border: 0; background: none; color: var(--t1); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
+      .scope-picker .jtag { flex: none; margin-left: auto; color: var(--t3); font-size: var(--fs-caption); font-weight: 400; }
+      .scope-picker .chev { flex: none; color: var(--t3); font-size: var(--fs-title); line-height: 1; }
+      .scope-picker .fstate, .scope-picker .fempty { margin: 0; padding: 12px 0; color: var(--t3); }
+      .scope-picker .fmore { padding: 8px 0; }
+      .scope-picker .confirm-box { display: flex; flex-direction: column; gap: 8px; margin: -4px 0 12px; padding: 12px; border: 1px solid var(--warn-line); border-radius: 12px; background: var(--warn-bg); }
+      .scope-picker .confirm-box .strong { color: var(--t1); font-weight: 600; }
+      .scope-picker .scope-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; padding: 12px; border: 1px solid var(--err-line); border-radius: 12px; background: var(--err-bg); }
+      .scope-picker .scope-error p { color: var(--t1); }
+      .scope-picker .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .scope-picker :is(.actions, .fmore, .scope-error) button { min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--t1); font-size: var(--fs-body); font-weight: 500; }
+      .scope-picker :is(.actions, .fmore, .scope-error) button:hover:not(:disabled) { background: var(--panel2); }
+      .scope-picker .actions button.primary { border-color: var(--accent-fill); background: var(--accent-fill); color: var(--on-accent); }
+      .scope-picker .actions button.danger { border-color: var(--bad); color: var(--bad); }
+      .scope-picker :is(.actions, .fmore, .scope-error) button:disabled { border-style: dashed; background: var(--panel); color: var(--t3); cursor: not-allowed; }
+      .scope-picker .picker-footer { margin-top: 24px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); display: flex; flex-direction: column; gap: 12px; }
+      .scope-picker .summary { display: flex; flex-direction: column; gap: 4px; }
+      .scope-picker .summary p { color: var(--t1); }
+      .scope-picker .save { display: flex; flex-direction: column; gap: 6px; }
+      .scope-picker .reason { color: var(--t3); font-size: var(--fs-caption); }
+      .scope-picker .reason:empty, .scope-picker .action-message:empty { display: none; }
       .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
       /* Mail scope picker: the same Finder frame, with form groups where the
          folder tree sits and the estimate where the inspector sits. */
@@ -2603,6 +3588,9 @@ var DISPOSITIONS_CSS = `
       .mail-scope-figures dt { color: var(--t3); font-size: var(--fs-caption); }
       .mail-scope-figures dd { margin: 0; color: var(--t1); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; text-align: right; }
       .mail-scope-estimate button { justify-self: start; padding: 6px 12px; font-size: var(--fs-caption); color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+      /* The same pill buttons and footer rhythm as the folder picker. */
+      .mail-scope-window .finder-footer { padding: 12px 16px; }
+      .mail-scope-window .finder-footer button, .mail-scope-estimate button { min-height: 36px; padding: 0 14px; border-radius: 999px; font-size: var(--fs-body); }
       [data-mail-scope-source] [hidden] { display: none !important; }
       [data-mail-scope-source] button:disabled, [data-mail-scope-source] input:disabled, [data-mail-scope-source] textarea:disabled { opacity: .45; cursor: not-allowed; }
       @media (max-width: 860px) {
@@ -2649,6 +3637,81 @@ var MODEL_SETUP_CSS = `
 .modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
 .modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
 `;
+var DASHBOARD_SOURCE_ROWS_CSS = `
+.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
+.srow .sact { grid-column: 2; grid-row: 1; }
+.srow .smenu { grid-column: 3; grid-row: 1; }
+.srow .shead { display: flex; align-items: center; gap: 10px; }
+.srow .shead .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); text-decoration: none; }
+.srow .shead a.name:hover { color: var(--link); text-decoration: underline; }
+.srow .shead a.name:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 4px; }
+.srow .sneed { font-size: var(--fs-row); color: var(--t1); }
+.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
+.srow.nodot .sline { margin-left: 0; }
+.srow .sact { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.srow .sact form { margin: 0; }
+.dot.tone-good { background: var(--good); }
+.dot.tone-run { background: var(--run-fill); }
+.dot.tone-warn { background: var(--warn-fill); }
+.dot.tone-bad { background: var(--bad); }
+.dot.tone-off { background: var(--off); }
+.sprog { margin: 0; }
+.srow .sprog .bar { max-width: none; height: 6px; margin: 8px 0 0 20px; }
+.sprog.overall .sline { margin: 0 0 8px; color: var(--t1); }
+.sprog.overall .bar { max-width: none; height: 6px; margin: 0 0 8px; }
+.sprog.stalled .sline { color: var(--t1); }
+.bar.stalled i { background: var(--warn-fill); }
+.sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+/* No border of its own: the list above already ends in one, and two read as a double divider. */
+.modelsrow { margin: 28px 0 0; }
+details.models > summary { font-size: var(--fs-section); font-weight: 600; color: var(--t1); cursor: pointer; padding: 4px 0; }
+details.models > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+details.models .modelsbody { margin-top: 12px; }
+.mlist { margin: 0 0 12px; padding-left: 20px; color: var(--t2); }
+.minstalls { display: grid; gap: 10px; margin: 8px 0 0; }
+.minstall .sline { margin: 0; color: var(--t2); font-size: var(--fs-body); }
+.minstall .bar { max-width: none; height: 6px; margin-top: 6px; }
+.minstall.failed .sline { color: var(--t1); font-weight: 600; }
+@media (max-width: 700px) {
+  .srow { grid-template-columns: minmax(0, 1fr) auto; }
+  .srow .sact { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; padding-left: 20px; }
+  .srow .smenu { grid-column: 2; grid-row: 1; }
+  .srow.nodot .sact { padding-left: 0; }
+  .srow .sact .rowlink { width: auto; justify-content: flex-start; }
+}
+`;
+var DASHBOARD_PRIVACY_CSS = `
+.privacy { max-width: 760px; }
+.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
+.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
+.pnote { color: var(--t2); margin: 0 0 12px; }
+.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
+.ptext { display: block; width: 100%; min-height: 120px; resize: vertical; background: var(--bg); border: 1px solid var(--field); border-radius: 8px; color: var(--t1); font: inherit; font-size: var(--fs-row); padding: 10px 12px; }
+.ptext:focus-visible, .ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.privacy .sect { margin-top: 24px; }
+.prule.removed .sline { text-decoration: line-through; color: var(--t3); }
+.pempty { margin: 8px 0 0; }
+.padd { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+.ppanel { margin: 12px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.ppanel .srows { margin: 8px 0; }
+.ppanel .ppath { margin: 0 0 8px; color: var(--t2); }
+.ppanel .ppath:empty { display: none; }
+.psources { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+.psources:empty { display: none; }
+.psources .btn[aria-pressed="true"] { background: var(--selected); border-color: var(--link-line); color: var(--t1); }
+.prow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ptextline { flex: 1 1 240px; width: auto; }
+.pfooter { margin: 24px 0 0; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 12px; }
+.pfooter p { margin: 0; color: var(--t1); }
+.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pbuttons a.btn { text-decoration: none; }
+/* The confirm and conflict steps: a tinted box with a 1px border, never a stripe. */
+.pprompt { padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; display: grid; gap: 8px; }
+.pprompt p { margin: 0; color: var(--t1); }
+`;
 
 // src/control-ui/styles.ts
 function forShadowRoot(css) {
@@ -2664,22 +3727,113 @@ var OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
   MODEL_SETUP_CSS,
   AGENT_CONNECT_CSS,
   BACKGROUND_CSS,
-  DISPOSITIONS_CSS
+  DISPOSITIONS_CSS,
+  DASHBOARD_SOURCE_ROWS_CSS,
+  DASHBOARD_PRIVACY_CSS
 ].join(`
 `)) + `
-:host { display: block; min-width: 0; color-scheme: dark; contain: content; }
+:host { display: block; min-width: 0; color-scheme: light dark; contain: content; }
 .olympus-control-ui { min-height: 100%; }
 .olympus-control-ui [data-write-capability-note] { margin: 0 auto 12px; max-width: 1120px; }
 .olympus-control-ui .native-state { max-width: 1120px; margin: 24px auto; padding: 18px 20px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--t2); }
 `;
 
+// src/workers/dashboard/shared-privacy-logic.ts
+function privacyLogic(config) {
+  const KINDS = ["folder", "label", "sender"];
+  const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+  function validRule(rule) {
+    if (!rule || typeof rule !== "object" || KINDS.indexOf(rule.kind) < 0)
+      return false;
+    if (rule.kind === "sender")
+      return rule.source_id === config.mailSourceId && text(rule.value);
+    if (rule.kind === "label")
+      return rule.source_id === config.mailSourceId && text(rule.key) && text(rule.value);
+    return Object.prototype.hasOwnProperty.call(config.folderSources, rule.source_id) && text(rule.key) && (rule.display === undefined || typeof rule.display === "string");
+  }
+  function displayOf(rule, unnamed) {
+    if (rule.kind === "sender" || rule.kind === "label")
+      return String(rule.value);
+    return text(rule.display) ? String(rule.display) : unnamed;
+  }
+  function viewRule(rule, display) {
+    const raw = {};
+    for (const field of Object.keys(rule))
+      raw[field] = rule[field];
+    const copy = { kind: rule.kind, source_id: rule.source_id, display, removed: false, saved: true, raw };
+    if (typeof rule.key === "string")
+      copy.key = rule.key;
+    if (typeof rule.value === "string")
+      copy.value = rule.value;
+    return copy;
+  }
+  function identity(rule) {
+    const matched = rule.kind === "sender" ? typeof rule.value === "string" ? rule.value.trim().toLowerCase() : "" : typeof rule.key === "string" ? rule.key.trim() : "";
+    return rule.kind + `
+` + rule.source_id + `
+` + matched;
+  }
+  function ruleOut(rule) {
+    if (rule.raw)
+      return rule.raw;
+    const out = { kind: rule.kind, source_id: rule.source_id };
+    if (typeof rule.key === "string")
+      out.key = rule.key;
+    if (typeof rule.value === "string")
+      out.value = rule.value;
+    if (rule.kind === "folder" && text(rule.display))
+      out.display = rule.display;
+    return out;
+  }
+  function addTo(rules, rule) {
+    const id = identity(rule);
+    const existing = rules.filter((other) => identity(other) === id)[0];
+    if (existing)
+      existing.removed = false;
+    else
+      rules.push(rule);
+    return rules;
+  }
+  function lowering(rules, description, savedDescription) {
+    return {
+      removed: rules.filter((rule) => rule.saved && rule.removed),
+      described: description.trim() !== savedDescription
+    };
+  }
+  function lowers(rules, description, savedDescription) {
+    const change = lowering(rules, description, savedDescription);
+    return change.removed.length > 0 || change.described;
+  }
+  function replay(draft, fresh) {
+    const removed = {};
+    for (const rule of draft.rules)
+      if (rule.saved && rule.removed)
+        removed[identity(rule)] = true;
+    const additions = draft.rules.filter((rule) => !rule.saved && !rule.removed);
+    const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
+    for (const rule of fresh)
+      if (removed[identity(rule)])
+        rule.removed = true;
+    for (const rule of additions)
+      addTo(fresh, rule);
+    return { rules: fresh, description: described };
+  }
+  function senderValue(input) {
+    const value = String(input || "").trim().toLowerCase();
+    return EMAIL.test(value) || DOMAIN.test(value) ? value : "";
+  }
+  return { validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue };
+}
+
 // src/control-ui.ts
 function routeFromProps(props) {
   const view = props.view;
   if (view === "dispositions")
     return { view, ...props.source_id ? { source_id: props.source_id } : {} };
-  if (view === "setup" || view === "background" || view === "sensitivity")
+  if (view === "setup" || view === "background" || view === "sensitivity" || view === "privacy")
     return { view };
   if (view === "source" && props.source_id)
     return { view, source_id: props.source_id };
@@ -2709,6 +3863,8 @@ function routeFromHref(href) {
     return { view: "background" };
   if (url.searchParams.has("sensitivity"))
     return { view: "sensitivity" };
+  if (url.searchParams.has("privacy"))
+    return { view: "privacy" };
   return { view: "home" };
 }
 function targetFor(route) {
@@ -2817,6 +3973,7 @@ function createDashboardPage() {
             returnUrl: context.host.navigation.pageHref(targetFor(route)),
             canWrite: result.can_write,
             authority: "gateway",
+            privacyLogic,
             replaceHtml(nextRoot, html) {
               setInertBody(nextRoot, html);
               rewriteInternalLinks(nextRoot, context.host);

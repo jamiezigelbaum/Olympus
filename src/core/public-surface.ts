@@ -120,7 +120,6 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
 export const V0_4_PUBLIC_CLI_COMMANDS = [
   'setup',
   'sovereignty init',
-  'sensitivity validate',
   'worker install',
   'worker status',
   'worker start',
@@ -130,6 +129,15 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'worker upgrade',
   'worker uninstall',
   'worker run',
+  'engine install',
+  'engine uninstall',
+  'engine status',
+  'engine restart',
+  'engine logs',
+  'engine stop',
+  'engine start',
+  'engine rollback',
+  'engine verify',
   'connect google',
   'connect gmail',
   'connect google-drive',
@@ -145,7 +153,6 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connections list',
   'connections revoke',
   'connections status',
-  'connections terms',
   'dashboard',
   'source answer',
   'source index status',
@@ -180,6 +187,7 @@ export const V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
   '__oauth-detached-child',
   '__worker-service-run',
   '__relay-service-run',
+  '__engine-run',
 ] as const;
 
 export interface PublicDashboardRoute {
@@ -207,6 +215,10 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/connect/oauth/cancel' },
   { method: 'POST', path: '/dashboard/connect/api-key' },
   { method: 'POST', path: '/dashboard/models/check' },
+  // A built-in model's failed download, started again (ChatGPT's olympus_model_retry).
+  { method: 'POST', path: '/dashboard/models/retry' },
+  // The owner's privacy settings (ChatGPT's olympus_privacy_set).
+  { method: 'POST', path: '/dashboard/privacy' },
   { method: 'POST', path: '/dashboard/sync-now' },
   { method: 'POST', path: '/dashboard/embedding-priority' },
   { method: 'POST', path: '/dashboard/disconnect' },
@@ -251,6 +263,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'dist/control-ui/index.js',
   'scripts/telegram-pair.py',
   'scripts/telegram-telethon-reader.py',
+  'scripts/macos-vision-ocr.js',
   'config/systemd/user/olympus-whisper-transcribe.sh',
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/go.mod',

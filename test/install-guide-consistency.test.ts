@@ -65,7 +65,7 @@ describe('pilot installation entry points', () => {
     const resolution = document.indexOf('OLYMPUS_BIN="$OLYMPUS_ROOT/bin/olympus"');
     expect(resolution).toBeGreaterThan(0);
     expect(document).toContain('olympus() { "$OLYMPUS_BIN" "$@"; }');
-    expect(resolution).toBeLessThan(document.indexOf('\nolympus sensitivity validate'));
+    expect(resolution).toBeLessThan(document.indexOf('\nolympus setup --preset private-cloud-only'));
   });
 
   test('a Control UI operator is pointed at the Olympus sidebar entry, not asked for an address', () => {
@@ -134,7 +134,7 @@ describe('pilot installation entry points', () => {
     );
     expect(step3).toContain('**Model keys are entered in the dashboard, not collected by you.**');
     expect(step3).toContain("not through OpenClaw's own secret prompt or store");
-    expect(document).toContain('Gemini API key (source embeddings, all presets; headless fallback only)');
+    expect(document).toContain('Gemini API key (only when the operator opted into Gemini embeddings instead\n  of the built-in model; headless fallback only)');
     expect(document).toContain('report\nit as "finished in the dashboard\'s Models section" and continue');
   });
 
@@ -200,7 +200,7 @@ describe('pilot installation entry points', () => {
     expect(document).toContain('- **Custom plugin UI opt-in** (Step 5, before the restart)');
   });
 
-  test('the posture is never a pick-list before the explanation and sensitivity conversation', () => {
+  test('the posture is never a pick-list before the explanation and privacy conversation', () => {
     const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const rule = document.indexOf('**No pick-list before the explanation — question tools included.**');
     const explanation = document.indexOf('**Required user-facing four-tier explanation.**');
@@ -209,7 +209,7 @@ describe('pilot installation entry points', () => {
     const text = document.slice(rule, explanation).replace(/\s+/g, ' ');
     expect(text).toContain('question tool');
     expect(text).toContain('never a bare preset id');
-    expect(text).toContain('sensitivity conversation');
+    expect(text).toContain('privacy conversation');
   });
 
   test('Step 0 installs Bun without unzip or sudo when those are missing', () => {

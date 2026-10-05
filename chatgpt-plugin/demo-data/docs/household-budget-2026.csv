@@ -1,0 +1,8 @@
+# SYNTHETIC DEMO DATA - fictional household, not real.
+category,monthly_amount_usd,notes
+rent,2150,"rises to 2215 from December if renewed"
+groceries,700,
+utilities,210,
+savings,750,"from October; was 600"
+transport,180,
+garden plot,15,"Elm Street plot 12"

@@ -7,20 +7,23 @@
  *
  * Two ways it reaches a runtime, in this order:
  *
- * 1. The release builder replaces `PACKAGED_GOOGLE_PILOT_CLIENT_ID` in staged
- *    bundle bytes from `OLYMPUS_GOOGLE_PILOT_CLIENT_ID`, which release builds
- *    still require.
+ * 1. The release builder replaces this module in staged bundles from
+ *    `OLYMPUS_GOOGLE_PILOT_CLIENT_ID`, which a release build must set: to a
+ *    Desktop client id, or to `none` for no Desktop client, since every
+ *    host's Gmail and Drive connect uses the publisher Web client and relay
+ *    (`scripts/release-google-pilot-choice.ts`). Unset, it packages the
+ *    source default below — the Olympus 1.0 choice (owner, 2026-10-03).
  * 2. `DEFAULT_GOOGLE_PILOT_CLIENT_ID` below, which ships in source. A
  *    repository install has no release substitution, so without a real default
  *    every repo-installed direct pilot path is forced onto BYO OAuth.
  *
- * The default is empty until the publisher mints (or hands over) the shared
- * Desktop client. Fill in the literal below — nothing else needs to change.
+ * The default is the publisher-owned Desktop client that 0.4.0-beta.11
+ * packaged, so installs that connected through it keep publisher recognition.
  * New publisher dashboard flows do not use this identity; they use the Google
  * Web client, signed relay, and publisher exchange for every dashboard origin.
- * An empty default keeps direct pilot behavior fail-closed to BYO OAuth.
+ * An empty id (a `none` build) keeps direct pilot behavior fail-closed to BYO OAuth.
  */
-export const DEFAULT_GOOGLE_PILOT_CLIENT_ID = '';
+export const DEFAULT_GOOGLE_PILOT_CLIENT_ID: string = '604346037984-oukrdn4ouh8n2fctggracadt0fdd2lps.apps.googleusercontent.com';
 
 export const PACKAGED_GOOGLE_PILOT_CLIENT_ID = '__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__';
 

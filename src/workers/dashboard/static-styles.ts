@@ -8,7 +8,9 @@ export const DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; 
 .bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
 .bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
 .minibar { display: block; width: 64px; height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; justify-self: end; }
-.minibar i { display: block; height: 100%; background: var(--run); }
+.minibar i { display: block; height: 100%; background: var(--run-fill); }
+/* Finished work is not in progress: a full bar reads ready, never yellow. */
+.minibar.done i { background: var(--good); }
 /* A bar always carries its number: the percent sits beside the track. */
 .labeledbar { display: flex; align-items: center; gap: 8px; justify-self: stretch; }
 .labeledbar .minibar { flex: 1; width: auto; }
@@ -46,7 +48,7 @@ export const DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520
 .phase.waiting .bar { background: var(--line2); }
 .phase.waiting .bar i { display: none; }
 .bar.indet.working { position: relative; }
-.bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
+.bar.indet.working i { width: 34%; background: var(--run-fill); animation: dashsweep 1.6s ease-in-out infinite; }
 @keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
 .settled { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; color: var(--t2); font-size: var(--fs-body); max-width: 520px; }
 .banner { margin-bottom: 6px; }
@@ -61,11 +63,7 @@ export const DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520
 }
 `;
 
-export const DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.catrow .name { font-weight: 600; color: var(--t2); }
-.catrow .what { color: var(--t4); font-size: var(--fs-caption); }
-.catrow .tier { color: var(--t3); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; }
-.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
+export const DASHBOARD_POLICY_CSS = `.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
 .scoperow .rid { font-family: var(--mono); font-size: var(--fs-caption); font-weight: 600; color: var(--t2); }
 .scoperow .what { color: var(--t3); font-size: var(--fs-caption); }
 .sect.gap { margin-top: 44px; }
@@ -80,9 +78,6 @@ export const DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-colu
 .chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: var(--fs-caption); }
 .chip b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-@media (max-width: 700px) {
-  .catrow { grid-template-columns: 1fr; gap: 4px; }
-}
 `;
 
 export const DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; background: var(--bg); padding-top: 2px; }
@@ -227,23 +222,78 @@ export const DISPOSITIONS_CSS = `
       .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
       .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
       .scope-connection, .scope-browser-note { color: var(--t3); font-size: var(--fs-caption); padding: 8px 12px; }
-      .scope-browser-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line2); }
-      .scope-browser-toolbar button, .scope-browser-list button, [data-scope-more] { color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; }
-      .scope-browser-list .scope-folder { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
-      .scope-folder [data-scope-select] { flex: 1; border: 0; background: transparent; padding: 0; color: inherit; text-align: left; overflow-wrap: anywhere; }
-      .scope-folder.selected [data-scope-select] { background: transparent; }
-      .scope-folder [data-scope-open] { padding: 0; width: 14px; border: 0; background: transparent; color: inherit; }
-      .scope-folder-status { color: var(--t3); font-size: var(--fs-caption); }
-      .scope-folder.selected .scope-folder-status { color: var(--t1); }
-      .scope-folder-status.mixed, .node-state.mixed { color: var(--warn); font-weight: 600; }
-      .scope-whole-account, .scope-whole-confirm { margin: 12px; font-size: var(--fs-caption); color: var(--t2); }
-      .scope-whole-account { display: block; }
-      .scope-whole-confirm:not([hidden]) { display: block; color: var(--warn); }
-      [data-folder-scope-source] input[type="checkbox"] { width: auto; display: inline-block; margin: 0 6px 0 0; vertical-align: middle; }
-      [data-folder-scope-source] [hidden] { display: none !important; }
-      .scope-review { border-top: 1px solid var(--line2); margin: 12px; padding-top: 12px; font-size: var(--fs-caption); }
-      .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
-      [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
+      /* The folder picker (Dropbox, Google Drive): the approved ChatGPT
+         layout. One level per screen, one thin line per folder with the
+         drill-in chevron beside the name, and one pill control flush right. */
+      .scope-picker { max-width: 760px; }
+      .scope-picker form { display: block; container-type: inline-size; }
+      .scope-picker [hidden] { display: none !important; }
+      .scope-back a, .scope-picker button.back { display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--t1); font-size: var(--fs-caption); font-weight: 500; text-decoration: none; }
+      .scope-picker button.back::before { content: "\\2190\\00a0"; }
+      .scope-locations { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+      .scope-locations .location { padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--t2); text-decoration: none; }
+      .scope-locations .location.selected { border-color: var(--field); background: var(--panel2); color: var(--t1); }
+      .scope-locations .folder-icon { display: none; }
+      .scope-picker .scope-browser-note { padding: 0; margin: 0 0 8px; }
+      .scope-picker .fpath { margin: 14px 0 12px; color: var(--t1); font-size: var(--fs-section); font-weight: 600; }
+      .scope-picker .fpath-up { color: var(--t3); font-weight: 400; }
+      .scope-picker .this-row { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 4px 4px 4px 12px; margin: 0 0 12px; background: var(--panel); border-radius: 12px; }
+      .scope-picker .this-label { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--t1); font-weight: 600; }
+      .scope-picker .fsection { margin-top: 18px; }
+      .scope-picker .fsection h2 { margin: 0 0 6px; color: var(--t1); font-size: var(--fs-row); }
+      .scope-picker .flist { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line2); }
+      .scope-picker .frow { display: flex; align-items: center; gap: 4px; min-height: 48px; border-bottom: 1px solid var(--line2); }
+      .scope-picker .fname { position: relative; flex: 1 1 auto; display: flex; align-items: center; gap: 0 8px; min-width: 44px; height: 44px; margin: 0; padding: 0 0 0 23px; border: 0; border-radius: 8px; background: none; color: var(--t1); font: inherit; font-weight: 500; text-align: left; white-space: nowrap; overflow: hidden; cursor: pointer; }
+      .scope-picker .fname.leaf { cursor: default; }
+      .scope-picker .fopen, .scope-picker .fopen-gap { position: absolute; left: 0; top: 0; width: 18px; height: 44px; line-height: 44px; text-align: center; }
+      .scope-picker .fopen { color: var(--t3); font-size: var(--fs-title); }
+      .scope-picker button.fname:hover:not(:disabled) .fopen { color: var(--t1); }
+      .scope-picker button.fname:disabled { cursor: default; }
+      .scope-picker .fname-main { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+      .scope-picker .fname-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .scope-picker .ftag { flex: none; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--t3); font-size: var(--fs-caption); font-weight: 500; line-height: 20px; }
+      .scope-picker .seg { flex: none; margin-left: auto; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); }
+      .scope-picker .seg-opt { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 44px; height: 32px; margin: 0; padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--t1); font: inherit; font-size: var(--fs-caption); font-weight: 500; white-space: nowrap; cursor: pointer; }
+      .scope-picker .seg-opt::before { content: ""; position: absolute; inset: -7px 0; }
+      .scope-picker .seg-opt + .seg-opt::after { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
+      .scope-picker .seg-opt.on::after, .scope-picker .seg-opt.on + .seg-opt::after, .scope-picker .seg-opt.inherited::after, .scope-picker .seg-opt.inherited + .seg-opt::after { display: none; }
+      .scope-picker .seg-opt:hover:not(:disabled):not(.on) { background: var(--panel2); }
+      .scope-picker .seg-opt.on { background: var(--t1); color: var(--bg); font-weight: 600; }
+      .scope-picker .seg-opt.inherited { background: var(--panel2); box-shadow: inset 0 0 0 1px var(--t3); }
+      .scope-picker .seg-opt:disabled { color: var(--t3); opacity: .5; cursor: not-allowed; }
+      .scope-picker .seg-opt:disabled.inherited, .scope-picker .seg-opt:disabled.on { opacity: 1; }
+      .scope-picker .seg-short { display: none; }
+      @container (max-width: 420px) {
+        .scope-picker .seg-long { display: none; }
+        .scope-picker .seg-short { display: inline; }
+        .scope-picker .seg-opt { padding: 0 8px; }
+        .scope-picker .picker-footer { padding: 12px; }
+        .scope-picker :is(.actions, .fmore, .scope-error) button { padding: 0 12px; }
+      }
+      @media (max-width: 720px) {
+        .picker-page { padding: 20px 16px 56px; }
+      }
+      .scope-picker .jump-btn { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px; margin: 0; padding: 0; border: 0; background: none; color: var(--t1); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
+      .scope-picker .jtag { flex: none; margin-left: auto; color: var(--t3); font-size: var(--fs-caption); font-weight: 400; }
+      .scope-picker .chev { flex: none; color: var(--t3); font-size: var(--fs-title); line-height: 1; }
+      .scope-picker .fstate, .scope-picker .fempty { margin: 0; padding: 12px 0; color: var(--t3); }
+      .scope-picker .fmore { padding: 8px 0; }
+      .scope-picker .confirm-box { display: flex; flex-direction: column; gap: 8px; margin: -4px 0 12px; padding: 12px; border: 1px solid var(--warn-line); border-radius: 12px; background: var(--warn-bg); }
+      .scope-picker .confirm-box .strong { color: var(--t1); font-weight: 600; }
+      .scope-picker .scope-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; padding: 12px; border: 1px solid var(--err-line); border-radius: 12px; background: var(--err-bg); }
+      .scope-picker .scope-error p { color: var(--t1); }
+      .scope-picker .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .scope-picker :is(.actions, .fmore, .scope-error) button { min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--t1); font-size: var(--fs-body); font-weight: 500; }
+      .scope-picker :is(.actions, .fmore, .scope-error) button:hover:not(:disabled) { background: var(--panel2); }
+      .scope-picker .actions button.primary { border-color: var(--accent-fill); background: var(--accent-fill); color: var(--on-accent); }
+      .scope-picker .actions button.danger { border-color: var(--bad); color: var(--bad); }
+      .scope-picker :is(.actions, .fmore, .scope-error) button:disabled { border-style: dashed; background: var(--panel); color: var(--t3); cursor: not-allowed; }
+      .scope-picker .picker-footer { margin-top: 24px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); display: flex; flex-direction: column; gap: 12px; }
+      .scope-picker .summary { display: flex; flex-direction: column; gap: 4px; }
+      .scope-picker .summary p { color: var(--t1); }
+      .scope-picker .save { display: flex; flex-direction: column; gap: 6px; }
+      .scope-picker .reason { color: var(--t3); font-size: var(--fs-caption); }
+      .scope-picker .reason:empty, .scope-picker .action-message:empty { display: none; }
       .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
       /* Mail scope picker: the same Finder frame, with form groups where the
          folder tree sits and the estimate where the inspector sits. */
@@ -275,6 +325,9 @@ export const DISPOSITIONS_CSS = `
       .mail-scope-figures dt { color: var(--t3); font-size: var(--fs-caption); }
       .mail-scope-figures dd { margin: 0; color: var(--t1); font-size: var(--fs-caption); font-variant-numeric: tabular-nums; text-align: right; }
       .mail-scope-estimate button { justify-self: start; padding: 6px 12px; font-size: var(--fs-caption); color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+      /* The same pill buttons and footer rhythm as the folder picker. */
+      .mail-scope-window .finder-footer { padding: 12px 16px; }
+      .mail-scope-window .finder-footer button, .mail-scope-estimate button { min-height: 36px; padding: 0 14px; border-radius: 999px; font-size: var(--fs-body); }
       [data-mail-scope-source] [hidden] { display: none !important; }
       [data-mail-scope-source] button:disabled, [data-mail-scope-source] input:disabled, [data-mail-scope-source] textarea:disabled { opacity: .45; cursor: not-allowed; }
       @media (max-width: 860px) {
@@ -333,4 +386,83 @@ export const MODEL_SETUP_CSS = `
 .modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
 .modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
 .modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
+`;
+
+/** The rows' layout, after the ChatGPT dashboard's list rows. */
+export const DASHBOARD_SOURCE_ROWS_CSS = `
+.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
+.srow .sact { grid-column: 2; grid-row: 1; }
+.srow .smenu { grid-column: 3; grid-row: 1; }
+.srow .shead { display: flex; align-items: center; gap: 10px; }
+.srow .shead .name { font-weight: 600; font-size: var(--fs-row); color: var(--t1); text-decoration: none; }
+.srow .shead a.name:hover { color: var(--link); text-decoration: underline; }
+.srow .shead a.name:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 4px; }
+.srow .sneed { font-size: var(--fs-row); color: var(--t1); }
+.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
+.srow.nodot .sline { margin-left: 0; }
+.srow .sact { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.srow .sact form { margin: 0; }
+.dot.tone-good { background: var(--good); }
+.dot.tone-run { background: var(--run-fill); }
+.dot.tone-warn { background: var(--warn-fill); }
+.dot.tone-bad { background: var(--bad); }
+.dot.tone-off { background: var(--off); }
+.sprog { margin: 0; }
+.srow .sprog .bar { max-width: none; height: 6px; margin: 8px 0 0 20px; }
+.sprog.overall .sline { margin: 0 0 8px; color: var(--t1); }
+.sprog.overall .bar { max-width: none; height: 6px; margin: 0 0 8px; }
+.sprog.stalled .sline { color: var(--t1); }
+.bar.stalled i { background: var(--warn-fill); }
+.sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+/* No border of its own: the list above already ends in one, and two read as a double divider. */
+.modelsrow { margin: 28px 0 0; }
+details.models > summary { font-size: var(--fs-section); font-weight: 600; color: var(--t1); cursor: pointer; padding: 4px 0; }
+details.models > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+details.models .modelsbody { margin-top: 12px; }
+.mlist { margin: 0 0 12px; padding-left: 20px; color: var(--t2); }
+.minstalls { display: grid; gap: 10px; margin: 8px 0 0; }
+.minstall .sline { margin: 0; color: var(--t2); font-size: var(--fs-body); }
+.minstall .bar { max-width: none; height: 6px; margin-top: 6px; }
+.minstall.failed .sline { color: var(--t1); font-weight: 600; }
+@media (max-width: 700px) {
+  .srow { grid-template-columns: minmax(0, 1fr) auto; }
+  .srow .sact { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; padding-left: 20px; }
+  .srow .smenu { grid-column: 2; grid-row: 1; }
+  .srow.nodot .sact { padding-left: 0; }
+  .srow .sact .rowlink { width: auto; justify-content: flex-start; }
+}
+`;
+
+/** The Privacy editor (pages/privacy.ts), after the ChatGPT privacy screen. */
+export const DASHBOARD_PRIVACY_CSS = `
+.privacy { max-width: 760px; }
+.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
+.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
+.pnote { color: var(--t2); margin: 0 0 12px; }
+.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
+.ptext { display: block; width: 100%; min-height: 120px; resize: vertical; background: var(--bg); border: 1px solid var(--field); border-radius: 8px; color: var(--t1); font: inherit; font-size: var(--fs-row); padding: 10px 12px; }
+.ptext:focus-visible, .ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.privacy .sect { margin-top: 24px; }
+.prule.removed .sline { text-decoration: line-through; color: var(--t3); }
+.pempty { margin: 8px 0 0; }
+.padd { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+.ppanel { margin: 12px 0 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.ppanel .srows { margin: 8px 0; }
+.ppanel .ppath { margin: 0 0 8px; color: var(--t2); }
+.ppanel .ppath:empty { display: none; }
+.psources { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+.psources:empty { display: none; }
+.psources .btn[aria-pressed="true"] { background: var(--selected); border-color: var(--link-line); color: var(--t1); }
+.prow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ptextline { flex: 1 1 240px; width: auto; }
+.pfooter { margin: 24px 0 0; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 12px; }
+.pfooter p { margin: 0; color: var(--t1); }
+.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pbuttons a.btn { text-decoration: none; }
+/* The confirm and conflict steps: a tinted box with a 1px border, never a stripe. */
+.pprompt { padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; display: grid; gap: 8px; }
+.pprompt p { margin: 0; color: var(--t1); }
 `;

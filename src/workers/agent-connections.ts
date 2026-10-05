@@ -13,11 +13,10 @@
  * - POST /dashboard/agents/keys creates a bearer connection, as
  *   `olympus connections add <name>` does, and returns its token once.
  * - POST /dashboard/agents/revoke revokes a connection by id.
- * - POST /dashboard/agents/remote-access turns remote access on or off. On
- *   needs the owner's acceptance of the CA's current subscriber agreement,
- *   recorded exactly as `olympus connections terms --accept` records it; the
- *   config change itself goes through OpenClaw's config write path in the
- *   Gateway (core/remote-access-config.ts), never a file Olympus writes.
+ * - POST /dashboard/agents/remote-access turns remote access on or off. Under
+ *   OpenClaw the change goes through OpenClaw's config write path in the
+ *   Gateway (core/remote-access-config.ts); under the standalone engine,
+ *   through the engine's own config file (workers/remote-access-control.ts).
  *
  * Codes and tokens appear only in the response body of the request that
  * minted them, with `Cache-Control: no-store`. Nothing here logs.
@@ -35,6 +34,9 @@ export const DASHBOARD_AGENT_KEYS_PATH = '/dashboard/agents/keys';
 export const DASHBOARD_AGENT_REVOKE_PATH = '/dashboard/agents/revoke';
 export const DASHBOARD_AGENT_REMOTE_ACCESS_PATH = '/dashboard/agents/remote-access';
 
+/** See `needsTerms`: kept only for the dashboard lane's existing reference. */
+export const LETS_ENCRYPT_REPOSITORY_URL = 'https://letsencrypt.org/repository/';
+
 export const DASHBOARD_AGENT_CONTROL_PATHS = [
   DASHBOARD_AGENT_PAIRING_CODE_PATH,
   DASHBOARD_AGENT_KEYS_PATH,
@@ -42,15 +44,11 @@ export const DASHBOARD_AGENT_CONTROL_PATHS = [
   DASHBOARD_AGENT_REMOTE_ACCESS_PATH,
 ] as const;
 
-/** Where the dashboard links for the agreement when the CA names no URL of its own. */
-export const LETS_ENCRYPT_REPOSITORY_URL = 'https://letsencrypt.org/repository/';
-
 /**
  * Whether agents in a vendor's cloud can reach this computer.
  *
  * `not_connected`: remote access is on, but agents cannot reach Olympus right
- * now: connecting, certificate pending, the agreement to accept
- * (`needsTerms`), the relay unavailable or its process down. That includes a
+ * now: connecting, the relay unavailable or its process down. That includes a
  * relay session that went offline after it worked, even though the public
  * address is kept for when it returns. `detail` says which, in the owner's
  * words.
@@ -68,7 +66,16 @@ export type DashboardRemoteAccess =
       setBy?: 'worker_env';
     }
   | { state: 'off' }
-  | { state: 'not_connected'; detail?: string; needsTerms?: true }
+  | {
+      state: 'not_connected';
+      detail?: string;
+      /**
+       * Never set since relay v2 (the relay holds the only certificate, so no
+       * CA agreement is asked for). Kept until the dashboard lane drops its
+       * reads of it and of LETS_ENCRYPT_REPOSITORY_URL.
+       */
+      needsTerms?: true;
+    }
   | { state: 'invalid'; detail: string };
 
 export interface DashboardAgentConnection {
@@ -101,16 +108,7 @@ export type RemoteAccessConfigWrite =
   | { ok: false; status: number; code: string; message: string };
 
 export interface DashboardRemoteAccessControl {
-  /**
-   * The CA's current subscriber agreement (`resolveCurrentTermsUrl`):
-   * undefined when the CA names none. Throws when it cannot be read.
-   */
-  currentTermsUrl(): Promise<string | undefined>;
-  /** `termsAccepted` for that agreement. */
-  termsAccepted(url: string | undefined): boolean;
-  /** `recordTermsAcceptance`, as `olympus connections terms --accept`. */
-  recordTermsAcceptance(url: string | undefined): void;
-  /** Change `remote.enabled` through OpenClaw's config write path (never a file write here). */
+  /** Change `remote.enabled` through the host's own config path. */
   setEnabled(enabled: boolean): Promise<RemoteAccessConfigWrite>;
 }
 
@@ -126,7 +124,7 @@ export interface DashboardRemoteAccessControl {
 export function remoteAccessFromStatus(input: {
   live: RemotePublicUrls | undefined;
   status: (Pick<RemoteAccessStatusView, 'error' | 'mode' | 'remote_enabled' | 'next_step'>
-    & Partial<Pick<RemoteAccessStatusView, 'relay' | 'certificate' | 'public_base_url_source'>>) | undefined;
+    & Partial<Pick<RemoteAccessStatusView, 'relay' | 'public_base_url_source'>>) | undefined;
   /** Where the worker's live address comes from: its environment (worker.env) or the relay status. */
   liveOrigin?: 'env' | 'status';
 }): DashboardRemoteAccess {
@@ -149,16 +147,9 @@ export function remoteAccessFromStatus(input: {
 
 /** Not connected through the relay, said for the owner rather than a shell. */
 function relayNotConnected(
-  status: Pick<RemoteAccessStatusView, 'next_step'> & Partial<Pick<RemoteAccessStatusView, 'relay' | 'certificate'>>,
+  status: Pick<RemoteAccessStatusView, 'next_step'> & Partial<Pick<RemoteAccessStatusView, 'relay'>>,
 ): DashboardRemoteAccess {
   const relay = status.relay?.state;
-  if (status.certificate?.state === 'awaiting_terms') {
-    return {
-      state: 'not_connected',
-      needsTerms: true,
-      detail: 'Olympus needs you to accept Let\'s Encrypt\'s subscriber agreement before it can get its certificate.',
-    };
-  }
   if (relay === 'offline' || relay === 'replaced') {
     return {
       state: 'not_connected',
@@ -171,10 +162,6 @@ function relayNotConnected(
       detail: 'The remote access process has stopped. Olympus restarts it on its own; if this stays, restart OpenClaw.',
     };
   }
-  if (relay === 'online' && status.certificate?.state === 'failed') {
-    return { state: 'not_connected', detail: 'Olympus could not get its certificate yet. It tries again on its own.' };
-  }
-  if (relay === 'online') return { state: 'not_connected', detail: 'Olympus is getting its certificate.' };
   if (relay === undefined || relay === null) {
     return status.next_step ? { state: 'not_connected', detail: status.next_step } : { state: 'not_connected' };
   }
@@ -275,13 +262,9 @@ export async function handleDashboardAgentRequest(
 }
 
 /**
- * Turn remote access on or off. On first checks the owner has accepted the
- * CA's *current* subscriber agreement: without an acceptance it answers 409
- * `terms_required` with the agreement's URL, and the page shows it; the owner's
- * explicit acceptance comes back with that same URL, and is recorded exactly
- * as `olympus connections terms --accept` records it. If the CA published a
- * different agreement meanwhile, the acceptance is refused (`terms_changed`)
- * and the new one is shown instead. Off needs no agreement.
+ * Turn remote access on or off. The relay holds the only certificate, so
+ * there is no agreement to accept here; an `accept_terms` field from an older
+ * page is accepted and ignored.
  */
 async function setRemoteAccess(
   body: Record<string, unknown>,
@@ -290,16 +273,6 @@ async function setRemoteAccess(
   const unknown = Object.keys(body).filter((key) => key !== 'enabled' && key !== 'accept_terms');
   if (unknown.length > 0 || typeof body.enabled !== 'boolean') {
     return refusal(400, 'invalid_request', 'Say whether to turn remote access on or off.');
-  }
-  let acceptedUrl: string | null | undefined;
-  if (body.accept_terms !== undefined) {
-    const accept = body.accept_terms;
-    const record = accept && typeof accept === 'object' && !Array.isArray(accept) ? accept as Record<string, unknown> : undefined;
-    if (!body.enabled || !record || Object.keys(record).length !== 1 || !('url' in record)
-      || (record.url !== null && !isHttpsUrl(record.url))) {
-      return refusal(400, 'invalid_request', 'An agreement acceptance names the agreement it accepts.');
-    }
-    acceptedUrl = record.url as string | null;
   }
   const control = backend.remoteAccessControl;
   if (!control) {
@@ -310,41 +283,6 @@ async function setRemoteAccess(
   const before = currentAccess(backend);
   if (before?.state === 'on' && before.setBy === 'worker_env') {
     return refusal(409, 'set_by_worker_env', WORKER_ENV_ADDRESS_MESSAGE);
-  }
-  if (body.enabled) {
-    let current: string | undefined;
-    try {
-      current = await control.currentTermsUrl();
-    } catch {
-      return refusal(
-        502,
-        'terms_unavailable',
-        'Olympus could not read Let\'s Encrypt\'s subscriber agreement just now. Check the internet connection, then try again.',
-      );
-    }
-    const terms = { url: current ?? null, read_url: current ?? LETS_ENCRYPT_REPOSITORY_URL };
-    if (acceptedUrl !== undefined) {
-      if (acceptedUrl !== (current ?? null)) {
-        return secretResponse({
-          ok: false,
-          error: {
-            code: 'terms_changed',
-            message: 'Let\'s Encrypt has published a new subscriber agreement. Read it, then accept it to continue.',
-          },
-          terms,
-        }, 409);
-      }
-      control.recordTermsAcceptance(current);
-    } else if (!control.termsAccepted(current)) {
-      return secretResponse({
-        ok: false,
-        error: {
-          code: 'terms_required',
-          message: 'Read Let\'s Encrypt\'s subscriber agreement, then accept it to turn on remote access.',
-        },
-        terms,
-      }, 409);
-    }
   }
   const written = await control.setEnabled(body.enabled).catch((): RemoteAccessConfigWrite => ({
     ok: false,
@@ -369,7 +307,7 @@ async function setRemoteAccess(
     ok: true,
     enabled: body.enabled,
     status_message: body.enabled
-      ? 'Remote access is turning on. Olympus connects to its relay and gets a certificate, which usually takes a minute.'
+      ? 'Remote access is turning on. Olympus connects to its relay, which usually takes a few seconds.'
       : written.unchanged
         ? 'Remote access is off. Agents in the cloud cannot reach Olympus; agents on this computer are unaffected.'
         : 'Remote access is turning off. Within a few seconds agents in the cloud can no longer reach Olympus; agents on this computer are unaffected.',
@@ -394,15 +332,6 @@ function hostOfUrl(url: string): string {
     return new URL(url).host;
   } catch {
     return url;
-  }
-}
-
-function isHttpsUrl(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length > 2048) return false;
-  try {
-    return new URL(value).protocol === 'https:';
-  } catch {
-    return false;
   }
 }
 

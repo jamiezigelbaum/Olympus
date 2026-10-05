@@ -3,20 +3,22 @@
  *
  * - the Gateway's native relay service decides the mode from plugin config and
  *   supervises the relay child (`native-relay-service.ts`);
- * - the relay child keeps the session and certificate and reports progress
+ * - the relay child keeps the install's session to the relay and reports it
  *   (`remote-relay-runtime.ts`);
  * - the worker and the CLI read what they report.
  *
  * They meet in one directory, `<data>/openclaw/olympus/connect-relay` (0700,
- * files 0600), which also holds the install's keys:
+ * files 0600), which also holds the install's key:
  *
  *   status.json          what the service and the relay child report
- *   relay-auth           per-install secret proving a request came through the relay
- *   acme-terms.json      the user's acceptance of the CA subscriber agreement
+ *   install-key.pem      the install's Ed25519 identity (relay child only)
+ *   demo-install         present only on a demo install (synthetic data);
+ *                        see `demoInstallMarked`
  *
- * The worker learns its public base URL from status.json without restarting;
- * see `createRemotePublicUrlSource`. Issuer and resource still come only from
- * that configured value, never from a request's Host or forwarding headers.
+ * The worker learns its public base URL and install id from status.json
+ * without restarting; see `createRemotePublicUrlSource`. Issuer and resource
+ * come only from that configured value, never from a request's Host or
+ * forwarding headers.
  *
  * Nothing here imports the relay client, so the Gateway and worker bundles do
  * not carry it.
@@ -31,6 +33,7 @@ import {
   readFileSync as raReadFileSync,
   renameSync as raRenameSync,
   statSync as raStatSync,
+  unlinkSync as raUnlinkSync,
   writeFileSync as raWriteFileSync,
 } from 'node:fs';
 import { homedir as raHomedir } from 'node:os';
@@ -43,15 +46,20 @@ import {
 } from './remote-public-url.ts';
 import { readWorkerSetupEnv } from './worker-auth.ts';
 
-export const REMOTE_ACCESS_STATUS_SCHEMA = 'olympus.remote-access.status.v1';
+export const REMOTE_ACCESS_STATUS_SCHEMA = 'olympus.remote-access.status.v2';
 export const REMOTE_ACCESS_DIR_NAME = 'connect-relay';
-/** Must equal RELAY_AUTH_HEADER in connect-relay/client/local-endpoint.ts (a test holds them equal). */
-export const RELAY_AUTH_HEADER = 'x-olympus-relay-auth';
+/**
+ * The relay child marks every request it forwards with this header (a secret
+ * minted per boot) and strips any inbound copy. The worker refuses OAuth
+ * approval for any request carrying it, so approval can only come from a
+ * direct visit on this Mac. Must equal RELAY_HEADER in
+ * connect-relay/client/forward.ts (a test holds them equal).
+ */
+export const RELAYED_REQUEST_HEADER = 'x-olympus-relay';
 
 const STATUS_FILE = 'status.json';
-const RELAY_AUTH_FILE = 'relay-auth';
-const TERMS_FILE = 'acme-terms.json';
 const DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+const INSTALL_ID = /^[a-z2-7]{32}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 // ---------------------------------------------------------------------------
@@ -63,14 +71,14 @@ export type RemoteAccessMode =
   | { mode: 'relay'; relayHost: string }
   | { mode: 'error'; error: string };
 
-/** The Olympus connect relay, used whenever remote access is on without a tunnel of the owner's own. */
-export const DEFAULT_RELAY_HOST = 'connect.olympusplugin.ai';
+/** The Olympus relay, used whenever remote access is on without a tunnel of the owner's own. */
+export const DEFAULT_RELAY_HOST = 'mcp.olympusplugin.ai';
 
 /**
  * Remote access is opt-in (`remote.enabled`), with exactly one public address:
- * the Olympus relay (`remote.relayHost`, default `connect.olympusplugin.ai`)
- * or a tunnel the owner runs (`remote.publicBaseUrl`). Both set explicitly is
- * a conflict, reported by name; it turns remote access off rather than failing
+ * the Olympus relay (`remote.relayHost`, default `mcp.olympusplugin.ai`) or a
+ * tunnel the owner runs (`remote.publicBaseUrl`). Both set explicitly is a
+ * conflict, reported by name; it turns remote access off rather than failing
  * the plugin, so local tools keep working while the owner fixes it.
  *
  * The default lives here, not as a JSON-schema `default` in the manifest, so
@@ -95,7 +103,7 @@ export function resolveRemoteAccessMode(remote: OlympusConfig['remote']): Remote
   }
   const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
   if (!DNS_NAME.test(host)) {
-    return { mode: 'error', error: 'remote.relayHost must be a DNS name such as connect.olympusplugin.ai, with no scheme, port or path.' };
+    return { mode: 'error', error: 'remote.relayHost must be a DNS name such as mcp.olympusplugin.ai, with no scheme, port or path.' };
   }
   return { mode: 'relay', relayHost: host };
 }
@@ -145,10 +153,6 @@ function writePrivateText(path: string, text: string): void {
   raRenameSync(temporary, path);
 }
 
-function writePrivateJson(path: string, value: unknown): void {
-  writePrivateText(path, `${JSON.stringify(value, null, 2)}\n`);
-}
-
 /** A regular file owned by this user, not a symlink; otherwise undefined. */
 function readPrivateFile(path: string): string | undefined {
   try {
@@ -191,7 +195,6 @@ function cachedFileReader<T>(path: () => string, parse: (text: string) => T | un
 // Status file
 
 export type RelaySessionState = 'starting' | 'connecting' | 'online' | 'offline' | 'replaced' | 'stopped';
-export type CertificateState = 'none' | 'awaiting_terms' | 'issuing' | 'serving' | 'failed';
 
 export interface RemoteAccessStatusFile {
   schema: typeof REMOTE_ACCESS_STATUS_SCHEMA;
@@ -202,16 +205,19 @@ export interface RemoteAccessStatusFile {
   relay_host: string | null;
   /** The loopback worker the relay forwards to. */
   local_url: string | null;
-  /** The public origin, once it works: manual, or relay online with a served certificate. */
+  /**
+   * The public origin: manual, or `https://<relay host>` while the relay child
+   * runs. The issuer does not move with the session; whether hosted agents can
+   * reach this Mac right now is `relay.state`.
+   */
   public_base_url: string | null;
   instance_id: string | null;
   pid: number | null;
+  /** This install's relay id (relay mode). */
   install_id: string | null;
-  hostname: string | null;
   relay: { state: RelaySessionState; reason: string | null; retry_in_ms: number | null } | null;
-  certificate: { state: CertificateState; not_after: string | null; reason: string | null; retry_in_ms: number | null } | null;
-  /** The CA's current subscriber agreement, as last seen by the relay child. */
-  terms_url: string | null;
+  /** When the relay session last came up. */
+  last_connected_at: string | null;
 }
 
 export function emptyRemoteAccessStatus(mode: RemoteAccessStatusFile['mode'], now = new Date()): RemoteAccessStatusFile {
@@ -226,16 +232,14 @@ export function emptyRemoteAccessStatus(mode: RemoteAccessStatusFile['mode'], no
     instance_id: null,
     pid: null,
     install_id: null,
-    hostname: null,
     relay: null,
-    certificate: null,
-    terms_url: null,
+    last_connected_at: null,
   };
 }
 
 export function writeRemoteAccessStatus(dir: string, status: RemoteAccessStatusFile): void {
   ensureRemoteAccessDir(dir);
-  writePrivateJson(raJoin(dir, STATUS_FILE), status);
+  writePrivateText(raJoin(dir, STATUS_FILE), `${JSON.stringify(status, null, 2)}\n`);
 }
 
 function parseStatus(text: string): RemoteAccessStatusFile | undefined {
@@ -268,16 +272,16 @@ export interface RemotePublicUrlSource {
  * An `OLYMPUS_PUBLIC_BASE_URL` in the worker's environment (worker.env) is the
  * owner's explicit manual value and stays fixed for the process. Otherwise the
  * worker reads status.json, which the Gateway's relay service writes for a
- * configured `remote.publicBaseUrl` and the relay child writes once its
- * session is up and its certificate is served. The file is re-read only when
- * it changes, and stat-ed at most once a second, so a request pays at most
- * one stat.
+ * configured `remote.publicBaseUrl` and the relay child writes while it runs.
+ * In relay mode the URLs carry the install id, and are withheld until the
+ * child has reported it: codes and tokens must name it for the relay to route
+ * them. The file is re-read only when it changes, and stat-ed at most once a
+ * second, so a request pays at most one stat.
  *
  * A file rather than a supervised restart: restarting the worker when the
  * relay comes up would cut in-flight answers and MCP streams and drop pending
- * OAuth approvals (they live in memory), and the relay can come and go with
- * the network. A file also lets the CLI and a worker that the Gateway does not
- * supervise read the same answer.
+ * OAuth approvals (they live in memory). A file also lets the CLI and a worker
+ * that the Gateway does not supervise read the same answer.
  */
 export function createRemotePublicUrlSource(
   env: Record<string, string | undefined> = process.env,
@@ -294,7 +298,8 @@ export function createRemotePublicUrlSource(
     (text) => {
       const status = parseStatus(text);
       if (!status || status.error || status.mode === 'off' || !status.public_base_url) return undefined;
-      const parsed = parseRemotePublicBaseUrl(status.public_base_url);
+      if (status.mode === 'relay' && !(status.install_id && INSTALL_ID.test(status.install_id))) return undefined;
+      const parsed = parseRemotePublicBaseUrl(status.public_base_url, status.mode === 'relay' ? status.install_id! : undefined);
       return parsed.enabled ? parsed.urls : undefined;
     },
     options.minIntervalMs ?? 1_000,
@@ -303,100 +308,93 @@ export function createRemotePublicUrlSource(
   return { origin: 'status', current: read };
 }
 
-// ---------------------------------------------------------------------------
-// Relay forwarding trust
+/**
+ * The demo marker: a file an operator creates by hand on a demo install, which
+ * holds synthetic sample data only. Its first line must be exactly
+ * DEMO_INSTALL_MARKER_TEXT. Demo sign-in (remote.demoConsent) and forwarding
+ * of the demo sign-in path both require it, so the config flag alone never
+ * opens password sign-in on a real install.
+ */
+export const DEMO_INSTALL_MARKER_FILE = 'demo-install';
+export const DEMO_INSTALL_MARKER_TEXT = 'olympus demo install: synthetic sample data only';
 
-/** The relay child's secret: created once, 0600, never logged. */
-export function loadOrCreateRelayAuthSecret(dir: string): string {
-  ensureRemoteAccessDir(dir);
-  const path = raJoin(dir, RELAY_AUTH_FILE);
-  const existing = readPrivateFile(path)?.trim();
-  if (existing && /^[A-Za-z0-9_-]{43}$/.test(existing)) return existing;
-  const secret = raRandomBytes(32).toString('base64url');
-  writePrivateText(path, `${secret}\n`);
-  return secret;
+export function demoInstallMarked(dir: string): boolean {
+  const text = readPrivateFile(raJoin(dir, DEMO_INSTALL_MARKER_FILE));
+  return text !== undefined && text.split('\n', 1)[0]!.trim() === DEMO_INSTALL_MARKER_TEXT;
 }
 
 /**
- * Whether a request's relay forwarding headers (`x-olympus-relay`,
- * `x-forwarded-for`) may be believed. Only the relay's local endpoint knows
- * the per-install secret it sends in `x-olympus-relay-auth`, and it strips
- * any inbound copy; any other loopback caller that sets the headers is
- * treated as a direct caller.
+ * Whether a request carries the relay marker at all, whatever its value. Only
+ * for refusing what a direct loopback visit alone may do (OAuth approval):
+ * a forged marker then fails closed. Never a reason to grant anything.
  */
-export function createRelayRequestVerifier(
-  env: Record<string, string | undefined> = process.env,
-  options: { now?: () => number; minIntervalMs?: number } = {},
-): (request: Request) => boolean {
-  const dir = remoteAccessDir(env);
-  const secret = cachedFileReader(
-    () => raJoin(dir, RELAY_AUTH_FILE),
-    (text) => {
-      const value = text.trim();
-      return /^[A-Za-z0-9_-]{43}$/.test(value) ? Buffer.from(value) : undefined;
-    },
-    options.minIntervalMs ?? 1_000,
-    options.now ?? Date.now,
-  );
-  return (request) => {
-    if (request.headers.get('x-olympus-relay') !== '1') return false;
-    const presented = request.headers.get(RELAY_AUTH_HEADER);
-    const expected = secret();
-    if (!presented || !expected) return false;
-    const actual = Buffer.from(presented);
-    return actual.length === expected.length && raTimingSafeEqual(actual, expected);
-  };
+export function carriesRelayMarker(request: Request): boolean {
+  return request.headers.has(RELAYED_REQUEST_HEADER);
 }
 
-// ---------------------------------------------------------------------------
-// CA subscriber agreement
+/**
+ * The relay child's per-boot secret (remote-relay-runtime.ts), written 0600
+ * in the 0700 remote-access directory so the worker, another process, can
+ * check the marker's value. Removed when the child stops.
+ */
+export const RELAY_SECRET_FILE = 'relay-secret';
+const RELAY_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
-export interface TermsAcceptance {
-  terms_url: string | null;
-  accepted_at: string;
+export function writeRelaySecret(dir: string, secret: string): void {
+  if (!RELAY_SECRET_PATTERN.test(secret)) throw new Error('relay secret must be 32 random bytes, base64url');
+  ensureRemoteAccessDir(dir);
+  writePrivateText(raJoin(dir, RELAY_SECRET_FILE), `${secret}\n`);
 }
 
-export function readTermsAcceptance(dir: string): TermsAcceptance | undefined {
-  const text = readPrivateFile(raJoin(dir, TERMS_FILE));
-  if (text === undefined) return undefined;
+/** Removes the secret file if it still holds this child's secret (a newer child's stays). */
+export function clearRelaySecret(dir: string, secret: string): void {
+  const path = raJoin(dir, RELAY_SECRET_FILE);
+  if (readPrivateFile(path)?.trim() !== secret) return;
   try {
-    const value = JSON.parse(text) as TermsAcceptance;
-    return typeof value?.accepted_at === 'string' ? value : undefined;
+    raUnlinkSync(path);
   } catch {
-    return undefined;
+    // Already gone.
   }
 }
 
-export function recordTermsAcceptance(dir: string, termsUrl: string | undefined, now = new Date()): TermsAcceptance {
-  ensureRemoteAccessDir(dir);
-  const acceptance: TermsAcceptance = { terms_url: termsUrl ?? null, accepted_at: now.toISOString() };
-  writePrivateJson(raJoin(dir, TERMS_FILE), acceptance);
-  return acceptance;
+/**
+ * A relayed-request check for one remote-access directory: the marker must
+ * equal the relay child's current secret (constant-time). No secret file, or
+ * one not owned by this user, means nothing is relayed.
+ */
+export function createRelayedRequestCheck(options: { dir?: () => string; now?: () => number } = {}): (request: Request) => boolean {
+  const read = cachedFileReader(
+    () => raJoin(options.dir ? options.dir() : remoteAccessDir(process.env), RELAY_SECRET_FILE),
+    (text) => {
+      const secret = text.trim();
+      return RELAY_SECRET_PATTERN.test(secret) ? Buffer.from(secret, 'utf8') : undefined;
+    },
+    // Statted on each marked request: a restarted child's new secret is seen at once.
+    0,
+    options.now ?? Date.now,
+  );
+  return (request) => {
+    const value = request.headers.get(RELAYED_REQUEST_HEADER);
+    if (!value) return false;
+    const secret = read();
+    if (!secret) return false;
+    const given = Buffer.from(value, 'utf8');
+    return given.length === secret.length && raTimingSafeEqual(given, secret);
+  };
 }
+
+let defaultRelayedCheck: ((request: Request) => boolean) | undefined;
 
 /**
- * The CA's current subscriber agreement, as `olympus connections terms` and
- * the dashboard's Turn on remote access both resolve it: the URL the relay
- * child last saw; else, when the child asked and the CA named none, no URL
- * (`none: true`); else the CA directory's `meta.termsOfService`, read now.
- * Both surfaces then record acceptance with `recordTermsAcceptance` against
- * exactly this value, so a new agreement needs a new acceptance.
+ * Whether a request came through this Mac's relay child: its marker equals
+ * the child's per-boot secret (review finding, 2026-10-02: presence alone let
+ * any local caller with a credential select the ChatGPT surface and
+ * `/private`). Reads the secret from this process's remote-access directory.
  */
-export async function resolveCurrentTermsUrl(
-  status: RemoteAccessStatusFile | undefined,
-  fetchTerms: () => Promise<string | undefined>,
-): Promise<string | undefined> {
-  const reported = status?.terms_url ?? undefined;
-  if (reported) return reported;
-  if (status?.certificate?.state === 'awaiting_terms') return undefined;
-  return fetchTerms();
-}
-
-/** Accepted, and for the CA's current agreement: a new agreement needs a new acceptance. */
-export function termsAccepted(dir: string, currentTermsUrl: string | undefined): boolean {
-  const acceptance = readTermsAcceptance(dir);
-  if (!acceptance) return false;
-  return currentTermsUrl === undefined || acceptance.terms_url === currentTermsUrl;
+export function isRelayedRequest(request: Request): boolean {
+  if (!request.headers.has(RELAYED_REQUEST_HEADER)) return false;
+  defaultRelayedCheck ??= createRelayedRequestCheck();
+  return defaultRelayedCheck(request);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,8 +415,8 @@ export interface RemoteAccessUrls {
 /**
  * The URLs to hand an agent, from the owner's shell: the worker environment's
  * manual value first (it is what the worker itself uses), then what status.json
- * reports (config's manual value, or the relay once it works), else the
- * worker's real loopback address.
+ * reports (config's manual value, or the relay), else the worker's real
+ * loopback address.
  */
 export function resolveRemoteAccessUrls(input: {
   /** CLI environment layered over worker.env. */
@@ -512,40 +510,33 @@ export interface RemoteAccessStatusView {
     reason: string | null;
     retry_in_ms: number | null;
     install_id: string | null;
-    hostname: string | null;
-  };
-  certificate: {
-    state: CertificateState | null;
-    not_after: string | null;
-    reason: string | null;
-  };
-  terms: {
-    url: string | null;
-    accepted: boolean;
-    accepted_at: string | null;
-    accepted_url: string | null;
+    last_connected_at: string | null;
   };
   updated_at: string | null;
   next_step: string | null;
 }
 
+/**
+ * What runs Olympus: the OpenClaw Gateway (plugin install), or the standalone
+ * engine (`olympus engine`, config in ~/.olympus/engine.json). It decides
+ * which commands the owner is told to run.
+ */
+export type RemoteAccessHostKind = 'openclaw' | 'standalone';
+
 export function remoteAccessStatusView(input: {
-  dir: string;
   urls: RemoteAccessUrls;
   status: RemoteAccessStatusFile | undefined;
   isAlive?: (pid: number) => boolean;
+  hostKind?: RemoteAccessHostKind;
 }): RemoteAccessStatusView {
   const { status, urls } = input;
   const isAlive = input.isAlive ?? processIsAlive;
-  const acceptance = readTermsAcceptance(input.dir);
   // No status file: the relay service never ran with remote access on.
   const mode = status ? status.mode : 'off';
   let relayState: RemoteAccessStatusView['relay']['state'] = status?.relay?.state ?? null;
   if (status?.mode === 'relay' && status.pid !== null && relayState !== 'stopped' && !isAlive(status.pid)) {
     relayState = 'not_running';
   }
-  const termsUrl = status?.terms_url ?? null;
-  const accepted = acceptance !== undefined && (termsUrl === null || acceptance.terms_url === termsUrl);
   const view: RemoteAccessStatusView = {
     kind: 'remote_access_status',
     schema: REMOTE_ACCESS_STATUS_SCHEMA,
@@ -563,45 +554,35 @@ export function remoteAccessStatusView(input: {
       reason: status?.relay?.reason ?? null,
       retry_in_ms: status?.relay?.retry_in_ms ?? null,
       install_id: status?.install_id ?? null,
-      hostname: status?.hostname ?? null,
-    },
-    certificate: {
-      state: status?.certificate?.state ?? null,
-      not_after: status?.certificate?.not_after ?? null,
-      reason: status?.certificate?.reason ?? null,
-    },
-    terms: {
-      url: termsUrl,
-      accepted,
-      accepted_at: acceptance?.accepted_at ?? null,
-      accepted_url: acceptance?.terms_url ?? null,
+      last_connected_at: status?.last_connected_at ?? null,
     },
     updated_at: status?.updated_at ?? null,
     next_step: null,
   };
-  view.next_step = nextStep(view);
+  view.next_step = nextStep(view, input.hostKind ?? 'openclaw');
   return view;
 }
 
-function nextStep(view: RemoteAccessStatusView): string | null {
+function nextStep(view: RemoteAccessStatusView, hostKind: RemoteAccessHostKind): string | null {
   if (view.error) return view.error;
   if (view.mode === 'off' && !view.public_base_url) {
     return 'Remote access is off, so hosted agents cannot reach this Olympus (local agents are unaffected). '
       + 'To turn it on, use Turn on remote access in the Agents section of the Olympus dashboard, '
-      + 'or run: openclaw config set plugins.entries.olympus.config.remote.enabled true';
+      + (hostKind === 'standalone'
+        ? 'or set "remote": {"enabled": true} in ~/.olympus/engine.json and run: olympus engine restart'
+        : 'or run: openclaw config set plugins.entries.olympus.config.remote.enabled true');
   }
   if (view.mode !== 'relay') return null;
-  if (view.certificate.state === 'awaiting_terms') {
-    return 'Read the Let\'s Encrypt subscriber agreement (terms.url), then accept it with Turn on remote access in the dashboard, or with olympus connections terms --accept.';
+  if (view.relay.state === 'not_running') {
+    return hostKind === 'standalone'
+      ? 'The relay process is not running; run olympus engine restart.'
+      : 'The relay process is not running; check openclaw gateway status.';
   }
-  if (view.relay.state === 'not_running') return 'The relay process is not running; check openclaw gateway status.';
   if (view.relay.state === 'offline') {
     return `Olympus relay unavailable${view.relay.reason ? ` (${view.relay.reason})` : ''}. `
       + 'Olympus keeps retrying on its own; local agents are unaffected.';
   }
   if (view.relay.state !== 'online') return 'Olympus is connecting to the relay.';
-  if (view.certificate.state === 'failed') return 'The certificate could not be obtained yet; Olympus retries automatically.';
-  if (view.certificate.state !== 'serving') return 'Olympus is obtaining its certificate.';
   return null;
 }
 

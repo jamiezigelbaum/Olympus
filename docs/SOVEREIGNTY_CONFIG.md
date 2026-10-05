@@ -56,26 +56,45 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 
 | Preset | Public and Personal embeddings | Private search | Private answers | You supply |
 |---|---|---|---|---|
-| Venice (`private-cloud-only`) — recommended after you confirm you do not run local models | Gemini Embedding 2 | Venice Private embeddings when no local provider is configured | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
-| Local models (`local-only`) | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
-| Local models with Venice fallback (`local-first`) | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
-| Don't ingest Private data (`no-sensitive`) | Gemini Embedding 2 | Private content is unavailable to answering | None | Gemini key |
+| Venice (`private-cloud-only`) — recommended after you confirm you do not run local models | Built-in model | Built-in model | Approved Venice Private/TEE model | Venice account, usable API balance and key |
+| Local models (`local-only`) | Built-in model | Built-in model | Local answer model | Local answer server and its exact registered model ID |
+| Local models with Venice fallback (`local-first`) | Built-in model | Built-in model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
+| Don't ingest Private data (`no-sensitive`) | Built-in model | Private content is unavailable to answering | None | Nothing |
 
-The **Venice** preset describes **Private-data handling**: Private answers use
-Venice, and Private semantic search uses a separately configured Venice Private
-embedding model when no local provider is configured. It does not route all
-Olympus traffic through Venice; Gemini serves Public and Personal
-embeddings. Explain that distinction before asking for either provider key.
+### Built-in embeddings
 
-`local-only` describes the handling of **Private** data; the shipped preset
-still uses Gemini for Public and Personal embeddings. It is not an all-offline preset.
-The ordinary answer path uses the host's configured inference route by default.
-Neither a Gemini key nor a Venice key creates an OpenClaw subscription/login.
+New installs (setup from 2026-10-01) embed every tier with the **built-in
+model**: Snowflake Arctic Embed M v1.5 (Apache-2.0), int8, 768 dimensions,
+running in-process on ONNX Runtime. It needs no account, no key and no extra
+app, and nothing leaves the computer. On first use Olympus downloads the model
+(110 MB) and the runtime for this platform (114 MB) once into
+`<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models/built-in-embedding`
+(override with `OLYMPUS_BUILT_IN_EMBEDDING_DIR`); every file is pinned by size
+and checksum and re-verified before it loads. While it downloads, questions
+fall back to keyword search. It uses at most half the CPU cores, capped at
+four (`OLYMPUS_BUILT_IN_EMBEDDING_THREADS` overrides). Supported: macOS on
+Apple silicon, Linux x64 and arm64.
 
-Private content never goes to Gemini. The private-cloud-only preset does not
-require a GPU or a local embedding server. Local presets retain local Private
-embeddings; an unavailable local server does not silently change the vector
-model. Venice E2EE integration remains outside this release. Existing saved
+The profile is:
+
+```json
+"built-in-embedding": {
+  "provider": "built-in",
+  "trust": "local",
+  "model": "arctic-embed-m-v1.5-int8-e58a8f7",
+  "purpose": "embedding"
+}
+```
+
+Gemini, a local OpenAI-compatible embedding server, and Venice Private
+embeddings stay available as opt-in profiles. Switching an existing corpus to
+a different embedding model is a re-embed and needs the owner's approval and
+an embedding-ledger entry. Installs set up before the built-in model keep the
+policy they were written with, and keep their current embeddings.
+
+Private content never goes to Gemini. No preset requires a GPU or a local
+embedding server. An unavailable embedding provider never silently changes the
+vector model. Venice E2EE integration remains outside this release. Existing saved
 configurations are preserved: a previously lexical-only install needs explicit
 activation of its new embedding profile and a bounded backfill.
 
@@ -250,7 +269,11 @@ work, ordinary cloud models for Public material, or a mix.
 A data class describes what kind of information is being handled. User-facing
 language is Public, Personal, Private, and Secrets; internally those map to the
 existing granular trust scale (`public_safe`, `internal`, `secure_local`, and
-S5) through the legacy stored keys shown below.
+S5) through the legacy stored keys shown below. A policy with no `public_safe`
+route and no `public_safe` retrieval policy has no Public class: the
+`no-sensitive` preset, which `olympus engine install` seeds for every ChatGPT
+install, is written that way, and Public verdicts become Personal (see
+[TRUST_MODEL.md](TRUST_MODEL.md#product-tier-names)).
 
 | User-facing data class | Legacy stored key | Granular trust scale |
 |---|---|---|
@@ -555,12 +578,13 @@ Hard invariants remain enforced outside user control:
   chat fetch, and residual non-cooperative orphans are counted content-free
 - consecutive member failures open a worker-local cooldown breaker; skipped
   members are recorded in the analyst-leg trace without source content
-- Private embeddings use loopback local providers or an explicitly selected,
-  catalog-approved Venice Private provider; other cloud providers are refused
+- Private embeddings use the built-in model, loopback local providers, or an
+  explicitly selected, catalog-approved Venice Private provider; other cloud
+  providers are refused
 - secrets are hard-denied everywhere
 - empty or exhausted fallback chains fail closed
 
-The preset Gemini embedding profile references
+An opt-in Gemini embedding profile references
 `env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY`, matching the supervised worker
 launcher. The env-derived compatibility bridge and embedding provider also
 accept `GEMINI_API_KEY` for existing interactive installs.

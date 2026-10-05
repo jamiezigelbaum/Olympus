@@ -505,3 +505,43 @@ describe('bounds and the owner-approval gate', () => {
     expect(snifferId(LOCAL_LANE)).toBe(`local:${SNIFFER_PROMPT_VERSION}`);
   });
 });
+
+describe('vocabulary-only detector hits (owner ruling 2026-10-01)', () => {
+  const FILLER = 'The integral approach maps quadrants and levels of development across many fields of human inquiry, from art and ethics to ecology. '
+    .repeat(12);
+  const BOOK = `${FILLER}In medicine, a purely physical treatment of symptoms ignores the interior quadrants of meaning and culture. ${FILLER}`;
+
+  async function judgedAs(verdict: { tier: string; category: string; confidence: number }) {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+      const decision = classifyItemTiers({
+        signals: { title: 'Introduction to the Integral Approach.pdf' },
+        text: BOOK,
+        subject: subject(1),
+      }, { sniffer });
+      ledger.recordDecision(subject(1), decision);
+      // Held: pending, waiting on the content question, not decided by the words.
+      expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true, contentTier: 'private' });
+      const model = spyModel((_, items) => verdictsFor(items, verdict));
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
+      expect(report.verdictsApplied).toBe(1);
+      expect(model.requests[0]!.prompt).toContain('physical treatment of symptoms');
+      return ledger.getCurrent(subject(1))!;
+    } finally {
+      store.close();
+      ledger.close();
+    }
+  }
+
+  test('the local model calling it ordinary work makes it Personal', async () => {
+    const record = await judgedAs({ tier: 'personal', category: 'work', confidence: 0.95 });
+    expect(record).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+  });
+
+  test('a health category stays Private even when the model pairs it with personal', async () => {
+    const record = await judgedAs({ tier: 'personal', category: 'health', confidence: 0.95 });
+    expect(record).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
+  });
+});

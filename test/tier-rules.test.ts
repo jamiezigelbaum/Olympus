@@ -9,7 +9,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import { USER_FACING_TIER_MAPPING } from '../src/core/sensitivity-map.ts';
 import { senderMatchesRule } from '../src/core/sender-rules.ts';
 import {
   clearInstalledTierClassification,
@@ -56,7 +55,7 @@ function rulesFile(dir: string, rules: unknown[]): string {
 }
 
 describe('the rules file', () => {
-  test('validates like the sensitivity map and tightens a readable file to 0600', () => {
+  test('validates the file and tightens a readable one to 0600', () => {
     const dir = tempDir();
     const path = rulesFile(dir, [
       { id: 'published', match: { pathPrefix: '/work/published' }, tier: 'public', strength: 'prior' },
@@ -101,7 +100,6 @@ describe('the rules file', () => {
     expect(tierKeyFromDisplayName('public')).toBe('public');
     expect(tierKeyFromDisplayName('secrets')).toBe('secrets');
     expect(tierKeyFromDisplayName('internal')).toBeUndefined();
-    expect(USER_FACING_TIER_MAPPING.private.targetTrustDomain).toBe('internal');
   });
 });
 
@@ -177,7 +175,6 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     const dir = tempDir();
     const env = {
       OLYMPUS_TIER_RULES_PATH: join(dir, 'tier-rules.json'),
-      OLYMPUS_SENSITIVITY_MAP_PATH: join(dir, 'sensitivity-map.json'),
       OLYMPUS_CLASSIFICATION_LEDGER_PATH: join(dir, 'classification-ledger.jsonl'),
     };
     const dbPath = join(dir, 'store.sqlite');
@@ -185,23 +182,11 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     return { dir, env, dbPath, store };
   }
 
-  test('a lane that passes no classification inputs records with the owner map and rules', async () => {
+  test('a lane that passes no classification inputs records with the owner rules', async () => {
     const { env, store } = setup();
     try {
-      writeFileSync(env.OLYMPUS_SENSITIVITY_MAP_PATH, JSON.stringify({
-        schemaVersion: 2,
-        userFacingTiers: USER_FACING_TIER_MAPPING,
-        categories: [{
-          id: 'garden-club',
-          label: 'Garden club',
-          targetTierName: 'secure',
-          targetTrustTier: 'S4',
-          targetTrustDomain: 'secure_local',
-          examples: ['garden club minutes'],
-          match: { keywords: ['zebracorn'], senderPatterns: [], pathPatterns: [] },
-        }],
-      }));
       rulesFile(join(env.OLYMPUS_TIER_RULES_PATH, '..'), [
+        { id: 'garden-club', match: { pathPrefix: '/notes' }, tier: 'secure', strength: 'prior' },
         { id: 'published', match: { pathPrefix: '/work/published' }, tier: 'public', strength: 'prior' },
       ]);
       configureInstalledTierClassification({ env });
@@ -211,7 +196,7 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
       ]), { fetchContent: true });
       const ledger = store.tierLedger()!;
       expect(ledger.getCurrent({ provider: 'fixture', accountScope: 'personal', providerItemId: 'file-1' })).toMatchObject({ contentTier: 'secure' });
-      expect(ledger.getCurrent({ provider: 'fixture', accountScope: 'personal', providerItemId: 'file-1' })?.reasons).toContain('content:sensitivity_map:garden-club');
+      expect(ledger.getCurrent({ provider: 'fixture', accountScope: 'personal', providerItemId: 'file-1' })?.reasons).toContain('metadata:owner_rule:pathPrefix:garden-club:prior');
       expect(ledger.getCurrent({ provider: 'fixture', accountScope: 'personal', providerItemId: 'file-2' })).toMatchObject({ contentTier: 'public', decidedBy: 'owner_rule' });
     } finally {
       store.close();
@@ -314,11 +299,11 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     ]);
     configureInstalledTierClassification({ env, lane: { kind: 'local', modelId: 'fixture' } });
     const laneRule: OwnerTierRule = { id: 'lane', match: { kind: 'pathPrefix', value: '/notes' }, tier: 'secure', strength: 'force' };
-    const merged = resolveStoreTierClassification({ rules: [laneRule] }, dbPath, undefined)!;
+    const merged = resolveStoreTierClassification({ rules: [laneRule] }, dbPath)!;
     expect(merged.rules?.map((rule) => rule.id)).toEqual(['lane', 'published']);
     expect(merged.sniffer?.id).toMatch(/^local:p-[0-9a-f]{12}$/);
     clearInstalledTierClassification();
-    expect(resolveStoreTierClassification({ rules: [laneRule] }, dbPath, undefined)).toEqual({ rules: [laneRule] });
+    expect(resolveStoreTierClassification({ rules: [laneRule] }, dbPath)).toEqual({ rules: [laneRule] });
   });
 
   test('tier classifier approve records the owner approval; status reads it back', async () => {

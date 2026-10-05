@@ -184,6 +184,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/core/source-index/retrieval.ts',
   'src/core/source-index/router.ts',
   'src/core/source-index/selected-item-safety.ts',
+  'src/workers/file-extraction/extractors/apple-vision-ocr.ts',
   'src/workers/file-extraction/extractors/bounded-text.ts',
   'src/workers/file-extraction/extractors/command-runner.ts',
   'src/workers/file-extraction/extractors/document-formats.ts',
@@ -379,8 +380,8 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
  * `test-results/` and a developer's checkout does not.
  */
 const REPO_CONTENT_DIRECTORIES = [
-  '.claude', '.github', 'assets', 'bin', 'config', 'connect-relay', 'dist', 'docs', 'eval', 'exchange',
-  'integrations', 'relay', 'scripts', 'skills', 'src', 'test', 'tools',
+  '.claude', '.github', 'assets', 'bin', 'chatgpt-plugin', 'config', 'connect-relay', 'dist', 'docs', 'eval', 'exchange',
+  'integrations', 'relay', 'scripts', 'site', 'skills', 'src', 'test', 'tools',
 ];
 
 function repoContentFiles(): string[] {

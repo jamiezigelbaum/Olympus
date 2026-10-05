@@ -491,7 +491,7 @@ describe('dashboard X OAuth exchange', () => {
     expect(callback.status).toBe(400);
     expect(page).not.toContain('abc-12');
     expect(page).not.toContain('Provider rejected');
-    expect(page).toContain('Connecting x failed partway through');
+    expect(page).toContain('Connecting X failed partway through');
   });
 
   test('a crafted exchange-shaped message with an unlisted code is not repeated', async () => {
@@ -537,7 +537,7 @@ describe('dashboard X OAuth exchange', () => {
 
     expect(callback.status).toBe(400);
     expect(page).not.toContain('smuggled_lowercase_payload');
-    expect(page).toContain('Connecting x failed partway through');
+    expect(page).toContain('Connecting X failed partway through');
   });
 
   test('connector-returned handle strings never reach the api-key success response', async () => {

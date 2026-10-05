@@ -12,6 +12,7 @@ import {
   type OlympusBrowserController,
 } from './control-ui/browser-controller.ts';
 import { OLYMPUS_CONTROL_UI_CSS } from './control-ui/styles.ts';
+import { privacyLogic } from './workers/dashboard/shared-privacy-logic.ts';
 
 type ControlUiPageTarget = {
   id: string;
@@ -57,7 +58,7 @@ function routeFromProps(props: Readonly<Record<string, string>>): OlympusDashboa
   const view = props.view;
   if (view === 'dispositions') return { view, ...(props.source_id ? { source_id: props.source_id } : {}) };
   if (view === 'setup' || view === 'background'
-    || view === 'sensitivity') return { view };
+    || view === 'sensitivity' || view === 'privacy') return { view };
   if (view === 'source' && props.source_id) return { view, source_id: props.source_id };
   return { view: 'home' };
 }
@@ -76,6 +77,7 @@ function routeFromHref(href: string): OlympusDashboardReadParams | undefined {
   if (url.searchParams.has('setup')) return { view: 'setup' };
   if (url.searchParams.has('background')) return { view: 'background' };
   if (url.searchParams.has('sensitivity')) return { view: 'sensitivity' };
+  if (url.searchParams.has('privacy')) return { view: 'privacy' };
   return { view: 'home' };
 }
 
@@ -199,6 +201,7 @@ function createDashboardPage() {
             returnUrl: context.host.navigation.pageHref(targetFor(route)),
             canWrite: result.can_write,
             authority: 'gateway',
+            privacyLogic,
             replaceHtml(nextRoot, html) {
               setInertBody(nextRoot, html);
               rewriteInternalLinks(nextRoot, context.host);

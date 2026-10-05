@@ -6,11 +6,12 @@
  * - `/mcp` (and the OpenAPI tool paths, through the same check) accept ONLY a
  *   connection credential the connection store verifies: a bearer connection
  *   token (`olympus_conn_…`), or, when a public base URL is configured, an
- *   OAuth access token (`olympus_at_…`) issued for exactly this resource (see
+ *   OAuth access token (`oly2.<installId>.…` through the relay, `olympus_at_…`
+ *   behind a tunnel of the owner's own) issued for exactly this resource (see
  *   workers/remote-oauth). The worker's own shared bearer is neither, so it
  *   cannot reach them. A 401 names the protected-resource metadata (RFC 9728)
- *   whenever OAuth is on, which is how Claude, ChatGPT and Grok discover where
- *   to ask the owner for approval.
+ *   whenever OAuth is on, which is how ChatGPT discovers where to ask the
+ *   owner for approval.
  * - Every other worker route stays behind `withWorkerBearerAuth`, which
  *   accepts only the worker bearer, so a connection token reaches nothing else.
  *
@@ -32,11 +33,14 @@ import {
   type RemoteConnectionRecord,
   type RemoteConnectionStore,
 } from '../core/remote-connections.ts';
+import { isRelayedRequest } from '../core/remote-access.ts';
 import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
 import { currentRemotePublicUrls, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/source-answer-jobs.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
+import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mcp-surface.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
+import { AUTHENTICATED_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
@@ -53,7 +57,28 @@ export interface RemoteMcpHandlerOptions {
   publicUrls?: RemotePublicUrlsSource;
   /** `signal` is the remote client's request signal; see createInProcessOperationContext. */
   makeOperationContext: (caller: OperationCaller, signal: AbortSignal) => OperationContext;
+  /**
+   * The ChatGPT surface (workers/chatgpt): the answer tools with
+   * ChatGPT-written descriptions, the dashboard tool and its MCP Apps
+   * resource, every response through the allowlisted response builder.
+   * Served only to requests `servesRequest` accepts; every other caller keeps
+   * the remote operation surface unchanged.
+   */
+  /**
+   * Whether a request came through this Mac's relay child (default: its
+   * marker carries the child's per-boot secret, core/remote-access.ts).
+   */
+  isRelayed?: (request: Request) => boolean;
+  chatgpt?: ChatGptSurfaceOptions & {
+    /** Whether this request, from this connection, gets the ChatGPT surface. */
+    servesRequest: (request: Request, connection: RemoteMcpConnection) => boolean;
+    /** Whether this connection gets only the surface's read-only tools (a demo grant). */
+    readOnlyFor?: (connection: RemoteMcpConnection) => boolean;
+  };
 }
+
+/** The verified connection behind a remote request; `clientId` for OAuth grants. */
+export type RemoteMcpConnection = Pick<RemoteConnectionRecord, 'id' | 'displayName'> & { clientId?: string | null };
 
 export function isRemoteMcpRequest(request: Request): boolean {
   const { pathname } = new URL(request.url);
@@ -72,9 +97,19 @@ export function withRemoteMcpRoute(
 }
 
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
+  const isRelayed = options.isRelayed ?? isRelayedRequest;
   return async (request: Request): Promise<Response> => {
     const verification = authenticateRemoteRequest(request, options);
     if (!verification.ok) return verification.response;
+    const response = await serveAuthenticated(request, verification);
+    // Only the relay reads the mark; a direct caller never sees it.
+    return isRelayed(request) ? markAuthenticated(response) : response;
+  };
+
+  async function serveAuthenticated(
+    request: Request,
+    verification: { connection: RemoteMcpConnection },
+  ): Promise<Response> {
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
       // (DELETE). A 405 is how Streamable HTTP says so.
@@ -95,7 +130,12 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     }
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
-    const server = createOlympusMcpServer('remote', () => ctx);
+    const chatgpt = options.chatgpt?.servesRequest(request, verification.connection)
+      ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true }
+      : undefined;
+    const server = chatgpt
+      ? createChatGptMcpServer(() => ctx, chatgpt, () => options.makeOperationContext(caller, new AbortController().signal))
+      : createOlympusMcpServer('remote', () => ctx);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -107,7 +147,20 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     } finally {
       await server.close().catch(() => undefined);
     }
-  };
+  }
+}
+
+/**
+ * Marks a response to a request whose credential was verified. The connect
+ * relay uses the mark only to keep that credential's later requests in the
+ * owner's admission lane, so forged secrets cannot spend the owner's budget
+ * (connect-relay/server/limits.ts); it grants nothing. Only relayed requests
+ * get it, and the relay drops it before its public response.
+ */
+function markAuthenticated(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set(AUTHENTICATED_RESPONSE_HEADER, '1');
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 /**
@@ -124,7 +177,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
 export function authenticateRemoteRequest(
   request: Request,
   options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
-): { ok: true; connection: Pick<RemoteConnectionRecord, 'id' | 'displayName'> } | { ok: false; response: Response } {
+): { ok: true; connection: RemoteMcpConnection } | { ok: false; response: Response } {
   const urls = currentRemotePublicUrls(options.publicUrls);
   const refuse = (error?: 'invalid_token') => ({ ok: false as const, response: unauthorized(error, urls) });
   const token = bearerToken(request.headers.get('Authorization'));

@@ -9,7 +9,6 @@
 // Retry-After handling. Existing history lives in the canonical stores;
 // normal runtime has no migration source or fallback index.
 
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { createHash } from 'node:crypto';
 import type {
   RawItem,
@@ -39,7 +38,7 @@ import {
   isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
-import { accountFromGoogleHandle, loadGoogleSensitivityMap } from './classification.ts';
+import { accountFromGoogleHandle } from './classification.ts';
 import {
   DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES,
   GOOGLE_DRIVE_PROVIDER,
@@ -175,11 +174,6 @@ export interface GoogleDriveConnectorStoreSyncHandler {
 }
 
 export interface GoogleDriveConnectorStoreSyncOptions extends GoogleDriveSourceConnectorOptions {
-  /**
-   * The owner's sensitivity map for this lane's placement policy and its
-   * recorded four-tier decisions. Loaded from the environment when omitted.
-   */
-  sensitivityMap?: SensitivityMap;
   internalStore: LocalConnectorStore;
   secureStore: LocalConnectorStore;
   /**
@@ -213,9 +207,7 @@ export function createGoogleDriveConnectorStoreSyncHandler(
   ) {
     throw new Error('Google Drive secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
-  const classification = googleDriveConnectorStoreClassification(
-    options.sensitivityMap ?? loadGoogleSensitivityMap(env),
-  );
+  const classification = googleDriveConnectorStoreClassification();
   const buildConnector = (overrides: {
     maxFiles?: number;
     maxContentFiles?: number;
@@ -235,7 +227,6 @@ export function createGoogleDriveConnectorStoreSyncHandler(
     provenance: sourceInvocationProvenance(overrides.provenance),
   });
 
-  const sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
   const tierSet = options.tierSet ?? createLaneTieredStoreSet({
     setId: connectorId,
     internalStore: options.internalStore,
@@ -245,7 +236,6 @@ export function createGoogleDriveConnectorStoreSyncHandler(
       : {}),
     ...(options.internalEmbeddingProvider ? { internalEmbeddingProvider: options.internalEmbeddingProvider } : {}),
     ...(options.secureEmbeddingProvider ? { secureEmbeddingProvider: options.secureEmbeddingProvider } : {}),
-    ...(sensitivityMap ? { tierClassification: { sensitivityMap } } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened!(store) } : {}),
   });

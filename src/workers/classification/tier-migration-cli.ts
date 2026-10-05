@@ -17,13 +17,13 @@
 import { loadConfig } from '../../core/config.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { createHash } from 'node:crypto';
-import { readOwnerSensitivityMap, sensitivityMapRevision } from '../../core/sensitivity-map.ts';
 import { isClassifierApproved, readClassificationLedger, resolveClassificationLedgerPath } from '../classification-ledger.ts';
 import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId } from './sniffer.ts';
 import { SnifferLaneRefusedError, resolveSnifferLane, type SnifferLane } from './sniffer-lane.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { loadOwnerTierRules } from './tier-rules.ts';
+import { TIER_MAP_REVISION } from './tier-classifier.ts';
 import { loadSovereigntyEngine } from '../../core/sovereignty.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
@@ -243,14 +243,7 @@ async function withLanes<T>(
 ): Promise<T> {
   const opened = openTierMigrationLanes(context.laneSpecs ?? installedTierMigrationLaneSpecs(env), {
     mode,
-    ...(inputs.sensitivityMap || inputs.rules
-      ? {
-          tierClassification: {
-            ...(inputs.sensitivityMap ? { sensitivityMap: inputs.sensitivityMap } : {}),
-            ...(inputs.rules ? { rules: inputs.rules } : {}),
-          },
-        }
-      : {}),
+    ...(inputs.rules ? { tierClassification: { rules: inputs.rules } } : {}),
   });
   try {
     return await run(opened);
@@ -262,8 +255,8 @@ async function withLanes<T>(
 
 /**
  * The owner's installed classification inputs, through the same loaders the
- * worker uses (P2): the sensitivity map and `tier-rules.json`. Fail closed: a
- * map or rules file that is present but unusable (invalid, torn, or writable
+ * worker uses (P2): `tier-rules.json`. Fail closed: a rules file that is
+ * present but unusable (invalid, torn, or writable
  * by anyone but its owner) refuses the command rather than planning without
  * the owner's Private rules. `--with-sniffer` uses the privacy-safe sniffer
  * only when its exact lane, profile, model and prompt are owner-approved in
@@ -275,21 +268,11 @@ async function installedInputs(
   env: Record<string, string | undefined>,
   options: { withSniffer: boolean },
 ): Promise<TierMigrationInputs & { close?(): void }> {
-  const mapRead = readOwnerSensitivityMap(env);
-  if (mapRead.status === 'invalid') {
-    throw new OperationError(
-      'config_error',
-      `The sensitivity map is unusable (${mapRead.reason}); the migration refuses to plan without it.`,
-      'Fix the map (olympus sensitivity validate), then run the command again.',
-    );
-  }
-  const sensitivityMap = mapRead.status === 'ok' ? mapRead.map : undefined;
   // Throws on an invalid file: the owner's rules are never silently dropped.
   const rules = loadOwnerTierRules({ env, allowMissing: true });
   const rulesDigest = createHash('sha256').update(JSON.stringify(rules)).digest('hex').slice(0, 16);
-  const revision = `map:${sensitivityMapRevision(sensitivityMap)};rules:${rules.length > 0 ? rulesDigest : 'none'}`;
+  const revision = `map:${TIER_MAP_REVISION};rules:${rules.length > 0 ? rulesDigest : 'none'}`;
   const base = {
-    ...(sensitivityMap ? { sensitivityMap } : {}),
     ...(rules.length > 0 ? { rules } : {}),
     revision,
   };

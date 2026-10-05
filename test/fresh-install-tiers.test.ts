@@ -1,0 +1,717 @@
+// A fresh, clean install (owner rulings 2026-09-23 and 2026-10-01): Personal,
+// Private and Secret only.
+//
+// - An unflagged file is Personal at once: its text reaches olympus_search.
+// - A file whose NAMES look private waits (held Private, keyword-searchable,
+//   never in olympus_search) until the private model judges it; with no
+//   private model at all it waits, and nothing else does.
+// - A file with a secret in it is Secret: nowhere on any channel.
+// - The built-in private model judges flagged items through the AnalystModel
+//   interface, reading the owner's own words about privacy, only after the
+//   owner approves it.
+// - Public is retired: the seeded policy has no Public tier and nothing is
+//   ever placed Public.
+
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
+import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { isPublicTierRetired, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
+import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
+import {
+  appendClassificationLedgerEntry,
+  CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+  readClassificationLedger,
+} from '../src/workers/classification-ledger.ts';
+import {
+  BUILT_IN_SNIFFER_LANE,
+  registerBuiltInPrivateModel,
+  registeredBuiltInPrivateModel,
+  resolveTierSnifferRuntime,
+  type BuiltInPrivateModel,
+} from '../src/workers/classification/built-in-sniffer.ts';
+import {
+  clearInstalledTierClassification,
+  configureInstalledTierClassification,
+} from '../src/workers/classification/installed-tier-classification.ts';
+import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
+import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
+import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
+import { BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { classifyItemTiers, TIER_CLASSIFIER_VERSION, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
+import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
+import {
+  createConnectorStoreContentProvider,
+  createConnectorStoreCorpusAdapter,
+  defineConnectorCorpus,
+  LocalConnectorStore,
+} from '../src/workers/connector-store/index.ts';
+import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
+import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import {
+  createDropboxProviderStoreSyncHandler,
+  createDropboxTierLane,
+  type DropboxMetadataClient,
+  type DropboxMetadataPage,
+} from '../src/workers/dropbox-files/index.ts';
+import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
+import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+
+// Built at runtime: the repository refuses literal credential patterns.
+const FAKE_AWS_KEY = ['AKIA', 'QRSTUVWXYZ234567'].join('');
+const SECURE_CORPUS = 'secure_local.dropbox.files';
+
+const FILES = [
+  { id: 'id:garden', name: 'orchard-plan.pdf', path: '/Notes/orchard-plan.pdf', text: 'Orchard pruning plan for the apple trees this winter.' },
+  // "bank" in the NAME: flagged, so it waits for the private model.
+  { id: 'id:bank', name: 'bank letter.pdf', path: '/Notes/bank letter.pdf', text: 'Orchard loan terms from the lender, signed in March.' },
+  { id: 'id:secret', name: 'orchard-deploy.pdf', path: '/Notes/orchard-deploy.pdf', text: `orchard deploy key ${FAKE_AWS_KEY} for the pipeline` },
+] as const;
+
+let root: string;
+let env: Record<string, string>;
+const closers: Array<() => void> = [];
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'olympus-fresh-tiers-'));
+  env = {
+    OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
+    OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
+    OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
+    OLYMPUS_TIER_RULES_PATH: join(root, 'olympus', 'tier-rules.json'),
+    OLYMPUS_PRIVACY_PROFILE_PATH: join(root, 'olympus', 'privacy.json'),
+  };
+});
+
+afterEach(() => {
+  for (const close of closers.splice(0).reverse()) close();
+  clearInstalledTierClassification();
+  rmSync(root, { recursive: true, force: true });
+});
+
+/** A fresh install with Dropbox connected: the seeded policy, the lane, one sync, and the text extracted. */
+async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; ownerWords?: string } = {}) {
+  const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+  const installed = configureInstalledTierClassification({
+    env,
+    ...(options.lane ? { lane: { kind: options.lane.kind, modelId: options.lane.modelId } } : {}),
+    ...(isPublicTierRetired(policy) ? { retirePublic: true } : {}),
+    ownerContext: () => options.ownerWords,
+  });
+  const secure = new LocalConnectorStore({ dbPath: join(root, 'dropbox-secure.sqlite'), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
+  closers.push(() => secure.close());
+  const secrets = new SecretLocationsIndex({ dbPath: join(root, 'secrets.sqlite') });
+  closers.push(() => secrets.close());
+  const lane = createDropboxTierLane({ secureStore: secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: secrets });
+  closers.push(() => {
+    lane.internal.current()?.close();
+    lane.public.current()?.close();
+  });
+  const entries = FILES.map((file) => ({ tag: 'file' as const, id: file.id, name: file.name, pathDisplay: file.path, rev: 'r1' }));
+  const metadataClient: DropboxMetadataClient = {
+    supportsNativeRecursive: true,
+    async listFolder(): Promise<DropboxMetadataPage> { return { entries, cursor: 'c1', hasMore: false }; },
+    async listFolderContinue(): Promise<DropboxMetadataPage> { return { entries, cursor: 'c2', hasMore: false }; },
+  };
+  const broker = new StaticCredentialBroker([{
+    handle: 'dropbox.personal', provider: 'dropbox', allowedCapabilities: ['dropbox.files.sync'], token: 'test-token', trustDomain: 'secure_local',
+  }]);
+  const sync = createDropboxProviderStoreSyncHandler({ store: secure, account: 'personal', broker, metadataClient, tierSet: lane.set });
+  await sync.pull({ approved_scope_key: 'dropbox.personal:/' });
+  const sink = createTieredStoreExtractionSink({ set: lane.set, syncConnectorId: 'extraction', ownerConnectorId: 'dropbox', ownershipKind: 'observed' });
+  for (const file of FILES) {
+    await sink.accept({
+      ref: {
+        corpusId: SECURE_CORPUS,
+        provider: 'dropbox',
+        accountScope: 'personal',
+        approvedScopeKey: 'dropbox.personal:/',
+        providerItemId: file.id,
+        localItemId: `personal:${file.id}`,
+        sourceVersion: 'r1',
+      },
+      text: file.text,
+      extractorKind: 'local_text',
+      extractorVersion: 'test',
+      fetchedAt: '2026-10-01T00:00:00.000Z',
+    });
+  }
+  return { installed, secure, secrets, lane };
+}
+
+type Install = Awaited<ReturnType<typeof freshInstall>>;
+
+/** olympus_search as ChatGPT receives it: released evidence through the response builder. */
+async function olympusSearch(install: Install, question: string) {
+  const raw = await searchReleasedEvidence({
+    question,
+    lanes: () => {
+      const stores = install.lane.set.openStores();
+      return {
+        registry: buildSourceIndexCorpusRegistry(stores.map((store) => defineConnectorCorpus({
+          corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain,
+        }))),
+        adapters: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreCorpusAdapter({ store })])),
+        contentProviders: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreContentProvider({ store })])),
+        visibilityGate: createTierVisibilityGate(() => [{ ledger: install.lane.ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }]),
+        classificationCoverage: (searched: readonly string[]) => searched.map((corpusId) => ({
+          corpusId, pendingClassificationItems: install.lane.ledger.corpusCopyCounts(corpusId).held,
+        })),
+      };
+    },
+  });
+  return { raw, result: searchToolResult(raw) };
+}
+
+const identity = (id: string) => ({ provider: 'dropbox', accountScope: 'personal', providerItemId: id });
+
+describe('fresh install: Personal by default, flagged items wait, Secrets never leave', () => {
+  test('no private model: unflagged content reaches olympus_search; the flagged file waits; the secret is nowhere', async () => {
+    const install = await freshInstall();
+
+    // The unflagged file is Personal, content and names, at once.
+    const garden = install.lane.ledger.getCurrent(identity('id:garden'))!;
+    expect(garden).toMatchObject({ metadataTier: 'private', contentTier: 'private', state: 'current', contentRead: true });
+    // The flagged one waits, held Private (keyword-searchable on the Mac, never embedded).
+    const bank = install.lane.ledger.getCurrent(identity('id:bank'))!;
+    expect(bank).toMatchObject({ state: 'pending', metadataPending: true, metadataFlagged: true });
+    expect(install.secure.searchItems('lender', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:bank']);
+    expect(install.lane.ledger.corpusCopyCounts(SECURE_CORPUS).held).toBe(1);
+    // The secret is Secret: stored nowhere, its location only.
+    expect(install.lane.ledger.getCurrent(identity('id:secret'))).toMatchObject({ contentTier: 'secrets' });
+    // Public is retired: no Public store was ever created.
+    expect(existsSync(env.OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH!)).toBe(false);
+
+    const { result } = await olympusSearch(install, 'orchard');
+    const evidence = (result.structuredContent as { evidence: Array<{ title?: string; excerpt?: string }> }).evidence;
+    const everything = JSON.stringify(result);
+    // The PDF's TEXT reaches ChatGPT, not just its name.
+    expect(evidence.some((item) => item.excerpt?.includes('pruning plan for the apple trees'))).toBe(true);
+    expect(everything).not.toContain('loan terms');
+    expect(everything).not.toContain('bank letter');
+    expect(everything).not.toContain(FAKE_AWS_KEY);
+    expect(everything).not.toContain('orchard-deploy');
+  });
+
+  test('a borderline word in the text alone does not hold an item without a private model', async () => {
+    // "invoice" once in the text is a borderline financial word, not a flag on the names.
+    const decision = classifyItemTiers({ signals: { title: 'trip.pdf', path: '/trip.pdf' }, text: 'Hotel booking; the invoice comes later.' });
+    expect(decision).toMatchObject({ contentTier: 'private', state: 'current', contentPending: false });
+  });
+
+  test('the built-in private model judges the flagged file, only once the owner approves it, reading the owner\'s words', async () => {
+    const prompts: AnalystModelRequest[] = [];
+    let ready = false;
+    const model: AnalystModel = {
+      async complete(request) {
+        prompts.push(request);
+        // Every read item is judged (p3): the orchard plan is ordinary, the bank letter is not.
+        if (request.prompt.includes('pruning plan')) {
+          return { text: '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}', modelId: 'built_in' };
+        }
+        return { text: '{"verdicts":[{"i":1,"tier":"private","category":"financial","confidence":0.9}]}', modelId: 'built_in' };
+      },
+    };
+    const builtIn: BuiltInPrivateModel = { model, available: () => ready };
+    // The seeded policy has no private lane, so the built-in model is the sniffer.
+    const runtime = resolveTierSnifferRuntime({
+      engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) }),
+      builtIn,
+    });
+    expect(runtime.source).toBe('built_in');
+    const ownerWords = 'Money matters and anything about my health.';
+    const install = await freshInstall({ ...(runtime.source === 'built_in' ? { lane: runtime.lane } : {}), ownerWords });
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending', metadataPending: true });
+
+    const ledgerPath = join(root, 'classification-ledger.jsonl');
+    const service = new TierSnifferService({
+      installed: install.installed,
+      lane: BUILT_IN_SNIFFER_LANE,
+      model,
+      stores: () => [install.secure, ...[install.lane.internal.current()].filter((store): store is LocalConnectorStore => store !== undefined)],
+      classificationLedgerPath: ledgerPath,
+      modelAvailable: () => builtIn.available(),
+      ownerContext: () => ownerWords,
+    });
+    closers.push(() => service.stop());
+
+    // Still downloading: nothing is asked, nothing counted.
+    expect(await service.runOnce()).toMatchObject({ state: 'model_unavailable' });
+    ready = true;
+    // Not approved yet: nothing is asked.
+    expect(await service.runOnce()).toMatchObject({ state: 'awaiting_owner_approval' });
+    expect(prompts).toHaveLength(0);
+
+    await appendClassificationLedgerEntry(ledgerPath, {
+      recorded_at: '2026-10-01T12:00:00.000Z',
+      kind: 'classifier_model_decision',
+      what: 'Owner approves the built-in private model for the privacy sniffer.',
+      model_id: 'built_in',
+      prompt_version: snifferPromptVersions(ownerWords).approval,
+      lane: 'local',
+      profile_id: 'built_in',
+      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+      status: 'complete',
+    });
+    const tick = await service.runOnce();
+    expect(tick).toMatchObject({ state: 'ran' });
+    expect(prompts.length).toBeGreaterThan(0);
+    // The owner's words travel as quoted data; the secret's text never does.
+    expect(prompts.every((prompt) => prompt.prompt.includes(JSON.stringify({ owner_privacy: ownerWords })))).toBe(true);
+    expect(prompts.some((prompt) => prompt.prompt.includes('bank letter'))).toBe(true);
+    expect(JSON.stringify(prompts)).not.toContain(FAKE_AWS_KEY);
+    expect(prompts.every((prompt) => prompt.localOnly === true)).toBe(true);
+
+    // Judged Private: no longer pending, and still never in olympus_search.
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', metadataTier: 'secure', metadataPending: false });
+    // The orchard plan's text was read, so it was held for the model too; judged
+    // Personal, it is queued to move back (no automatic moves configured here)
+    // and its text stays out of olympus_search until it lands.
+    expect(prompts.some((prompt) => prompt.prompt.includes('pruning plan'))).toBe(true);
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'moving', targetContentTier: 'private', contentPending: false });
+    const { result } = await olympusSearch(install, 'orchard');
+    expect(JSON.stringify(result)).not.toContain('loan terms');
+    expect(JSON.stringify(result)).not.toContain('pruning plan');
+  });
+
+  test('a configured private lane wins; a refused one is never papered over with the built-in model', () => {
+    const builtIn: BuiltInPrivateModel = { model: { complete: async () => ({ text: '', modelId: 'built_in' }) }, available: () => true };
+    const localFirst = loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset('local-first') });
+    expect(resolveTierSnifferRuntime({ engine: localFirst, builtIn }).source).toBe('configured');
+    const noSensitive = loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) });
+    expect(resolveTierSnifferRuntime({ engine: noSensitive })).toEqual({ source: 'off', reason: 'no_private_lane' });
+  });
+});
+
+describe('Public is retired on a fresh install', () => {
+  test('public evidence or a Public owner rule is Personal, with a content-free reason', () => {
+    const signals = { title: 'talk-slides.pdf', path: '/talks/talk-slides.pdf', sharing: 'public_link' as const };
+    expect(classifyItemTiers({ signals, text: 'Slides for the conference talk.' }).metadataTier).toBe('public');
+    const retired = classifyItemTiers({ signals, text: 'Slides for the conference talk.' }, { retirePublic: true });
+    expect(retired).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
+    expect(retired.reasons).toContain('tier:public_retired');
+    const ruled = classifyItemTiers(
+      { signals: { title: 'a.pdf', path: '/work/published/a.pdf' }, provider: 'dropbox', text: 'Published essay.' },
+      { retirePublic: true, rules: [{ id: 'published', match: { kind: 'pathPrefix', value: '/work/published' }, tier: 'public', strength: 'force' }] },
+    );
+    expect(ruled).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
+    const overridden = classifyItemTiers({ signals, text: 'x' }, { retirePublic: true, override: { kind: 'tier', tier: 'public' } });
+    expect(overridden).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
+  });
+
+  test('an older policy that defines Public keeps it; a half-removed Public tier is refused', () => {
+    const localFirst = loadSovereigntyPreset('local-first');
+    expect(isPublicTierRetired(localFirst)).toBe(false);
+    const halfRemoved = structuredClone(localFirst);
+    delete halfRemoved.routes.public_safe;
+    expect(() => loadSovereigntyEngine({ inlineConfig: halfRemoved })).toThrow(/public_safe/);
+  });
+});
+
+describe('owner defaults (2026-10-01): the registered built-in model is approved by default, and Personal verdicts move at once', () => {
+  afterEach(() => registerBuiltInPrivateModel(undefined));
+
+  /** The worker's boot order: register the built-in model, then resolve the sniffer from the registry. */
+  function registeredBuiltIn(verdict: string | ((request: AnalystModelRequest) => string)) {
+    const prompts: AnalystModelRequest[] = [];
+    registerBuiltInPrivateModel({
+      model: {
+        async complete(request) {
+          prompts.push(request);
+          // A function that throws is a transport failure.
+          return { text: typeof verdict === 'string' ? verdict : verdict(request), modelId: 'built_in' };
+        },
+      },
+      available: () => true,
+    });
+    const builtIn = registeredBuiltInPrivateModel()!;
+    const runtime = resolveTierSnifferRuntime({
+      engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) }),
+      builtIn,
+    });
+    expect(runtime.source).toBe('built_in');
+    return { prompts, builtIn, runtime };
+  }
+
+  function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: {
+    ownerWords?: () => string | undefined;
+    autoApproveBuiltIn?: boolean;
+    localEmbeddingsOnly?: boolean;
+    lane?: typeof BUILT_IN_SNIFFER_LANE;
+    now?: () => Date;
+    staleAfterMs?: number;
+  } = {}) {
+    const service = new TierSnifferService({
+      installed: install.installed,
+      lane: options.lane ?? BUILT_IN_SNIFFER_LANE,
+      model: builtIn.model,
+      stores: () => [install.secure, ...[install.lane.internal.current()].filter((store): store is LocalConnectorStore => store !== undefined)],
+      classificationLedgerPath: join(root, 'classification-ledger.jsonl'),
+      modelAvailable: () => builtIn.available(),
+      ownerContext: options.ownerWords ?? (() => undefined),
+      autoApproveBuiltIn: options.autoApproveBuiltIn ?? true,
+      ...(options.now ? { now: options.now } : {}),
+      autoMoves: {
+        localEmbeddingsOnly: () => options.localEmbeddingsOnly ?? true,
+        embeddingLedgerPath: join(root, 'embedding-ledger.jsonl'),
+        maxPerPass: 5,
+        ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
+      },
+    });
+    closers.push(() => service.stop());
+    return service;
+  }
+
+  const PRIVATE_VERDICT = '{"verdicts":[{"i":1,"tier":"private","category":"financial","confidence":0.9}]}';
+  const PERSONAL_VERDICT = '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}';
+
+  test('the built-in model judges at once with a default owner approval, re-approved for new owner words, never past a revocation', async () => {
+    const { prompts, builtIn, runtime } = registeredBuiltIn(PRIVATE_VERDICT);
+    // No owner words yet: the base prompt version.
+    let ownerWords: string | undefined;
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn, { ownerWords: () => ownerWords });
+
+    expect(await service.runOnce()).toMatchObject({ state: 'ran' });
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', metadataTier: 'secure' });
+    const ledgerPath = join(root, 'classification-ledger.jsonl');
+    const first = (await readClassificationLedger(ledgerPath)).entries;
+    expect(first[0]).toMatchObject({
+      kind: 'classifier_model_decision',
+      // The standing default, never signed as the owner.
+      approved_by: 'built_in_default',
+      status: 'complete',
+      lane: 'local',
+      profile_id: 'built_in',
+      model_id: 'built_in',
+      prompt_version: snifferPromptVersions(ownerWords).approval,
+      why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON,
+    });
+    expect(first[0]!.recorded_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    // The owner adds their words: a new prompt version, approved again automatically.
+    ownerWords = 'Money matters and my health.';
+    expect(snifferPromptVersions(ownerWords).approval).not.toBe(snifferPromptVersions(undefined).approval);
+    expect(await service.runOnce()).toMatchObject({ state: 'ran' });
+    const second = (await readClassificationLedger(ledgerPath)).entries;
+    expect(second.filter((entry) => entry.approved_by === 'built_in_default' && entry.status === 'complete')).toHaveLength(2);
+    expect(second.some((entry) => entry.approved_by === 'owner')).toBe(false);
+    expect(second[0]).toMatchObject({ prompt_version: snifferPromptVersions(ownerWords).approval, why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON });
+
+    // The owner revokes this version: the default never re-approves it.
+    await appendClassificationLedgerEntry(ledgerPath, {
+      recorded_at: new Date(Date.now() + 60_000).toISOString(),
+      kind: 'classifier_model_revoked',
+      what: 'Owner revokes the built-in sniffer.',
+      model_id: 'built_in',
+      prompt_version: snifferPromptVersions(ownerWords).approval,
+      lane: 'local',
+      profile_id: 'built_in',
+      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+      status: 'complete',
+    });
+    expect(await service.runOnce()).toMatchObject({ state: 'awaiting_owner_approval' });
+
+    // The revocation is sticky across prompt versions: back on the base
+    // prompt (no owner words), its earlier default approval no longer counts.
+    ownerWords = undefined;
+    expect(snifferPromptVersions(ownerWords).approval).not.toBe(snifferPromptVersions('Money matters and my health.').approval);
+    expect(await service.runOnce()).toMatchObject({ state: 'awaiting_owner_approval' });
+
+    // Until the owner approves the model again themselves.
+    await appendClassificationLedgerEntry(ledgerPath, {
+      recorded_at: new Date(Date.now() + 120_000).toISOString(),
+      kind: 'classifier_model_decision',
+      what: 'Owner approves the built-in sniffer again.',
+      model_id: 'built_in',
+      prompt_version: snifferPromptVersions(ownerWords).approval,
+      lane: 'local',
+      profile_id: 'built_in',
+      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+      status: 'complete',
+    });
+    expect(await service.runOnce()).toMatchObject({ state: 'ran' });
+  });
+
+  test('a remote classifier is never approved by default', async () => {
+    const { builtIn } = registeredBuiltIn(PRIVATE_VERDICT);
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE });
+    const venice = { ...BUILT_IN_SNIFFER_LANE, kind: 'venice', modelId: 'venice-private', profileId: 'venice-private' } as typeof BUILT_IN_SNIFFER_LANE;
+    const service = snifferFor(install, builtIn, { lane: venice });
+    expect(await service.runOnce()).toMatchObject({ state: 'awaiting_owner_approval' });
+    const entries = (await readClassificationLedger(join(root, 'classification-ledger.jsonl'))).entries;
+    expect(entries.some((entry) => entry.approved_by === 'owner')).toBe(false);
+  });
+
+  test('a Personal verdict on a held item moves it at once when every embedding is the built-in local model', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending' });
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
+    const tick = await service.runOnce();
+    // Both read items were held for the model (p3: every read item is judged);
+    // both Personal verdicts move at once.
+    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 2 }, autoMoves: { moved: 2, failed: 0, notEligible: 0 } });
+    // The bank letter's names were judged Personal, but its text question was
+    // still open: the move carried it, so the letter landed held and pending
+    // (never at its names' Personal placement), and its question was kept.
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending', contentPending: true, storedTrustDomain: 'secure_local' });
+    expect(JSON.stringify((await olympusSearch(install, 'lender')).result)).not.toContain('loan terms');
+    // The next pass answers the text question, and that verdict moves it.
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { moved: 1, failed: 0 } });
+    // Moved: current in Personal, and its text now reaches olympus_search.
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+    const { result } = await olympusSearch(install, 'lender');
+    expect(JSON.stringify(result)).toContain('loan terms');
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
+    const ledger = await readEmbeddingLedgerEntries(join(root, 'embedding-ledger.jsonl'));
+    expect(ledger.some((entry) => entry.approved_by === 'system-automatic')).toBe(true);
+  });
+
+  test('an item held for a text question that left the queue is asked again, not held forever', async () => {
+    // Live 2026-10-03: a move landed an item held (text question open) with
+    // no question queued, so nothing ever asked about it again. Re-judging
+    // skipped it (pending) and the sniffer pass is driven by its queue.
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
+    await service.runOnce();
+    const bank = identity('id:bank');
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'pending', contentPending: true });
+    const sniffer = new TierSnifferStore({ dbPath: tierSnifferPathForLedger(install.lane.ledger.dbPath) });
+    sniffer.deleteQuestion(bank, 'content');
+    expect(sniffer.questionFor(bank, 'content')).toBeUndefined();
+    sniffer.close();
+
+    for (let pass = 0; pass < 4 && install.lane.ledger.getCurrent(bank)!.state !== 'current'; pass += 1) await service.runOnce();
+    expect(install.lane.ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+    expect(JSON.stringify((await olympusSearch(install, 'lender')).result)).toContain('loan terms');
+  });
+
+  test('with a paid or remote embedding configured, the queued move waits for the owner-approved migration', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: false });
+    const tick = await service.runOnce();
+    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 2 } });
+    expect((tick as { autoMoves?: unknown }).autoMoves).toBeUndefined();
+    expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+    const { result } = await olympusSearch(install, 'lender');
+    expect(JSON.stringify(result)).not.toContain('loan terms');
+  });
+
+  /** The private model arrives after the items were judged without one (or under an older classifier). */
+  function addPrivateModel(install: Install, lane: typeof BUILT_IN_SNIFFER_LANE): Install {
+    const installed = configureInstalledTierClassification({
+      env,
+      lane: { kind: lane.kind, modelId: lane.modelId },
+      retirePublic: true,
+      ownerContext: () => undefined,
+    });
+    return { ...install, installed };
+  }
+
+  test('a routed item judged Personal with no model is re-judged once a model is there: asked while it stays visible, raised only on a Private verdict', async () => {
+    const before = await freshInstall();
+    // Read, no detector fired, Personal at once (no private model yet).
+    expect(before.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({
+      state: 'current', contentTier: 'private', decidedBy: 'default', reasons: ['metadata:default:personal', 'content:no_raise'],
+    });
+    expect(JSON.stringify((await olympusSearch(before, 'orchard')).result)).toContain('pruning plan');
+
+    // The first call fails (transport), so the question stays open a tick.
+    let calls = 0;
+    const { builtIn, runtime, prompts } = registeredBuiltIn(() => {
+      calls += 1;
+      if (calls === 1) throw new Error('model busy');
+      return PRIVATE_VERDICT;
+    });
+    const install = addPrivateModel(before, runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE);
+    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
+
+    // First pass: re-judged and ASKED. The item was visible under its
+    // previous decision and stays exactly where it was until the answer.
+    const first = await service.runOnce();
+    expect(first).toMatchObject({ state: 'ran', rejudged: { asked: 1, movesQueued: 0 }, report: { failedCalls: 1 } });
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+    expect(install.lane.ledger.rejudgeQuestion(identity('id:garden'))).toBeDefined();
+    expect(install.lane.ledger.copies(identity('id:garden')).find((copy) => copy.state === 'current' && copy.layers !== 'metadata'))
+      .toMatchObject({ trustDomain: 'internal', embedHold: false });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
+    // Asked, not re-judged again while it waits.
+    expect(first).not.toHaveProperty('rejudged.seen', 2);
+
+    // Next pass: the model reads the names and the excerpt and says Private:
+    // raised (hidden first) and moved.
+    const second = await service.runOnce();
+    expect(second).not.toHaveProperty('rejudged');
+    expect(second).toMatchObject({ state: 'ran', report: { movesQueued: 1 }, autoMoves: { moved: 1, failed: 0 } });
+    const judged = install.lane.ledger.getCurrent(identity('id:garden'))!;
+    expect(judged).toMatchObject({ state: 'current', contentTier: 'secure', engineVersion: TIER_CLASSIFIER_VERSION });
+    expect(judged.reasons.some((reason) => reason.startsWith('content:sniffer:local:'))).toBe(true);
+    expect(install.lane.ledger.rejudgeQuestion(identity('id:garden'))).toBeUndefined();
+    expect(prompts.some((prompt) => prompt.prompt.includes('Names: orchard-plan.pdf') && prompt.prompt.includes('pruning plan'))).toBe(true);
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+
+    // Judged under the current classifier and prompt: never re-judged again.
+    expect(await service.runOnce()).not.toHaveProperty('rejudged');
+  });
+
+  test('an owner override is never re-judged', async () => {
+    const before = await freshInstall();
+    before.lane.ledger.setOverride(identity('id:garden'), { kind: 'tier', tier: 'private' });
+    const { builtIn, runtime } = registeredBuiltIn(PRIVATE_VERDICT);
+    const install = addPrivateModel(before, runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE);
+    const tick = await snifferFor(install, builtIn, { localEmbeddingsOnly: true }).runOnce();
+    expect(tick).not.toHaveProperty('rejudged');
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'default' });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
+  });
+
+  test('a held item judged Personal, then held again, moves back into the store that kept its copy (no stuck move)', async () => {
+    // The live 2026-10-01 case: the Personal move left the held copy kept
+    // (superseded) in the Private store; a new prompt version re-held the
+    // item, hiding its Personal copy, and the move back was refused for that
+    // kept copy on every pass. The item stayed `moving` and unsearchable.
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn);
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { moved: 2, failed: 0 } });
+    const garden = identity('id:garden');
+    const settled = install.lane.ledger.getCurrent(garden)!;
+    expect(settled).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(install.lane.ledger.copies(garden).find((copy) => copy.corpusId === SECURE_CORPUS)).toMatchObject({ state: 'superseded' });
+
+    // A re-judgment (a new classifier version) re-holds the text question:
+    // a raise back to the store that kept its copy, hidden at once.
+    const reheld: TierDecision = {
+      metadataTier: 'private',
+      contentTier: 'private',
+      decidedBy: 'sniffer',
+      reasons: ['metadata:default:personal', `content:sniffer:${BUILT_IN_SNIFFER_LANE.kind}:rejudge:undecided`],
+      state: 'pending',
+      contentRead: true,
+      metadataPending: false,
+      contentPending: true,
+      metadataForced: false,
+      metadataFlagged: false,
+      engineVersion: settled.engineVersion,
+      mapRevision: settled.mapRevision,
+      snifferId: 'none',
+    };
+    const queued = install.lane.ledger.recordRoutedPlacement(garden, reheld, install.lane.set.placementFor(reheld));
+    expect(queued).toMatchObject({ outcome: 'queued_move', raise: true });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+    // The move completes (it was refused on every pass before).
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { failed: 0 } });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentPending: true });
+    expect(install.lane.ledger.copies(garden).find((copy) => copy.layers !== 'metadata' && copy.state === 'current'))
+      .toMatchObject({ corpusId: SECURE_CORPUS, embedHold: true });
+
+    // Personal again: back to the Personal store, whose kept copy is the
+    // same text. Searchable again, never left mid-move.
+    const personal: TierDecision = {
+      ...reheld,
+      reasons: settled.reasons,
+      state: 'current',
+      contentPending: false,
+    };
+    expect(install.lane.ledger.recordRoutedPlacement(garden, personal, install.lane.set.placementFor(personal)))
+      .toMatchObject({ outcome: 'queued_move', raise: false });
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { failed: 0 } });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+    expect(install.lane.ledger.listMoving()).toEqual([]);
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
+  });
+
+  test('a move interrupted between stage and flip resumes on the next tick', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    const service = snifferFor(install, builtIn);
+    await service.runOnce();
+    const garden = identity('id:garden');
+    const record = install.lane.ledger.getCurrent(garden)!;
+    expect(record).toMatchObject({ state: 'current', contentTier: 'private' });
+    // A crash after a raise hid the source and staged the destination.
+    install.lane.ledger.stageMove(garden, {
+      expectedGeneration: record.generation,
+      target: { metadataTier: 'private', contentTier: 'secure' },
+      destination: [{ corpusId: SECURE_CORPUS, trustDomain: 'secure_local', layers: 'both' }],
+      hideSource: true,
+    });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { failed: 0 } });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(install.lane.ledger.copies(garden).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId))
+      .toContain(SECURE_CORPUS);
+  });
+
+  test('a move that keeps failing past the bound: a lateral one is given up, a raise stays hidden and queued', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane } : {});
+    let clock = Date.now();
+    const service = snifferFor(install, builtIn, { now: () => new Date(clock), staleAfterMs: 60 * 60_000 });
+    await service.runOnce();
+    const ledger = install.lane.ledger;
+    const garden = identity('id:garden');
+    const bank = identity('id:bank');
+    for (let pass = 0; pass < 3 && ledger.getCurrent(bank)!.state !== 'current'; pass += 1) await service.runOnce();
+    expect(ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'current', contentTier: 'private' });
+
+    // Garden: a lateral move queued (nothing hidden). Bank: a raise staged
+    // (its Personal copy hidden). Then both sources lose their store rows,
+    // so neither move can ever complete.
+    const gardenBefore = ledger.getCurrent(garden)!;
+    ledger.beginMove(garden, { metadataTier: 'private', contentTier: 'private' }, gardenBefore.generation);
+    const bankBefore = ledger.getCurrent(bank)!;
+    ledger.stageMove(bank, {
+      expectedGeneration: bankBefore.generation,
+      target: { metadataTier: 'private', contentTier: 'secure' },
+      destination: [{ corpusId: SECURE_CORPUS, trustDomain: 'secure_local', layers: 'both' }],
+      hideSource: true,
+    });
+    const internal = install.lane.internal.current()!;
+    for (const id of ['id:garden', 'id:bank']) {
+      internal.tombstoneCopy(
+        { ...identity(id), family: 'file', localItemId: `personal:${id}` },
+        { connectorId: 'test' },
+      );
+    }
+
+    // Queued long ago, but the bound counts from the first failed attempt:
+    // retried, both left queued.
+    clock += 3 * 60 * 60_000;
+    expect(await service.runOnce()).toMatchObject({ autoMoves: { moved: 0, failed: 2 } });
+    expect(ledger.getCurrent(garden)).toMatchObject({ state: 'moving' });
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'moving' });
+    clock += 10 * 60_000;
+    expect(await service.runOnce()).toMatchObject({ autoMoves: { moved: 0, failed: 2 } });
+    expect(ledger.getCurrent(garden)).toMatchObject({ state: 'moving' });
+
+    // Past the bound since the first failure.
+    clock += 2 * 60 * 60_000;
+    const settled = await service.runOnce();
+    expect(settled).toMatchObject({ autoMoves: { failed: 2, abandoned: 1, staleRaises: 1 } });
+    // The lateral move is given up: back at its tiers, its copy current.
+    expect(ledger.getCurrent(garden)).toMatchObject({
+      state: 'current', generation: gardenBefore.generation, targetContentTier: null, contentTier: 'private',
+    });
+    expect(ledger.copies(garden).some((copy) => copy.state === 'current')).toBe(true);
+    // The raise is never rolled back to the lower placement.
+    expect(ledger.getCurrent(bank)).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
+    expect(ledger.copies(bank).some((copy) => copy.state === 'current')).toBe(false);
+  });
+});
+
+async function readEmbeddingLedgerEntries(path: string): Promise<Array<Record<string, unknown>>> {
+  const { readEmbeddingLedger } = await import('../src/workers/embedding-ledger.ts');
+  return (await readEmbeddingLedger(path)).entries as unknown as Array<Record<string, unknown>>;
+}

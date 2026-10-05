@@ -59,6 +59,10 @@ export interface SnifferLane extends SnifferLaneIdentity {
 export function assertSnifferProfileAllowed(profileId: string, profile: SovereigntyModelProfile): SnifferLaneKind {
   if (profile.trust === 'standard_cloud') throw new SnifferLaneRefusedError('standard_cloud', profileId);
   if (profile.provider === 'local-openai-compatible' && profile.trust === 'local') return 'local';
+  // The built-in private model (built-in-sniffer.ts): in-process on this
+  // computer, reached only through its own fixed identity.
+  if (profile.provider === 'built-in' && profile.trust === 'local' && profileId === 'built_in'
+    && profile.purpose === 'classification') return 'local';
   if (profile.provider === 'venice' && profile.trust === 'encrypted_cloud') {
     assertSecureAnalystPoolModelIdAllowed(profileId, profile.model);
     return 'venice';

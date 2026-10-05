@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "modelProfiles": {
+    "built-in-embedding": {
+      "provider": "built-in",
+      "trust": "local",
+      "model": "arctic-embed-m-v1.5-int8-e58a8f7",
+      "purpose": "embedding"
+    },
     "venice-private": {
       "provider": "venice",
       "trust": "encrypted_cloud",
@@ -13,22 +19,6 @@
       "provider": "openclaw-infer",
       "trust": "standard_cloud",
       "purpose": "analyst"
-    },
-    "gemini-source-embedding": {
-      "provider": "google-gemini",
-      "trust": "standard_cloud",
-      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
-      "model": "gemini-embedding-2",
-      "secretRef": "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
-      "purpose": "embedding"
-    },
-    "venice-source-embedding": {
-      "provider": "venice",
-      "trust": "encrypted_cloud",
-      "baseUrl": "https://api.venice.ai/api/v1",
-      "model": "text-embedding-qwen3-8b",
-      "secretRef": "store:venice.api_key",
-      "purpose": "embedding"
     }
   },
   "routes": {
@@ -49,11 +39,12 @@
       "secure_local": {
         "minimumExecutionTrust": "encrypted_cloud",
         "allowedEmbeddingTrust": [
+          "local",
           "encrypted_cloud"
         ],
-        "embeddingProfile": "venice-source-embedding",
+        "embeddingProfile": "built-in-embedding",
         "allowCloudQuery": false,
-        "activationMode": "lexical_only",
+        "activationMode": "hybrid_shadow",
         "secureHandling": "answerable"
       },
       "internal": {
@@ -62,7 +53,7 @@
           "local",
           "standard_cloud"
         ],
-        "embeddingProfile": "gemini-source-embedding",
+        "embeddingProfile": "built-in-embedding",
         "allowCloudQuery": true,
         "activationMode": "hybrid_shadow"
       },
@@ -72,7 +63,7 @@
           "local",
           "standard_cloud"
         ],
-        "embeddingProfile": "gemini-source-embedding",
+        "embeddingProfile": "built-in-embedding",
         "allowCloudQuery": true,
         "activationMode": "hybrid_shadow"
       }

@@ -1,9 +1,8 @@
 /**
- * How the pages reach the additive view-model blocks: the sensitivity map, the
- * tier policy, one source's slice of the exclusion rules, and a card's review
+ * How the pages reach the additive view-model blocks: the tier policy, one source's slice of the exclusion rules, and a card's review
  * breakdown.
  *
- * Four readers rather than four field accesses, because each one answers
+ * Three readers rather than three field accesses, because each one answers
  * "absent" rather than "zero". A page that prints 0 for a field the worker
  * never emitted has asserted something nobody measured, and these blocks exist
  * precisely because their counts are real.
@@ -11,18 +10,10 @@
 import type {
   DashboardExcludedSource,
   DashboardNeedsReview,
-  DashboardSensitivityCategory,
   DashboardSensitivityTier,
   DashboardSourceCard,
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
-
-/** The secure categories, or an empty list when no map was read. */
-export function dashboardSensitivityCategories(
-  view: SourceDashboardViewModel,
-): readonly DashboardSensitivityCategory[] {
-  return view.sensitivity?.categories ?? [];
-}
 
 /** The four policy rows, or an empty list on a view model that predates them. */
 export function dashboardSensitivityTiers(

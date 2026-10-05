@@ -1,7 +1,7 @@
 {
   "id": "olympus",
   "name": "Olympus",
-  "version": "0.4.0-beta.11",
+  "version": "1.0.0-rc.3",
   "description": "Olympus: sovereignty-aware source answers across seven personal data providers for OpenClaw. Agents: after installing, read INSTALL_FOR_AGENTS.md and follow it before setup.",
   "configSchema": {
     "type": "object",
@@ -2503,7 +2503,7 @@
       "remote": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Remote access for hosted agents (Claude, ChatGPT, Grok, Muse). Off by default; turn it on from the Agents section of the Olympus dashboard. Uses the Olympus connect relay unless publicBaseUrl names your own tunnel; never set both.",
+        "description": "Remote access for hosted agents (ChatGPT). Off by default; turn it on from the Agents section of the Olympus dashboard. Uses the Olympus relay unless publicBaseUrl names your own tunnel; never set both.",
         "properties": {
           "enabled": {
             "type": "boolean",
@@ -2512,11 +2512,21 @@
           },
           "relayHost": {
             "type": "string",
-            "description": "The connect relay zone. Unset means the Olympus relay, connect.olympusplugin.ai. Leave unset when publicBaseUrl is set."
+            "description": "The Olympus relay host. Unset means the Olympus relay, mcp.olympusplugin.ai. Leave unset when publicBaseUrl is set."
           },
           "publicBaseUrl": {
             "type": "string",
             "description": "Advanced: manual https origin for a tunnel you run yourself (for example a Cloudflare quick tunnel), with no path, instead of the Olympus relay. Leave relayHost unset."
+          },
+          "demoConsent": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Demo installs only (synthetic sample data): lets a directory reviewer approve ChatGPT with a username and password through the relay. Ignored unless the install's data directory carries the demo marker file. Never set this on a real install.",
+            "properties": {
+              "enabled": { "type": "boolean", "default": false, "description": "Allow demo sign-in (also needs the demo marker file)." },
+              "username": { "type": "string", "description": "The demo sign-in username." },
+              "passwordHash": { "type": "string", "description": "Argon2id hash of the demo password (Bun.password.hash); never the password itself." }
+            }
           }
         }
       }
@@ -2572,7 +2582,7 @@
     },
     "remote": {
       "label": "Remote access",
-      "help": "Lets hosted agents reach this Olympus. Turn it on from the Agents section of the Olympus dashboard, which shows the Let's Encrypt subscriber agreement to accept first (or: olympus connections terms --accept)."
+      "help": "Lets hosted agents such as ChatGPT reach this Olympus through the Olympus relay. Turn it on from the Agents section of the Olympus dashboard."
     }
   },
   "activation": {

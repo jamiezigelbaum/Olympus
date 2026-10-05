@@ -3,6 +3,10 @@
 Install Olympus, connect the sources you want it to answer from, and verify a
 cited answer.
 
+This is the OpenClaw path. **Using ChatGPT?** Follow
+[Olympus for ChatGPT](../README.md#olympus-for-chatgpt) instead: it needs only
+a Mac and ChatGPT, with no OpenClaw and no API keys.
+
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
 on macOS or Linux. An agent with terminal access can obtain the pilot package
@@ -28,7 +32,7 @@ agent with a terminal:
 
 Before first setup, read the full
 [four-tier privacy explanation](../INSTALL_FOR_AGENTS.md#step-2--privacy-posture-mandatory-decision-gate),
-then describe your sensitivity preferences and choose how to handle Private data.
+then describe your privacy preferences and choose how to handle Private data.
 For the credentials and models that choice requires, follow the
 [agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It covers account creation, API spending, exact password-manager references,
@@ -42,10 +46,17 @@ The preset prerequisites are:
 
 | Preset | Required before first source answer |
 |---|---|
-| `local-first` — Local models with Venice fallback | Gemini key for Public and Personal embeddings; a funded Venice API key; local answer and embedding models with exact registered IDs and matching output dimensions. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
-| `local-only` — Local models | Gemini key for Public and Personal embeddings; local answer and embedding models with exact registered IDs and matching output dimensions, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
-| `private-cloud-only` — Venice | Gemini key for Public and Personal embeddings; a funded Venice API key for Private answers and approved Private embeddings; no local server required. Confirm the embedding model, dimensions, and cost before activation. |
-| `no-sensitive` — Don't ingest Private data | Gemini key for Public and Personal embeddings. Private content is unavailable to answering. |
+| `local-first` — Local models with Venice fallback | A funded Venice API key; a local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. |
+| `local-only` — Local models | A local answer model with its exact registered ID at `http://127.0.0.1:28090/v1`. No Venice account is needed. |
+| `private-cloud-only` — Venice | A funded Venice API key for Private answers; no local server required. |
+| `no-sensitive` — Don't ingest Private data | Nothing. Private content is unavailable to answering. |
+
+Every preset makes content searchable with the built-in embedding model: a
+small model that runs inside Olympus, downloads once (about 225 MB, checksum
+pinned) on first use, needs no account or key, and sends nothing off the
+computer. Gemini, a local embedding server, or a Venice Private embedding
+model remain opt-in choices; see
+[SOVEREIGNTY_CONFIG.md](SOVEREIGNTY_CONFIG.md#built-in-embeddings).
 
 A local runtime means a server actually answering at the effective policy's
 endpoints and serving its exact answer and embedding model IDs. An
@@ -135,37 +146,21 @@ public install path.
 
 ## 2. Run setup
 
-First write your sensitivity map:
+Your privacy preferences are not a file you write before setup. The
+installer-agent flow asks them conversationally: "Tell me about your data —
+what do you want your assistant to know about, and what are your privacy
+concerns?" Once Olympus is running, you save the answer in the dashboard's
+**Privacy** section (or with ChatGPT's `olympus_privacy_set`): your own words
+for "What's private for you?", plus folders, Gmail labels or senders that are
+always Private. That privacy profile is the only privacy configuration
+Olympus reads. Olympus judges each item's names (Personal unless raised) and
+its content (raised to Private or Secrets on evidence); your always-Private
+rules raise matching items, and nothing you write can lower content.
 
-```bash
-mkdir -p ~/.olympus && chmod 700 ~/.olympus   # setup makes it 0700 too, but runs later
-$EDITOR ~/.olympus/sensitivity-map.json
-chmod 600 ~/.olympus/sensitivity-map.json     # the map is owner-only; your umask isn't
-olympus sensitivity validate
-```
-
-The first `chmod` covers the directory, the second covers the map itself.
-Nothing in Olympus writes `sensitivity-map.json` — you do — so it lands at
-your umask (0644 on a clean macOS install), inside a directory that hides
-it from other users but not from anything running as you.
-`olympus sensitivity validate` enforces the same thing: it leaves the file
-0600 and reports `permissions` and `permissionsTightened` when it had to
-change it. Setting it yourself first means it never has to.
-
-The installer-agent flow asks this conversationally: "Tell me about your data
-— what do you want your assistant to know about, and what are your privacy
-concerns?" The dashboard does not edit the map; its Sensitivity page shows the
-saved categories read-only. Write the map as `"schemaVersion": 2`. Olympus
-judges each item's names (Personal unless raised) and its content (raised to
-Private or Secrets on evidence), and the map feeds both. Private and Secrets
-categories raise matching items. Public and Personal categories are lowering
-guidance that any raise still beats, and they never lower content. They
-match only on a path pattern or a sender, never a keyword; Personal is the
-default, so a Personal category is rarely useful. A schemaVersion 1 map
-still loads and stays raise-only guidance. The stored keys keep their legacy
-names — `secure` is Private, and the legacy `private` key means Personal — so
-sensitive Private data is written with `"targetTierName": "secure"`, never
-`"private"`.
+The legacy sensitivity map (`~/.olympus/sensitivity-map.json` and
+`olympus sensitivity validate`) was retired on 2026-10-03. If an older
+install has that file, Olympus no longer reads it: re-add its rules in the
+Privacy section.
 
 ```bash
 olympus setup --preset private-cloud-only --cloud-lane subscription --yes
@@ -488,7 +483,7 @@ source or start ingestion by itself.
 
 Connect only the source you chose, using its dashboard card and the
 [per-source guide](../INSTALL_FOR_AGENTS.md#step-6--finish-installation-dashboard-handoff).
-Google's packaged shared pilot client requests Gmail or Drive scopes only when
+Olympus's packaged publisher Google client requests Gmail or Drive scopes only when
 you choose that source; Gmail is not required for installation. X uses your own
 developer application, with plan availability and possible cost shown before
 consent. v0.4 supports one connected account per provider.
@@ -611,9 +606,10 @@ To let other agents ask Olympus (Claude, ChatGPT, Grok, Muse, or Claude Code
 and Codex on this computer), open the dashboard's Setup page and press
 **Connect an agent** — see the README's "Connect other agents" section. Agents
 in the cloud also need remote access: press **Turn on remote access** in the
-same Agents section, read and accept the Let's Encrypt subscriber agreement it
-shows, and Olympus connects through the Olympus relay with no account or tunnel
-to set up. (Advanced: a tunnel of your own goes in `remote.publicBaseUrl`.)
+same Agents section, and Olympus connects through the Olympus relay
+(`mcp.olympusplugin.ai`) with no account, tunnel or certificate agreement to
+set up. ChatGPT itself uses the Olympus plugin instead: see the README's
+[Olympus for ChatGPT](../README.md#olympus-for-chatgpt). (Advanced: a tunnel of your own goes in `remote.publicBaseUrl`.)
 
 ## Anytime
 

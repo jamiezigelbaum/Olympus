@@ -238,7 +238,7 @@ describe('publisher Google flow through the relay (non-loopback dashboard)', () 
     // endpoint status rides inside the rendered reason text instead.
     expect(callback.status).toBe(400);
     const body = await callback.text();
-    expect(body).toContain('Could not connect gmail');
+    expect(body).toContain('Could not connect Gmail');
     expect(body).toContain(String(status));
     expect(body.toLowerCase()).not.toContain('client_secret');
     expect(body).not.toContain(PUBLISHER_WEB_CLIENT_ID);

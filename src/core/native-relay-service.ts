@@ -15,6 +15,7 @@ import {
   emptyRemoteAccessStatus,
   loopbackWorkerOrigin,
   readRemoteAccessStatus,
+  relayProcessRunning,
   remoteAccessDir,
   resolveRemoteAccessMode,
   writeRemoteAccessStatus,
@@ -126,15 +127,26 @@ function prepareRelayStart(
     local_url: localUrl ?? null,
     ...next,
   });
+  // This service stops its own relay child before it prepares a new start, so
+  // a relay child still running here belongs to another supervisor of the
+  // same data root (another Gateway or engine, or a test run pointed at the
+  // real one). Its status is its own to report: saying "off" over it would
+  // tell the worker and the CLI remote access is off while that relay serves.
+  const reportsOff = (next: RemoteAccessStatusFile): void => {
+    if (relayProcessRunning(statusDir)) return;
+    writeRemoteAccessStatus(statusDir, next);
+  };
   const fail = (error: string, statusMode: RemoteAccessStatusFile['mode']): never => {
-    writeRemoteAccessStatus(statusDir, status({ mode: statusMode, error }));
+    const next = status({ mode: statusMode, error });
+    if (statusMode === 'off') reportsOff(next);
+    else writeRemoteAccessStatus(statusDir, next);
     throw new NativeProcessConfigurationError(`Olympus remote access is off: ${error}`);
   };
 
   if (mode.mode === 'off') {
     // Clear what an earlier mode reported; an install that never turned remote
     // access on gets no state directory at all.
-    if (readRemoteAccessStatus(statusDir)) writeRemoteAccessStatus(statusDir, status({ mode: 'off' }));
+    if (readRemoteAccessStatus(statusDir)) reportsOff(status({ mode: 'off' }));
     return { statusDir, launch: undefined };
   }
   if (mode.mode === 'error') return fail(mode.error, 'off');

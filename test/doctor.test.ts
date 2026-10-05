@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { runDoctor } from '../src/core/doctor.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
+import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import {
   createSovereigntyEngine,
   loadSovereigntyPreset,
@@ -1069,7 +1070,7 @@ describe('runDoctor', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-doctor-sovereignty-default-'));
     try {
       const policyPath = writeSovereigntyConfigFile({
-        config: loadSovereigntyPreset('no-sensitive'),
+        config: loadPreBuiltInPreset('no-sensitive'),
         path: join(home, '.olympus', 'sovereignty.json'),
       });
       expect(policyPath).toBe(join(home, '.olympus', 'sovereignty.json'));
@@ -1135,7 +1136,7 @@ describe('runDoctor', () => {
     const result = await runDoctor(doctorDeps({
       config: defaultConfig(),
       delphi: healthyDelphi(),
-      sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+      sovereigntyEngine: createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive')),
       env: { GEMINI_API_KEY: 'gemini-test-key' },
     }));
 
@@ -1145,7 +1146,7 @@ describe('runDoctor', () => {
   });
 
   test('accepts exact worker policy readiness when the wrapper secret is absent from doctor env', async () => {
-    const engine = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive'));
+    const engine = createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive'));
     const profile = engine.config.modelProfiles['gemini-source-embedding']!;
     const fingerprint = credentialConfigFingerprint('gemini-source-embedding', profile);
     const config = defaultConfig();
@@ -1182,7 +1183,7 @@ describe('runDoctor', () => {
   });
 
   test('does not accept readiness for the same profile id when its policy fingerprint differs', async () => {
-    const engine = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive'));
+    const engine = createSovereigntyEngine(loadPreBuiltInPreset('no-sensitive'));
     const profile = engine.config.modelProfiles['gemini-source-embedding']!;
     const mismatchedFingerprint = credentialConfigFingerprint(
       'gemini-source-embedding',

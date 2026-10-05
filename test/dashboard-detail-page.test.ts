@@ -20,8 +20,8 @@ describe('dashboard detail selection summary', () => {
     }), { now: NOW });
 
     expect(html).toContain('Added to Olympus');
-    expect(html).toContain('<span>Metadata only</span><b>2,000 files</b>');
-    expect(html).toContain('<span>Full ingestion</span><b>10,000 files</b>');
+    expect(html).toContain('<span>Names only</span><b>2,000 files</b>');
+    expect(html).toContain('<span>Fully indexed</span><b>10,000 files</b>');
     expect(html).not.toContain('class="kpis"');
     expect(html).not.toContain('Text ready');
     expect(html).not.toContain('<div class="u">Flow</div>');
@@ -36,9 +36,9 @@ describe('dashboard detail selection summary', () => {
     const html = renderDashboardDetailBody(fixtureCard({
       ingestion_selection: { metadata_only_files: 556, full_ingestion_files: 3, policy_deferred_files: 1 },
     }), { now: NOW });
-    expect(html).toContain('<span>Metadata only</span><b>556 files</b>');
-    expect(html).toContain('<span>Full ingestion</span><b>3 files</b>');
-    expect(html).toContain('1 file selected for full ingestion is not being processed because of a separate ingestion policy.');
+    expect(html).toContain('<span>Names only</span><b>556 files</b>');
+    expect(html).toContain('<span>Fully indexed</span><b>3 files</b>');
+    expect(html).toContain('1 file chosen to be fully indexed is not being processed because of a separate ingestion policy.');
   });
 
   test('keeps mechanical failure evidence inside Advanced, never in summary cards', () => {
@@ -246,8 +246,8 @@ describe('dashboard detail progress owns readiness', () => {
     const start = html.indexOf('Added to Olympus');
     const selection = html.slice(start, html.indexOf('<div class="dsect">', start + 1));
     expect(start).toBeGreaterThan(-1);
-    expect(selection).toContain('<span>Metadata only</span><b>381 files</b>');
-    expect(selection).toContain('<span>Full ingestion</span><b>12,431 files</b>');
+    expect(selection).toContain('<span>Names only</span><b>381 files</b>');
+    expect(selection).toContain('<span>Fully indexed</span><b>12,431 files</b>');
     expect(selection).not.toContain('247,712');
   });
 });
@@ -1035,7 +1035,9 @@ describe('dashboard detail page', () => {
     const html = renderDashboardDetailPage(fixtureView(), 'dropbox.files', { now: NOW }) ?? '';
 
     expect(html).toContain('<title>Olympus / Dropbox</title>');
-    expect(html).toContain('class="meta">Fresh · checked');
+    // 3,201 of 4,806 files read: the header holds its word to the progress,
+    // the same derivation the ChatGPT dashboard uses, so never Fresh here.
+    expect(html).toContain('class="meta">Working · checked');
     expect(html).toContain('<div class="dsect">Ingestion</div>');
   });
 });

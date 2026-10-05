@@ -4,6 +4,49 @@ const DEFAULT_READINESS_POLL_MS = 100;
 const DEFAULT_STOP_GRACE_MS = 2_000;
 const DEFAULT_RESTART_DELAYS_MS = [250, 1_000, 5_000, 15_000, 30_000] as const;
 
+/**
+ * Where supervised children write. Inside the OpenClaw Gateway they write
+ * nowhere (`ignore`): the Gateway's own log is not theirs to fill. The
+ * standalone engine host (core/engine-host.ts) runs under launchd with its
+ * stdout/stderr already redirected to ~/Library/Logs/Olympus, so it passes
+ * the children's output through to those files. Process-wide on purpose: it
+ * is a property of the host, set once before any service starts.
+ */
+export type NativeProcessChildStdio = 'ignore' | 'inherit';
+let childStdio: NativeProcessChildStdio = 'ignore';
+
+export function setNativeProcessChildStdio(mode: NativeProcessChildStdio): void {
+  childStdio = mode;
+}
+
+/**
+ * Told when the kernel starts a child process group and when it has stopped
+ * that whole group. The standalone engine host records the groups so a host
+ * that died without stopping them can clean them up at its next start
+ * (core/engine-children.ts). Process-wide for the same reason as the stdio
+ * mode; the OpenClaw Gateway sets none.
+ */
+export interface NativeProcessChildObserver {
+  /** `argv`: the exact command and arguments the group leader was spawned with. */
+  spawned(serviceId: string, processGroupId: number, argv?: readonly string[]): void;
+  stopped(serviceId: string, processGroupId: number): void;
+}
+let childObserver: NativeProcessChildObserver | undefined;
+
+export function setNativeProcessChildObserver(observer: NativeProcessChildObserver | undefined): void {
+  childObserver = observer;
+}
+
+function notifyChildObserver(event: 'spawned' | 'stopped', serviceId: string, pid: number | undefined, argv?: readonly string[]): void {
+  if (!childObserver || !pid || process.platform === 'win32') return;
+  try {
+    if (event === 'spawned') childObserver.spawned(serviceId, pid, argv);
+    else childObserver.stopped(serviceId, pid);
+  } catch {
+    // Advisory bookkeeping never changes supervision.
+  }
+}
+
 export interface NativeProcessServiceHealth {
   reportFailure(error: Error): void;
   clearFailure(): void;
@@ -119,6 +162,7 @@ export function backgroundNativeProcessService(
 }
 
 interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
+  serviceId: string;
   generation: number;
   context: NativeProcessServiceContext;
   child: ChildProcess | undefined;
@@ -255,12 +299,13 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     const child = spawnChild(settings.command, [...settings.args], {
       env: settings.env,
-      stdio: 'ignore',
+      stdio: childStdio === 'inherit' ? ['ignore', 'inherit', 'inherit'] : 'ignore',
       detached: process.platform !== 'win32',
       ...(options.workingDirectory ? { cwd: options.workingDirectory } : {}),
     });
     lifetime.child = child;
     lifetime.childReady = false;
+    notifyChildObserver('spawned', options.id, child.pid, [settings.command, ...settings.args]);
     let spawnFailed = false;
 
     child.once('exit', (code, signal) => {
@@ -336,6 +381,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       await stopCurrent();
       if (requestedGeneration !== generation) return;
       const lifetime: ServiceLifetime<TSettings> = {
+        serviceId: options.id,
         generation: requestedGeneration,
         context,
         child: undefined,
@@ -467,6 +513,7 @@ async function terminateChild<TSettings extends NativeProcessStartSettings>(
   lifetime.cleanupPromise = cleanup;
   try {
     await cleanup;
+    notifyChildObserver('stopped', lifetime.serviceId, child.pid);
     if (lifetime.child === child) lifetime.child = undefined;
   } finally {
     if (lifetime.cleanupPromise === cleanup) lifetime.cleanupPromise = undefined;

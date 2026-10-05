@@ -17,7 +17,6 @@ import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
 import type { RawItem, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildEvidencePack } from '../src/core/evidence-pack.ts';
 import { SourceReactionValidationError } from '../src/core/source-index/reactions.ts';
-import type { SensitivityMap } from '../src/core/sensitivity-map.ts';
 import { createSourceExclusionMatcher } from '../src/core/source-ingestion-exclusions.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import {
@@ -448,46 +447,6 @@ const ROADMAP: FakeItemSpec = {
   name: 'roadmap.md',
   inlineText: 'Q3 roadmap: ship the connector spine milestone.',
   locatorUri: '/Approved/roadmap.md',
-};
-
-const GOOGLE_ITEM_SENSITIVITY_MAP: SensitivityMap = {
-  schemaVersion: 1,
-  userFacingTiers: {
-    public: { targetTrustTier: 'S0', targetTrustDomain: 'public_safe' },
-    private: { targetTrustTier: 'S3', targetTrustDomain: 'internal' },
-    secure: { targetTrustTier: 'S4', targetTrustDomain: 'secure_local' },
-    secrets: { targetTrustTier: 'S5', targetTrustDomain: 'secure_local' },
-  },
-  categories: [
-    {
-      id: 'therapy',
-      label: 'Therapy',
-      targetTierName: 'secure',
-      targetTrustTier: 'S4',
-      targetTrustDomain: 'secure_local',
-      examples: ['therapy appointment notes'],
-      notes: '',
-      match: {
-        keywords: ['therapy'],
-        senderPatterns: [],
-        pathPatterns: [],
-      },
-    },
-    {
-      id: 'password-manager-export',
-      label: 'Password Manager Export',
-      targetTierName: 'secrets',
-      targetTrustTier: 'S5',
-      targetTrustDomain: 'secure_local',
-      examples: ['password-manager-export.csv'],
-      notes: '',
-      match: {
-        keywords: [],
-        senderPatterns: [],
-        pathPatterns: ['password-manager-export'],
-      },
-    },
-  ],
 };
 
 describe('LocalConnectorStore sync', () => {
@@ -1789,7 +1748,8 @@ describe('LocalConnectorStore sync', () => {
       provider: 'google_drive',
       id: 'file-passwords',
       title: 'password-manager-export.csv',
-      text: 'account,username,password\nexample,alice,secret',
+      // A real secret in the text: the secret detector, not a name list, decides S5.
+      text: 'account,username,password\nexample,alice,secret\n-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
       metadata: {
         name: 'password-manager-export.csv',
         pathDisplay: '/Exports/password-manager-export.csv',
@@ -1821,7 +1781,19 @@ describe('LocalConnectorStore sync', () => {
       family: 'file',
       trustDomain: 'secure_local',
     });
-    const classification = { sensitivityMap: GOOGLE_ITEM_SENSITIVITY_MAP };
+    // The owner's always-Private sender (a privacy-profile rule) places the
+    // therapy mail; the secret detector catches the password export.
+    const classification = {
+      baselineTrustTier: 'S3' as const,
+      baselineTrustDomain: 'internal' as const,
+      ownerRules: [{
+        id: 'privacy-sender-clinic',
+        source: 'gmail',
+        match: { kind: 'sender' as const, value: 'care@example.com' },
+        tier: 'secure' as const,
+        strength: 'prior' as const,
+      }],
+    };
 
     const gmailConnector = createGoogleFixtureConnector('google:gmail', 'email', [ordinaryEmail, therapyEmail]);
     const driveConnector = createGoogleFixtureConnector('google:drive', 'file', [passwordExport]);
@@ -1886,8 +1858,8 @@ describe('LocalConnectorStore sync', () => {
     secureDriveStore.close();
   });
 
-  test('the shared classification policy runs the sensitive detectors, not only the sensitivity map', async () => {
-    // The defect this pins: the policy consulted ONLY the sensitivity map and
+  test('the shared classification policy runs the sensitive detectors', async () => {
+    // The defect this pins: the policy consulted ONLY the (since retired) sensitivity map and
     // then fell to its baseline, so on a lane whose baseline is internal —
     // every Google lane — the engine's conservative detectors never ran at
     // all. A bank statement filed as ordinary internal mail (and became cloud
@@ -1914,7 +1886,7 @@ describe('LocalConnectorStore sync', () => {
       provider: 'gmail',
       id: 'msg-key',
       title: 'Deploy key',
-      text: '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
+      text: '-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
       metadata: { subject: 'Deploy key', sender: 'Ops <ops@example.com>' },
     });
 
@@ -1930,8 +1902,6 @@ describe('LocalConnectorStore sync', () => {
       family: 'email',
       trustDomain: 'secure_local',
     });
-    // No sensitivity map: the map is the operator's override, and the estate's
-    // classification doctrine does not depend on one existing.
     const classification = { baselineTrustTier: 'S3' as const, baselineTrustDomain: 'internal' as const };
     const connector = createGoogleFixtureConnector('google:gmail', 'email', [ordinary, financial, secretBearing]);
 

@@ -2,24 +2,20 @@
  * Turn on / Turn off remote access from Setup's Agents section.
  *
  * What matters: the toggle carries the same custody as every dashboard
- * control (control cookie, CSRF, same origin) plus its own rate limit; turning
- * it on needs the owner's explicit acceptance of the CA's *current*
- * subscriber agreement, recorded exactly as `olympus connections terms
- * --accept` records it; the config change goes only through OpenClaw's own
- * config write (`api.runtime.config.mutateConfigFile`, in the Gateway); and
- * a relay that is down reads as "not connected" with its reason.
+ * control (control cookie, CSRF, same origin) plus its own rate limit; no CA
+ * agreement is asked for (the relay holds the only certificate); the config
+ * change goes only through OpenClaw's own config write
+ * (`api.runtime.config.mutateConfigFile`, in the Gateway); and a relay that is
+ * down reads as "not connected" with its reason.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { runConnectionsTermsCommand } from '../src/cli.ts';
 import { parseDashboardControlParams } from '../src/core/control-ui-gateway.ts';
 import {
   emptyRemoteAccessStatus,
-  readTermsAcceptance,
-  recordTermsAcceptance,
   remoteAccessDir,
   remoteAccessStatusView,
   writeRemoteAccessStatus,
@@ -54,8 +50,9 @@ import type { OlympusDashboardControlParams, OlympusDashboardControlResult } fro
 
 const ROOT = join(import.meta.dir, '..');
 const ORIGIN = 'http://127.0.0.1:17777';
-const PUBLIC = 'https://abc123.connect.olympusplugin.ai';
+const PUBLIC = 'https://mcp.olympusplugin.ai';
 const TERMS_V1 = 'https://letsencrypt.org/documents/LE-SA-v1.5.pdf';
+// The panel's agreement flow (dashboard lane) is still rendered and tested with a mocked transport.
 const TERMS_V2 = 'https://letsencrypt.org/documents/LE-SA-v1.6.pdf';
 const NOW = new Date('2026-09-25T12:00:00.000Z');
 
@@ -78,36 +75,30 @@ function home() {
 function relayStatus(overrides: Partial<RemoteAccessStatusFile> = {}): RemoteAccessStatusFile {
   return {
     ...emptyRemoteAccessStatus('relay'),
-    relay_host: 'connect.olympusplugin.ai',
+    relay_host: 'mcp.olympusplugin.ai',
     local_url: 'http://127.0.0.1:28190',
     public_base_url: PUBLIC,
     instance_id: 'instance-1',
     pid: process.pid,
-    install_id: 'abc123',
-    hostname: 'abc123.connect.olympusplugin.ai',
+    install_id: 'abcdefghijklmnopqrstuvwxyz234567',
     relay: { state: 'online', reason: null, retry_in_ms: null },
-    certificate: { state: 'serving', not_after: '2026-12-23T00:00:00.000Z', reason: null, retry_in_ms: null },
-    terms_url: TERMS_V1,
+    last_connected_at: '2026-09-25T11:00:00.000Z',
     ...overrides,
   };
 }
 
 /** The dashboard control over a real state directory, with the config write recorded. */
-function control(dir: string, options: { fetchTerms?: () => Promise<string | undefined>; write?: RemoteAccessConfigWrite } = {}) {
+function control(_dir: string, options: { write?: RemoteAccessConfigWrite } = {}) {
   const writes: boolean[] = [];
-  const fetched: number[] = [];
   const remoteAccessControl = createDashboardRemoteAccessControl({
-    dir: () => dir,
-    fetchTerms: options.fetchTerms ?? (async () => { fetched.push(1); return TERMS_V1; }),
     setEnabled: async (enabled) => { writes.push(enabled); return options.write ?? { ok: true }; },
-    now: () => NOW,
   });
   const backend: DashboardAgentConnectionsBackend = {
     store: () => undefined,
     remoteAccess: () => ({ state: 'off' }),
     remoteAccessControl,
   };
-  return { backend, writes, fetched };
+  return { backend, writes };
 }
 
 function guarded(backend: DashboardAgentConnectionsBackend) {
@@ -163,7 +154,6 @@ describe('the toggle carries dashboard custody', () => {
       expect((await fetcher(new Request(`${ORIGIN}${path}`, { headers: { Authorization: 'Bearer worker-secret' } }))).status).toBe(404);
     }
     expect(writes).toEqual([]);
-    expect(readTermsAcceptance(dir)).toBeUndefined();
   });
 
   test('a live session with CSRF, and the Gateway bearer, turn it on and off', async () => {
@@ -185,7 +175,6 @@ describe('the toggle carries dashboard custody', () => {
   test('is rate limited per control session, on its own budget', async () => {
     const { dir } = home();
     writeRemoteAccessStatus(dir, relayStatus());
-    recordTermsAcceptance(dir, TERMS_V1);
     const { backend, writes } = control(dir);
     const fetcher = guarded(backend);
     const { cookie, csrf } = await controlSession(fetcher);
@@ -203,99 +192,20 @@ describe('the toggle carries dashboard custody', () => {
   });
 });
 
-describe('the agreement gates turning it on', () => {
-  test('no enable without acceptance: the route names the agreement and writes nothing', async () => {
+describe('turning it on asks for no agreement', () => {
+  test('on writes at once; an accept_terms field from an older page is ignored; malformed requests are refused', async () => {
     const { dir } = home();
-    writeRemoteAccessStatus(dir, relayStatus({ certificate: { state: 'awaiting_terms', not_after: null, reason: null, retry_in_ms: null } }));
     const { backend, writes } = control(dir);
-    const refused = await call(backend, { enabled: true });
-    expect(refused.status).toBe(409);
-    expect(refused.body).toMatchObject({ ok: false, error: { code: 'terms_required' }, terms: { url: TERMS_V1, read_url: TERMS_V1 } });
-    expect(writes).toEqual([]);
-    expect(readTermsAcceptance(dir)).toBeUndefined();
-  });
-
-  test('explicit acceptance is recorded exactly as olympus connections terms --accept records it', async () => {
-    const dashboard = home();
-    writeRemoteAccessStatus(dashboard.dir, relayStatus());
-    const { backend, writes } = control(dashboard.dir);
-    expect((await call(backend, { enabled: true, accept_terms: { url: TERMS_V1 } })).status).toBe(200);
-    expect(writes).toEqual([true]);
-
-    const cli = home();
-    writeRemoteAccessStatus(cli.dir, relayStatus());
-    await runConnectionsTermsCommand(['--accept'], cli.env, { now: () => NOW, fetchTerms: async () => { throw new Error('unused'); } });
-    expect(readTermsAcceptance(dashboard.dir)).toEqual(readTermsAcceptance(cli.dir)!);
-    expect(readTermsAcceptance(dashboard.dir)).toEqual({ terms_url: TERMS_V1, accepted_at: NOW.toISOString() });
-    // And the CLI reads the dashboard's acceptance as its own.
-    expect(await runConnectionsTermsCommand([], dashboard.env, { fetchTerms: async () => { throw new Error('unused'); } }))
-      .toMatchObject({ url: TERMS_V1, accepted: true });
-    // Once accepted, turning it on again needs no second acceptance.
     expect((await call(backend, { enabled: true })).status).toBe(200);
-    expect(writes).toEqual([true, true]);
-  });
-
-  test('a changed agreement URL needs a new acceptance, and a stale acceptance is refused', async () => {
-    const { dir } = home();
-    writeRemoteAccessStatus(dir, relayStatus());
-    const { backend, writes } = control(dir);
     expect((await call(backend, { enabled: true, accept_terms: { url: TERMS_V1 } })).status).toBe(200);
-
-    // The CA publishes a new agreement; the relay reports it.
-    writeRemoteAccessStatus(dir, relayStatus({ terms_url: TERMS_V2, certificate: { state: 'awaiting_terms', not_after: null, reason: null, retry_in_ms: null } }));
-    const again = await call(backend, { enabled: true });
-    expect(again.status).toBe(409);
-    expect(again.body).toMatchObject({ error: { code: 'terms_required' }, terms: { url: TERMS_V2 } });
-    const stale = await call(backend, { enabled: true, accept_terms: { url: TERMS_V1 } });
-    expect(stale.status).toBe(409);
-    expect(stale.body).toMatchObject({ error: { code: 'terms_changed' }, terms: { url: TERMS_V2 } });
-    expect(readTermsAcceptance(dir)?.terms_url).toBe(TERMS_V1);
-    expect(writes).toEqual([true]);
-
-    expect((await call(backend, { enabled: true, accept_terms: { url: TERMS_V2 } })).status).toBe(200);
-    expect(readTermsAcceptance(dir)?.terms_url).toBe(TERMS_V2);
-    expect(writes).toEqual([true, true]);
-  });
-
-  test('before the relay has run, the agreement comes from the CA directory; a CA with none is accepted against none', async () => {
-    const fresh = home();
-    const asked = control(fresh.dir);
-    expect((await call(asked.backend, { enabled: true })).body).toMatchObject({ error: { code: 'terms_required' }, terms: { url: TERMS_V1 } });
-    expect(asked.fetched).toHaveLength(1);
-
-    const none = home();
-    writeRemoteAccessStatus(none.dir, relayStatus({ terms_url: null, public_base_url: null, certificate: { state: 'awaiting_terms', not_after: null, reason: null, retry_in_ms: null } }));
-    const noUrl = control(none.dir, { fetchTerms: async () => { throw new Error('must not substitute another agreement'); } });
-    const shown = await call(noUrl.backend, { enabled: true });
-    expect(shown.body).toMatchObject({ error: { code: 'terms_required' }, terms: { url: null, read_url: LETS_ENCRYPT_REPOSITORY_URL } });
-    expect((await call(noUrl.backend, { enabled: true, accept_terms: { url: null } })).status).toBe(200);
-    expect(readTermsAcceptance(none.dir)).toEqual({ terms_url: null, accepted_at: NOW.toISOString() });
-
-    const offline = home();
-    const unreadable = control(offline.dir, { fetchTerms: async () => { throw new Error('offline'); } });
-    const failed = await call(unreadable.backend, { enabled: true });
-    expect(failed.status).toBe(502);
-    expect(failed.body).toMatchObject({ error: { code: 'terms_unavailable' } });
-    expect(unreadable.writes).toEqual([]);
-  });
-
-  test('turning off needs no agreement; malformed requests are refused', async () => {
-    const { dir } = home();
-    const { backend, writes } = control(dir);
     expect((await call(backend, { enabled: false })).status).toBe(200);
-    expect(writes).toEqual([false]);
-    for (const body of [{}, { enabled: 'yes' }, { enabled: false, accept_terms: { url: TERMS_V1 } }, { enabled: true, accept_terms: { url: 'http://insecure.test/terms' } },
-      { enabled: true, accept_terms: {} }, { enabled: true, extra: 1 }]) {
+    expect(writes).toEqual([true, true, false]);
+    for (const body of [{}, { enabled: 'yes' }, { enabled: true, extra: 1 }]) {
       expect((await call(backend, body)).status).toBe(400);
     }
-    expect(writes).toEqual([false]);
-    expect(readTermsAcceptance(dir)).toBeUndefined();
+    expect(writes).toEqual([true, true, false]);
     // The Gateway bridge validates the same shape before it reaches the worker.
     expect(parseDashboardControlParams({ action: 'set_remote_access', enabled: false })).toEqual({ action: 'set_remote_access', enabled: false });
-    expect(parseDashboardControlParams({ action: 'set_remote_access', enabled: true, accept_terms: { url: null } }))
-      .toEqual({ action: 'set_remote_access', enabled: true, accept_terms: { url: null } });
-    expect(() => parseDashboardControlParams({ action: 'set_remote_access', enabled: false, accept_terms: { url: TERMS_V1 } })).toThrow();
-    expect(() => parseDashboardControlParams({ action: 'set_remote_access', enabled: true, accept_terms: { url: 'http://x.test' } })).toThrow();
     expect(() => parseDashboardControlParams({ action: 'set_remote_access', enabled: true, relayHost: 'evil.test' })).toThrow();
   });
 });
@@ -324,7 +234,7 @@ describe('the config changes only through OpenClaw\'s config write', () => {
     plugins: {
       allow: ['olympus'],
       entries: {
-        olympus: { enabled: true, config: { worker: { authToken: { source: 'exec', id: 'olympus/worker' } }, remote: { relayHost: 'connect.olympusplugin.ai' } } },
+        olympus: { enabled: true, config: { worker: { authToken: { source: 'exec', id: 'olympus/worker' } }, remote: { relayHost: 'mcp.olympusplugin.ai' } } },
         other: { enabled: true },
       },
     },
@@ -433,9 +343,7 @@ describe('the config changes only through OpenClaw\'s config write', () => {
 describe('remote access that is on but not reachable', () => {
   const live = parseRemotePublicBaseUrl(PUBLIC);
   const view = (file: RemoteAccessStatusFile) => {
-    const { dir } = home();
     return remoteAccessStatusView({
-      dir,
       status: file,
       urls: { public_base_url: file.public_base_url, public_base_url_source: 'relay', mcp_url: `${PUBLIC}/mcp`, openapi_url: `${PUBLIC}/openapi.json`, oauth_issuer: PUBLIC, local_url: 'http://127.0.0.1:28190' },
       isAlive: () => true,
@@ -443,7 +351,7 @@ describe('remote access that is on but not reachable', () => {
   };
 
   test('an outage keeps the address but reads not connected with its reason, and mints no pairing code', async () => {
-    const outage = relayStatus({ relay: { state: 'offline', reason: 'connect ECONNREFUSED 203.0.113.9:443', retry_in_ms: 30_000 } });
+    const outage = relayStatus({ relay: { state: 'offline', reason: 'could not reach the relay', retry_in_ms: 30_000 } });
     // The relay child keeps the served address through an outage.
     expect(outage.public_base_url).toBe(PUBLIC);
     const access = remoteAccessFromStatus({ live: live.enabled ? live.urls : undefined, status: view(outage) });
@@ -469,26 +377,11 @@ describe('remote access that is on but not reachable', () => {
 
   test('the relay that is not deployed yet reads "Olympus relay unavailable", in the CLI status and the panel', () => {
     const notDeployed = relayStatus({
-      public_base_url: null,
-      install_id: null,
-      hostname: null,
-      relay: { state: 'offline', reason: 'getaddrinfo ENOTFOUND relay.connect.olympusplugin.ai', retry_in_ms: 16_000 },
-      certificate: { state: 'none', not_after: null, reason: null, retry_in_ms: null },
+      relay: { state: 'offline', reason: 'could not reach the relay', retry_in_ms: 16_000 },
     });
     const status = view(notDeployed);
-    expect(status.next_step).toContain('Olympus relay unavailable (getaddrinfo ENOTFOUND relay.connect.olympusplugin.ai)');
+    expect(status.next_step).toContain('Olympus relay unavailable (could not reach the relay)');
     expect(remoteAccessFromStatus({ live: undefined, status })).toMatchObject({ state: 'not_connected', detail: expect.stringContaining('Olympus relay unavailable') });
-  });
-
-  test('awaiting the agreement offers Review agreement beside Turn off', () => {
-    const awaiting = relayStatus({ public_base_url: null, certificate: { state: 'awaiting_terms', not_after: null, reason: null, retry_in_ms: null } });
-    const access = remoteAccessFromStatus({ live: undefined, status: view(awaiting) });
-    expect(access).toMatchObject({ state: 'not_connected', needsTerms: true });
-    const doc = new Window().document;
-    doc.body.innerHTML = renderDashboardAgentsSection({ view: { remoteAccess: access, connections: [] }, now: NOW });
-    expect(doc.querySelector('form[data-agent-kind="remote-on"]')!.textContent).toBe('Review agreement');
-    expect(doc.querySelector('form[data-agent-kind="remote-off"]')).not.toBeNull();
-    expect(doc.querySelector('[data-remote-terms]')!.hasAttribute('hidden')).toBe(true);
   });
 });
 
@@ -696,7 +589,6 @@ describe('a public address set in worker.env', () => {
   test('the route refuses to toggle it and writes nothing', async () => {
     const { dir } = home();
     writeRemoteAccessStatus(dir, relayStatus());
-    recordTermsAcceptance(dir, TERMS_V1);
     const { backend, writes } = control(dir);
     const envBackend = { ...backend, remoteAccess: () => envAccess };
     for (const body of [{ enabled: false }, { enabled: true }]) {
@@ -717,7 +609,7 @@ describe('Turn off reports off only when nothing is still reachable', () => {
     const stillOn = { ...backend, remoteAccess: () => REMOTE_ON };
     const result = await call(stillOn, { enabled: false });
     expect(result.status).toBe(409);
-    expect(result.body).toMatchObject({ ok: false, error: { code: 'remote_access_still_reachable', message: expect.stringContaining('abc123.connect.olympusplugin.ai') } });
+    expect(result.body).toMatchObject({ ok: false, error: { code: 'remote_access_still_reachable', message: expect.stringContaining('mcp.olympusplugin.ai') } });
     expect(JSON.stringify(result.body)).not.toContain('Remote access is off');
     expect(writes).toEqual([false]);
   });

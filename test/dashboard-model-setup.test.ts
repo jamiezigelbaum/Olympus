@@ -28,7 +28,9 @@ test('a model blocker leads the page and every source connection says why it is 
   expect(banner).toContain('data-focus-target="#model-key-field-gemini"');
   expect(html.indexOf('data-blocker')).toBeLessThan(html.indexOf('aria-label="Models"'));
   expect(html).toContain('id="model-key-field-gemini"');
-  expect(html.indexOf('aria-label="Models"')).toBeLessThan(html.indexOf('Available to connect'));
+  // The Models row opens by itself while models need the owner, so the
+  // banner's button lands on a field the reader can see.
+  expect(html).toContain('<details class="models" data-poll-key="models" open><summary>Models — Custom · Needs you</summary>');
   expect(html).toContain('name="source" value="gemini"');
   expect(html).toContain('name="source" value="venice"');
   // Blocked controls look blocked and carry the reason beside themselves.
@@ -64,7 +66,10 @@ test('ready models collapse to source-style rows; a model without its key keeps 
   }
   expect(ready).not.toContain('<section class="modelcard"');
   expect(ready).not.toContain('Add the keys required by your privacy choice');
-  expect(ready).toContain('Models are ready. You can connect sources below.');
+  // One line on the page; the setup inside it no longer points at sources below.
+  expect(ready).toContain('<summary>Models — Custom · Ready</summary>');
+  expect(ready).toContain('Models are ready.');
+  expect(ready).not.toContain('<details class="models" data-poll-key="models" open>');
   // The optional local-model help and the re-check stay reachable on one quiet line.
   const extras = segment(ready, 'class="modelextras"', '</section>');
   expect(extras).toContain('data-sheet-toggle="#local-model-setup-sheet"');

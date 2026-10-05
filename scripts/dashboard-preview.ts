@@ -243,7 +243,104 @@ function connectPreview(
   });
 }
 
+/**
+ * The ChatGPT-rules port (owner, 2026-10-02) in one view: Gmail mid-sign-in
+ * through Olympus's own app, Google Drive reading at 40%, Dropbox connected
+ * and waiting for its folders, Readwise fresh. Pair it with
+ * buildDashboardPreviewOptions('review') for a model downloading and privacy
+ * set up ('review-unconfigured' leaves privacy unset; 'review-indexing' adds a
+ * second working source so the page-wide progress line shows).
+ */
+function reviewPreview(variant: 'review' | 'review-unconfigured' | 'review-indexing'): SourceDashboardViewModel {
+  const status = emptyStatus();
+  status.corpora = [
+    corpus('internal.drive.docs', 'file', 'internal', 'google_drive', 3_100, 3_100, { withText: 1_240, embedded: 1_240 }),
+    corpus('internal.readwise.library', 'readwise', 'internal', 'readwise', 250, 250, {
+      withText: 250,
+      embedded: variant === 'review-indexing' ? 100 : 250,
+    }),
+  ];
+  const view = buildSourceDashboardViewModel({
+    sourceIndexStatus: status,
+    schedulerStatus: scheduler([
+      schedulerSource('google_drive.docs', 'internal.drive.docs', 0.2),
+      schedulerSource('readwise.library', 'internal.readwise.library', 0.4),
+    ]),
+    sovereigntyEngine: engine,
+    connectedHandleRegistry: registry([
+      handle('google_drive.personal', 'google_drive', ['google_drive.docs.sync'], ['https://www.googleapis.com/auth/drive.readonly']),
+      handle('dropbox.personal', 'dropbox', ['dropbox.files.sync'], ['files.content.read']),
+      handle('readwise.personal', 'readwise', ['readwise.library.sync'], []),
+    ]),
+    apiKeyAvailability: { readwise: true },
+    publisherOAuthSources: ['gmail', 'google-drive', 'dropbox'] as const,
+    oauthClientIds: {},
+    oauthClientSecretAvailability: {},
+    googlePilotClientConfigured: true,
+    oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
+    ingestionDispositionsAvailable: true,
+    fileSourceScopeStatus: { 'google_drive.docs': 'approved', 'dropbox.files': 'scope_pending' },
+    fileSourceScopeIngestionEnabled: { 'google_drive.docs': true, 'dropbox.files': false },
+    pendingConnects: [{
+      source: 'gmail',
+      started_at: at(120),
+      expires_at: new Date(NOW.getTime() + 9 * 60_000).toISOString(),
+    }],
+    now: NOW,
+  });
+  // Built-in models only, as a fresh install has them: no keys to enter, the
+  // private model still downloading (see buildDashboardPreviewOptions).
+  // Drive read a file 40 seconds ago; Readwise's index moved a minute ago.
+  for (const card of view.sources) {
+    if (card.source_id === 'google_drive.docs') card.movement = { extraction_at: at(40), embedding_at: at(40) };
+    if (card.source_id === 'readwise.library') card.movement = { embedding_at: at(60) };
+  }
+  return view;
+}
+
+/**
+ * The page options the worker reads for a preview state: the built-in models'
+ * installs and the owner's privacy settings. Empty for the older states.
+ */
+export function buildDashboardPreviewOptions(state: string): {
+  modelInstalls?: { embedding?: { kind: 'built_in'; state: 'ready' | 'downloading'; percent?: number; bytesDone?: number; bytesTotal?: number }; privateModel?: { state: 'downloading' | 'ready'; percent?: number; bytesDone?: number; bytesTotal?: number } };
+  privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
+  privacySettings?: {
+    configured: boolean;
+    description: string;
+    pendingCount: number;
+    rules: Array<{ kind: 'folder'; source_id: 'dropbox.files'; key: string; display: string }
+      | { kind: 'label'; source_id: 'gmail.email'; key: string; value: string }
+      | { kind: 'sender'; source_id: 'gmail.email'; value: string }>;
+  };
+} {
+  if (!state.startsWith('review')) return {};
+  const configured = state !== 'review-unconfigured';
+  const rules = configured
+    ? [
+        { kind: 'folder' as const, source_id: 'dropbox.files' as const, key: '/medical-records', display: 'Medical Records' },
+        { kind: 'label' as const, source_id: 'gmail.email' as const, key: 'Label_12', value: 'Lawyer' },
+        { kind: 'sender' as const, source_id: 'gmail.email' as const, value: 'billing@clinic.example' },
+      ]
+    : [];
+  return {
+    modelInstalls: {
+      embedding: { kind: 'built_in', state: 'ready' },
+      // The private model downloading: 40%, 1.2 of 3.0 GB.
+      privateModel: { state: 'downloading', percent: 40, bytesDone: 1_200_000_000, bytesTotal: 3_000_000_000 },
+    },
+    privacy: { configured, pendingCount: 12, ruleCount: rules.length },
+    privacySettings: {
+      configured,
+      description: configured ? 'My health and therapy, money and taxes, anything about my kids' : '',
+      pendingCount: 12,
+      rules,
+    },
+  };
+}
+
 export function buildDashboardPreviewView(state: string): SourceDashboardViewModel {
+  if (state === 'review' || state === 'review-unconfigured' || state === 'review-indexing') return reviewPreview(state);
   if (state === 'models') {
     const view = buildDashboardPreviewView('fresh');
     view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'missing' }).getStatus();
@@ -814,6 +911,7 @@ if (import.meta.main) {
     }
     const state = url.pathname.replace(/^\//, '') || 'partial';
     const states = [
+      'review', 'review-unconfigured', 'review-indexing',
       'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
       'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
       'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
@@ -857,12 +955,14 @@ if (import.meta.main) {
         },
         ...(previewUnlocked ? { controlSessionCsrfToken: 'preview-csrf-token' } : {}),
         agents: previewAgentsView(url.searchParams.get('agents')),
+        ...buildDashboardPreviewOptions(state),
       },
     });
     return new Response(page.html, { status: page.status, headers: { 'content-type': 'text/html; charset=utf-8' } });
   },
   });
   console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
+  console.log('  ChatGPT-rules port: /review /review-unconfigured /review-indexing (add ?setup, ?privacy)');
   console.log('  states: /models /models-applying /first-install /gmail-scope-pending /tier-migration /fresh /partial /full /dropbox-initial /dropbox-update');
   console.log('  mail scope picker: /mail-picker (add ?approved for a saved scope)');
   console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');

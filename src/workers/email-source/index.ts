@@ -1,3 +1,4 @@
+import { CONSENT_PAGE_STYLE } from '../remote-oauth/consent-page.ts';
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import type { SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
@@ -153,7 +154,11 @@ import {
   GOOGLE_DRIVE_DOCS_CORPUS_ID,
   INTERNAL_EMAIL_CORPUS_ID,
 } from '../google-connectors/corpora.ts';
-import { renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
+import { dashboardHtmlRoutePage, renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
+import type { DashboardModelInstalls } from '../dashboard/source-rows.ts';
+import type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
+
+export type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 import {
   OLYMPUS_DASHBOARD_VIEWS,
   type OlympusFolderScopeBrowseResult,
@@ -211,7 +216,6 @@ import {
 } from '../source-dispositions.ts';
 import type { SourceDispositionEdit, SourceDispositionState } from '../../core/source-disposition-tree.ts';
 import type { SourceExclusionCriterionKind } from '../../core/source-ingestion-exclusions.ts';
-import { loadSensitivityMap } from '../../core/sensitivity-map.ts';
 import {
   buildSourceIngestionLedgerSnapshot,
   type SourceIngestionLedgerExclusionSource,
@@ -483,6 +487,23 @@ export interface EmailSourceWorkerOptions {
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
+    /**
+     * The owner's privacy settings, through the same engine operations as
+     * ChatGPT's olympus_privacy_get / olympus_privacy_set (validation, caps,
+     * Secrets-tier locations kept off the page and kept as saved). Absent: the
+     * dashboard shows no Privacy row and the save route answers 501.
+     */
+    privacy?: {
+      /** Counts only, for the pages that name privacy. */
+      summary(): Promise<DashboardPrivacySummaryOutcome>;
+      /** The full settings, for the editor; supplied only to a reader with write authority. */
+      read(): Promise<DashboardPrivacyOutcome>;
+      save(update: Record<string, unknown>): Promise<DashboardPrivacyOutcome>;
+    };
+    /** The built-in models' installs, for the Models row (status only). */
+    modelInstalls?: () => DashboardModelInstalls;
+    /** Starts a built-in model's failed install again; false when that model is not built in here. */
+    retryModel?: (model: 'embedding' | 'answers') => boolean;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
@@ -539,6 +560,14 @@ export interface EmailSourceWorkerOptions {
      * tree that reads as "you have no folders".
      */
     ingestionDispositions?: () => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
+    /**
+     * Where a sign-in started for ChatGPT returns: the relay's public origin
+     * and this install's relay id (docs/design/chatgpt-plugin.md, "Setup from
+     * ChatGPT"). Read only when the start request asks for `handback: 'relay'`;
+     * the origin is never taken from the request. Absent or undefined: no
+     * relay hand-back on this worker.
+     */
+    oauthHandback?: () => { origin: string; installId: string } | undefined;
     fileSourceScopes?: {
       summaries(): SourceFolderScopeSummary[];
       browse(input: {
@@ -1251,12 +1280,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // configuration" section is summarized from an empty list, so the
           // page reported zero excluded folders while the rules were enforced.
           const exclusionSources = await dashboardExclusionSources(sourceDashboard, dashboardExclusionDebt);
-          // The owner's secure categories, read the same way the exclusion
-          // rules above are: off disk, read-only, and tolerantly. A missing map
-          // is the ordinary state and an unparseable one must not take the
-          // whole page down, so both yield undefined and the page omits the
-          // section rather than rendering an empty one.
-          const sensitivityMap = loadSensitivityMap({ allowMissing: true, ignoreInvalid: true });
           const credentialHealth = readCredentialHealthReport(
             sourceDashboard.credentialHealthReportPath
               ?? process.env.OLYMPUS_CREDENTIAL_HEALTH_REPORT_PATH?.trim()
@@ -1323,7 +1346,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   ),
                 }
               : {}),
-            ...(sensitivityMap ? { sensitivityMap } : {}),
           });
           assertNoRawEmailFields(view);
           if (url.pathname === '/dashboard.json') return json(view);
@@ -1340,7 +1362,35 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // gives the lanes a trailing rate — one reading per render.
           const backgroundRuntime = readBackgroundRuntime({ env: process.env });
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
+          // The owner's privacy settings, counts only, for the Privacy row; the
+          // full settings only for the Privacy editor itself.
+          // Only the pages that name privacy read it (Home's one ask, Setup's
+          // row, Sensitivity, the editor): Background and source pages poll
+          // without it. Counts for the row; the full settings only for the
+          // editor, and only for a reader with write authority.
+          // The renderer's own precedence, so `?background&privacy` reads no
+          // privacy because it renders Background.
+          const dashboardPage = dashboardUi ? dashboardUi.params.view : dashboardHtmlRoutePage(url);
+          const privacyShown = dashboardPage === 'home' || dashboardPage === 'setup' || dashboardPage === 'sensitivity' || dashboardPage === 'privacy';
+          const writeAuthority = dashboardUi ? dashboardUi.canWrite : request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+          const privacySummary = sourceDashboard.privacy && privacyShown
+            ? await sourceDashboard.privacy.summary().catch(() => undefined)
+            : undefined;
+          const privacyRead = sourceDashboard.privacy && dashboardPage === 'privacy' && writeAuthority
+            ? await sourceDashboard.privacy.read().catch(() => undefined)
+            : undefined;
+          let modelInstalls: DashboardModelInstalls | undefined;
+          try {
+            modelInstalls = sourceDashboard.modelInstalls?.();
+          } catch {
+            modelInstalls = undefined;
+          }
           const options: DashboardBackgroundPageOptions = {
+            ...(modelInstalls ? { modelInstalls } : {}),
+            ...(sourceDashboard.privacy && privacyShown
+              ? { privacy: privacySummary?.ok ? privacySummary.summary : 'unreadable' as const }
+              : {}),
+            ...(privacyRead?.ok ? { privacySettings: privacyRead.settings } : {}),
             embeddingRuntime,
             backgroundRuntime,
             ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
@@ -1419,7 +1469,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             ? true
             : verifyOAuthRelayState(state, {
               keys: await dashboardRelayStateKeys(dashboardSecretStore(sourceDashboard)),
-              expectedOrigin: dashboardOAuthRedirectOrigin(url, request.headers),
+              expectedOrigin: attempt.relay.handbackOrigin ?? dashboardOAuthRedirectOrigin(url, request.headers),
               expectedSource: source,
               expectedNonce: attempt.relay.nonce,
               now: new Date(),
@@ -1531,6 +1581,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               status: 400,
             });
           }
+          // A ChatGPT hand-back arrived through the relay, which can route this
+          // tab's next request only by its state: say done here.
+          if (attempt.relay?.handbackOrigin) {
+            return dashboardOAuthCompleteHtml({ source, returnTo: CHATGPT_RETURN_TO });
+          }
           // MINOR 2 (Codex round 2): redirect to the query-free `/done` route
           // above rather than rendering the "Connected" page at this URL, which
           // still carries the now-spent `code` and `state` in its own address —
@@ -1560,13 +1615,27 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const record = await parseObjectBody(request);
           const source = parseDashboardOAuthSource(record.source);
-          assertDashboardModelsReady();
+          // A sign-in from ChatGPT (handback: relay) is not gated on model
+          // setup: ChatGPT writes the answers, so the Mac's answer model is
+          // irrelevant to it, and connecting stores a grant without reading
+          // anything. What reads private data stays gated: the scope approval
+          // and the first sync after connect both check readiness, so indexing
+          // simply waits for the models (owner live test, 2026-10-01: a Venice
+          // analyst without a key refused Connect from ChatGPT).
+          if (record.handback !== 'relay') assertDashboardModelsReady();
           const secretStore = dashboardSecretStore(sourceDashboard);
           const registry = readDashboardRegistry(sourceDashboard.registryPath);
           assertDashboardAccountCardinality(registry, source);
           const clientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
           const submittedClientId = asOptionalString(record.client_id);
-          const dashboardOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+          // A sign-in started for ChatGPT returns through the relay to this
+          // install (the state's nonce carries the install id the relay routes
+          // on). Only the publisher apps' relay callback can do that.
+          const handback = record.handback === 'relay' ? sourceDashboard.oauthHandback?.() : undefined;
+          if (record.handback !== undefined && !handback) {
+            throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This sign-in cannot return through the relay on this install.');
+          }
+          const dashboardOrigin = handback?.origin ?? dashboardOAuthRedirectOrigin(url, request.headers);
           // Publisher mode: Olympus's own registered app, so the owner presses
           // Connect and nothing else. It is chosen only when this install has
           // no registration of its own for the source — a submitted client id
@@ -1578,6 +1647,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               source,
               dashboardOAuthClientIdForSource(source, clientIdSets.own),
             );
+          if (handback && (submittedClientId || publisher?.relay !== true)) {
+            throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This source uses your own app registration; connect it in Olympus on your Mac.');
+          }
           const clientId = submittedClientId
             ?? publisher?.clientId
             ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
@@ -1628,7 +1700,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // so a relay flow's state is signed and carries that origin. Minted
           // here, inside an authenticated control-session route, and never from
           // an inbound callback (OAUTH_RELAY.md, worker check 0).
-          const relayNonce = publisher?.relay === true ? createOAuthRelayNonce() : undefined;
+          const relayNonce = publisher?.relay === true
+            ? (handback ? `${handback.installId}_${createOAuthRelayNonce()}` : createOAuthRelayNonce())
+            : undefined;
           const relayState = relayNonce === undefined
             ? undefined
             : signOAuthRelayState({
@@ -1674,10 +1748,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           dashboardOAuthAttempts.set(source, {
             source,
             pending,
-            returnTo: dashboardReturnTo(),
+            returnTo: handback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
             startedAt: startedAtDate.toISOString(),
             expiresAt,
-            ...(relayNonce ? { relay: { nonce: relayNonce } } : {}),
+            ...(relayNonce ? { relay: { nonce: relayNonce, ...(handback ? { handbackOrigin: handback.origin } : {}) } } : {}),
           });
           return json({
             ok: true,
@@ -1728,6 +1802,48 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // Return promptly; the authoritative Models card receives their result.
           void sourceDashboard.checkModelSetup().catch(() => undefined);
           return json({ ok: true, status_message: 'Readiness check requested. See the Models cards above for the result.' });
+        }
+
+        // The owner's privacy settings, saved through the same engine operation
+        // as ChatGPT's olympus_privacy_set: each field given replaces the saved
+        // one, every rule is validated and capped, and rules on Secrets-tier
+        // locations stay as saved. Bearer or control session only, like every
+        // control route here.
+        if (request.method === 'POST' && url.pathname === '/dashboard/privacy') {
+          if (!sourceDashboard?.privacy) {
+            throw new EmailSourceWorkerError(501, 'privacy_not_supported', 'This worker does not support privacy settings.');
+          }
+          const record = await parseObjectBody(request);
+          const outcome = await sourceDashboard.privacy.save(record);
+          if (!outcome.ok) {
+            // Lowering protection without the owner's confirmation is refused
+            // as a conflict the page answers with its confirm step.
+            const status = outcome.code === 'invalid_params' ? 400 : outcome.code === 'privacy_owner_only' ? 409 : 500;
+            return json({ ok: false, error: { code: outcome.code, message: outcome.message } }, status);
+          }
+          if (outcome.status === 'conflict') {
+            // Changed somewhere else since the page was read: nothing saved;
+            // the current settings come back so the page can keep the draft.
+            return json({
+              ok: false,
+              error: { code: 'conflict', message: 'These privacy settings were changed somewhere else. Your changes are still here.' },
+              settings: outcome.settings,
+            }, 409);
+          }
+          return json({ ok: true, settings: outcome.settings, status_message: 'Privacy saved.' });
+        }
+
+        if (request.method === 'POST' && url.pathname === '/dashboard/models/retry') {
+          if (!sourceDashboard?.retryModel) {
+            throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'This worker does not support restarting a model download.');
+          }
+          const record = await parseObjectBody(request);
+          const model = record.model === 'embedding' || record.model === 'answers' ? record.model : undefined;
+          if (!model) throw new EmailSourceWorkerError(400, 'invalid_request', 'model must be embedding or answers.');
+          if (!sourceDashboard.retryModel(model)) {
+            throw new EmailSourceWorkerError(409, 'model_not_configured', 'That model is not the built-in one on this computer.');
+          }
+          return json({ ok: true, status_message: 'Downloading again. This row updates as it goes.' });
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/connect/api-key') {
@@ -2773,8 +2889,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               corpusId: run.store.corpusId,
               trustDomain: run.store.trustDomain,
             })));
-            // One tier-ledger snapshot judges every tier's hits together.
-            const visible = new Set(tiered && options.sourceIndexVisibilityGate
+            // One tier-ledger snapshot judges every tier's hits together, and
+            // a single pinned corpus (`all_tiers: false`) too: an item whose
+            // copy here is no longer current (re-tiered, Secret) is never
+            // returned, whatever the store's own filter says.
+            const visible = new Set(options.sourceIndexVisibilityGate
               ? options.sourceIndexVisibilityGate(tagged)
               : tagged);
             // Round-robin across tiers, so a full page from one tier cannot
@@ -2787,7 +2906,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 if (hit && merged.length < searchRequest.maxResults) merged.push(hit);
               }
             }
-            const hits = tiered ? merged : tagged;
+            const hits = tiered ? merged : tagged.filter((hit) => visible.has(hit));
             const secretLocations = tiered
               ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
               : [];
@@ -5433,7 +5552,15 @@ interface DashboardOAuthAttempt {
    * The nonce is the single-use record the bounced state must match; consuming
    * or replacing the attempt is what makes a replay fail.
    */
-  relay?: { nonce: string };
+  relay?: {
+    nonce: string;
+    /**
+     * Set for a ChatGPT hand-back: the relay origin the state names, fixed at
+     * start. The callback then arrives through the relay at this worker's
+     * loopback address, so the origin cannot be derived from that request.
+     */
+    handbackOrigin?: string;
+  };
   /**
    * The provider's refusal, if its callback carried `error=`.
    *
@@ -5526,6 +5653,9 @@ function dashboardOAuthAttemptExpired(attempt: DashboardOAuthAttempt, now: Date)
 function dashboardReturnTo(): string {
   return '/dashboard';
 }
+
+/** Where a sign-in started from ChatGPT sends the person back to. */
+const CHATGPT_RETURN_TO = 'https://chatgpt.com/';
 
 function parseDashboardControlUiRequest(
   url: URL,
@@ -6138,7 +6268,19 @@ function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSo
   // The code inside the shape is re-checked against the allowlist: the shape
   // alone would admit arbitrary lowercase content from a crafted message.
   if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined)) return message;
-  return `Connecting ${source} failed partway through. Start connect again from the dashboard.`;
+  return `Connecting ${dashboardOAuthSourceLabel(source)} failed partway through. Start connect again from the dashboard.`;
+}
+
+/** The product name a callback page uses for a source, never its id. */
+function dashboardOAuthSourceLabel(source: DashboardOAuthSource): string {
+  const labels: Record<DashboardOAuthSource, string> = {
+    google: 'Google',
+    gmail: 'Gmail',
+    'google-drive': 'Google Drive',
+    dropbox: 'Dropbox',
+    x: 'X',
+  };
+  return labels[source] ?? source;
 }
 
 /**
@@ -6160,14 +6302,19 @@ function dashboardOAuthFailureHtml(options: {
   returnTo: string;
   status: number;
 }): Response {
+  const label = dashboardOAuthSourceLabel(options.source);
+  const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
   return dashboardOAuthLandingHtml({
     title: 'Olympus connect failed',
-    heading: `Could not connect ${options.source}`,
+    heading: `Could not connect ${label}`,
     paragraphs: [
-      `Could not connect ${options.source}: ${options.reason}`,
-      'You can close this tab and go back to the Olympus dashboard tab you started from.',
+      `Could not connect ${label}: ${options.reason}`,
+      chatgpt
+        ? 'Go back to ChatGPT and try again from your Olympus dashboard.'
+        : 'You can close this tab and go back to the Olympus dashboard tab you started from.',
     ],
     returnTo: options.returnTo,
+    returnLabel: chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
     status: options.status,
   });
 }
@@ -6187,13 +6334,17 @@ function dashboardOAuthCompleteHtml(options: {
   source: DashboardOAuthSource;
   returnTo: string;
 }): Response {
+  const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
   return dashboardOAuthLandingHtml({
     title: 'Olympus connected',
-    heading: `Connected ${options.source}`,
+    heading: `${dashboardOAuthSourceLabel(options.source)} connected`,
     // The more specific of the two sentences: it also says what happens next,
-    // and where. The dashboard tab that opened this one never navigated away.
-    paragraphs: ['You can close this tab. The Olympus dashboard tab you started from is still open. It picks the new connection up on its own.'],
+    // and where. The dashboard that started this sign-in never navigated away.
+    paragraphs: [chatgpt
+      ? 'Go back to ChatGPT; your Olympus dashboard updates on its own.'
+      : 'You can close this tab. The Olympus dashboard tab you started from is still open. It picks the new connection up on its own.'],
     returnTo: options.returnTo,
+    returnLabel: chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
     status: 200,
   });
 }
@@ -6213,23 +6364,29 @@ function dashboardOAuthLandingHtml(options: {
   heading: string;
   paragraphs: readonly string[];
   returnTo: string;
+  returnLabel: string;
   status: number;
 }): Response {
   const paragraphs = options.paragraphs
     .map((paragraph) => `      <p>${escapeHtml(paragraph)}</p>`)
     .join('\n');
+  // The consent page's look (light and dark), plus a link styled as its
+  // secondary button. Inline: these pages load nothing.
   return html(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${escapeHtml(options.title)}</title>
+    <style>${CONSENT_PAGE_STYLE}
+a.back { display: inline-block; margin-top: .5rem; padding: .7rem 1rem; border: 1px solid var(--line); border-radius: 10px;
+  color: var(--fg); text-decoration: none; font-weight: 600; }</style>
   </head>
   <body>
     <main>
       <h1>${escapeHtml(options.heading)}</h1>
 ${paragraphs}
-      <p><a href="${escapeHtml(options.returnTo)}">Back to the dashboard tab</a></p>
+      <p><a class="back" href="${escapeHtml(options.returnTo)}">${escapeHtml(options.returnLabel)}</a></p>
     </main>
   </body>
 </html>`, options.status, {

@@ -2,18 +2,19 @@ import { appendFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DEFAULT_GOOGLE_PILOT_CLIENT_ID } from '../src/core/google-pilot-client.ts';
+import { GOOGLE_PILOT_CLIENT_MISSING_MESSAGE, releaseGooglePilotChoice } from './release-google-pilot-choice.ts';
 import { V0_4_PUBLIC_PACKAGE_BUILD_READY } from '../src/core/public-surface.ts';
 
 const rootDir = join(import.meta.dir, '..');
 const notReadyMessage = 'Public artifact creation is fail-closed until Slice 3D builds public-only runtime entrypoints and proves zero private bytes.';
-const publisherClientMissingMessage = 'OLYMPUS_GOOGLE_PILOT_CLIENT_ID must name the publisher-owned Google Desktop OAuth client before building a release artifact, or DEFAULT_GOOGLE_PILOT_CLIENT_ID must carry it in src/core/google-pilot-client.ts.';
-const GOOGLE_DESKTOP_CLIENT_ID = /^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/;
-// The builder accepts the environment variable OR the client id shipped in
-// source, so this gate has to resolve it the same way. Checking only the env
-// var would make CI demand a refusal the builder stops producing the moment
-// DEFAULT_GOOGLE_PILOT_CLIENT_ID is filled in.
-const publisherClientPresent = GOOGLE_DESKTOP_CLIENT_ID.test(process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID?.trim() ?? '')
-  || GOOGLE_DESKTOP_CLIENT_ID.test(DEFAULT_GOOGLE_PILOT_CLIENT_ID.trim());
+const publisherClientMissingMessage = GOOGLE_PILOT_CLIENT_MISSING_MESSAGE;
+// The builder's own resolution, so this gate and the builder agree on what
+// counts as a decision: a Desktop client id (env or source), or an explicit
+// OLYMPUS_GOOGLE_PILOT_CLIENT_ID=none. Anything else must refuse.
+const publisherClientPresent = releaseGooglePilotChoice(
+  process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID,
+  DEFAULT_GOOGLE_PILOT_CLIENT_ID,
+) !== undefined;
 
 if (V0_4_PUBLIC_PACKAGE_BUILD_READY && publisherClientPresent) {
   runReleaseArtifact('inherit');
@@ -37,7 +38,7 @@ if (V0_4_PUBLIC_PACKAGE_BUILD_READY && publisherClientPresent) {
   }
   publishReady(false);
   console.log(V0_4_PUBLIC_PACKAGE_BUILD_READY
-    ? 'Public release artifact awaits the publisher client ID; exact fail-closed refusal proved.'
+    ? 'Public release artifact awaits a Google Desktop client decision (an id, or none); exact fail-closed refusal proved.'
     : 'Public release artifact remains intentionally not ready; exact fail-closed refusal proved.');
 }
 

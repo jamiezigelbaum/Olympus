@@ -105,6 +105,7 @@ describe('release artifact packaging', () => {
       expect(listing.stdout).toContain('package/INSTALL_FOR_AGENTS.md');
       expect(listing.stdout).toContain('package/dist/cli.js');
       expect(listing.stdout).toContain('package/dist/embedding-drain.js');
+      expect(listing.stdout).toContain('package/scripts/macos-vision-ocr.js');
       expect(listing.stdout).toContain('package/docs/QUICKSTART.md');
       expect(listing.stdout).not.toContain('package/docs/ARCHITECTURE.md');
       expect(listing.stdout).toContain('package/docs/TRUST_MODEL.md');

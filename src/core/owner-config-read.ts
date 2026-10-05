@@ -1,4 +1,4 @@
-// Reading an owner-edited policy file (the sensitivity map, the tier rules)
+// Reading an owner-edited policy file (the tier rules, the privacy profile)
 // so that a half-written or tampered file can never be mistaken for a valid
 // one. Three refusals, each distinct from "the file is absent":
 //

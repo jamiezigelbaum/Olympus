@@ -9,7 +9,6 @@ import {
   renderDashboardSensitivityPage,
 } from '../src/workers/dashboard/pages/sensitivity.ts';
 import type {
-  DashboardSensitivity,
   DashboardSensitivityTiers,
   DashboardSourceCard,
   SourceDashboardViewModel,
@@ -17,20 +16,26 @@ import type {
 
 const NOW = new Date('2026-07-02T12:00:00.000Z');
 
-describe('dashboard sensitivity categories', () => {
-  test('lists the owner categories with their own words and the tier they raise into', () => {
-    const html = renderDashboardSensitivityBody(fixtureView({ sensitivity: fixtureSensitivity() }));
+describe('dashboard sensitivity privacy', () => {
+  test('leads with the privacy profile, the one ChatGPT and the Privacy editor edit, and links to the editor', () => {
+    const configured = renderDashboardSensitivityBody(
+      fixtureView(),
+      { privacy: { configured: true, pendingCount: 4, ruleCount: 3 } },
+    );
+    expect(configured).toContain('Your description · 3 always-private rules');
+    expect(configured).toContain('4 items waiting to be checked');
+    expect(configured).toContain('<a class="btn" href="/dashboard?privacy">Edit</a>');
 
-    expect(html).toContain('<div class="sect">Private categories</div>');
-    expect(html).toContain('<span class="name">Financial</span>');
-    expect(html).toContain('statements, tax, banking');
-    expect(html).toContain('Private (S4) · 12 match terms');
-    expect(html).toContain('<span class="name">Credentials</span>');
-    expect(html).toContain('Secrets (S5) · 1 match term');
+    const unset = renderDashboardSensitivityBody(fixtureView(), { privacy: { configured: false, pendingCount: 0, ruleCount: 0 } });
+    expect(unset).toContain('Tell Olympus what&#39;s private for you');
+    expect(unset).toContain('<a class="btn" href="/dashboard?privacy">Set up privacy</a>');
   });
 
-  test('carries the count of match terms and never a term, a pattern or a note', () => {
-    const view = fixtureView({
+  test('shows nothing from the retired sensitivity map file, even when a view model still carries it', () => {
+    // The profile is the only place privacy is set (2026-10-03); a view model
+    // from before the map's removal must not bring its categories back.
+    const view = {
+      ...fixtureView({ sensitivity_tiers: fixtureTiers() }),
       sensitivity: {
         configured: true,
         editable: false,
@@ -42,81 +47,28 @@ describe('dashboard sensitivity categories', () => {
           target_trust_tier: 'S4',
           target_trust_domain: 'secure_local',
           match_terms: 12,
-          // Fields the contract deliberately withholds. If a later data leg
-          // ever emits them, this page must still not print them.
-          ...{
-            notes: 'everything from statements@chase.com',
-            match: { keywords: ['tax'], senderPatterns: ['statements@chase.com'], pathPatterns: ['/Finance'] },
-          },
         }],
-      } as DashboardSensitivity,
-    });
+      },
+    } as SourceDashboardViewModel;
 
     const html = renderDashboardSensitivityBody(view);
 
-    expect(html).toContain('12 match terms');
-    expect(html).not.toContain('statements@chase.com');
-    expect(html).not.toContain('/Finance');
-    expect(html).not.toContain('keywords');
-  });
-
-  test('says one plain sentence when no map is configured, and invents no rows', () => {
-    const html = renderDashboardSensitivityBody(fixtureView());
-
-    expect(html).toContain('<div class="sect">Private categories</div>');
-    expect(html).toContain('No Private categories are configured.');
+    expect(html).not.toContain('sensitivity map');
     expect(html).not.toContain('Financial');
-    expect(html).not.toContain('Health');
-    expect(html).not.toContain('Therapy');
-  });
-
-  test('says the same sentence for a map that holds no categories', () => {
-    const html = renderDashboardSensitivityBody(
-      fixtureView({ sensitivity: { configured: true, editable: false, categories: [] } }),
-    );
-
-    expect(html).toContain('No Private categories are configured.');
-    expect(html).not.toContain('class="catrow"');
+    expect(html).not.toContain('catrow');
+    expect(html).not.toContain('match term');
   });
 
   test('offers no remove, add or guidance control, and claims no preset or added date', () => {
-    const html = renderDashboardSensitivityPage(
-      fixtureView({ sensitivity: fixtureSensitivity(), sensitivity_tiers: fixtureTiers() }),
-      { now: NOW },
-    );
+    const html = renderDashboardSensitivityPage(fixtureView({ sensitivity_tiers: fixtureTiers() }), { now: NOW });
 
     expect(html).not.toContain('<input');
     expect(html).not.toContain('<button');
     expect(html).not.toContain('×');
     expect(html).not.toContain('added ');
     expect(html).not.toContain('preset');
-    // The removal sheet promised a migration receipt no route can produce.
     expect(html).not.toContain('Keep Secure');
     expect(html).not.toContain('migrate');
-  });
-
-  test('escapes a category label rather than letting it reach the page as markup', () => {
-    const html = renderDashboardSensitivityBody(fixtureView({
-      sensitivity: {
-        configured: true,
-        editable: false,
-        categories: [{
-          id: 'x',
-          label: '<script>alert(1)</script>',
-          interpretation: '"quoted" & odd',
-          target_tier_name: 'secure',
-          target_trust_tier: 'S4',
-          target_trust_domain: 'secure_local',
-          match_terms: 0,
-        }],
-      },
-    }));
-
-    expect(html).not.toContain('<script>alert(1)</script>');
-    expect(html).toContain('&lt;script&gt;');
-    expect(html).toContain('&quot;quoted&quot; &amp; odd');
-    // No match terms means no trailing separator dangling after the tier.
-    expect(html).toContain('<span class="tier">Private (S4)</span>');
   });
 });
 
@@ -142,10 +94,7 @@ describe('dashboard sensitivity tiers', () => {
   });
 
   test('claims no item count for any tier', () => {
-    const html = renderDashboardSensitivityBody(fixtureView({
-      sensitivity: fixtureSensitivity(),
-      sensitivity_tiers: fixtureTiers(),
-    }));
+    const html = renderDashboardSensitivityBody(fixtureView({ sensitivity_tiers: fixtureTiers() }));
 
     // No index on items.trust_tier exists, so no row may carry a population.
     expect(html).not.toMatch(/\d[\d,]*\s+items/);
@@ -153,12 +102,10 @@ describe('dashboard sensitivity tiers', () => {
   });
 
   test('renders no tier block at all when the policy field is absent', () => {
-    const html = renderDashboardSensitivityBody(fixtureView({ sensitivity: fixtureSensitivity() }));
+    const html = renderDashboardSensitivityBody(fixtureView());
 
     expect(html).not.toContain('Tiers');
     expect(html).not.toContain('<th>Venice</th>');
-    // The categories the map really holds still render.
-    expect(html).toContain('<span class="name">Financial</span>');
   });
 });
 
@@ -203,33 +150,6 @@ describe('dashboard sensitivity route', () => {
     expect(page.html).toContain('href="/dashboard?token=dash_abc"');
   });
 });
-
-function fixtureSensitivity(): DashboardSensitivity {
-  return {
-    configured: true,
-    editable: false,
-    categories: [
-      {
-        id: 'financial',
-        label: 'Financial',
-        interpretation: 'statements, tax, banking',
-        target_tier_name: 'secure',
-        target_trust_tier: 'S4',
-        target_trust_domain: 'secure_local',
-        match_terms: 12,
-      },
-      {
-        id: 'credentials',
-        label: 'Credentials',
-        interpretation: 'passwords and keys',
-        target_tier_name: 'secrets',
-        target_trust_tier: 'S5',
-        target_trust_domain: 'secure_local',
-        match_terms: 1,
-      },
-    ],
-  };
-}
 
 function fixtureTiers(): DashboardSensitivityTiers {
   return {
@@ -309,7 +229,6 @@ function fixtureCard(): DashboardSourceCard {
 
 function fixtureView(
   additive: {
-    sensitivity?: DashboardSensitivity;
     sensitivity_tiers?: DashboardSensitivityTiers;
   } = {},
 ): SourceDashboardViewModel {
@@ -353,7 +272,6 @@ function fixtureView(
   };
   return {
     ...view,
-    ...(additive.sensitivity === undefined ? {} : { sensitivity: additive.sensitivity }),
     ...(additive.sensitivity_tiers === undefined ? {} : { sensitivity_tiers: additive.sensitivity_tiers }),
   };
 }

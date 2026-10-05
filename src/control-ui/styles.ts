@@ -9,6 +9,8 @@ import {
   DISPOSITIONS_CSS,
   MODEL_SETUP_CSS,
   SETUP_JOURNEY_CSS,
+  DASHBOARD_SOURCE_ROWS_CSS,
+  DASHBOARD_PRIVACY_CSS,
 } from '../workers/dashboard/static-styles.ts';
 
 /**
@@ -33,8 +35,10 @@ export const OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
   AGENT_CONNECT_CSS,
   BACKGROUND_CSS,
   DISPOSITIONS_CSS,
+  DASHBOARD_SOURCE_ROWS_CSS,
+  DASHBOARD_PRIVACY_CSS,
 ].join('\n')) + `
-:host { display: block; min-width: 0; color-scheme: dark; contain: content; }
+:host { display: block; min-width: 0; color-scheme: light dark; contain: content; }
 .olympus-control-ui { min-height: 100%; }
 .olympus-control-ui [data-write-capability-note] { margin: 0 auto 12px; max-width: 1120px; }
 .olympus-control-ui .native-state { max-width: 1120px; margin: 24px auto; padding: 18px 20px;

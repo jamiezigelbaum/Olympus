@@ -311,8 +311,8 @@ describe('the Readwise page states one embedding fact and counts in its own noun
       ingestion_selection: { metadata_only_files: 0, full_ingestion_files: 2791 },
     };
     const html = renderDashboardDetailBody(withSelection, { now: NOW });
-    expect(html).toContain('<span>Metadata only</span><b>0 items</b>');
-    expect(html).toContain('<span>Full ingestion</span><b>2,791 items</b>');
+    expect(html).toContain('<span>Names only</span><b>0 items</b>');
+    expect(html).toContain('<span>Fully indexed</span><b>2,791 items</b>');
 
     const fileCard: DashboardSourceCard = {
       ...card,
@@ -320,8 +320,8 @@ describe('the Readwise page states one embedding fact and counts in its own noun
       ingestion_selection: { metadata_only_files: 1, full_ingestion_files: 2, policy_deferred_files: 1 },
     };
     const fileHtml = renderDashboardDetailBody(fileCard, { now: NOW });
-    expect(fileHtml).toContain('<span>Metadata only</span><b>1 file</b>');
-    expect(fileHtml).toContain('<span>Full ingestion</span><b>2 files</b>');
-    expect(fileHtml).toContain('1 file selected for full ingestion is not being processed');
+    expect(fileHtml).toContain('<span>Names only</span><b>1 file</b>');
+    expect(fileHtml).toContain('<span>Fully indexed</span><b>2 files</b>');
+    expect(fileHtml).toContain('1 file chosen to be fully indexed is not being processed');
   });
 });

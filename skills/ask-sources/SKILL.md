@@ -24,8 +24,8 @@ posts.
 Use the tier names Public, Personal, Private, and Secrets when explaining
 results. Personal maps to `internal` (S1–S3); Private maps to `secure_local`
 (S4). Existing IDs and tool flags such as `include_secure_local` keep their
-spelling. In schema-v1 sensitivity maps, `private` means Personal and `secure`
-means Private; never substitute one for the other.
+spelling. In the schema-v1 tier keys of owner tier rules, `private` means
+Personal and `secure` means Private; never substitute one for the other.
 
 ## Contract
 

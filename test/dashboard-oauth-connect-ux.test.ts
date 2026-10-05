@@ -243,7 +243,7 @@ describe('the connect sheet carries the URI, an editable key, and a way to give 
     expect(pendingHtml).toContain('data-connect-kind="oauth_cancel"');
     expect(pendingHtml).toContain('>Cancel connection attempt</button>');
     // The Connecting row itself is no longer a dead end either.
-    expect(pendingHtml).toContain('>Cancel</button>');
+    expect(pendingHtml).toContain('>Cancel sign-in</button>');
 
     const quietHtml = renderDashboardSetupPage(buildView({
       oauthRedirectBaseUrl: TAILNET,

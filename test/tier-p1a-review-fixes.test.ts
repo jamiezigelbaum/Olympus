@@ -15,11 +15,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import {
-  USER_FACING_TIER_MAPPING,
-  parseSensitivityMap,
-  type SensitivityMap,
-} from '../src/core/sensitivity-map.ts';
 import { buildSourceSensitivity, type SourceSensitivity } from '../src/core/source-index/types.ts';
 import { classifyItemTier } from '../src/workers/classification/engine.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
@@ -40,22 +35,6 @@ const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 
 const ID = { provider: 'fixture', accountScope: 'personal', providerItemId: 'item-1' };
 const HEALTH = 'The lab results confirm the diagnosis; the patient starts treatment.';
-
-function mapV2(categories: Array<{ id: string; tier: 'public' | 'private' | 'secure' | 'secrets'; keywords?: string[]; pathPatterns?: string[] }>): SensitivityMap {
-  return parseSensitivityMap({
-    schemaVersion: 2,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: categories.map((category) => ({
-      id: category.id,
-      label: category.id,
-      targetTierName: category.tier,
-      targetTrustTier: USER_FACING_TIER_MAPPING[category.tier].targetTrustTier,
-      targetTrustDomain: USER_FACING_TIER_MAPPING[category.tier].targetTrustDomain,
-      examples: ['example'],
-      match: { keywords: category.keywords ?? [], senderPatterns: [], pathPatterns: category.pathPatterns ?? [] },
-    })),
-  });
-}
 
 function withDir<T>(run: (dir: string) => T | Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-review-'));
@@ -168,17 +147,10 @@ describe('A: an unread decision never lowers a content tier', () => {
   });
 });
 
-describe('C: lowering map categories and the sniffer', () => {
-  test('reproduction: an email subject naming /blog/ is not Public', () => {
-    const map = mapV2([{ id: 'blog', tier: 'public', pathPatterns: ['/blog/'] }]);
-    const decision = classifyItemTiers({ signals: { title: 'Re: draft for /blog/ launch', sender: 'a@b.example' }, text: 'see attached' }, { sensitivityMap: map });
-    expect(decision.metadataTier).toBe('private');
-    expect(decision.reasons).not.toContain('metadata:sensitivity_map:blog');
-  });
-
+describe('C: a lowering owner rule and the sniffer', () => {
   test('reproduction: therapy notes under a Public work/ folder are still flagged for the sniffer', () => {
-    const map = mapV2([{ id: 'work', tier: 'public', pathPatterns: ['/work/'] }]);
-    const decision = classifyItemTiers({ signals: { title: 'therapy notes', path: '/work/therapy notes.txt' } }, { sensitivityMap: map });
+    const rules = [{ id: 'work', match: { kind: 'pathPrefix' as const, value: '/work' }, tier: 'public' as const, strength: 'prior' as const }];
+    const decision = classifyItemTiers({ signals: { title: 'therapy notes', path: '/work/therapy notes.txt' } }, { rules });
     expect(decision.metadataTier).toBe('public');
     expect(decision.metadataPending).toBe(true);
     expect(decision.state).toBe('pending');
@@ -319,7 +291,7 @@ describe('per-lane placement parity with the retired connector classify()', () =
   }
 
   test('Gmail keeps the shared raise-only policy: text-bearing samples match the retired raise-only answer', () => {
-    const classification = gmailConnectorStoreClassification(undefined);
+    const classification = gmailConnectorStoreClassification();
     for (const body of ['weekly notes', `aws key ${FAKE_AWS_KEY}`, HEALTH, 'bank statement for your account']) {
       const raw = item(text(body), { subject: 'Hello', from: 'a@b.example', labels: ['INBOX'] });
       // classifyGoogleItemRaiseOnly, restated: engine verdict, raise-only above S3/internal.

@@ -4,6 +4,7 @@
 // connection-token handler, every other route to the worker-bearer wrapper.
 // A real MCP SDK client talks Streamable HTTP to it over loopback.
 
+import { AUTHENTICATED_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
@@ -108,6 +109,8 @@ beforeEach(() => {
   const fetch = withRemoteMcpRoute(
     createRemoteMcpHandler({
       connections: () => store,
+      // The relay child's per-boot secret, as the worker reads it from its 0600 file.
+      isRelayed: (request) => request.headers.get('x-olympus-relay') === 'per-boot-secret',
       makeOperationContext: (caller, signal) => createInProcessOperationContext({
         config: defaultConfig(),
         sourceIndexReadEnabled: true,
@@ -138,13 +141,14 @@ async function connectClient(token: string): Promise<Client> {
   return client;
 }
 
-function mcpInitialize(authorization?: string): Promise<Response> {
+function mcpInitialize(authorization?: string, extraHeaders: Record<string, string> = {}): Promise<Response> {
   return fetch(`${base}/mcp`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
       ...(authorization ? { Authorization: authorization } : {}),
+      ...extraHeaders,
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -204,10 +208,23 @@ describe('remote MCP over loopback with a connection token', () => {
       expect(response.headers.get('WWW-Authenticate') ?? '').toStartWith('Bearer realm="olympus"');
     }
 
-    expect((await mcpInitialize(`Bearer ${token}`)).status).toBe(200);
+    // Only a verified credential's response carries the relay's admission mark.
+    expect(missing.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
+    // Direct callers never see it; relayed requests (the relay child's marker) do.
+    const direct = await mcpInitialize(`Bearer ${token}`);
+    expect(direct.status).toBe(200);
+    expect(direct.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
+    const relayed = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'per-boot-secret' });
+    expect(relayed.status).toBe(200);
+    expect(relayed.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBe('1');
+    // A marker without the secret is a direct caller.
+    const forged = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'forged' });
+    expect(forged.status).toBe(200);
+    expect(forged.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
     store.revoke(connection.id);
-    const revoked = await mcpInitialize(`Bearer ${token}`);
+    const revoked = await mcpInitialize(`Bearer ${token}`, { 'x-olympus-relay': 'per-boot-secret' });
     expect(revoked.status).toBe(401);
+    expect(revoked.headers.get(AUTHENTICATED_RESPONSE_HEADER)).toBeNull();
     expect(revoked.headers.get('WWW-Authenticate')).toContain('error="invalid_token"');
     expect(answered).toBe(0);
   });

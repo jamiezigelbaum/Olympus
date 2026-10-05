@@ -3,16 +3,11 @@
  * to change `remote.enabled` through OpenClaw's config write path
  * (core/remote-access-config.ts), over the loopback plugin route watch
  * delivery already uses, with the worker bearer. The worker never writes
- * OpenClaw config itself.
+ * OpenClaw config itself. (The standalone engine supplies its own
+ * `setEnabled` to `createDashboardRemoteAccessControl`.)
  */
 import { REMOTE_ACCESS_CONFIG_ROUTE } from '../core/remote-access-config.ts';
 import type { TimeoutFetch } from '../core/http-timeout.ts';
-import {
-  readRemoteAccessStatus,
-  recordTermsAcceptance,
-  resolveCurrentTermsUrl,
-  termsAccepted,
-} from '../core/remote-access.ts';
 import type { DashboardRemoteAccessControl, RemoteAccessConfigWrite } from './agent-connections.ts';
 import { postOpenClawGatewayPluginRoute } from './source-watch-runtime.ts';
 
@@ -63,22 +58,9 @@ export function createGatewayRemoteAccessConfigWriter(options: {
   };
 }
 
-/**
- * The dashboard's remote-access control: the CA agreement resolved, checked
- * and recorded with exactly the functions `olympus connections terms` uses, in
- * the same state directory, and the config change handed to `setEnabled`.
- */
+/** The dashboard's remote-access control: the config change handed to `setEnabled`. */
 export function createDashboardRemoteAccessControl(options: {
-  /** The connect-relay state directory (`remoteAccessDir`). */
-  dir: () => string;
-  fetchTerms: () => Promise<string | undefined>;
   setEnabled: (enabled: boolean) => Promise<RemoteAccessConfigWrite>;
-  now?: () => Date;
 }): DashboardRemoteAccessControl {
-  return {
-    currentTermsUrl: () => resolveCurrentTermsUrl(readRemoteAccessStatus(options.dir()), options.fetchTerms),
-    termsAccepted: (url) => termsAccepted(options.dir(), url),
-    recordTermsAcceptance: (url) => { recordTermsAcceptance(options.dir(), url, options.now?.() ?? new Date()); },
-    setEnabled: options.setEnabled,
-  };
+  return { setEnabled: options.setEnabled };
 }

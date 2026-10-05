@@ -8,7 +8,10 @@ import type {
   OlympusFolderScopeSourceId,
   OlympusMailScopeDraft,
   OlympusSourceDispositionState,
+  OlympusPrivacyRule,
 } from '../control-ui-contract.ts';
+import type { PrivacyLogic, PrivacyLogicConfig } from '../workers/dashboard/shared-privacy-logic.ts';
+import type { DASHBOARD_PICKER_COPY } from '../workers/dashboard/vocabulary.ts';
 
 export interface OlympusDashboardTransport {
   /** Explicit private folder browse; never called by background refresh. */
@@ -39,6 +42,12 @@ export interface OlympusBrowserControllerOptions {
   authority?: 'gateway' | 'worker-session';
   /** Native boundary hook; standalone markup is produced in-process. */
   replaceHtml?: (root: HTMLElement | ShadowRoot, html: string) => void;
+  /**
+   * The privacy rules shared with ChatGPT's privacy panel
+   * (shared-privacy-logic.ts privacyLogic), for the Privacy editor. Passed in,
+   * not imported: this controller is serialized into the standalone page.
+   */
+  privacyLogic?: (config: PrivacyLogicConfig) => PrivacyLogic;
 }
 
 export interface OlympusBrowserController {
@@ -110,8 +119,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],'
-        + 'form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],form[data-model-retry],'
+        + 'form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind],form[data-privacy-form]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -169,6 +178,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'cancel_oauth': return 'Cancelling…';
       case 'sync_now': return 'Starting sync…';
       case 'set_embedding_priority': return 'Saving…';
+      case 'retry_model': return 'Starting the download again…';
       default: return 'Working…';
     }
   }
@@ -187,6 +197,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'set_embedding_priority': return 'Saved.';
       case 'disconnect': return 'Disconnected. This card updates when Olympus confirms it.';
       case 'unpair': return 'Unpaired on this computer.';
+      case 'retry_model': return 'Downloading again. This row updates as it goes.';
       default: return 'Saved.';
     }
   }
@@ -343,6 +354,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (form.hasAttribute('data-embedding-kind')) {
       return { action: 'set_embedding_priority', on: body.on === 'true' };
+    }
+    if (form.hasAttribute('data-model-retry')) {
+      const model = form.dataset.modelRetry;
+      return model === 'embedding' || model === 'answers' ? { action: 'retry_model', model } : undefined;
     }
     if (form.hasAttribute('data-disconnect-kind')) {
       return {
@@ -700,6 +715,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const action = node.getAttribute('data-connect-kind')
       || node.getAttribute('data-sync-kind')
       || node.getAttribute('data-embedding-kind')
+      || node.getAttribute('data-model-retry')
       || node.getAttribute('data-disconnect-kind')
       || node.getAttribute('data-unpair-kind');
     if (action) return `${node.tagName}:${action}`;
@@ -775,6 +791,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')) return;
     // The owner is reading the agreement: a poll must not close it under them.
     if (!force && query('[data-remote-terms]:not([hidden])')) return;
+    // An edited privacy list, or a list the owner is picking from, is theirs
+    // until they save or leave.
+    if (!force && query('form[data-privacy-form][data-dirty="true"],[data-privacy-panel]:not([hidden]),[data-privacy-confirm],[data-privacy-conflict]')) return;
     // A typed secret or folder query is the only copy of the user's work and
     // is never replaced by polling, however old the tab is.
     if (!force && hasDirtyInput()) return;
@@ -806,6 +825,694 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       : undefined;
   }
 
+  // ---- The Privacy editor (pages/privacy.ts) ------------------------------
+  // The page renders the saved description and rules; this edits the list in
+  // place and saves the whole of it through `save_privacy` (the same engine
+  // operation as ChatGPT's olympus_privacy_set). Names are only ever set as
+  // text, never as markup. An edited list holds the poll off until it is
+  // saved or discarded, like a typed field does.
+  type PrivacyRule = { kind: string; source_id: string; key?: string; value?: string; display?: string };
+  type PrivacyViewRule = ReturnType<PrivacyLogic['viewRule']>;
+
+  function privacyCopy(form: HTMLFormElement): Record<string, string> {
+    try { return JSON.parse(form.dataset.copy || '{}') as Record<string, string>; } catch { return {}; }
+  }
+
+  function privacyFill(template: string, values: Record<string, string>): string {
+    let out = template || '';
+    for (const key of Object.keys(values)) out = out.split(`{${key}}`).join(values[key]!);
+    return out;
+  }
+
+  function privacyJson<T>(value: string | undefined, fallback: T): T {
+    try {
+      const parsed = JSON.parse(value || '') as T;
+      return parsed ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function privacyFolderSources(form: HTMLFormElement): Array<{ id: string; label: string }> {
+    const list = privacyJson<Array<{ id: string; label: string }>>(form.dataset.folderSources, []);
+    return Array.isArray(list) ? list.filter((entry) => entry && typeof entry.id === 'string') : [];
+  }
+
+  /** Every folder source's name, connected or not: a saved rule may name either. */
+  function privacySourceNames(form: HTMLFormElement): Record<string, string> {
+    const names = privacyJson<Record<string, string>>(form.dataset.sourceNames, {});
+    return names && typeof names === 'object' ? names : {};
+  }
+
+  /**
+   * The rules this editor shares with ChatGPT's privacy panel
+   * (shared-privacy-logic.ts), handed in by the page: this controller is
+   * serialized into the standalone page and cannot import it.
+   */
+  function privacyLogicFor(form: HTMLFormElement): PrivacyLogic | undefined {
+    return options.privacyLogic
+      ? options.privacyLogic({ mailSourceId: 'gmail.email', folderSources: privacySourceNames(form) })
+      : undefined;
+  }
+
+  function privacyDisplay(form: HTMLFormElement, logic: PrivacyLogic, rule: PrivacyRule): string {
+    const names = privacySourceNames(form);
+    return logic.displayOf(rule, privacyFill(privacyCopy(form).folderUnnamed || '', { source: names[rule.source_id] || rule.source_id }));
+  }
+
+  function privacyKindText(form: HTMLFormElement, rule: PrivacyRule): string {
+    const copy = privacyCopy(form);
+    if (rule.kind === 'sender') return copy.kindSender || '';
+    if (rule.kind === 'label') return copy.kindLabel || '';
+    const names = privacySourceNames(form);
+    return privacyFill(copy.kindFolder || '', { source: names[rule.source_id] || rule.source_id });
+  }
+
+  /** The editor's rules as view rules, read off the rows: saved, removed, and exactly what the engine sent. */
+  function privacyViewRules(form: HTMLFormElement): PrivacyViewRule[] {
+    return Array.from(form.querySelectorAll<HTMLElement>('[data-privacy-rule]')).flatMap((row) => {
+      const rule = privacyJson<PrivacyRule | null>(row.getAttribute('data-privacy-rule') || undefined, null);
+      if (!rule || typeof rule.kind !== 'string' || typeof rule.source_id !== 'string') return [];
+      const saved = row.hasAttribute('data-privacy-saved');
+      const view: PrivacyViewRule = {
+        kind: rule.kind,
+        source_id: rule.source_id,
+        display: row.querySelector('.sline.strong')?.textContent || '',
+        removed: row.hasAttribute('data-removed'),
+        saved,
+        ...(typeof rule.key === 'string' ? { key: rule.key } : {}),
+        ...(typeof rule.value === 'string' ? { value: rule.value } : {}),
+        ...(saved ? { raw: rule as Record<string, unknown> } : {}),
+      };
+      return [view];
+    });
+  }
+
+  function privacyKept(form: HTMLFormElement): PrivacyViewRule[] {
+    return privacyViewRules(form).filter((rule) => !rule.removed);
+  }
+
+  /** The whole rule list a save sends: every kept rule, and every saved rule the page cannot show. */
+  function privacyRulesOut(form: HTMLFormElement, logic: PrivacyLogic): Array<Record<string, unknown>> {
+    const hidden = privacyJson<Array<Record<string, unknown>>>(form.dataset.hidden, []);
+    return privacyKept(form).map((rule) => logic.ruleOut(rule)).concat(Array.isArray(hidden) ? hidden : []);
+  }
+
+  function setPrivacyDirty(form: HTMLFormElement): void {
+    form.dataset.dirty = 'true';
+    // Any change closes an open confirmation step: what it named may no longer be true.
+    form.querySelectorAll('[data-privacy-confirm]').forEach((node) => node.remove());
+    const empty = form.querySelector<HTMLElement>('[data-privacy-empty]');
+    if (empty) empty.hidden = privacyKept(form).length > 0;
+  }
+
+  /** One rule as a row, the shape the page renders: a saved one keeps exactly what the engine sent. */
+  function privacyRow(form: HTMLFormElement, logic: PrivacyLogic, rule: PrivacyViewRule | PrivacyRule): HTMLElement {
+    const view = rule as PrivacyViewRule;
+    const display = typeof view.display === 'string' && view.display ? view.display : privacyDisplay(form, logic, rule);
+    const copy = privacyCopy(form);
+    const row = document.createElement('div');
+    row.className = 'srow nodot prule';
+    row.setAttribute('data-privacy-rule', JSON.stringify(view.saved && view.raw ? view.raw : logic.ruleOut({ ...rule, display })));
+    if (view.saved) row.setAttribute('data-privacy-saved', '');
+    const main = document.createElement('div');
+    main.className = 'smain';
+    const name = document.createElement('p');
+    name.className = 'sline strong';
+    name.textContent = display;
+    const kind = document.createElement('p');
+    kind.className = 'sline';
+    kind.textContent = privacyKindText(form, rule);
+    main.append(name, kind);
+    const actions = document.createElement('div');
+    actions.className = 'sact';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn';
+    remove.setAttribute('data-privacy-remove', '');
+    remove.setAttribute('aria-label', privacyFill(copy.removeFor || '', { name: display }));
+    remove.textContent = copy.remove || 'Remove';
+    actions.append(remove);
+    row.append(main, actions);
+    if (view.removed) markPrivacyRemoved(form, row, true);
+    return row;
+  }
+
+  /** Adds a rule, or brings back the same rule if it was removed; false when it is already kept. */
+  function addPrivacyRule(form: HTMLFormElement, rule: PrivacyRule): boolean {
+    const logic = privacyLogicFor(form);
+    if (!logic) return false;
+    const identity = logic.identity(rule);
+    const existing = Array.from(form.querySelectorAll<HTMLElement>('[data-privacy-rule]')).find((row) => {
+      const current = privacyJson<PrivacyRule | null>(row.getAttribute('data-privacy-rule') || undefined, null);
+      return current !== null && logic.identity(current) === identity;
+    });
+    if (existing) {
+      if (!existing.hasAttribute('data-removed')) return false;
+      togglePrivacyRemoved(form, existing);
+      return true;
+    }
+    form.querySelector('[data-privacy-rules]')?.append(privacyRow(form, logic, rule));
+    setPrivacyDirty(form);
+    return true;
+  }
+
+  function markPrivacyRemoved(form: HTMLFormElement, row: HTMLElement, removed: boolean): void {
+    const copy = privacyCopy(form);
+    const name = row.querySelector('.sline.strong')?.textContent || '';
+    const button = row.querySelector<HTMLButtonElement>('[data-privacy-remove]');
+    row.toggleAttribute('data-removed', removed);
+    row.classList.toggle('removed', removed);
+    if (button) {
+      button.textContent = removed ? copy.undo || 'Undo' : copy.remove || 'Remove';
+      button.setAttribute('aria-label', removed ? privacyFill(copy.undoFor || '', { name }) : privacyFill(copy.removeFor || '', { name }));
+    }
+  }
+
+  function togglePrivacyRemoved(form: HTMLFormElement, row: HTMLElement): void {
+    const copy = privacyCopy(form);
+    const name = row.querySelector('.sline.strong')?.textContent || '';
+    const removed = !row.hasAttribute('data-removed');
+    markPrivacyRemoved(form, row, removed);
+    setPrivacyDirty(form);
+    say(form, removed ? privacyFill(copy.removed || '', { name }) : '');
+  }
+
+  function privacyPanel(form: HTMLFormElement, kind: string): HTMLElement | null {
+    return form.querySelector<HTMLElement>(`[data-privacy-panel="${kind}"]`);
+  }
+
+  function panelSay(panel: HTMLElement, message: string): void {
+    const slot = panel.querySelector('[data-privacy-panel-message]');
+    if (slot) slot.textContent = message;
+  }
+
+  function openPrivacyPanel(form: HTMLFormElement, kind: string): void {
+    form.querySelectorAll<HTMLElement>('[data-privacy-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.privacyPanel !== kind;
+    });
+    const panel = privacyPanel(form, kind);
+    if (!panel) return;
+    if (kind === 'sender') {
+      panel.querySelector<HTMLInputElement>('[data-privacy-sender]')?.focus();
+      return;
+    }
+    if (kind === 'label' && panel.dataset.loaded !== 'true') void loadPrivacyLabels(form, panel);
+    if (kind === 'folder') {
+      const sources = privacyFolderSources(form);
+      const holder = panel.querySelector<HTMLElement>('[data-privacy-folder-sources]');
+      if (holder && holder.childElementCount === 0 && sources.length > 1) {
+        for (const source of sources) {
+          const choose = document.createElement('button');
+          choose.type = 'button';
+          choose.className = 'btn';
+          choose.setAttribute('data-privacy-folder-source', source.id);
+          choose.textContent = source.label;
+          holder.append(choose);
+        }
+      }
+      if (!panel.dataset.source && sources[0]) void loadPrivacyFolders(form, panel, sources[0].id, []);
+    }
+    if (!panel.hasAttribute('tabindex')) panel.setAttribute('tabindex', '-1');
+    panel.focus();
+  }
+
+  function closePrivacyPanel(panel: HTMLElement): void {
+    panel.hidden = true;
+    panelSay(panel, '');
+    const form = panel.closest<HTMLFormElement>('form[data-privacy-form]');
+    const opener = form?.querySelector<HTMLElement>(`[data-privacy-add="${panel.dataset.privacyPanel}"]`);
+    opener?.focus();
+  }
+
+  /** One line in a picking list: the name, and Make private (or Already private). */
+  function privacyPickRow(form: HTMLFormElement, label: string, rule: PrivacyRule, open?: { key: string; name: string }): HTMLElement {
+    const copy = privacyCopy(form);
+    const row = document.createElement('div');
+    row.className = 'srow nodot';
+    const main = document.createElement('div');
+    main.className = 'smain';
+    const name = document.createElement('p');
+    name.className = 'sline strong';
+    name.textContent = label;
+    main.append(name);
+    const actions = document.createElement('div');
+    actions.className = 'sact';
+    if (open) {
+      const inside = document.createElement('button');
+      inside.type = 'button';
+      inside.className = 'btn';
+      inside.setAttribute('data-privacy-folder-open', JSON.stringify(open));
+      inside.textContent = copy.folderOpen || 'Open';
+      actions.append(inside);
+    }
+    const logic = privacyLogicFor(form);
+    const already = !!logic && privacyKept(form).some((current) => logic.identity(current) === logic.identity(rule));
+    const make = document.createElement('button');
+    make.type = 'button';
+    make.className = 'btn';
+    make.setAttribute('data-privacy-make-private', JSON.stringify(rule));
+    make.textContent = already ? copy.alreadyPrivate || 'Already private' : copy.makePrivate || 'Make private';
+    make.disabled = already;
+    actions.append(make);
+    row.append(main, actions);
+    return row;
+  }
+
+  async function loadPrivacyLabels(form: HTMLFormElement, panel: HTMLElement): Promise<void> {
+    const copy = privacyCopy(form);
+    const list = panel.querySelector<HTMLElement>('[data-privacy-list]');
+    if (!list || panel.dataset.loading === 'true') return;
+    panel.dataset.loading = 'true';
+    panelSay(panel, copy.loading || '');
+    let draft: unknown;
+    try { draft = JSON.parse(form.dataset.mailDraft || 'null'); } catch { draft = null; }
+    try {
+      const result = await options.transport.control({
+        action: 'browse_mail_scope', source_id: 'gmail.email', draft: draft as OlympusMailScopeDraft,
+      });
+      if (disposed || !root.contains(form)) return;
+      const summary = result.body.summary && typeof result.body.summary === 'object'
+        ? result.body.summary as Record<string, unknown>
+        : undefined;
+      const labels = summary && Array.isArray(summary.labels) ? summary.labels as Array<Record<string, unknown>> : undefined;
+      if (result.status < 200 || result.status >= 300 || !labels) {
+        panelSay(panel, copy.loadFailed || '');
+        return;
+      }
+      list.replaceChildren();
+      const own = labels.filter((label) => typeof label.id === 'string' && typeof label.name === 'string' && label.system !== true);
+      for (const label of own) {
+        list.append(privacyPickRow(form, String(label.name), {
+          kind: 'label', source_id: 'gmail.email', key: String(label.id), value: String(label.name),
+        }));
+      }
+      panel.dataset.loaded = 'true';
+      panelSay(panel, own.length === 0 ? copy.noLabels || '' : '');
+    } catch {
+      if (!disposed) panelSay(panel, copy.loadFailed || '');
+    } finally {
+      delete panel.dataset.loading;
+    }
+  }
+
+  async function loadPrivacyFolders(
+    form: HTMLFormElement,
+    panel: HTMLElement,
+    sourceId: string,
+    path: Array<{ key: string; name: string }>,
+    cursor?: string,
+  ): Promise<void> {
+    const copy = privacyCopy(form);
+    const list = panel.querySelector<HTMLElement>('[data-privacy-list]');
+    if (!list || panel.dataset.loading === 'true') return;
+    panel.dataset.loading = 'true';
+    panelSay(panel, copy.loading || '');
+    const parent = path.length > 0 ? path[path.length - 1]!.key : undefined;
+    try {
+      const result = await options.transport.control({
+        action: 'browse_folder_scope',
+        source_id: sourceId as OlympusFolderScopeSourceId,
+        ...(parent ? { parent_key: parent } : {}),
+        ...(cursor ? { cursor } : {}),
+      });
+      if (disposed || !root.contains(form)) return;
+      const page = result.body.scope_browser as OlympusFolderScopeBrowseResult | undefined;
+      if (result.status < 200 || result.status >= 300 || !page || !Array.isArray(page.nodes)) {
+        panelSay(panel, copy.loadFailed || '');
+        return;
+      }
+      panel.dataset.source = sourceId;
+      panel.dataset.path = JSON.stringify(path);
+      panel.querySelectorAll<HTMLElement>('[data-privacy-folder-source]').forEach((choice) => {
+        choice.setAttribute('aria-pressed', choice.dataset.privacyFolderSource === sourceId ? 'true' : 'false');
+      });
+      if (!cursor) list.replaceChildren();
+      list.querySelector('[data-privacy-folder-more]')?.remove();
+      const where = panel.querySelector<HTMLElement>('[data-privacy-folder-path]');
+      if (where) {
+        where.replaceChildren();
+        if (path.length > 0) {
+          const up = document.createElement('button');
+          up.type = 'button';
+          up.className = 'btn';
+          up.setAttribute('data-privacy-folder-up', '');
+          up.textContent = copy.folderUp || 'Back';
+          const name = document.createElement('span');
+          name.textContent = ` ${path.map((step) => step.name).join(' / ')}`;
+          where.append(up, name);
+        }
+      }
+      for (const node of page.nodes) {
+        if (typeof node.key !== 'string' || typeof node.name !== 'string' || node.selectable === false) continue;
+        list.append(privacyPickRow(
+          form,
+          node.name,
+          { kind: 'folder', source_id: sourceId, key: node.key, display: node.name },
+          node.has_children ? { key: node.key, name: node.name } : undefined,
+        ));
+      }
+      if (page.next_cursor) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'btn';
+        more.setAttribute('data-privacy-folder-more', page.next_cursor);
+        more.textContent = copy.folderMore || 'Load more folders';
+        list.append(more);
+      }
+      panelSay(panel, list.querySelector('[data-privacy-make-private]') ? '' : copy.folderEmpty || '');
+    } catch {
+      if (!disposed) panelSay(panel, copy.loadFailed || '');
+    } finally {
+      delete panel.dataset.loading;
+    }
+  }
+
+  function privacyPath(panel: HTMLElement): Array<{ key: string; name: string }> {
+    try {
+      const path = JSON.parse(panel.dataset.path || '[]') as Array<{ key: string; name: string }>;
+      return Array.isArray(path) ? path : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function addPrivacySender(form: HTMLFormElement): void {
+    const copy = privacyCopy(form);
+    const panel = privacyPanel(form, 'sender');
+    const field = panel?.querySelector<HTMLInputElement>('[data-privacy-sender]');
+    if (!panel || !field) return;
+    const value = privacyLogicFor(form)?.senderValue(field.value) || '';
+    if (!value) {
+      panelSay(panel, copy.senderInvalid || '');
+      field.focus();
+      return;
+    }
+    if (!addPrivacyRule(form, { kind: 'sender', source_id: 'gmail.email', value })) {
+      panelSay(panel, copy.senderDuplicate || '');
+      return;
+    }
+    field.value = '';
+    panelSay(panel, '');
+    field.focus();
+  }
+
+  /** The description as saved when the page was read (or at the last conflict). */
+  function privacySavedDescription(form: HTMLFormElement): string {
+    return form.dataset.savedDescription || '';
+  }
+
+  /** What a save of the draft would lower, decided again each time it is asked. */
+  function privacyLowering(form: HTMLFormElement, logic: PrivacyLogic): { removed: string[]; description: boolean } {
+    const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const change = logic.lowering(privacyViewRules(form), field ? field.value : privacySavedDescription(form), privacySavedDescription(form));
+    return { removed: change.removed.map((rule: PrivacyViewRule) => rule.display), description: change.described };
+  }
+
+  function clearPrivacyPrompts(form: HTMLFormElement): void {
+    form.querySelectorAll('[data-privacy-confirm],[data-privacy-conflict]').forEach((node) => node.remove());
+  }
+
+  /** A sentence (or a short list) and two buttons, in the save footer, in place of a dialog. */
+  function privacyPrompt(form: HTMLFormElement, kind: 'confirm' | 'conflict', lines: string[], items: string[], buttons: Array<[string, string]>): void {
+    clearPrivacyPrompts(form);
+    const box = document.createElement('div');
+    box.className = 'pprompt';
+    box.setAttribute(`data-privacy-${kind}`, '');
+    box.setAttribute('role', 'alert');
+    for (const line of lines) {
+      const text = document.createElement('p');
+      text.textContent = line;
+      box.append(text);
+    }
+    if (items.length > 0) {
+      const list = document.createElement('ul');
+      for (const item of items) {
+        const entry = document.createElement('li');
+        entry.textContent = item;
+        list.append(entry);
+      }
+      box.append(list);
+    }
+    const row = document.createElement('div');
+    row.className = 'pbuttons';
+    for (const [attribute, label] of buttons) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn';
+      button.setAttribute(attribute, '');
+      button.textContent = label;
+      row.append(button);
+    }
+    box.append(row);
+    const footer = form.querySelector('.pfooter');
+    (footer || form).prepend(box);
+    row.querySelector<HTMLButtonElement>('button')?.focus();
+  }
+
+  function showPrivacyConfirm(form: HTMLFormElement, lowering: { removed: string[]; description: boolean }): void {
+    const copy = privacyCopy(form);
+    const lines: string[] = [];
+    if (lowering.removed.length > 0) lines.push(privacyFill(copy.confirmRemoves || '', { list: lowering.removed.join(', ') }));
+    if (lowering.description) lines.push(copy.confirmDescription || '');
+    privacyPrompt(form, 'confirm', lines, [], [
+      ['data-privacy-confirm-yes', copy.confirm || 'Confirm'],
+      ['data-privacy-confirm-no', copy.cancel || 'Cancel'],
+    ]);
+  }
+
+  /** Settings changed somewhere else: the draft stays; what is saved now is shown beside it. */
+  function showPrivacyConflict(form: HTMLFormElement, logic: PrivacyLogic, current: { description?: unknown; rules?: unknown }): void {
+    const copy = privacyCopy(form);
+    const description = typeof current.description === 'string' ? current.description.trim() : '';
+    const rules = Array.isArray(current.rules) ? (current.rules as PrivacyRule[]).filter((rule) => logic.validRule(rule)) : [];
+    const items = [description ? privacyFill(copy.conflictDescription || '', { text: description }) : copy.conflictNoDescription || ''];
+    if (rules.length === 0) items.push(copy.rulesEmpty || '');
+    for (const rule of rules) items.push(`${privacyDisplay(form, logic, rule)} · ${privacyKindText(form, rule)}`);
+    privacyPrompt(form, 'conflict', [copy.conflict || '', copy.conflictNow || ''], items, [
+      ['data-privacy-apply-again', copy.applyAgain || 'Apply my changes again'],
+      ['data-privacy-discard-mine', copy.discardMine || 'Discard my changes'],
+    ]);
+  }
+
+  /**
+   * The person's changes, replayed onto the settings saved elsewhere
+   * (shared-privacy-logic.ts replay), then saved: asking first if they lower
+   * protection against what is saved now.
+   */
+  function privacyApplyAgain(form: HTMLFormElement): void {
+    const logic = privacyLogicFor(form);
+    const current = privacyJson<{ description?: unknown; rules?: unknown; revision?: unknown } | null>(form.dataset.server, null);
+    if (!logic || !current) return;
+    const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const draft = {
+      rules: privacyViewRules(form),
+      description: field ? field.value : privacySavedDescription(form),
+      savedDescription: privacySavedDescription(form),
+    };
+    const saved = Array.isArray(current.rules) ? current.rules as PrivacyRule[] : [];
+    const fresh = saved.filter((rule) => logic.validRule(rule)).map((rule) => logic.viewRule(rule, privacyDisplay(form, logic, rule)));
+    const replayed = logic.replay(draft, fresh);
+    const description = typeof current.description === 'string' ? current.description : '';
+    form.dataset.revision = typeof current.revision === 'string' ? current.revision : '';
+    form.dataset.savedDescription = description;
+    form.dataset.hidden = JSON.stringify(saved.filter((rule) => !logic.validRule(rule)));
+    delete form.dataset.server;
+    const list = form.querySelector('[data-privacy-rules]');
+    if (list) list.replaceChildren(...replayed.rules.map((rule: PrivacyViewRule) => privacyRow(form, logic, rule)));
+    if (field) {
+      field.defaultValue = description;
+      field.value = replayed.description !== null ? replayed.description : description;
+    }
+    setPrivacyDirty(form);
+    clearPrivacyPrompts(form);
+    void savePrivacy(form);
+  }
+
+  /**
+   * Save the whole list, as ChatGPT's privacy panel does: a save that lowers
+   * protection first asks, in place, and only then carries the owner's
+   * confirmation (decided again from the draft at that moment); every save
+   * carries the revision it was edited against; a conflict keeps the draft.
+   */
+  async function savePrivacy(form: HTMLFormElement, confirmed = false): Promise<void> {
+    const copy = privacyCopy(form);
+    const logic = privacyLogicFor(form);
+    if (!logic) return;
+    if (!canWrite && !csrfToken) {
+      say(form, 'Your OpenClaw connection has read-only access.');
+      return;
+    }
+    if (pendingForms.has(form) || form.dataset.server) return;
+    const lowering = privacyLowering(form, logic);
+    const lowers = lowering.removed.length > 0 || lowering.description;
+    if (lowers && !confirmed) {
+      showPrivacyConfirm(form, lowering);
+      return;
+    }
+    clearPrivacyPrompts(form);
+    const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const description = field ? field.value.trim() : undefined;
+    const revision = form.dataset.revision || '';
+    setFormPending(form, true, copy.saving || 'Saving…');
+    let result: OlympusDashboardControlResult;
+    try {
+      result = await options.transport.control({
+        action: 'save_privacy',
+        ...(description !== undefined ? { description } : {}),
+        rules: privacyRulesOut(form, logic) as unknown as OlympusPrivacyRule[],
+        // Always the revision the view was built from: a save over changed settings is refused.
+        revision,
+        // Only a save that lowers protection carries the confirmation.
+        ...(lowers ? { confirm: true } : {}),
+      });
+    } catch {
+      say(form, copy.saveFailed || 'Could not reach Olympus.');
+      return;
+    } finally {
+      setFormPending(form, false);
+    }
+    if (result.status === 401 || result.status === 403) {
+      if (options.authority === 'worker-session') {
+        csrfToken = '';
+        say(form, 'The control session expired — unlock controls in Setup, then try again.');
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, 'Your write access expired. Reconnect with operator.write access, then try again.');
+      }
+      return;
+    }
+    const error = result.body.error && typeof result.body.error === 'object' ? result.body.error as Record<string, unknown> : {};
+    if (result.status === 409 && error.code === 'conflict') {
+      const current = result.body.settings && typeof result.body.settings === 'object'
+        ? result.body.settings as { description?: unknown; rules?: unknown; revision?: unknown }
+        : {};
+      form.dataset.server = JSON.stringify(current);
+      form.dataset.dirty = 'true';
+      say(form, '');
+      showPrivacyConflict(form, logic, current);
+      return;
+    }
+    if (result.status === 409 && error.code === 'privacy_owner_only') {
+      showPrivacyConfirm(form, privacyLowering(form, logic));
+      return;
+    }
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      say(form, result.status === 400 ? errorMessage(result) : copy.saveFailed || errorMessage(result));
+      return;
+    }
+    // Saved: the page is read again from what the engine now holds.
+    delete form.dataset.dirty;
+    if (field) field.defaultValue = field.value;
+    say(form, copy.saved || 'Saved.');
+    await refreshNow(true);
+    const next = query<HTMLFormElement>('form[data-privacy-form]');
+    if (next) say(next, copy.saved || 'Saved.');
+  }
+
+  /** The editor's clicks; true when the click was the editor's. */
+  function onPrivacyClick(target: Element, event: Event): boolean {
+    const form = target.closest<HTMLFormElement>('form[data-privacy-form]');
+    if (!form) return false;
+    const remove = target.closest<HTMLElement>('[data-privacy-remove]');
+    if (remove) {
+      const row = remove.closest<HTMLElement>('[data-privacy-rule]');
+      if (row) togglePrivacyRemoved(form, row);
+      return true;
+    }
+    const add = target.closest<HTMLElement>('[data-privacy-add]');
+    if (add) {
+      openPrivacyPanel(form, add.dataset.privacyAdd || '');
+      return true;
+    }
+    const close = target.closest<HTMLElement>('[data-privacy-panel-close]');
+    if (close) {
+      const panel = close.closest<HTMLElement>('[data-privacy-panel]');
+      if (panel) closePrivacyPanel(panel);
+      return true;
+    }
+    if (target.closest('[data-privacy-sender-add]')) {
+      addPrivacySender(form);
+      return true;
+    }
+    if (target.closest('[data-privacy-confirm-yes]')) {
+      void savePrivacy(form, true);
+      return true;
+    }
+    if (target.closest('[data-privacy-confirm-no]')) {
+      clearPrivacyPrompts(form);
+      form.querySelector<HTMLButtonElement>('button[type="submit"]')?.focus();
+      return true;
+    }
+    if (target.closest('[data-privacy-apply-again]')) {
+      privacyApplyAgain(form);
+      return true;
+    }
+    if (target.closest('[data-privacy-discard-mine]')) {
+      delete form.dataset.dirty;
+      delete form.dataset.server;
+      clearPrivacyPrompts(form);
+      const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+      if (field) field.value = field.defaultValue;
+      void refreshNow(true);
+      return true;
+    }
+    const make = target.closest<HTMLButtonElement>('[data-privacy-make-private]');
+    if (make) {
+      try {
+        const rule = JSON.parse(make.dataset.privacyMakePrivate || '') as PrivacyRule;
+        if (addPrivacyRule(form, rule)) {
+          make.textContent = privacyCopy(form).alreadyPrivate || 'Already private';
+          make.disabled = true;
+        }
+      } catch {
+        // A malformed button adds nothing.
+      }
+      return true;
+    }
+    const panel = target.closest<HTMLElement>('[data-privacy-panel="folder"]');
+    if (panel) {
+      const source = target.closest<HTMLElement>('[data-privacy-folder-source]');
+      if (source) {
+        void loadPrivacyFolders(form, panel, source.dataset.privacyFolderSource || '', []);
+        return true;
+      }
+      const open = target.closest<HTMLElement>('[data-privacy-folder-open]');
+      if (open && panel.dataset.source) {
+        try {
+          const step = JSON.parse(open.dataset.privacyFolderOpen || '') as { key: string; name: string };
+          void loadPrivacyFolders(form, panel, panel.dataset.source, [...privacyPath(panel), step]);
+        } catch {
+          // A malformed button opens nothing.
+        }
+        return true;
+      }
+      if (target.closest('[data-privacy-folder-up]') && panel.dataset.source) {
+        void loadPrivacyFolders(form, panel, panel.dataset.source, privacyPath(panel).slice(0, -1));
+        return true;
+      }
+      const more = target.closest<HTMLElement>('[data-privacy-folder-more]');
+      if (more && panel.dataset.source) {
+        void loadPrivacyFolders(form, panel, panel.dataset.source, privacyPath(panel), more.dataset.privacyFolderMore || undefined);
+        return true;
+      }
+    }
+    const cancel = target.closest<HTMLAnchorElement>('[data-privacy-cancel]');
+    if (cancel) {
+      const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+      const edited = form.dataset.dirty === 'true' || (field !== null && field.value !== field.defaultValue);
+      if (edited && !window.confirm(privacyCopy(form).discard || 'Discard your changes?')) {
+        event.preventDefault();
+        return true;
+      }
+      delete form.dataset.dirty;
+      if (field) field.value = field.defaultValue;
+      return false;
+    }
+    return false;
+  }
+
   function onSubmit(event: Event): void {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
     if (!form || !root.contains(form)) return;
@@ -820,8 +1527,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       void submitAgentControl(form);
       return;
     }
+    if (form.hasAttribute('data-privacy-form')) {
+      event.preventDefault();
+      void savePrivacy(form);
+      return;
+    }
     if (!form.matches(
-      '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]',
+      '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-model-retry],[data-disconnect-kind],[data-unpair-kind],[data-model-check]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only
@@ -874,6 +1586,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
       return;
     }
+    if (onPrivacyClick(target, event)) return;
     if (target.closest('[data-remote-terms-cancel]')) {
       hideRemoteTerms();
       return;
@@ -1027,33 +1740,67 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     exclude: 'Skipped',
   };
 
-  type ScopeTrail = Array<{ key: string; name: string }>;
+  // The folder picker (Dropbox, Google Drive): one level per screen, the same
+  // layout as the approved ChatGPT picker. The root shows the whole-account
+  // row, the exceptions and the top-level folders; a folder shows its own
+  // choice ("This folder") and then its folders. Every row carries one
+  // three-segment control (Full, Names only, Skip): a tap sets that folder's
+  // own choice and a tap on the pressed segment clears it. Only explicit
+  // choices are held; inherited choices and Mixed are derived on each render.
+  // Words come from the form's data-scope-copy (DASHBOARD_PICKER_COPY): this
+  // function is serialized into the standalone page and cannot import them.
+  type ScopeCopy = typeof DASHBOARD_PICKER_COPY;
+  type ScopeState = OlympusSourceDispositionState;
   type ScopeDraft = {
     generation: string;
     revision: string;
-    selections: Map<string, OlympusSourceDispositionState>;
-    names: Map<string, string>;
+    selections: Map<string, ScopeState>;
     ancestors: Map<string, string[]>;
     nodes: OlympusFolderScopeNode[];
     catalog: Map<string, OlympusFolderScopeNode>;
     branches: Map<string, OlympusFolderScopeNode[]>;
     branchCursors: Map<string, string>;
-    expanded: Set<string>;
     nextCursor?: string | undefined;
-    selected?: OlympusFolderScopeNode | undefined;
+    /** The open folder's trail, root first; empty on the root screen. */
+    path: string[];
     loaded: boolean;
     loadAttempted: boolean;
     loading: boolean;
     busy: boolean;
+    saving: boolean;
     invalid: boolean;
     edited: boolean;
     whole: boolean;
+    wholeConfirmed: boolean;
+    retry?: (() => void) | undefined;
+    /** The control to focus after the next render (a data-scope-focus value). */
+    focus?: string | undefined;
   };
+  const SCOPE_STATES: ScopeState[] = ['ingest', 'metadata_only', 'exclude'];
+  /** The control.approve route accepts at most this many explicit choices. */
+  const MAX_SCOPE_RULES = 100;
+  const ACCOUNT_KEY = '@account';
   const scopeDrafts = new Map<HTMLFormElement, ScopeDraft>();
+  const scopeCopies = new WeakMap<HTMLFormElement, ScopeCopy>();
 
   function scopeMessage(form: HTMLFormElement, text: string): void {
     const slot = form.querySelector('[data-scope-message]');
     if (slot) slot.textContent = text;
+  }
+
+  function scopeCopy(form: HTMLFormElement): ScopeCopy {
+    let copy = scopeCopies.get(form);
+    if (!copy) {
+      try { copy = JSON.parse(form.dataset.scopeCopy || '{}') as ScopeCopy; } catch { copy = {} as ScopeCopy; }
+      scopeCopies.set(form, copy);
+    }
+    return copy;
+  }
+
+  function fillText(template: string | undefined, values: Record<string, string | number>): string {
+    let out = template || '';
+    for (const key of Object.keys(values)) out = out.split(`{${key}}`).join(String(values[key]));
+    return out;
   }
 
   function scopeDraft(form: HTMLFormElement): ScopeDraft {
@@ -1061,9 +1808,9 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     if (!draft) {
       draft = {
         generation: form.dataset.accountGeneration || '', revision: form.dataset.scopeRevision || '',
-        selections: new Map(), names: new Map(), ancestors: new Map(), nodes: [], catalog: new Map(), branches: new Map(), branchCursors: new Map(), expanded: new Set(), loaded: false, loadAttempted: false, loading: false,
-        busy: false, invalid: false, edited: false,
-        whole: form.querySelector<HTMLInputElement>('[data-scope-whole-account]')?.checked === true,
+        selections: new Map(), ancestors: new Map(), nodes: [], catalog: new Map(), branches: new Map(), branchCursors: new Map(),
+        path: [], loaded: false, loadAttempted: false, loading: false, busy: false, saving: false,
+        invalid: false, edited: false, whole: false, wholeConfirmed: false,
       };
       scopeDrafts.set(form, draft);
     }
@@ -1074,249 +1821,482 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     return canWrite && form.dataset.connected === 'true' && !draft.busy && !draft.invalid;
   }
 
-  function inheritedScopeState(draft: ScopeDraft, key: string): OlympusSourceDispositionState | undefined {
-    let state: OlympusSourceDispositionState | undefined = draft.whole ? 'ingest' : undefined;
+  /** What a folder gets from above it: the strictest choice wins, as the engine evaluates it. */
+  function scopeInherited(draft: ScopeDraft, key: string): { state: ScopeState | ''; from: string } {
+    let state: ScopeState | '' = draft.whole ? 'ingest' : '';
+    let from = draft.whole ? ACCOUNT_KEY : '';
     for (const ancestor of draft.ancestors.get(key) || []) {
       const choice = draft.selections.get(ancestor);
-      if (choice === 'exclude') return 'exclude';
-      if (choice === 'metadata_only') state = 'metadata_only';
-      else if (choice === 'ingest' && state === undefined) state = 'ingest';
+      if (choice === 'exclude') { state = 'exclude'; from = ancestor; }
+      else if (choice === 'metadata_only' && state !== 'exclude') { state = 'metadata_only'; from = ancestor; }
+      else if (choice === 'ingest' && (state === '' || state === 'ingest')) { state = 'ingest'; from = ancestor; }
     }
-    return state;
+    return { state, from };
   }
 
-  function effectiveScopeState(draft: ScopeDraft, key: string): OlympusSourceDispositionState {
-    const inherited = inheritedScopeState(draft, key);
+  /** The state a save records for a chosen folder; a folder nothing reaches stays out. */
+  function effectiveScopeState(draft: ScopeDraft, key: string): ScopeState {
+    const inherited = scopeInherited(draft, key).state;
     const own = draft.selections.get(key);
     if (inherited === 'exclude' || own === 'exclude') return 'exclude';
     if (inherited === 'metadata_only') return 'metadata_only';
     return own || inherited || 'exclude';
   }
 
-  function scopeChoiceAllowed(draft: ScopeDraft, state: string): boolean {
-    if (!draft.selected?.selectable) return false;
-    const inherited = inheritedScopeState(draft, draft.selected.key);
-    if (inherited === 'exclude') return state === 'exclude';
-    if (inherited === 'metadata_only') return state === 'metadata_only' || state === 'exclude';
-    return state === 'ingest' || state === 'metadata_only' || state === 'exclude';
+  /** What the page shows for a folder: '' when nothing chooses it (Not included). */
+  function shownScopeState(draft: ScopeDraft, key: string): ScopeState | '' {
+    return draft.selections.has(key) || scopeInherited(draft, key).state ? effectiveScopeState(draft, key) : '';
   }
 
-  function scopeControls(form: HTMLFormElement, draft: ScopeDraft): void {
-    const allowed = scopeAllowed(form, draft);
-    const loading = form.querySelector<HTMLElement>('[data-scope-loading]');
-    if (loading) loading.hidden = !draft.loading;
-    form.querySelector('[data-scope-nodes]')?.setAttribute('aria-busy', String(draft.loading));
-    form.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = !allowed; });
-    form.querySelectorAll<HTMLInputElement>('input').forEach((input) => { input.disabled = !allowed || !draft.loaded; });
-    form.querySelectorAll<HTMLButtonElement>('[data-scope-state]').forEach((button) => {
-      button.disabled = !allowed || !scopeChoiceAllowed(draft, button.dataset.scopeState || '');
-      button.classList.toggle('on', draft.selected !== undefined && effectiveScopeState(draft, draft.selected.key) === button.dataset.scopeState);
-    });
-    const hasSelection = Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== 'exclude');
-    const confirmation = form.querySelector<HTMLInputElement>('[data-scope-whole-confirm]');
-    const submit = form.querySelector<HTMLButtonElement>('[data-scope-start]');
-    if (submit) submit.disabled = !allowed || !draft.loaded || !draft.generation || !draft.revision
-      || (!draft.whole && !hasSelection && !draft.edited) || (draft.whole && confirmation?.checked !== true);
-    if (submit) submit.textContent = draft.whole || hasSelection ? 'Save scope and start' : 'Save scope (nothing indexed)';
-    const cancel = form.querySelector<HTMLButtonElement>('[data-scope-cancel]'); if (cancel) cancel.disabled = draft.busy;
-    const confirmationLabel = form.querySelector<HTMLElement>('.scope-whole-confirm');
-    if (confirmationLabel) confirmationLabel.hidden = !draft.whole;
+  /** A child can never be more open than its parent. */
+  function scopeChoiceAllowed(draft: ScopeDraft, key: string, state: ScopeState): boolean {
+    const inherited = scopeInherited(draft, key).state;
+    if (inherited === 'exclude') return state === 'exclude';
+    if (inherited === 'metadata_only') return state !== 'ingest';
+    return true;
+  }
+
+  /** Mixed: the first shown choice below a folder that differs from its own, or ''. */
+  function scopeMixed(draft: ScopeDraft, key: string): ScopeState | '' {
+    // Effective access, not the drawn state: a folder nothing reaches and a
+    // skipped folder inside it both let Olympus read nothing, so that is not Mixed.
+    const own = effectiveScopeState(draft, key);
+    for (const other of draft.selections.keys()) {
+      if (other === key || !(draft.ancestors.get(other) || []).includes(key)) continue;
+      const theirs = effectiveScopeState(draft, other);
+      if (theirs !== own) return theirs;
+    }
+    return '';
+  }
+
+  /** Exceptions: folders whose own choice differs from what they would inherit. */
+  function scopeExceptions(draft: ScopeDraft): string[] {
+    return Array.from(draft.selections.keys()).filter((key) => draft.selections.get(key) !== scopeInherited(draft, key).state);
+  }
+
+  function scopeAnyChosen(draft: ScopeDraft): boolean {
+    return Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== 'exclude');
+  }
+
+  function scopeNameOf(form: HTMLFormElement, draft: ScopeDraft, key: string): string {
+    const Q = scopeCopy(form);
+    if (key === ACCOUNT_KEY) return fillText(Q.accountRow, { source: form.dataset.scopeLabel || '' });
+    const node = draft.catalog.get(key);
+    if (node?.name) return node.name;
+    const above = (draft.ancestors.get(key) || []).filter((ancestor) => draft.catalog.get(ancestor)?.name);
+    return above.length ? fillText(Q.insideFolder, { name: draft.catalog.get(above[above.length - 1]!)!.name }) : Q.unknownFolder;
+  }
+
+  /** An exception's label: its name under its parent's ("Clients / Archive 2019") when both are listed. */
+  function scopeShortPath(form: HTMLFormElement, draft: ScopeDraft, key: string): string {
+    const node = draft.catalog.get(key);
+    if (!node?.name) return scopeNameOf(form, draft, key);
+    const ancestors = draft.ancestors.get(key) || [];
+    const parent = ancestors.length ? draft.catalog.get(ancestors[ancestors.length - 1]!) : undefined;
+    return parent?.name ? `${parent.name} / ${node.name}` : node.name;
+  }
+
+  function scopeTrail(draft: ScopeDraft, key: string): string[] {
+    return [...(draft.ancestors.get(key) || []), key];
+  }
+
+  function scopeEl(tag: string, className = '', text?: string): HTMLElement {
+    const node = root.ownerDocument.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function scopeButton(className: string, text: string, focusKey: string, enabled: boolean): HTMLButtonElement {
+    const button = scopeEl('button', className, text) as HTMLButtonElement;
+    button.type = 'button';
+    button.dataset.scopeFocus = focusKey;
+    button.disabled = !enabled;
+    return button;
   }
 
   /**
-   * A parent reads Mixed when a folder chosen inside it ends up with a
-   * different choice than the parent's own, so "Fully indexed" never sits on
-   * a folder whose subfolders are partly kept out.
+   * One pill of three segments: toggle buttons (aria-pressed) in a labelled
+   * group, since a pressed segment can be cleared. One tab stop; arrow keys,
+   * Home and End move focus between segments without choosing (scopeKeydown).
+   * The explicit choice is filled; a choice that applies without being made
+   * here is drawn weaker (outlined).
    */
-  function scopeMixed(draft: ScopeDraft, key: string): boolean {
-    const own = effectiveScopeState(draft, key);
-    for (const other of draft.selections.keys()) {
-      if (other !== key && (draft.ancestors.get(other) || []).includes(key) && effectiveScopeState(draft, other) !== own) return true;
+  function scopeSegments(form: HTMLFormElement, draft: ScopeDraft, key: string, name: string, enabled: boolean): HTMLElement {
+    const Q = scopeCopy(form);
+    const account = key === ACCOUNT_KEY;
+    const own = account ? (draft.whole ? 'ingest' : '') : draft.selections.get(key) || '';
+    const from = account ? { state: '' as const, from: '' } : scopeInherited(draft, key);
+    const now = account ? own : shownScopeState(draft, key);
+    const node = draft.catalog.get(key);
+    const capped = !account && !own && draft.selections.size >= MAX_SCOPE_RULES;
+    const group = scopeEl('div', 'seg');
+    group.setAttribute('role', 'group');
+    group.setAttribute('aria-label', fillText(Q.choiceGroup, { name }));
+    const buttons: HTMLButtonElement[] = [];
+    for (const state of SCOPE_STATES) {
+      const [long, short] = Q.segments[state];
+      const pressed = own === state;
+      // An own choice a stricter parent overrides shows the winning choice beside it.
+      const inherited = !pressed && (own ? now !== own && now === state : from.state === state);
+      const button = scopeButton(`seg-opt${pressed ? ' on' : inherited ? ' inherited' : ''}`, '', `seg:${key}:${state}`, enabled);
+      button.dataset.scopeKey = key;
+      button.dataset.scopeState = state;
+      button.setAttribute('aria-label', long);
+      button.setAttribute('aria-pressed', String(pressed));
+      button.append(scopeEl('span', 'seg-long', long), scopeEl('span', 'seg-short', short));
+      const fromName = from.from ? scopeNameOf(form, draft, from.from) : '';
+      const blocked = pressed ? '' : account
+        ? (state === 'ingest' ? '' : Q.wholeOnlyFull)
+        : node && !node.selectable ? Q.cannotChoose
+          : from.state && !scopeChoiceAllowed(draft, key, state) ? fillText(Q.notPossible, { parent: fromName, state: Q.statesLower[from.state] })
+            : capped ? fillText(Q.capReached, { max: MAX_SCOPE_RULES }) : '';
+      const note = blocked
+        || (own === state && now && now !== own ? fillText(Q.overridden, { own: Q.states[own], parent: fromName, state: Q.states[now] }) : '')
+        || (!own && from.from && from.state === state ? fillText(Q.inheritedFrom, { parent: fromName }) : '');
+      if (note) { button.setAttribute('aria-description', note); button.title = note; }
+      if (blocked) button.disabled = true;
+      buttons.push(button);
+      group.appendChild(button);
     }
-    return false;
+    const live = buttons.filter((button) => !button.disabled);
+    const home = live.find((button) => button.dataset.scopeFocus === draft.focus)
+      || live.find((button) => button.classList.contains('on'))
+      || live.find((button) => button.classList.contains('inherited')) || live[0] || buttons[0];
+    for (const button of buttons) button.tabIndex = button === home ? 0 : -1;
+    return group;
   }
 
-  function scopeStatusText(draft: ScopeDraft, key: string): string {
-    if (scopeMixed(draft, key)) return 'Mixed';
-    const inherited = inheritedScopeState(draft, key);
-    const chosen = draft.selections.has(key);
-    return chosen || inherited
-      ? `${labels[effectiveScopeState(draft, key)]}${inherited && !chosen ? ' · inherited' : ''}` : 'Not selected';
-  }
-
-  /** What the current choices will do, counted from the choices themselves. */
-  function scopeConsequence(draft: ScopeDraft): string {
-    const counts = { ingest: 0, metadata_only: 0, exclude: 0 };
-    for (const key of draft.selections.keys()) counts[effectiveScopeState(draft, key)] += 1;
-    const folders = (count: number): string => `${count} ${count === 1 ? 'folder' : 'folders'}`;
-    const entries: Array<[string, number]> = [['fully indexed', counts.ingest], ['names only', counts.metadata_only], ['skipped', counts.exclude]];
-    const phrase = (list: Array<[string, number]>): string[] => list.filter(([, count]) => count > 0)
-      .map(([what, count], index) => `${index === 0 ? folders(count) : count} ${what}`);
-    if (draft.whole) {
-      const exceptions = phrase(entries.slice(1));
-      return `Entire account, including future folders, fully indexed${exceptions.length > 0 ? `; ${exceptions.join(', ')}` : ''}.`;
+  /** The folder's drill-in button (chevron and name are one target), or a leaf's name with the same gap. */
+  function scopeNameCell(form: HTMLFormElement, draft: ScopeDraft, node: OlympusFolderScopeNode, enabled: boolean): HTMLElement {
+    const Q = scopeCopy(form);
+    let label: HTMLElement;
+    if (node.has_children) {
+      const open = scopeButton('fname', '', `open:${node.key}`, enabled && !draft.loading);
+      open.dataset.scopeOpen = node.key;
+      open.setAttribute('aria-label', fillText(Q.openFolder, { name: node.name }));
+      const chevron = scopeEl('span', 'fopen', '›'); chevron.setAttribute('aria-hidden', 'true');
+      open.appendChild(chevron);
+      label = open;
+    } else {
+      label = scopeEl('p', 'fname leaf');
+      const gap = scopeEl('span', 'fopen-gap'); gap.setAttribute('aria-hidden', 'true');
+      label.appendChild(gap);
     }
-    const parts = phrase(entries);
-    if (counts.ingest + counts.metadata_only === 0) return 'No folders selected. Nothing will be indexed.';
-    return `${parts.join(', ')}. All other folders stay out.`;
+    label.title = node.name;
+    const main = scopeEl('span', 'fname-main');
+    main.appendChild(scopeEl('span', 'fname-text', node.name));
+    const differs = scopeMixed(draft, node.key);
+    if (differs) {
+      const tag = scopeEl('span', 'ftag', Q.mixed);
+      tag.title = fillText(Q.mixedSome, { state: Q.statesLower[differs] });
+      main.appendChild(tag);
+    }
+    label.appendChild(main);
+    return label;
   }
 
-  function renderScopeReview(form: HTMLFormElement, draft: ScopeDraft): void {
-    const summary = form.querySelector('[data-scope-summary]');
-    if (summary) summary.textContent = scopeConsequence(draft);
-    const list = form.querySelector('[data-scope-selections]');
-    if (list) {
-      list.replaceChildren();
-      for (const [key, state] of draft.selections) {
-        const item = root.ownerDocument.createElement('li');
-        item.textContent = `${labels[effectiveScopeState(draft, key)]} — ${draft.names.get(key) || key}`;
+  function scopeLevelList(form: HTMLFormElement, draft: ScopeDraft, parent: string, nodes: OlympusFolderScopeNode[], more: boolean, enabled: boolean): HTMLElement {
+    const Q = scopeCopy(form);
+    const list = scopeEl('ul', 'flist');
+    list.dataset.scopeNodes = parent;
+    list.setAttribute('aria-busy', String(draft.loading));
+    const seen = new Set<string>();
+    for (const node of nodes) {
+      if (seen.has(node.key)) continue;
+      seen.add(node.key);
+      const row = scopeEl('li', 'frow seg-row');
+      row.dataset.scopeRow = node.key;
+      row.append(scopeNameCell(form, draft, node, enabled), scopeSegments(form, draft, node.key, node.name, enabled && !draft.saving));
+      list.appendChild(row);
+    }
+    if (!nodes.length && draft.loaded && !draft.loading) list.appendChild(scopeEl('li', 'fempty', Q.noFolders));
+    if (more) {
+      const item = scopeEl('li', 'fmore');
+      const button = scopeButton('secondary', draft.loading ? Q.loadingFolders : Q.loadMore, `more:${parent}`, enabled && !draft.loading);
+      button.dataset.scopeMore = parent;
+      item.appendChild(button);
+      list.appendChild(item);
+    }
+    return list;
+  }
+
+  function scopeTopRow(text: string, control: HTMLElement, className = ''): HTMLElement {
+    const row = scopeEl('div', `this-row${className ? ` ${className}` : ''}`);
+    row.append(scopeEl('p', 'this-label', text), control);
+    return row;
+  }
+
+  function scopeRootScreen(form: HTMLFormElement, draft: ScopeDraft, view: HTMLElement, enabled: boolean): void {
+    const Q = scopeCopy(form);
+    const source = form.dataset.scopeLabel || '';
+    const accountName = fillText(Q.accountRow, { source });
+    view.appendChild(scopeTopRow(accountName, scopeSegments(form, draft, ACCOUNT_KEY, accountName, enabled && draft.loaded && !draft.saving), 'account-row'));
+    if (draft.whole && !draft.wholeConfirmed) {
+      const box = scopeEl('div', 'confirm-box');
+      box.dataset.scopeConfirm = '';
+      const actions = scopeEl('div', 'actions');
+      const yes = scopeButton('danger', Q.wholeConfirm, 'whole-yes', enabled && !draft.saving); yes.dataset.scopeWholeConfirm = '';
+      const no = scopeButton('secondary', Q.wholeCancel, 'whole-no', enabled && !draft.saving); no.dataset.scopeWholeCancel = '';
+      actions.append(yes, no);
+      box.append(scopeEl('p', 'strong', fillText(Q.wholePrompt, { source })), actions);
+      view.appendChild(box);
+    }
+    const exceptions = draft.loaded ? scopeExceptions(draft) : [];
+    if (exceptions.length) {
+      const section = scopeEl('section', 'fsection exceptions');
+      section.appendChild(scopeEl('h2', '', fillText(Q.exceptions, { n: exceptions.length })));
+      const list = scopeEl('ul', 'flist');
+      for (const key of exceptions) {
+        const state = draft.selections.get(key)!;
+        const jump = scopeButton('jump-btn', '', `jump:${key}`, enabled && !draft.loading);
+        jump.dataset.scopeJump = key;
+        jump.title = scopeShortPath(form, draft, key);
+        const chevron = scopeEl('span', 'chev', '›'); chevron.setAttribute('aria-hidden', 'true');
+        jump.append(scopeEl('span', 'fname-text', scopeShortPath(form, draft, key)), scopeEl('span', `jtag jtag-${state}`, Q.segments[state][0]), chevron);
+        const item = scopeEl('li', 'frow jump'); item.appendChild(jump);
         list.appendChild(item);
       }
+      section.appendChild(list);
+      view.appendChild(section);
     }
-    scopeControls(form, draft);
+    const folders = scopeEl('section', 'fsection');
+    folders.appendChild(scopeEl('h2', '', Q.foldersHeading));
+    folders.appendChild(scopeLevelList(form, draft, '', draft.nodes, !!draft.nextCursor, enabled));
+    view.appendChild(folders);
   }
 
-  function updateScopeRows(form: HTMLFormElement, draft: ScopeDraft): void {
-    form.querySelectorAll<HTMLElement>('.scope-folder').forEach((row) => {
-      const key = row.querySelector<HTMLElement>('[data-scope-select]')?.dataset.scopeSelect;
-      if (!key) return;
-      row.classList.toggle('selected', draft.selected?.key === key);
-      const status = row.querySelector('.scope-folder-status');
-      if (status) { status.textContent = scopeStatusText(draft, key); status.classList.toggle('mixed', status.textContent === 'Mixed'); }
+  function scopeFolderScreen(form: HTMLFormElement, draft: ScopeDraft, view: HTMLElement, enabled: boolean): void {
+    const Q = scopeCopy(form);
+    const key = draft.path[draft.path.length - 1]!;
+    const up = scopeButton('secondary back', Q.up, 'up', !draft.saving);
+    up.dataset.scopeUp = '';
+    view.appendChild(up);
+    const names = [form.dataset.scopeLabel || '', ...draft.path.map((entry) => scopeNameOf(form, draft, entry))];
+    const shown = names.length > 3 ? [Q.pathMore, ...names.slice(-2)] : names;
+    const head = scopeEl('h2', 'fpath');
+    shown.forEach((name, index) => {
+      head.appendChild(index === shown.length - 1 ? scopeEl('span', 'fpath-here', name) : scopeEl('span', 'fpath-up', `${name} / `));
     });
-    renderScopeReview(form, draft);
+    view.appendChild(head);
+    view.appendChild(scopeTopRow(Q.thisFolder, scopeSegments(form, draft, key, scopeNameOf(form, draft, key), enabled && !draft.saving)));
+    view.appendChild(scopeLevelList(form, draft, key, draft.branches.get(key) || [], draft.branchCursors.has(key), enabled));
   }
 
-  function scopeTrail(draft: ScopeDraft, key: string): ScopeTrail {
-    return [...(draft.ancestors.get(key) || []), key].map((ancestor) => ({ key: ancestor, name: draft.catalog.get(ancestor)?.name || ancestor }));
-  }
-
-  function renderScopeNodes(form: HTMLFormElement, draft: ScopeDraft): void {
-    const list = form.querySelector('[data-scope-nodes]');
-    if (!list) return;
-    list.replaceChildren();
-    const appendNodes = (host: Element, nodes: OlympusFolderScopeNode[], seen = new Set<string>()): void => {
-      const sorted = [...nodes].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
-        || a.key.localeCompare(b.key));
-      for (const node of sorted) {
-        if (seen.has(node.key)) continue;
-        const wrapper = root.ownerDocument.createElement('div'); wrapper.className = 'node';
-        const row = root.ownerDocument.createElement('div');
-        row.className = 'folder-row scope-folder'; row.setAttribute('role', 'listitem');
-        row.classList.toggle('selected', draft.selected?.key === node.key);
-        const disclosure = root.ownerDocument.createElement(node.has_children ? 'button' : 'span');
-        disclosure.className = 'disclosure';
-        if (disclosure instanceof HTMLButtonElement) {
-          disclosure.type = 'button'; disclosure.dataset.scopeOpen = node.key;
-          disclosure.textContent = draft.expanded.has(node.key) ? '▾' : '▸';
-          disclosure.setAttribute('aria-label', `${draft.expanded.has(node.key) ? 'Collapse' : 'Expand'} ${node.name}`);
-          disclosure.setAttribute('aria-expanded', String(draft.expanded.has(node.key)));
-        }
-        const select = root.ownerDocument.createElement('button');
-        select.type = 'button'; select.dataset.scopeSelect = node.key; select.textContent = node.name;
-        const status = root.ownerDocument.createElement('span'); status.className = 'scope-folder-status';
-        status.textContent = scopeStatusText(draft, node.key); status.classList.toggle('mixed', status.textContent === 'Mixed');
-        const icon = root.ownerDocument.createElement('span'); icon.className = 'folder-icon'; icon.textContent = '▰';
-        row.append(disclosure, icon, select, status); wrapper.appendChild(row);
-        if (draft.expanded.has(node.key)) {
-          const children = root.ownerDocument.createElement('div'); children.className = 'children';
-          children.setAttribute('role', 'group'); children.setAttribute('aria-label', node.name);
-          appendNodes(children, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
-          if (draft.branchCursors.has(node.key)) {
-            const more = root.ownerDocument.createElement('button'); more.type = 'button'; more.dataset.scopeMore = node.key; more.textContent = (draft.branches.get(node.key)?.length || 0) >= 20 ? 'Show more folders' : 'Continue loading folders'; children.appendChild(more);
-          }
-          wrapper.appendChild(children);
-        }
-        host.appendChild(wrapper);
-      }
-    };
-    appendNodes(list, draft.nodes);
-    if (draft.nodes.length === 0) {
-      const empty = root.ownerDocument.createElement('p'); empty.textContent = 'No folders returned in this page.'; list.appendChild(empty);
+  /** The footer: what happens when you save, then one primary Save and Discard changes. */
+  function scopeFooter(form: HTMLFormElement, draft: ScopeDraft): void {
+    const Q = scopeCopy(form);
+    const allowed = scopeAllowed(form, draft);
+    const totals: Record<ScopeState, number> = { ingest: 0, metadata_only: 0, exclude: 0 };
+    for (const key of draft.selections.keys()) totals[effectiveScopeState(draft, key)] += 1;
+    const parts: string[] = [];
+    for (const [state, template] of [['ingest', Q.summaryIngest], ['metadata_only', Q.summaryMetadata], ['exclude', Q.summaryExclude]] as Array<[ScopeState, string]>) {
+      const n = totals[state];
+      if (!n) continue;
+      parts.push(fillText(template, { n: parts.length ? String(n) : `${n} ${n === 1 ? Q.summaryFolder.one : Q.summaryFolder.many}` }));
     }
-    const needle = form.querySelector<HTMLInputElement>('[data-scope-search]')?.value.trim().toLowerCase() || '';
-    list.querySelectorAll<HTMLElement>('.scope-folder').forEach((row) => { row.hidden = !!needle && !(row.textContent || '').toLowerCase().includes(needle); });
-    const more = form.querySelector<HTMLElement>('[data-scope-more=""]'); if (more) { more.hidden = !draft.nextCursor; more.textContent = draft.nodes.length >= 20 ? 'Show more folders' : 'Continue loading folders'; }
-    renderScopeReview(form, draft);
+    const lines: string[] = [];
+    if (draft.whole) lines.push(fillText(Q.summaryWhole, { source: form.dataset.scopeLabel || '' }));
+    if (parts.length) lines.push(parts.join(', '));
+    else if (!draft.whole) lines.push(Q.summaryNone);
+    if (draft.selections.size >= MAX_SCOPE_RULES) lines.push(fillText(Q.capReached, { max: MAX_SCOPE_RULES }));
+    const summary = form.querySelector('[data-scope-summary]');
+    if (summary) summary.replaceChildren(...lines.map((line) => scopeEl('p', '', line)));
+    const chosen = scopeAnyChosen(draft);
+    const ready = allowed && draft.loaded && !!draft.generation && !!draft.revision && draft.selections.size <= MAX_SCOPE_RULES;
+    const blocker = draft.whole && !draft.wholeConfirmed ? Q.needConfirm : !draft.whole && !chosen && !draft.edited ? Q.needChoice : '';
+    const submit = form.querySelector<HTMLButtonElement>('[data-scope-start]');
+    if (submit) {
+      submit.disabled = !ready || blocker !== '';
+      submit.textContent = draft.saving ? Q.saving : draft.whole || chosen ? Q.saveFolders : Q.saveNoStart;
+      submit.setAttribute('aria-busy', String(draft.saving));
+    }
+    const reason = form.querySelector('[data-scope-reason]');
+    if (reason) reason.textContent = draft.saving || form.dataset.connected !== 'true' ? '' : blocker;
+    const cancel = form.querySelector<HTMLButtonElement>('[data-scope-cancel]');
+    if (cancel) cancel.disabled = !canWrite || draft.busy || (!draft.edited && !draft.invalid);
   }
 
-  async function browseScope(form: HTMLFormElement, trail: ScopeTrail, append = false): Promise<void> {
+  /** Re-render the open level and the footer from the draft, keeping focus on the same control. */
+  function renderScope(form: HTMLFormElement, draft: ScopeDraft): void {
+    const Q = scopeCopy(form);
+    const allowed = scopeAllowed(form, draft);
+    const loading = form.querySelector<HTMLElement>('[data-scope-loading]');
+    if (loading) loading.hidden = !draft.loading;
+    const back = form.closest('[data-scope-panel]')?.querySelector<HTMLElement>('.scope-back');
+    if (back) back.hidden = draft.path.length > 0;
+    const view = form.querySelector<HTMLElement>('[data-scope-view]');
+    // A disconnected account has nothing to choose yet: only its Connect line shows.
+    const connected = form.dataset.connected === 'true';
+    if (view) view.hidden = !connected;
+    const footer = form.querySelector<HTMLElement>('.picker-footer');
+    if (footer) footer.hidden = !connected;
+    if (view && connected) {
+      const tree = root.getRootNode();
+      const active = tree instanceof ShadowRoot ? tree.activeElement : root.ownerDocument.activeElement;
+      const keep = draft.focus || (active instanceof HTMLElement && view.contains(active) ? active.dataset.scopeFocus : undefined);
+      view.replaceChildren();
+      if (draft.retry && !draft.loading) {
+        const banner = scopeEl('div', 'scope-error');
+        banner.setAttribute('role', 'alert');
+        const retry = scopeButton('secondary', Q.tryAgain, 'retry', canWrite && !draft.invalid);
+        retry.dataset.scopeBrowseRoot = '';
+        banner.append(scopeEl('p', '', Q.loadFailed), retry);
+        view.appendChild(banner);
+      }
+      if (draft.path.length) scopeFolderScreen(form, draft, view, allowed);
+      else scopeRootScreen(form, draft, view, allowed);
+      if (!allowed) view.querySelectorAll<HTMLButtonElement>('button:not([data-scope-up])').forEach((button) => { button.disabled = true; });
+      draft.focus = undefined;
+      if (keep) {
+        const controls = Array.from(view.querySelectorAll<HTMLButtonElement>('button[data-scope-focus]'));
+        let target = controls.find((node) => node.dataset.scopeFocus === keep && !node.disabled);
+        // The control that had focus is gone or disabled (a cleared choice whose
+        // segment a stricter parent now blocks): stay on the same folder's
+        // control, on the choice it inherits, else on any control still enabled.
+        if (!target && !draft.busy) {
+          const key = keep.startsWith('seg:') ? keep.slice(4, keep.lastIndexOf(':')) : '';
+          const same = controls.filter((node) => !node.disabled && key !== '' && node.dataset.scopeKey === key);
+          target = same.find((node) => node.classList.contains('inherited')) || same.find((node) => node.classList.contains('on'))
+            || same[0] || controls.find((node) => !node.disabled);
+        }
+        target?.focus();
+      }
+    }
+    scopeFooter(form, draft);
+  }
+
+  /** List one level (the root, or a folder by its trail). Resolves true once it is listed. */
+  async function browseScope(form: HTMLFormElement, trail: string[], append = false): Promise<boolean> {
     const draft = scopeDraft(form);
-    if (!scopeAllowed(form, draft) || !options.transport.read) return;
-    const parent = trail.at(-1)?.key;
+    const Q = scopeCopy(form);
+    if (!scopeAllowed(form, draft) || !options.transport.read) return false;
+    const parent = trail.at(-1);
     const cursor = append ? (parent ? draft.branchCursors.get(parent) : draft.nextCursor) : undefined;
-    draft.loadAttempted = true; draft.loading = true; draft.busy = true; scopeControls(form, draft); scopeMessage(form, 'Loading folders…');
+    draft.loadAttempted = true; draft.loading = true; draft.busy = true; draft.retry = undefined;
+    scopeMessage(form, ''); renderScope(form, draft);
+    let listed = false;
+    // Try again repeats what was asked: a folder that would not open is opened again.
+    const again = parent && !append ? () => { void drillScope(form, draft, parent); } : () => { void browseScope(form, trail, append); };
     try {
       const result = await options.transport.read({
         view: 'dispositions', action: 'browse_folder_scope',
         source_id: form.dataset.folderScopeSource as OlympusFolderScopeSourceId,
         ...(parent ? { parent_key: parent } : {}), ...(cursor ? { cursor } : {}),
       });
-      if (disposed || options.signal.aborted || !root.contains(form)) return;
+      if (disposed || options.signal.aborted || !root.contains(form)) return false;
       if (result.status === 401 || result.status === 403 || !result.can_write) {
-        canWrite = false; scopeMessage(form, 'Write access expired. Reconnect before browsing private folders.'); return;
+        canWrite = false; scopeMessage(form, Q.readOnly); return false;
       }
       const page: OlympusFolderScopeBrowseResult | undefined = result.scope_browser;
       if (result.status < 200 || result.status >= 300 || !page
         || page.source_id !== form.dataset.folderScopeSource || !page.account_generation || !page.scope_revision
         || !Array.isArray(page.nodes) || page.nodes.some((node) => typeof node.key !== 'string'
           || typeof node.name !== 'string' || node.kind !== 'folder' || typeof node.selectable !== 'boolean')) {
-        scopeMessage(form, 'Could not list folders. Check the connection and reopen this picker.'); return;
+        draft.retry = again; return false;
       }
       if (draft.loaded && (draft.generation !== page.account_generation || draft.revision !== page.scope_revision)) {
-        draft.invalid = true;
-        scopeMessage(form, 'The account or saved scope changed. Reopen this picker before applying choices.'); return;
+        draft.invalid = true; scopeMessage(form, Q.conflict); return false;
+      }
+      if (page.nodes.some((node) => trail.includes(node.key))) {
+        draft.invalid = true; scopeMessage(form, Q.cycle); return false;
       }
       if (!draft.loaded) {
         draft.generation = page.account_generation; draft.revision = page.scope_revision;
         draft.selections = new Map(page.selections.map((selection) => [selection.key, selection.state]));
         page.selections.forEach((selection) => draft.ancestors.set(selection.key, selection.ancestor_keys || []));
         draft.whole = page.whole_account_selected;
-        const whole = form.querySelector<HTMLInputElement>('[data-scope-whole-account]'); if (whole) whole.checked = draft.whole;
-      }
-      if (page.nodes.some((node) => trail.some((ancestor) => ancestor.key === node.key))) {
-        scopeMessage(form, 'The folder listing contains a cycle. Reopen the picker before continuing.'); draft.invalid = true; return;
+        draft.wholeConfirmed = false;
       }
       draft.loaded = true;
-      const previous = parent ? draft.branches.get(parent) || [] : draft.nodes;
-      const nodes = append ? [...previous, ...page.nodes.filter((node) => !previous.some((old) => old.key === node.key))] : page.nodes;
+      const previous = append ? (parent ? draft.branches.get(parent) || [] : draft.nodes) : [];
+      const fresh = page.nodes.filter((node) => !previous.some((old) => old.key === node.key));
+      // Alphabetical, numbers in numeric order ("2 Areas" before "10 Notes"),
+      // whatever order the provider lists them in.
+      const nodes = [...previous, ...fresh].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+        || a.key.localeCompare(b.key));
       if (parent) {
-        draft.branches.set(parent, nodes); draft.expanded.add(parent);
+        draft.branches.set(parent, nodes);
         if (page.next_cursor) draft.branchCursors.set(parent, page.next_cursor); else draft.branchCursors.delete(parent);
       } else {
         draft.nodes = nodes; draft.nextCursor = page.next_cursor;
-        if (!append) { draft.branches.clear(); draft.branchCursors.clear(); draft.expanded.clear(); draft.catalog.clear(); }
+        if (!append) { draft.branches.clear(); draft.branchCursors.clear(); draft.path = []; }
       }
       page.nodes.forEach((node) => {
         draft.catalog.set(node.key, node);
-        draft.names.set(node.key, [...trail.map((entry) => entry.name), node.name].join(' / '));
-        draft.ancestors.set(node.key, trail.map((entry) => entry.key));
+        draft.ancestors.set(node.key, trail.slice());
       });
-      renderScopeNodes(form, draft);
-      scopeMessage(form, 'Only folder names were listed. Review your choices, then save and start.');
+      listed = true;
+      return true;
     } catch {
-      if (!disposed && root.contains(form)) scopeMessage(form, 'Folder browsing failed. Your choices are still here; retry when the connection is ready.');
+      if (!disposed && root.contains(form)) {
+        draft.retry = again;
+        scopeMessage(form, Q.browseFailed);
+      }
+      return false;
     } finally {
       draft.loading = false; draft.busy = false;
-      if (!disposed && root.contains(form)) scopeControls(form, draft);
+      // A folder that opened is shown by its caller (drill or jump), with Back focused.
+      if (!disposed && root.contains(form) && (!listed || !parent || append)) {
+        if (listed && append) draft.focus = `more:${parent || ''}`;
+        renderScope(form, draft);
+      }
     }
+  }
+
+  /** Open a folder: list it once, then show it with Back focused. */
+  async function drillScope(form: HTMLFormElement, draft: ScopeDraft, key: string): Promise<void> {
+    const trail = scopeTrail(draft, key);
+    if (!draft.branches.has(key) && !await browseScope(form, trail)) return;
+    if (disposed || !root.contains(form)) return;
+    draft.path = trail; draft.focus = 'up'; renderScope(form, draft);
+  }
+
+  /** Open a folder anywhere, listing each level above it once with the ancestor keys already held. */
+  async function jumpScope(form: HTMLFormElement, draft: ScopeDraft, key: string): Promise<void> {
+    const trail = scopeTrail(draft, key);
+    for (let index = 0; index < trail.length; index += 1) {
+      if (draft.branches.has(trail[index]!)) continue;
+      if (!await browseScope(form, trail.slice(0, index + 1))) return;
+      if (disposed || !root.contains(form)) return;
+    }
+    draft.path = trail; draft.focus = 'up'; renderScope(form, draft);
+  }
+
+  /** Set (or with '' clear) one folder's own choice, or the whole account's. */
+  function chooseScope(form: HTMLFormElement, draft: ScopeDraft, key: string, state: ScopeState | ''): void {
+    if (draft.saving) return;
+    if (key === ACCOUNT_KEY) {
+      const whole = state === 'ingest';
+      if (whole === draft.whole) return;
+      draft.whole = whole; draft.wholeConfirmed = false; draft.edited = true;
+      draft.focus = whole ? 'whole-yes' : `seg:${ACCOUNT_KEY}:ingest`;
+    } else {
+      if (state && (!scopeChoiceAllowed(draft, key, state) || draft.catalog.get(key)?.selectable === false)) return;
+      if (state && !draft.selections.has(key) && draft.selections.size >= MAX_SCOPE_RULES) return;
+      if (state) draft.selections.set(key, state); else draft.selections.delete(key);
+      draft.edited = true;
+      draft.focus = `seg:${key}:${state || scopeInherited(draft, key).state || 'ingest'}`;
+    }
+    renderScope(form, draft);
   }
 
   async function approveScope(form: HTMLFormElement): Promise<void> {
     const draft = scopeDraft(form);
-    const confirmation = form.querySelector<HTMLInputElement>('[data-scope-whole-confirm]')?.checked === true;
+    const Q = scopeCopy(form);
     if (!scopeAllowed(form, draft) || !draft.loaded || !draft.generation || !draft.revision
-      || (!draft.whole && !draft.edited && !Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== 'exclude'))
-      || (draft.whole && !confirmation)) {
-      scopeMessage(form, 'Choose folders first. Entire-account access also needs explicit confirmation.'); return;
+      || draft.selections.size > MAX_SCOPE_RULES
+      || (!draft.whole && !draft.edited && !scopeAnyChosen(draft))
+      || (draft.whole && !draft.wholeConfirmed)) {
+      scopeMessage(form, draft.whole && !draft.wholeConfirmed ? Q.needConfirm : Q.needChoice); return;
     }
-    draft.busy = true; scopeControls(form, draft); scopeMessage(form, 'Saving your approved scope…');
+    draft.busy = true; draft.saving = true; scopeMessage(form, ''); renderScope(form, draft);
     try {
       const result = await options.transport.control({
         action: 'approve_source_scope_and_start', source_id: form.dataset.folderScopeSource as OlympusFolderScopeSourceId,
         account_generation: draft.generation, expected_scope_revision: draft.revision,
         selections: Array.from(draft.selections.keys(), (key) => ({ key, state: effectiveScopeState(draft, key), ancestor_keys: draft.ancestors.get(key) || [] })),
-        whole_account: draft.whole, explicit_whole_account_confirmation: confirmation,
+        whole_account: draft.whole, explicit_whole_account_confirmation: draft.whole && draft.wholeConfirmed,
       });
       if (disposed || options.signal.aborted || !root.contains(form)) return;
       if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
@@ -1324,19 +2304,92 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
         if (result.status === 409) draft.invalid = true;
         const error = result.body.error;
         const message = error && typeof error === 'object' ? (error as Record<string, unknown>).message : undefined;
-        scopeMessage(form, typeof message === 'string' ? message : 'Scope was not activated. Your choices are still here.'); return;
+        scopeMessage(form, typeof message === 'string' ? message : Q.saveFailed); return;
       }
       draft.edited = false;
-      scopeMessage(form, 'Scope saved. Opening the source status…');
+      scopeMessage(form, Q.saved);
       if (!dirty && !Array.from(scopeDrafts.values()).some((other) => other.edited)) {
         options.navigate(`/dashboard?source=${encodeURIComponent(form.dataset.folderScopeSource || '')}`);
       }
     } catch {
-      if (!disposed && root.contains(form)) scopeMessage(form, 'Could not confirm the result. Reopen the picker to check saved scope before retrying.');
+      if (!disposed && root.contains(form)) scopeMessage(form, Q.unconfirmed);
     } finally {
-      draft.busy = false;
-      if (!disposed && root.contains(form)) scopeControls(form, draft);
+      draft.busy = false; draft.saving = false;
+      if (!disposed && root.contains(form)) renderScope(form, draft);
     }
+  }
+
+  function scopeClick(target: Element): boolean {
+    const form = target.closest<HTMLFormElement>('form[data-folder-scope-source]');
+    if (!form || !root.contains(form)) return false;
+    const draft = scopeDraft(form);
+    const Q = scopeCopy(form);
+    const control = target.closest<HTMLButtonElement>('button');
+    if (control?.disabled) return true;
+    if (target.closest('[data-scope-cancel]')) {
+      if (draft.busy) return true;
+      scopeDrafts.delete(form);
+      const fresh = scopeDraft(form); renderScope(form, fresh); scopeMessage(form, Q.discarded); void browseScope(form, []); return true;
+    }
+    if (target.closest('[data-scope-up]')) {
+      if (draft.saving) return true;
+      const left = draft.path.pop();
+      draft.focus = left ? `open:${left}` : undefined; renderScope(form, draft); return true;
+    }
+    if (!scopeAllowed(form, draft)) return true;
+    if (target.closest('[data-scope-browse-root]')) {
+      if (draft.retry) draft.retry(); else void browseScope(form, []);
+      return true;
+    }
+    const more = target.closest<HTMLElement>('[data-scope-more]');
+    if (more) {
+      const key = more.dataset.scopeMore || '';
+      if (key && draft.branchCursors.has(key)) void browseScope(form, scopeTrail(draft, key), true);
+      else if (!key && draft.nextCursor) void browseScope(form, [], true);
+      return true;
+    }
+    const open = target.closest<HTMLElement>('[data-scope-open]');
+    if (open?.dataset.scopeOpen) { void drillScope(form, draft, open.dataset.scopeOpen); return true; }
+    const jump = target.closest<HTMLElement>('[data-scope-jump]');
+    if (jump?.dataset.scopeJump) { void jumpScope(form, draft, jump.dataset.scopeJump); return true; }
+    if (target.closest('[data-scope-whole-confirm]')) {
+      draft.wholeConfirmed = true; draft.focus = `seg:${ACCOUNT_KEY}:ingest`; renderScope(form, draft); return true;
+    }
+    if (target.closest('[data-scope-whole-cancel]')) { chooseScope(form, draft, ACCOUNT_KEY, ''); return true; }
+    const segment = target.closest<HTMLElement>('[data-scope-key][data-scope-state]');
+    const key = segment?.dataset.scopeKey;
+    const state = segment?.dataset.scopeState as ScopeState | undefined;
+    if (key && state && SCOPE_STATES.includes(state)) {
+      const own = key === ACCOUNT_KEY ? (draft.whole ? 'ingest' : '') : draft.selections.get(key) || '';
+      chooseScope(form, draft, key, own === state ? '' : state);
+    }
+    return true;
+  }
+
+  /** Arrow keys, Home and End move between a control's enabled segments; Escape goes up a level. */
+  function scopeKeydown(event: KeyboardEvent): void {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const form = target?.closest<HTMLFormElement>('form[data-folder-scope-source]');
+    if (!target || !form || !root.contains(form)) return;
+    const draft = scopeDraft(form);
+    if (event.key === 'Escape' && draft.path.length && !draft.saving) {
+      event.preventDefault();
+      const left = draft.path.pop();
+      draft.focus = left ? `open:${left}` : undefined; renderScope(form, draft); return;
+    }
+    const group = target.closest('.seg');
+    if (!group || !target.matches('.seg-opt')) return;
+    const live = Array.from(group.querySelectorAll<HTMLButtonElement>('.seg-opt')).filter((button) => !button.disabled);
+    const at = live.indexOf(target as HTMLButtonElement);
+    let next: HTMLButtonElement | undefined;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = live[(at + 1) % live.length];
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = live[(at - 1 + live.length) % live.length];
+    else if (event.key === 'Home') next = live[0];
+    else if (event.key === 'End') next = live[live.length - 1];
+    if (!next) return;
+    event.preventDefault();
+    group.querySelectorAll<HTMLButtonElement>('.seg-opt').forEach((button) => { button.tabIndex = button === next ? 0 : -1; });
+    next.focus();
   }
 
   // Mail scope (Gmail). Same contract as the folder picker above: nothing
@@ -1581,56 +2634,6 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     return false;
   }
 
-  function scopeClick(target: Element): boolean {
-    const form = target.closest<HTMLFormElement>('form[data-folder-scope-source]');
-    if (!form || !root.contains(form)) return false;
-    const draft = scopeDraft(form);
-    if (target.closest('[data-scope-cancel]')) {
-      if (draft.busy) return true;
-      scopeDrafts.delete(form);
-      const list = form.querySelector('[data-scope-nodes]'); list?.replaceChildren();
-      form.querySelectorAll<HTMLInputElement>('input').forEach((input) => { input.checked = input.defaultChecked; });
-      const empty = form.querySelector<HTMLElement>('[data-scope-inspector-empty]'); if (empty) empty.hidden = false;
-      const content = form.querySelector<HTMLElement>('[data-scope-inspector-content]'); if (content) content.hidden = true;
-      form.querySelectorAll<HTMLElement>('[data-scope-more]').forEach((element) => { element.hidden = true; });
-      const location = form.querySelector('[data-scope-location]'); if (location) location.textContent = 'Folders';
-      const fresh = scopeDraft(form); renderScopeReview(form, fresh); scopeMessage(form, 'Changes cancelled. Loading saved folders…'); void browseScope(form, []); return true;
-    }
-    if (!scopeAllowed(form, draft)) return true;
-    if (target.closest('[data-scope-browse-root]')) { void browseScope(form, []); return true; }
-    const more = target.closest<HTMLElement>('[data-scope-more]');
-    if (more) {
-      const key = more.dataset.scopeMore;
-      if (key && draft.branchCursors.has(key)) void browseScope(form, scopeTrail(draft, key), true);
-      else if (!key && draft.nextCursor) void browseScope(form, [], true);
-      return true;
-    }
-    const open = target.closest<HTMLElement>('[data-scope-open]');
-    if (open) {
-      const node = draft.catalog.get(open.dataset.scopeOpen || '');
-      if (node && draft.expanded.has(node.key)) { draft.expanded.delete(node.key); renderScopeNodes(form, draft); }
-      else if (node && draft.branches.has(node.key)) { draft.expanded.add(node.key); renderScopeNodes(form, draft); }
-      else if (node) void browseScope(form, scopeTrail(draft, node.key));
-      return true;
-    }
-    const select = target.closest<HTMLElement>('[data-scope-select]');
-    if (select) {
-      draft.selected = draft.catalog.get(select.dataset.scopeSelect || '');
-      const empty = form.querySelector<HTMLElement>('[data-scope-inspector-empty]'); if (empty) empty.hidden = !!draft.selected;
-      const content = form.querySelector<HTMLElement>('[data-scope-inspector-content]'); if (content) content.hidden = !draft.selected;
-      const name = form.querySelector('[data-scope-selected-name]'); if (name) name.textContent = draft.selected?.name || '';
-      const path = form.querySelector('[data-scope-selected-path]'); if (path) path.textContent = draft.selected ? draft.names.get(draft.selected.key) || draft.selected.name : '';
-      const note = form.querySelector('[data-scope-selected-note]'); if (note) note.textContent = 'This choice applies to this folder and its contents. Review narrower choices before starting.';
-      updateScopeRows(form, draft); return true;
-    }
-    const choice = target.closest<HTMLElement>('[data-scope-state]');
-    const state = choice?.dataset.scopeState;
-    if (draft.selected?.selectable && state && scopeChoiceAllowed(draft, state) && (state === 'ingest' || state === 'metadata_only' || state === 'exclude')) {
-      draft.selections.set(draft.selected.key, state); draft.edited = true; updateScopeRows(form, draft);
-    }
-    return true;
-  }
-
   function query<T extends Element = Element>(selector: string): T | null {
     return root.querySelector(selector) as T | null;
   }
@@ -1678,7 +2681,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>('form[data-folder-scope-source]').forEach((form) => {
       const draft = scopeDraft(form);
-      scopeControls(form, draft);
+      renderScope(form, draft);
       if (presented && !form.closest<HTMLElement>('[data-scope-panel]')?.hidden
         && !draft.loadAttempted && scopeAllowed(form, draft)) void browseScope(form, []);
     });
@@ -1824,7 +2827,10 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
   }
 
   function onKeydown(event: Event): void {
-    if (event.target instanceof Element && event.target.closest('form[data-folder-scope-source]')) return;
+    if (event.target instanceof Element && event.target.closest('form[data-folder-scope-source]')) {
+      if (event instanceof KeyboardEvent) scopeKeydown(event);
+      return;
+    }
     if (!(event instanceof KeyboardEvent) || (event.key !== 'Enter' && event.key !== ' ')) return;
     const row = event.target instanceof Element ? event.target.closest<HTMLElement>('.folder-row') : null;
     if (!row || !root.contains(row)) return;
@@ -1837,17 +2843,6 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     if (mailForm && root.contains(mailForm)) {
       const state = mailState(mailForm);
       state.edited = true; mailControls(mailForm, state); return;
-    }
-    if (event.target instanceof HTMLInputElement && root.contains(event.target)) {
-      const form = event.target.closest<HTMLFormElement>('form[data-folder-scope-source]');
-      if (form && event.target.matches('[data-scope-search]')) { renderScopeNodes(form, scopeDraft(form)); return; }
-      if (form && (event.target.matches('[data-scope-whole-account]') || event.target.matches('[data-scope-whole-confirm]'))) {
-        const draft = scopeDraft(form);
-        if (!scopeAllowed(form, draft) || !draft.loaded) return;
-        draft.whole = form.querySelector<HTMLInputElement>('[data-scope-whole-account]')?.checked === true;
-        if (!draft.whole) { const confirm = form.querySelector<HTMLInputElement>('[data-scope-whole-confirm]'); if (confirm) confirm.checked = false; }
-        draft.edited = true; renderScopeReview(form, draft); return;
-      }
     }
     const input = event.target instanceof HTMLInputElement && event.target.matches('[data-folder-search]')
       ? event.target

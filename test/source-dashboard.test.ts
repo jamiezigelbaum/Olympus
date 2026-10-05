@@ -2078,7 +2078,7 @@ describe('multi-source source dashboard', () => {
 
     expect(callback.status).toBe(400);
     expect(callback.headers.get('Content-Type')).toContain('text/html');
-    expect(text).toContain('Could not connect dropbox');
+    expect(text).toContain('Could not connect Dropbox');
     // The allowlisted code is the whole provider vocabulary this page speaks:
     // the description is provider prose, and provider prose can echo secrets
     // (R61/R61B), so it never renders.

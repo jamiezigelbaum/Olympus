@@ -29,7 +29,7 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { classifyContentTier, maxTier, type TierDecision } from '../classification/tier-classifier.ts';
+import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
 import type { TierCopy, TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
@@ -128,14 +128,15 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           metadataTier: record.metadataTier,
           metadataForced: record.metadataForced,
           metadataFlagged: record.metadataFlagged,
+          metadataOwnerDecided: namesDecidedByOwner(record.reasons),
           ...(itemTitle ? { title: itemTitle } : {}),
           ...(itemPath ? { path: itemPath } : {}),
           subject: identity,
         },
         {
-          ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
           ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
           ...(override ? { override } : {}),
+          ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
       );
       // An unusable map or rules file: the content decision is held pending

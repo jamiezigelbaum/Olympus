@@ -1,6 +1,6 @@
 // P2 on the P1c lanes: the owner's tier rules file reaches WhatsApp (an
 // explicit chat rule to Personal lifts the lane's Private floor for that chat
-// only), and an edited sensitivity map or rules file takes effect at the next
+// only), and an edited rules file takes effect at the next
 // sync pass on every lane, with no restart.
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,7 +10,6 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { compactClassificationSignals, trustDomainPrior } from '../src/core/classification-signals.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
-import { USER_FACING_TIER_MAPPING } from '../src/core/sensitivity-map.ts';
 import {
   clearInstalledTierClassification,
   configureInstalledTierClassification,
@@ -42,22 +41,6 @@ function workspace(): string {
 
 function ids(store: LocalConnectorStore | undefined, term: string): string[] {
   return (store?.searchItems(term, 20) ?? []).map((row) => row.sourceItem.providerItemId).sort();
-}
-
-function writeMap(path: string, keywords: string[]): void {
-  writeFileSync(path, JSON.stringify({
-    schemaVersion: 2,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: [{
-      id: 'owner-private',
-      label: 'owner private',
-      targetTierName: 'secure',
-      targetTrustTier: USER_FACING_TIER_MAPPING.secure.targetTrustTier,
-      targetTrustDomain: USER_FACING_TIER_MAPPING.secure.targetTrustDomain,
-      examples: ['example'],
-      match: { keywords, senderPatterns: [], pathPatterns: [] },
-    }],
-  }));
 }
 
 describe('WhatsApp: owner chat rules from tier-rules.json', () => {
@@ -129,7 +112,7 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
       schemaVersion: 1,
       rules: [{ id: 'garden-club', match: { chat: 'chat-a' }, tier: 'private', strength: 'prior' }],
     }));
-    configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: rulesPath, OLYMPUS_SENSITIVITY_MAP_PATH: join(root, 'no-map.json') } });
+    configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: rulesPath } });
     const { store, sync, internal } = openLane(root);
     await sync([
       { id: 'm1', conversation: 'chat-a', title: 'Garden club', text: 'See you at the allotment on Saturday.' },
@@ -144,7 +127,7 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
 
   test('with no rules file every new message stays Private', async () => {
     const root = workspace();
-    configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(root, 'none.json'), OLYMPUS_SENSITIVITY_MAP_PATH: join(root, 'no-map.json') } });
+    configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(root, 'none.json') } });
     const { store, sync, internal } = openLane(root);
     await sync([{ id: 'm1', conversation: 'chat-a', title: 'Garden club', text: 'See you at the allotment on Saturday.' }]);
     expect(internal()).toBeUndefined();
@@ -152,16 +135,16 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
   });
 });
 
-describe('an edited map applies at the next pass, without a restart', () => {
-  test('Dropbox: a Private category added to the map keeps the next new file Private and queues the earlier one to move', async () => {
+describe('an edited rules file applies at the next pass, without a restart', () => {
+  test('Dropbox: an always-Private folder rule keeps the next new file Private and queues the earlier one to move', async () => {
     const root = workspace();
-    const mapPath = join(root, 'sensitivity-map.json');
+    const rulesPath = join(root, 'tier-rules.json');
     const env = {
       OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
       OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
       OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
     };
-    configureInstalledTierClassification({ env: { OLYMPUS_SENSITIVITY_MAP_PATH: mapPath, OLYMPUS_TIER_RULES_PATH: join(root, 'none.json') } });
+    configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: rulesPath } });
 
     const entries: Array<{ tag: 'file'; id: string; name: string; pathDisplay: string; rev: string }> = [];
     const metadataClient: DropboxMetadataClient = {
@@ -191,19 +174,23 @@ describe('an edited map applies at the next pass, without a restart', () => {
     });
     const sync = createDropboxProviderStoreSyncHandler({ store: secure, account: 'personal', broker, metadataClient, tierSet: lane.set });
 
-    // Pass 1, no map: a new file's names are Personal.
+    // Pass 1, no rules: a new file's names are Personal.
     entries.push({ tag: 'file', id: 'id:first', name: 'zebracorn-plan.pdf', pathDisplay: '/zebracorn-plan.pdf', rev: 'r1' });
     await sync.pull({ approved_scope_key: 'dropbox.personal:/' });
     expect(ids(lane.internal.current(), 'zebracorn')).toEqual(['id:first']);
 
-    // The owner adds a Private category. The same worker, the next pass:
-    writeMap(mapPath, ['zebracorn']);
+    // The owner makes the folder always Private (a privacy-profile rule). The
+    // same worker, the next pass:
+    writeFileSync(rulesPath, JSON.stringify({
+      schemaVersion: 1,
+      rules: [{ id: 'owner-private', source: 'dropbox', match: { pathPrefix: '/' }, tier: 'secure', strength: 'prior' }],
+    }));
     entries.push({ tag: 'file', id: 'id:second', name: 'zebracorn-budget.pdf', pathDisplay: '/zebracorn-budget.pdf', rev: 'r1' });
     const second = await sync.pull({ approved_scope_key: 'dropbox.personal:/' });
     expect(ids(secure, 'budget')).toEqual(['id:second']);
     expect(ids(lane.internal.current(), 'budget')).toEqual([]);
     expect(lane.ledger.getCurrent({ provider: 'dropbox', accountScope: 'personal', providerItemId: 'id:second' })?.reasons)
-      .toContain('metadata:sensitivity_map:owner-private');
+      .toContain('metadata:owner_rule:pathPrefix:owner-private:prior');
     // The earlier file is re-judged too: raised, so queued to move (hidden first).
     expect(second.receipt.counts.tier_moves_queued).toBe(1);
     expect(lane.ledger.getCurrent({ provider: 'dropbox', accountScope: 'personal', providerItemId: 'id:first' }))

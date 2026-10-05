@@ -27,6 +27,7 @@
 // - The Castor-visible result carries the gated answer, citation locators, and
 //   audits — never raw chunks, packets, or pack internals.
 
+import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
@@ -2120,12 +2121,19 @@ function safeUnsupportedCoverageGaps(pack: EvidencePack, nonPublicPack: boolean)
 }
 
 function safeUnreadableMatchedCoverageGaps(detail: EvidencePackBuildDetail): string[] {
-  const count = unreadableMatchedCandidateIndexes(detail).length;
-  if (count === 0) return [];
-  return [
-    `${count} matched file${count === 1 ? '' : 's'} found, but ` +
-    `${count === 1 ? 'it could' : 'they could'} not be read or extracted in this pass.`,
-  ];
+  const namesOnly = new Set(detail.namesOnlyCandidateIndexes ?? []);
+  const matched = unreadableMatchedCandidateIndexes(detail);
+  const namesOnlyCount = matched.filter((index) => namesOnly.has(index)).length;
+  const count = matched.length - namesOnlyCount;
+  const notes: string[] = [];
+  if (count > 0) {
+    notes.push(
+      `${count} matched file${count === 1 ? '' : 's'} found, but ` +
+      `${count === 1 ? 'it could' : 'they could'} not be read or extracted in this pass.`,
+    );
+  }
+  if (namesOnlyCount > 0) notes.push(namesOnlyCoverageNote(namesOnlyCount));
+  return notes;
 }
 
 function appendUniqueCoverageNotes(
@@ -2336,8 +2344,12 @@ function appendUnreadableMatchedEvidence(
 
 function unreadableMatchedCandidateIndexes(detail: EvidencePackBuildDetail): number[] {
   if (detail.pack.coverage.extractionGaps.length === 0) return [];
+  // Contents tiered Private are not unreadable: they are answered from their
+  // Private copy, and a name-only copy adds nothing as evidence.
+  const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
   return detail.pack.candidates
     .map((candidate, index) => ({ candidate, index }))
+    .filter(({ index }) => !contentPrivate.has(index))
     .filter(({ candidate }) => candidate.provenance.sourceItem.family === 'file')
     .filter(({ candidate }) => {
       return candidate.chunks.length === 0
@@ -2394,4 +2406,269 @@ function sourceItemsEqual(left: SourceItemIdentity, right: SourceItemIdentity): 
     && left.providerEventId === right.providerEventId
     && left.localItemId === right.localItemId
     && left.sourceVersion === right.sourceVersion;
+}
+
+// --- Released evidence for an external analyst ------------------------------
+// The retrieval-only path (ChatGPT on the owner's Mac, no local model): the
+// same shared EvidencePack build the Analyst path runs, restricted to Public
+// and Personal tiers, with every item passed through the same release gate
+// the Analyst's answer passes, item by item. The calling assistant's own model
+// then does the Analyst's job under the one generic instruction (answer from
+// this evidence only, cite each claim, say what you could not find). No
+// Analyst call, no per-question logic, no change to the EvidencePack contract:
+// this is a new consumer of it (docs/CONTRACTS.md change log, 2026-10-01).
+
+export interface ReleasedEvidenceItem extends SourceIndexAnswerEvidence {
+  // The candidate's own chunks, bounded; absent for a matched item no reader
+  // could open (it still counts as matched).
+  excerpt?: string;
+  // The release gate saw instruction-like text in this excerpt; it is data.
+  source_instructions_flagged?: true;
+}
+
+export interface ReleasedEvidenceCoverage {
+  searched_corpora: number;
+  skipped_corpora: number;
+  // Matched items Olympus tried and failed to read (no provider, no text).
+  unreadable_items: number;
+  // Matched items in folders the owner set to Names only: their names are
+  // searchable and their contents are deliberately not read. Never folded
+  // into unreadable_items.
+  names_only_items: number;
+  // Matched items whose name is Personal or Public but whose contents are
+  // tiered Private: answered only by the Private lane. Never folded into
+  // unreadable_items or names_only_items.
+  content_private_items: number;
+  partially_read_items: number;
+  unclassified_items: number;
+  // Breadth per family beyond the bounded selection (counts only).
+  matches: Array<{ family: string; matched_items: number; in_evidence: number; at_least: boolean }>;
+}
+
+export interface ReleasedEvidenceResult {
+  evidence: ReleasedEvidenceItem[];
+  // Items the release gate held back (count only).
+  withheld: number;
+  coverage: ReleasedEvidenceCoverage;
+}
+
+const RELEASED_EXCERPT_MAX_CHARS = 1_500;
+
+export async function searchReleasedEvidence(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  question: string;
+  maxResults?: number;
+  maxCharsPerCandidate?: number;
+  evidenceByteBudget?: number;
+  laneTimeoutMs?: number;
+}): Promise<ReleasedEvidenceResult> {
+  const question = input.question.trim();
+  if (!question) throw new OperationError('invalid_params', 'A question is required.');
+  const maxResults = Math.max(1, Math.min(MAX_EVIDENCE_CANDIDATES, input.maxResults ?? DEFAULT_MAX_RESULTS));
+  const request: SourceIndexAnswerRequest = {
+    question,
+    retrieval_mode: 'hybrid',
+    include_internal: true,
+    include_secure_local: false,
+    include_secure_local_content: false,
+    max_results: maxResults,
+  };
+  const lanes = input.lanes(request);
+  const detail = await buildEvidencePackDetailed({
+    question,
+    maxResults,
+    // Public and Personal only: Private never enters this pack.
+    searchContext: { allowedTrustDomains: ['public_safe', 'internal'], allowCloudQueries: true },
+    registry: lanes.registry,
+    adapters: lanes.adapters,
+    contentProviders: lanes.contentProviders,
+    maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+    evidenceByteBudget: input.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET,
+    ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
+    ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+    ...(lanes.classificationCoverage ? { classificationCoverage: lanes.classificationCoverage } : {}),
+  });
+  assertEvidencePackModelEligible(detail.pack);
+  const evidence: ReleasedEvidenceItem[] = [];
+  let withheld = 0;
+  const seen = new Set<string>();
+  // A match whose name is Personal but whose contents are tiered Private is
+  // answered from its Private copy (the private answer panel); here it would
+  // be a name with nothing behind it. Its name is not hidden by this (names
+  // may stay Personal): it is just not listed as evidence. It is still
+  // counted in coverage.content_private_items.
+  const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
+  detail.pack.candidates.forEach((candidate, index) => {
+    if (contentPrivate.has(index)) return;
+    if (candidate.trustDomain !== 'public_safe' && candidate.trustDomain !== 'internal') {
+      withheld += 1;
+      return;
+    }
+    const corpusId = detail.candidateCorpusIds[index] ?? 'unknown';
+    const item = candidate.provenance.sourceItem;
+    const key = `${corpusId}:${item.providerItemId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const excerpt = candidate.chunks.join('\n…\n').trim().slice(0, RELEASED_EXCERPT_MAX_CHARS);
+    const cite = candidate.provenance.citation;
+    const fact = createStructuredEvidenceFact({
+      factId: `evidence-${index + 1}`,
+      claim: excerpt || cite?.title || item.providerItemId,
+      sourceProvenance: [candidate.provenance],
+      sensitivity: buildSourceSensitivity({ trustTier: candidate.trustTier, trustDomain: candidate.trustDomain }),
+      confidence: 'medium',
+      extractionKind: excerpt ? 'quoted_fact' : 'metadata',
+    });
+    const decision = evaluateReleaseGate({
+      facts: [fact],
+      draftAnswer: excerpt,
+      destination: 'calling_agent',
+      action: 'answer',
+      caller: 'worker',
+    });
+    if (decision.decision !== 'allow') {
+      withheld += 1;
+      return;
+    }
+    evidence.push(withoutSecretLikeLabels({
+      corpus_id: corpusId,
+      trust_domain: candidate.trustDomain,
+      family: item.family,
+      provider: item.provider,
+      provider_item_id: item.providerItemId,
+      ...(cite?.title ? { title: cite.title } : {}),
+      ...(cite?.sourceLabel ? { source_label: cite.sourceLabel } : {}),
+      ...(cite?.uri ? { uri: cite.uri } : {}),
+      ...(cite?.authoredAt ? { authored_at: cite.authoredAt } : {}),
+      ...(cite?.updatedAt ? { updated_at: cite.updatedAt } : {}),
+      ...(excerpt ? { excerpt } : {}),
+      ...(fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true as const } : {}),
+    }));
+  });
+  const coverage = detail.pack.coverage;
+  return {
+    evidence,
+    withheld,
+    coverage: {
+      searched_corpora: coverage.searchedCorpora.length,
+      skipped_corpora: detail.skippedCorpora.filter((skip) => skip.trustDomain !== 'secure_local').length,
+      unreadable_items: (detail.unreadCandidates ?? 0)
+        + (detail.policyDeniedCandidates ?? 0)
+        + (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.unreadDocuments, 0),
+      names_only_items: detail.namesOnlyCandidateIndexes?.length ?? 0,
+      content_private_items: detail.contentPrivateCandidateIndexes?.length ?? 0,
+      partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
+      unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
+      matches: (coverage.matchCounts ?? []).map((count) => ({
+        family: count.family,
+        matched_items: count.matchedItems,
+        in_evidence: count.inEvidence,
+        at_least: count.atLeast,
+      })),
+    },
+  };
+}
+
+// --- Private evidence for the private answer panel -------------------------
+// The ChatGPT private answer panel (workers/chatgpt/private-answer-jobs.ts):
+// the same shared EvidencePack build, restricted to Private (secure_local)
+// items, so each matched item arrives with its own bounded, query-relevant
+// passages read from the local store. Nothing here is released: the
+// candidates go only to the built-in private model on this computer, and only
+// their count leaves the engine. No Analyst call, no per-question logic.
+
+export interface PrivateEvidenceResult {
+  // Private items the bounded search matched, readable or not.
+  matched: number;
+  // Every matched Private candidate, with whatever passages its store could
+  // read (an empty `chunks` means unreadable; the consumer must not answer
+  // from its title alone). Each names the Private corpus it came from, so
+  // readPrivateEvidenceItem can read it again in depth.
+  candidates: PrivateEvidenceCandidate[];
+}
+
+export type PrivateEvidenceCandidate = EvidenceCandidate & { corpusId: string };
+
+const PRIVATE_EVIDENCE_MAX_RESULTS = 12;
+const PRIVATE_DEPTH_MAX_PASSAGES = 24;
+const PRIVATE_EVIDENCE_BYTE_BUDGET = 20_000;
+
+export async function searchPrivateEvidence(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  question: string;
+  maxResults?: number;
+  maxCharsPerCandidate?: number;
+  evidenceByteBudget?: number;
+  laneTimeoutMs?: number;
+}): Promise<PrivateEvidenceResult> {
+  const question = input.question.trim();
+  if (!question) throw new OperationError('invalid_params', 'A question is required.');
+  const maxResults = Math.max(1, Math.min(MAX_EVIDENCE_CANDIDATES, input.maxResults ?? PRIVATE_EVIDENCE_MAX_RESULTS));
+  const request: SourceIndexAnswerRequest = {
+    question,
+    retrieval_mode: 'hybrid',
+    include_internal: false,
+    include_secure_local: true,
+    include_secure_local_content: true,
+    max_results: maxResults,
+  };
+  const lanes = input.lanes(request);
+  const detail = await buildEvidencePackDetailed({
+    question,
+    maxResults,
+    // Private only, and no query leaves this computer.
+    searchContext: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false },
+    registry: lanes.registry,
+    adapters: lanes.adapters,
+    contentProviders: lanes.contentProviders,
+    maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+    evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
+    ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
+    ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+  });
+  assertEvidencePackModelEligible(detail.pack);
+  const candidates = detail.pack.candidates
+    .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
+    .filter((candidate) => candidate.trustDomain === 'secure_local' && candidate.corpusId !== '');
+  return { matched: candidates.length, candidates };
+}
+
+/**
+ * One Private evidence item's own text, read again from its local store with
+ * a larger budget: the whole item when it fits `maxChars`, else its passages
+ * most relevant to `question` (the store's own selection, the same as at
+ * search time). The private answer panel reads an item that clearly leads in
+ * depth through this. Private (secure_local) corpora only, through the same
+ * content provider, so the store's tier visibility applies as at search time;
+ * undefined when the item is not readable there.
+ */
+export async function readPrivateEvidenceItem(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  item: Readonly<Record<string, unknown>>;
+  question: string;
+  maxChars: number;
+}): Promise<readonly string[] | undefined> {
+  const corpusId = typeof input.item.corpusId === 'string' ? input.item.corpusId : undefined;
+  const provenance = input.item.provenance as SourceIndexProvenance | undefined;
+  if (!corpusId || !provenance?.sourceItem || input.item.trustDomain !== 'secure_local') return undefined;
+  const lanes = input.lanes({
+    question: input.question,
+    retrieval_mode: 'hybrid',
+    include_internal: false,
+    include_secure_local: true,
+    include_secure_local_content: true,
+  });
+  if (lanes.registry.get(corpusId)?.trustDomain !== 'secure_local') return undefined;
+  const provider = lanes.contentProviders[corpusId];
+  if (!provider) return undefined;
+  const content = await provider.fetchLocalContent({
+    provenance,
+    trustDomain: 'secure_local',
+    maxChars: Math.max(1, Math.floor(input.maxChars)),
+    query: input.question,
+    // In depth: as many of the item's passages as the budget holds.
+    maxPassages: PRIVATE_DEPTH_MAX_PASSAGES,
+  });
+  if (!content || content.namesOnly || content.contentPrivate) return undefined;
+  return content.chunks;
 }

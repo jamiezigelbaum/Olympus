@@ -36,8 +36,9 @@ const IMPORT_ALLOWLIST = new Set([
   'node:path',
   'bun:sqlite',
   '../../core/contracts.ts',
+  // The shared location matcher (review P-5): path prefixes, folder keys, labels; no source names.
+  '../../core/location-rules.ts',
   '../../core/sender-rules.ts',
-  '../../core/sensitivity-map.ts',
   '../../core/source-index/types.ts',
   '../../core/sqlite-migrations.ts',
   '../../core/sqlite-store.ts',

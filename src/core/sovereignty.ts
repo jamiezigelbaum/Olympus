@@ -8,6 +8,9 @@ import { normalizeSecretRef } from './secret-store.ts';
 import { assertModelTrustTierAllowed } from './source-model-policy.ts';
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import type { SourceTrustDomain, SourceTrustTier } from './source-index/types.ts';
+import { BUILT_IN_EMBEDDING_MODEL } from '../workers/source-index/built-in-embedding/manifest.ts';
+
+const BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
 
 export {
   assertEvidenceCandidateModelEligible,
@@ -28,7 +31,10 @@ export type SovereigntyProfileProvider =
   | 'google-gemini'
   | 'venice'
   | 'anthropic'
-  | 'openai-compatible';
+  | 'openai-compatible'
+  // The in-process embedding model: embedding only, always local trust, no
+  // endpoint and no credential.
+  | 'built-in';
 
 interface SovereigntyModelProfileBase {
   trust: SovereigntyProfileTrust;
@@ -263,7 +269,12 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
   for (const [id, profile] of Object.entries(config.modelProfiles)) {
     validateProfile(id, profile);
   }
+  const publicRetired = isPublicTierRetired(config);
   for (const domain of BUILTIN_DOMAINS) {
+    // An install without a Public tier (fresh installs, owner ruling
+    // 2026-10-01) leaves public_safe out of BOTH routes and retrieval;
+    // leaving out only one half is still an error.
+    if (domain === 'public_safe' && publicRetired) continue;
     const route = config.routes[domain];
     if (!route) {
       throw new OperationError('config_error', `sovereignty.routes.${domain} is required.`);
@@ -283,6 +294,12 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
     validateAnalystPoolShape(pool, domain);
     for (const profileId of pool.members) {
       const resolved = resolveProfile(config, profileId, `route ${domain}`);
+      if (resolved.profile.provider === 'built-in') {
+        throw new OperationError(
+          'config_error',
+          `sovereignty.routes.${domain} cannot use the built-in embedding profile "${profileId}" as an analyst.`,
+        );
+      }
       if (!profileAllowedForDomain(resolved.profile, domain)) {
         throw new OperationError(
           'config_error',
@@ -301,6 +318,17 @@ export function validateSovereigntyConfig(rawConfig: SovereigntyConfig): Soverei
     validateRetrievalPolicy(config, domain, retrieval);
   }
   return config;
+}
+
+/**
+ * Whether this policy has no Public tier: it defines neither a public_safe
+ * route nor a public_safe retrieval policy. Fresh installs are written this
+ * way (owner ruling 2026-10-01: Personal, Private and Secret only; anything
+ * that would be Public is Personal). Every earlier policy defines both and
+ * keeps its Public tier unchanged.
+ */
+export function isPublicTierRetired(config: Pick<SovereigntyConfig, 'routes' | 'retrieval'>): boolean {
+  return config.routes.public_safe === undefined && config.retrieval.trustDomains.public_safe === undefined;
 }
 
 export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | undefined> = process.env): SovereigntyConfig {
@@ -380,6 +408,13 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
         ?? 'env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
       purpose: 'embedding',
     };
+  } else if (embeddingProvider === 'built-in') {
+    profiles['built-in-embedding'] = {
+      provider: 'built-in',
+      trust: 'local',
+      model: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_MODEL_ID,
+      purpose: 'embedding',
+    };
   } else if (embeddingProvider === 'venice') {
     profiles['venice-source-embedding'] = {
       provider: 'venice',
@@ -401,12 +436,16 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
     ? 'gemini-source-embedding'
     : embeddingProvider === 'local-openai-compatible'
       ? 'local-source-embedding'
-      : null;
+      : embeddingProvider === 'built-in'
+        ? 'built-in-embedding'
+        : null;
   const secureEmbeddingProfile = embeddingProvider === 'local-openai-compatible'
     ? 'local-source-embedding'
     : embeddingProvider === 'venice'
       ? 'venice-source-embedding'
-      : null;
+      : embeddingProvider === 'built-in'
+        ? 'built-in-embedding'
+        : null;
   const secureEmbeddingTrust: SovereigntyProfileTrust[] = embeddingProvider === 'venice'
     ? ['encrypted_cloud']
     : ['local'];
@@ -494,11 +533,10 @@ export function writeSovereigntyConfigFile(input: {
     );
   }
   const config = validateSovereigntyConfig(input.config);
-  // ~/.olympus is the owner's private policy directory: sovereignty.json and
-  // the sensitivity map the install guide has an agent write next to it. It
-  // must exist after setup, and at 0700 -- created with the process umask it
-  // was world-readable, which is the wrong custody for the directory that
-  // holds a sensitivity map.
+  // ~/.olympus is the owner's private policy directory: sovereignty.json, the
+  // privacy profile and the tier rules. It must exist after setup, and at
+  // 0700 -- created with the process umask it was world-readable, which is
+  // the wrong custody for the directory that holds the owner's privacy rules.
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
@@ -673,11 +711,15 @@ function parseTrustDomainPolicy(record: Record<string, unknown>, label: string):
 
 function validateProfile(id: string, profile: SovereigntyModelProfile): void {
   if (!id.trim()) throw new OperationError('config_error', 'Sovereignty model profile ids must not be empty.');
-  if (!['local-openai-compatible', 'openclaw-infer', 'google-gemini', 'venice', 'anthropic', 'openai-compatible'].includes(profile.provider)) {
+  if (!['local-openai-compatible', 'openclaw-infer', 'google-gemini', 'venice', 'anthropic', 'openai-compatible', 'built-in'].includes(profile.provider)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" has unsupported provider "${profile.provider}".`);
   }
   if (!['local', 'encrypted_cloud', 'standard_cloud'].includes(profile.trust)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.provider === 'built-in') {
+    validateBuiltInProfile(id, profile);
+    return;
   }
   if (profile.trust === 'local' && profile.provider !== 'local-openai-compatible') {
     throw new OperationError(
@@ -713,6 +755,24 @@ function validateProfile(id: string, profile: SovereigntyModelProfile): void {
   }
   if (profile.secretRef !== undefined && !normalizeSecretRef(profile.secretRef)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" secretRef must use env:NAME or store:key.`);
+  }
+}
+
+function validateBuiltInProfile(id: string, profile: SovereigntyModelProfile): void {
+  if (profile.trust !== 'local') {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" uses the built-in model, which is always local trust.`);
+  }
+  if (profile.baseUrl !== undefined || profile.secretRef !== undefined) {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty profile "${id}" uses the built-in model, which takes no baseUrl or secretRef.`,
+    );
+  }
+  if (profile.purpose !== undefined && profile.purpose !== 'embedding') {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" uses the built-in model, which only embeds.`);
+  }
+  if (!profile.model?.trim()) {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" requires a model.`);
   }
 }
 

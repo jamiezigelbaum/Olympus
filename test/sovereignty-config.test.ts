@@ -10,6 +10,7 @@ import {
   SOVEREIGNTY_PRESETS,
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
+  isPublicTierRetired,
   loadSovereigntyEngine,
   loadSovereigntyPreset,
   sovereigntyRoutingSnapshot,
@@ -370,8 +371,8 @@ describe('sovereignty config engine', () => {
       'cloud-openclaw-infer',
       'local-source-answer',
     ]);
-    expect(engine.resolveEmbeddingProfile('secure_local')?.id).toBe('local-source-embedding');
-    expect(engine.resolveEmbeddingProfile('internal')?.id).toBe('gemini-source-embedding');
+    expect(engine.resolveEmbeddingProfile('secure_local')?.id).toBe('built-in-embedding');
+    expect(engine.resolveEmbeddingProfile('internal')?.id).toBe('built-in-embedding');
   });
 
   test('preset routing: local-only serves secure_local through the local lane only', () => {
@@ -381,8 +382,8 @@ describe('sovereignty config engine', () => {
     expect(engine.resolveAnalystRoute({ trustDomain: 'secure_local' }).map((entry) => entry.id)).toEqual([
       'local-source-answer',
     ]);
-    expect(engine.resolveEmbeddingProfile('secure_local')?.id).toBe('local-source-embedding');
-    expect(engine.resolveEmbeddingProfile('internal')?.id).toBe('gemini-source-embedding');
+    expect(engine.resolveEmbeddingProfile('secure_local')?.id).toBe('built-in-embedding');
+    expect(engine.resolveEmbeddingProfile('internal')?.id).toBe('built-in-embedding');
   });
 
   test('preset routing: private-cloud-only serves secure_local through Venice only', () => {
@@ -401,9 +402,11 @@ describe('sovereignty config engine', () => {
     expect(engine.resolveAnalystRoute({ trustDomain: 'internal' }).map((entry) => entry.id)).toEqual([
       'cloud-openclaw-infer',
     ]);
+    // New installs embed with the built-in model, even here: it is local,
+    // so stricter than the private-cloud lane the preset otherwise uses.
     expect(engine.resolveEmbeddingProfile('secure_local')).toMatchObject({
-      id: 'venice-source-embedding',
-      profile: { provider: 'venice', trust: 'encrypted_cloud', purpose: 'embedding' },
+      id: 'built-in-embedding',
+      profile: { provider: 'built-in', trust: 'local', purpose: 'embedding' },
     });
   });
 
@@ -417,7 +420,6 @@ describe('sovereignty config engine', () => {
 
     expect(unmet.map((item) => item.id)).toEqual([
       'store:venice.api_key',
-      'env:GEMINI_API_KEY',
     ]);
     expect(unmet.map((item) => item.kind)).not.toContain('local_model_server');
   });
@@ -790,8 +792,11 @@ describe('sovereignty config engine', () => {
 
   test('subscription-first presets put openclaw-infer first for ordinary cloud routes', () => {
     for (const preset of SOVEREIGNTY_PRESETS) {
-      const engine = createSovereigntyEngine(loadSovereigntyPreset(preset));
-      for (const domain of ['internal', 'public_safe'] as const) {
+      const config = loadSovereigntyPreset(preset);
+      const engine = createSovereigntyEngine(config);
+      // A preset without a Public tier (the fresh-install preset) has no public_safe route.
+      const domains = isPublicTierRetired(config) ? ['internal'] as const : ['internal', 'public_safe'] as const;
+      for (const domain of domains) {
         const route = engine.resolveAnalystRoute({ trustDomain: domain });
         expect(route[0]).toMatchObject({
           id: 'cloud-openclaw-infer',

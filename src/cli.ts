@@ -62,7 +62,6 @@ import {
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
-import { validateSensitivityMapFile } from './core/sensitivity-map.ts';
 import { TIER_CLI_USAGE, runTierCommand } from './workers/classification/tier-cli.ts';
 import {
   runSetupWizard,
@@ -112,11 +111,10 @@ import {
   type RemoteConnectionRecord,
 } from './core/remote-connections.ts';
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
+import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
+import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
 import {
   readRemoteAccessStatus,
-  readTermsAcceptance,
-  recordTermsAcceptance,
-  resolveCurrentTermsUrl,
   relayProcessRunning,
   remoteAccessDirForCli,
   remoteAccessStatusView,
@@ -130,8 +128,8 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'source',
   'source index',
   'sovereignty',
-  'sensitivity',
   'worker',
+  'engine',
   'connect',
   'connections',
   'data',
@@ -187,20 +185,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (args[0] === 'sensitivity' && args[1] === 'validate') {
-    try {
-      console.log(JSON.stringify(validateSensitivityMapFile(parseSensitivityValidateArgs(args.slice(2))), null, 2));
-    } catch (error) {
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
   if (args[0] === 'setup') {
     try {
       const result = await runSetupWizard(parseSetupArgs(args.slice(1)));
@@ -233,6 +217,34 @@ async function main(): Promise<void> {
       throw new OperationError('invalid_params', 'Native worker service invocation has unexpected arguments.');
     }
     await runWorkerForeground(args[1] ? { managedInstanceId: args[1] } : {});
+    return;
+  }
+
+  if (args[0] === 'engine') {
+    try {
+      const result = await runEngineCommand(args.slice(1));
+      if (result !== undefined) console.log(JSON.stringify(result, null, 2));
+      // install, verify and rollback report ok: false when the build did not prove healthy.
+      const verifying = ['install', 'verify', 'rollback'].includes(args[1] ?? '');
+      if (verifying && result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) process.exitCode = 1;
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
+  if (args[0] === '__engine-run') {
+    if (args.length !== 1) {
+      throw new OperationError('invalid_params', 'Engine host invocation has unexpected arguments.');
+    }
+    // Loaded only here: the host pulls in every native service adapter.
+    const { runEngineHostProcess } = await import('./core/engine-host.ts');
+    await runEngineHostProcess(import.meta.url);
     return;
   }
 
@@ -270,9 +282,7 @@ async function main(): Promise<void> {
 
   if (args[0] === 'connections') {
     try {
-      const result = args[1] === 'terms'
-        ? await runConnectionsTermsCommand(args.slice(2))
-        : runConnectionsCommand(args.slice(1));
+      const result = runConnectionsCommand(args.slice(1));
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
@@ -683,8 +693,8 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
   if (group === 'source' && command === 'extract-pdfs') return 'source extract-pdfs';
   if (
     group === 'sovereignty'
-    || group === 'sensitivity'
     || group === 'worker'
+    || group === 'engine'
     || group === 'connect'
     || group === 'connections'
     || group === 'data'
@@ -1112,9 +1122,10 @@ function printHelp(): void {
   console.log('  olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]');
   console.log(`  olympus setup --preset ${SOVEREIGNTY_PRESETS.join('|')} --yes [--cloud-lane subscription|api-key]`);
   console.log(`  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path ~/.olympus/sovereignty.json]`);
-  console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
+  console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
+  console.log('  olympus engine uninstall|status|start|stop|restart|rollback|logs');
   console.log('  olympus dashboard [--read-only] [--no-open]');
   console.log('  olympus dashboard token');
   console.log('  olympus doctor');
@@ -1129,7 +1140,6 @@ function printHelp(): void {
   console.log('  olympus connections list');
   console.log('  olympus connections revoke <id>');
   console.log('  olympus connections status');
-  console.log('  olympus connections terms [--accept]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
@@ -1141,7 +1151,6 @@ function printHelp(): void {
 const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   setup: 'olympus setup --preset <preset> --yes',
   'sovereignty init': 'olympus sovereignty init --preset <preset> [--path <path>]',
-  'sensitivity validate': 'olympus sensitivity validate [--path <path>]',
   'worker install': 'olympus worker install [--platform darwin|linux] [--dry-run]',
   'worker status': 'olympus worker status [--platform darwin|linux]',
   'worker start': 'olympus worker start [--platform darwin|linux]',
@@ -1151,6 +1160,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'worker upgrade': 'olympus worker upgrade --artifact <path> [--platform darwin|linux]',
   'worker uninstall': 'olympus worker uninstall [--platform darwin|linux]',
   'worker run': 'olympus worker run',
+  ...ENGINE_CLI_USAGE,
   'connect google': 'olympus connect google --client-id <id>',
   'connect gmail': 'olympus connect gmail --client-id <id>',
   'connect google-drive': 'olympus connect google-drive --client-id <id>',
@@ -1166,7 +1176,6 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
   'connections status': 'olympus connections status',
-  'connections terms': 'olympus connections terms [--accept]',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
   'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
@@ -1221,13 +1230,14 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     `  olympus sovereignty init --preset ${SOVEREIGNTY_PRESETS.join('|')} [--path <path>] [--force]`,
   ],
-  sensitivity: [
-    'Usage: olympus sensitivity <command>',
-    'Commands:',
-    '  olympus sensitivity validate [--path <path>]',
-  ],
   worker: [
     'Usage: olympus worker install|start|stop|restart|status|foreground|upgrade|uninstall',
+  ],
+  engine: [
+    'Usage: olympus engine <command>',
+    'Runs Olympus on this Mac without OpenClaw, as a per-user LaunchAgent.',
+    'Commands:',
+    ...Object.values(ENGINE_CLI_USAGE).map((usage) => `  ${usage}`),
   ],
   connect: [
     'Usage: olympus connect <source>',
@@ -1245,8 +1255,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connections pair            Print a one-time code to approve Claude, ChatGPT or Grok',
     '  olympus connections list',
     '  olympus connections revoke <id>',
-    '  olympus connections status          Remote access: relay, public URLs, certificate expiry',
-    '  olympus connections terms [--accept]  Show (or accept) the Let\'s Encrypt subscriber agreement',
+    '  olympus connections status          Remote access: relay session and public URLs',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -2316,9 +2325,20 @@ function parseConnectOptions(args: string[]): {
 }
 
 /** The supervised worker state delete custody reads, or `unknown` if unreadable. */
-function observedWorkerServiceState(): WorkerServiceState {
+function observedWorkerServiceState(): { workerState: WorkerServiceState; engineLoaded: boolean } {
+  // The standalone engine supervises its own worker. Loaded at all (running,
+  // or between launchd's restarts), it holds the worker whatever the legacy
+  // worker unit says.
+  if (process.platform === 'darwin') {
+    const custody = engineDataCustody(inspectEngine());
+    if (custody === 'loaded') return { workerState: 'active', engineLoaded: true };
+    if (custody === 'unknown') return { workerState: 'unknown', engineLoaded: false };
+  }
   const lifecycleStatus = runWorkerLifecycle('status');
-  return lifecycleStatus.action === 'status' ? lifecycleStatus.service.state : 'unknown';
+  return {
+    workerState: lifecycleStatus.action === 'status' ? lifecycleStatus.service.state : 'unknown',
+    engineLoaded: false,
+  };
 }
 
 async function runDataCommand(args: string[]): Promise<unknown> {
@@ -2344,7 +2364,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     // with no public capability falls through to the worker-inactive
     // requirement, which is unsatisfiable unless the observed state is passed
     // in — the delete was refused at every worker state without it.
-    const workerState = observedWorkerServiceState();
+    const { workerState, engineLoaded } = observedWorkerServiceState();
     if (options.sourceId) {
       const sourceId = options.sourceId;
       const registryPath = handleRegistryPathFromEnv(process.env, true)!;
@@ -2354,6 +2374,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
           dryRun: options.dryRun,
           connectedRegistry: readConnectedHandleRegistry(registryPath),
           workerState,
+          engineLoaded,
         })
       );
     }
@@ -2361,6 +2382,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
       all: options.all,
       dryRun: options.dryRun,
       workerState,
+      engineLoaded,
       relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
     });
   }
@@ -2413,24 +2435,6 @@ function parseDataOptions(args: string[]): {
     }
   }
   return { output: outputPath, input: inputPath, sourceId, all, dryRun, yesIAMSure };
-}
-
-function parseSensitivityValidateArgs(args: string[]): { path?: string } {
-  const options: { path?: string } = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === '--path') {
-      options.path = requireOptionValue(args, (index += 1), arg);
-    } else if (arg?.startsWith('--path=')) {
-      options.path = arg.slice('--path='.length);
-    } else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: olympus sensitivity validate [--path <path>]');
-      process.exit(0);
-    } else {
-      throw new OperationError('invalid_params', `Unknown sensitivity validate option: ${arg}`);
-    }
-  }
-  return options;
 }
 
 async function confirmDeleteAll(): Promise<void> {
@@ -2579,8 +2583,8 @@ function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
 }
 
 /**
- * `olympus connections status`: remote access mode, relay session,
- * certificate expiry and the URLs to hand an agent. The same JSON is what the
+ * `olympus connections status`: remote access mode, relay session and the
+ * URLs to hand an agent. The same JSON is what the
  * dashboard's "Connect an agent" panel consumes.
  */
 function runConnectionsStatus(env: Record<string, string | undefined>): Record<string, unknown> {
@@ -2593,65 +2597,7 @@ function runConnectionsStatus(env: Record<string, string | undefined>): Record<s
     status,
     configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl,
   });
-  return { ...remoteAccessStatusView({ dir, urls, status }) };
-}
-
-/**
- * `olympus connections terms [--accept]`: shows the certificate authority's
- * subscriber agreement, and records the owner's acceptance of that exact
- * version. The relay places no certificate order until this is recorded, and a
- * new agreement from the CA needs a new acceptance.
- */
-export async function runConnectionsTermsCommand(
-  args: readonly string[],
-  env: Record<string, string | undefined> = process.env,
-  dependencies: { fetchTerms?: () => Promise<string | undefined>; now?: () => Date } = {},
-): Promise<Record<string, unknown>> {
-  const accept = args.length === 1 && args[0] === '--accept';
-  if (args.length > 1 || (args.length === 1 && !accept)) {
-    throw new OperationError('invalid_params', 'Usage: olympus connections terms [--accept]');
-  }
-  const dir = remoteAccessDirForCli(env);
-  const status = readRemoteAccessStatus(dir);
-  const fetchTerms = dependencies.fetchTerms
-    ?? (async () => (await import('./core/remote-access-terms.ts')).fetchLetsEncryptTermsUrl());
-  let termsUrl: string | undefined;
-  try {
-    // The relay's reported agreement, or none when the CA named none, else
-    // the CA directory now: the one resolution the dashboard shares.
-    termsUrl = await resolveCurrentTermsUrl(status, fetchTerms);
-  } catch {
-    throw new OperationError(
-      'config_error',
-      'Could not read the Let\'s Encrypt subscriber agreement URL from its directory.',
-      'Check the network and retry; the agreement is published at https://letsencrypt.org/repository/.',
-    );
-  }
-  const acceptance = readTermsAcceptance(dir);
-  if (accept) {
-    const recorded = recordTermsAcceptance(dir, termsUrl, dependencies.now?.() ?? new Date());
-    return {
-      kind: 'remote_access_terms',
-      url: termsUrl ?? null,
-      accepted: true,
-      accepted_at: recorded.accepted_at,
-      notice: termsUrl
-        ? 'Accepted. Olympus will now request this install\'s certificate through the relay.'
-        : 'Accepted. The certificate authority publishes no agreement URL, so this records consent to its terms as it states them; if it later publishes an agreement, you will be asked again.',
-    };
-  }
-  const accepted = acceptance !== undefined && (termsUrl === undefined || acceptance.terms_url === termsUrl);
-  return {
-    kind: 'remote_access_terms',
-    url: termsUrl ?? null,
-    accepted,
-    accepted_at: accepted ? acceptance!.accepted_at : null,
-    notice: accepted
-      ? 'Already accepted.'
-      : termsUrl
-        ? 'Remote access needs a certificate for this install\'s own hostname, which means agreeing to the certificate authority\'s Subscriber Agreement. Read it at the url above; to accept, run olympus connections terms --accept.'
-        : 'Remote access needs a certificate for this install\'s own hostname. The certificate authority publishes no agreement URL; to consent to its terms and continue, run olympus connections terms --accept.',
-  };
+  return { ...remoteAccessStatusView({ urls, status }) };
 }
 
 function remoteConnectionView(connection: RemoteConnectionRecord): Record<string, unknown> {

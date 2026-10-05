@@ -48,7 +48,6 @@ import {
   readSqliteSchemaVersion,
   runSqliteMigrations,
 } from '../../core/sqlite-migrations.ts';
-import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { classifyItemTier, type ClassifyItemTierInput } from '../classification/engine.ts';
 import {
   TierLedger,
@@ -58,7 +57,7 @@ import {
   type TierCopy,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
-import { classifyContentTier, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { classifyContentTier, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -83,6 +82,7 @@ import {
 } from '../../core/source-index/fts.ts';
 import {
   boundedSourceIndexChunks,
+  compactPassageWhitespace,
   sourceIndexChunkQueryTerms,
   sourceIndexChunkTermScore,
 } from '../../core/source-index/chunk-selection.ts';
@@ -113,6 +113,7 @@ import {
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
+import { BUILT_IN_EMBEDDING_MODEL } from '../source-index/built-in-embedding/manifest.ts';
 import type {
   SourceIndexCorpusSearchAdapter,
   SourceIndexCorpusSearchRequest,
@@ -155,6 +156,10 @@ const EMBEDDING_BATCH_SIZE = 32;
 const MAX_SELECTED_EMBED_ITEM_IDS = 25_000;
 const MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 const MIN_VECTOR_SCORE = 0.18;
+// The most query concepts a keyword match must contain (see searchItemsDetailed).
+const MAX_REQUIRED_CONCEPTS = 3;
+// Or the share of the query's concept weight (IDF) a keyword match must carry.
+const RARE_CONCEPT_WEIGHT_SHARE = 0.6;
 const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projection-locator-uri');
 // Below this bar, semantic similarity is treated as no evidence. Calibrated
 // against the live corpus (gemini-embedding-2, 2026-07-25: off-domain
@@ -173,6 +178,25 @@ export const DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62;
 const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map([
   ['gemini-embedding-2', DEFAULT_SEMANTIC_RELEVANCE_BAR],
 ]);
+// Relevance bars that also gate the vector lane when the adapter sets none:
+// a vector row below its model's bar is no evidence at all (not merely no
+// content preference), so it neither enters fusion nor counts as a match. The
+// built-in model's nearest neighbours are everything with text: without a
+// bar, every question "matched" every embedded item, so a corpus that held
+// any text always answered (2026-10-02: every ChatGPT question reported 12
+// Private matches). Calibrated 2026-10-02 on the owner's corpus copies (the
+// built-in Arctic Embed M v1.5): off-topic questions peak at 0.39 best-cosine
+// against the Private items and 0.37 against the Personal ones, while true
+// positives and paraphrases start at 0.40 (most at 0.43 to 0.56; the weaker
+// true positives are lexical matches, which stand on their own merit).
+const CALIBRATED_SEMANTIC_RELEVANCE_BARS: ReadonlyMap<string, number> = new Map([
+  [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4],
+]);
+
+/** The relevance bar that gates a model's vector lane: the adapter's own, else the model's calibrated one. */
+function semanticRelevanceBarFor(modelId: string, adapterBar?: number): number | undefined {
+  return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
+}
 
 // Media types that name a container rather than a document, for every source
 // that stores its folders as items: the IANA/freedesktop directory type
@@ -849,7 +873,6 @@ export type ConnectorStoreCoverageGap =
 export interface ConnectorStoreClassificationOptions {
   baselineTrustTier?: SourceTrustTier;
   baselineTrustDomain?: SourceTrustDomain;
-  sensitivityMap?: SensitivityMap;
   /**
    * Owner tier rules this lane's placement honours. Only RAISING rules
    * (Private, Secrets) move placement: an item a rule makes Private is placed
@@ -1379,6 +1402,16 @@ export interface ConnectorStoreSearchRow {
 
 export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
   bestCosine: number;
+}
+
+/**
+ * How much of a keyword query each row matched: the query's distinct
+ * concepts (a term with its synonyms is one concept) and, per row (by local
+ * item id), how many of them the item's name or text contains.
+ */
+export interface ConnectorStoreConceptCoverage {
+  total: number;
+  matched: ReadonlyMap<string, number>;
 }
 
 export interface ConnectorStoreCurrentEmbeddingRow {
@@ -2267,25 +2300,39 @@ export class LocalConnectorStore {
     tierClassification?: ConnectorStoreTierClassification,
   ): boolean {
     try {
-      const inputs = resolveStoreTierClassification(tierClassification, this.tierLedgerPathInUse(), undefined);
+      const inputs = resolveStoreTierClassification(tierClassification, this.tierLedgerPathInUse());
       if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
       const existing = ledger.getCurrent(item.identity);
       if (!existing) return false;
       const override = ledger.getOverride(item.identity);
+      // The item's names travel with the text, as they do in the tiered
+      // sink: the detectors' origin hint and the sniffer read them too.
+      const metadataString = (keys: readonly string[]): string | undefined => {
+        for (const key of keys) {
+          const value = item.metadata[key];
+          if (typeof value === 'string' && value.trim()) return value.trim();
+        }
+        return undefined;
+      };
+      const title = metadataString(['title', 'name', 'subject']);
+      const path = metadataString(['locatorUri', 'pathDisplay']);
       const content = classifyContentTier(
         {
           text,
           metadataTier: existing.metadataTier,
           metadataForced: existing.metadataForced,
           metadataFlagged: existing.metadataFlagged,
+          metadataOwnerDecided: namesDecidedByOwner(existing.reasons),
+          ...(title ? { title } : {}),
+          ...(path ? { path } : {}),
           subject: item.identity,
         },
         {
-          ...(inputs?.sensitivityMap ? { sensitivityMap: inputs.sensitivityMap } : {}),
           ...(inputs?.sniffer ? { sniffer: inputs.sniffer } : {}),
           ...(override ? { override } : {}),
+          ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
       );
       return ledger.recordContentDecision(item.identity, content) !== undefined;
@@ -2448,9 +2495,18 @@ export class LocalConnectorStore {
    * (superseded and staged), and of copies held back from embedding (pending
    * classification). Empty for a store with no routed copies.
    */
-  private tierHiddenItemPks(): { hidden: number[]; held: number[]; metadataLayer: number[]; moving: number } {
+  private tierHiddenItemPks(): {
+    hidden: number[];
+    held: number[];
+    metadataLayer: number[];
+    /** The subset of `metadataLayer` whose text no current copy holds yet: still to be read. */
+    metadataLayerContentUnread: number[];
+    moving: number;
+  } {
     const ledger = this.visibilityLedger();
-    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return { hidden: [], held: [], metadataLayer: [], moving: 0 };
+    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
+      return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+    }
     const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): number[] => {
       const lookup = this.db.query(`
         SELECT item_pk FROM items
@@ -2479,11 +2535,47 @@ export class LocalConnectorStore {
       // (e.g. kept vectors after a split move) but never serves, counts or
       // embeds them.
       metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer')),
+      metadataLayerContentUnread: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread')),
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
   }
 
   /** Whether this store's copy of an item may be served for any layer. */
+  /**
+   * True when this store serves an item's name only because the item's
+   * CONTENT is tiered Private: the tier ledger holds its current content copy
+   * in a secure_local store. Says nothing about what that content is.
+   */
+  contentHeldPrivate(localItemId: string): boolean {
+    if (this.trustDomain === 'secure_local') return false;
+    const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId) as {
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+    } | null;
+    if (!row) return false;
+    const identity = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    };
+    try {
+      const ledger = this.visibilityLedger();
+      if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return false;
+      const copies = ledger.copiesForMany([identity]).get(tierLedgerIdentityKey(identity)) ?? [];
+      return copies.some((copy) => copy.state === 'current'
+        && copy.trustDomain === 'secure_local'
+        && (copy.layers === 'content' || copy.layers === 'both'));
+    } catch {
+      return false;
+    }
+  }
+
   private copyServable(identity: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }): boolean {
     return this.tierVisibleRows([identity], (entry) => entry, () => 'metadata').length > 0
       || this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
@@ -5608,7 +5700,6 @@ export class LocalConnectorStore {
     const tierClassification = resolveStoreTierClassification(
       options?.tierClassification,
       this.tierLedgerPathInUse(),
-      classification?.sensitivityMap,
     );
     const tierRouting = options?.tierRouting;
     let itemsRoutedElsewhere = 0;
@@ -8311,11 +8402,11 @@ export class LocalConnectorStore {
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
     ftsOptions: { prefix?: boolean; contentOnly?: boolean } = {},
-  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean } {
+  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean; concepts: ConnectorStoreConceptCoverage } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const terms = toFtsQuery(query, ftsOptions);
-    if (!terms) return { rows: [], saturated: false };
+    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = sourceIndexFtsTermGroups(query);
     const minimumSignal = groups.length >= 2;
@@ -8358,13 +8449,23 @@ export class LocalConnectorStore {
     // single concept is lexical noise, not evidence (live incident
     // 2026-07-25: a bookmark was cited for a four-concept question on the
     // strength of the lone word "schedule"). Distinct concept groups —
-    // raw token plus synonyms — must match at least twice.
+    // raw token plus synonyms — must all match, or three of them for a
+    // longer question (a long question is not held to every word). A
+    // candidate that matches fewer still counts when the concepts it matches
+    // carry most of the question's weight: a concept few items in this store
+    // contain says more than one most of them do (inverse document
+    // frequency). So a file named for the one rare word of "AI sycophancy" is
+    // found without "AI", while two common words of a question are noise:
+    // "June 2026 blood work" matched a diet guide on "blood" and "work", and
+    // "omega-3 level" matched every guide that says "3" and "level".
+    const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
     let selected = rows;
+    const matchedGroups = new Map<number, number>();
+    const matchedGroupIndexes = new Map<number, number[]>();
     if (minimumSignal && rows.length > 0) {
       const pks = rows.map((row) => row.item_pk);
       const placeholders = pks.map(() => '?').join(', ');
-      const matchedGroups = new Map<number, number>();
-      for (const group of groups) {
+      for (const [groupIndex, group] of groups.entries()) {
         const hits = this.db.query(`
           SELECT DISTINCT connector_store_fts.item_pk
           FROM connector_store_fts
@@ -8375,9 +8476,17 @@ export class LocalConnectorStore {
         `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
         for (const hit of hits) {
           matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
+          matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
         }
       }
-      selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
+      const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
+      const weights = rows.every(enough) ? undefined : this.conceptWeights(groups);
+      selected = rows.filter((row) => {
+        if (enough(row)) return true;
+        if (!weights) return false;
+        const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index]!, 0);
+        return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
+      });
     }
     selected = this.tierVisibleRows(
       selected,
@@ -8392,8 +8501,9 @@ export class LocalConnectorStore {
       (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
     );
     const spanTerms = queryTermsForSpan(query);
+    const kept = selected.slice(0, limit);
     return {
-      rows: selected.slice(0, limit).map((row) => {
+      rows: kept.map((row) => {
         const base = searchRowFromItemRow(row);
         const chunk = row.chunk_pk === null || row.chunk_pk === undefined
           ? undefined
@@ -8401,7 +8511,33 @@ export class LocalConnectorStore {
         return chunk ? { ...base, chunk } : base;
       }),
       saturated: rows.length >= fetchLimit || selected.length > limit,
+      // How many of the query's concepts each row matched (in its name or its
+      // text). A single-concept query has nothing to count: every row matched it.
+      concepts: {
+        total: groups.length,
+        matched: new Map(kept.map((row) => [
+          row.local_item_id,
+          minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
+        ])),
+      },
     };
+  }
+
+  /**
+   * Each query concept's weight in this store: its inverse document frequency,
+   * ln((items + 1) / (items containing it + 0.5)). A concept no item contains
+   * weighs the most, so the question's missing words still count against a
+   * partial match.
+   */
+  private conceptWeights(groups: ReadonlyArray<readonly string[]>): { of: number[]; total: number } {
+    const items = (this.db.query('SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0').get() as { count: number }).count;
+    const of = groups.map((group) => {
+      const { count } = this.db.query(
+        'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+      ).get(sourceIndexFtsGroupQuery(group)) as { count: number };
+      return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+    });
+    return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
   }
 
   /**
@@ -8513,14 +8649,18 @@ export class LocalConnectorStore {
     localItemId: string,
     maxChars?: number,
     passageFocus?: ConnectorStorePassageFocus,
+    // Names only: the item's stored tier and locator, never its text. For an
+    // item the owner's scope keeps unread, so no chunk row is even selected.
+    options: { withoutContent?: boolean } = {},
   ): ConnectorStoreLocalContent | undefined {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
-        provider_conversation_id,
+        provider_conversation_id, title,
         ${this.reactionsColumnPresent ? 'reactions_json' : 'NULL AS reactions_json'}
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId) as {
       item_pk: number;
+      title: string | null;
       trust_tier: string;
       locator_uri: string | null;
       mime_type: string;
@@ -8544,16 +8684,42 @@ export class LocalConnectorStore {
     if (!this.copyServable(identity)) {
       return undefined;
     }
-    const servesContent = this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    const servesContent = options.withoutContent !== true
+      && this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    const queryVector = passageFocus?.queryVector;
+    const vectorModelId = passageFocus?.queryVectorModelId;
+    const scoreByVector = queryVector !== undefined && queryVector.length > 0 && vectorModelId !== undefined;
     const chunkRows = servesContent
-      ? this.db.query(
-        'SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
-      ).all(row.item_pk) as Array<{ bounded_text: string }>
+      ? (scoreByVector
+        ? this.db.query(`
+          SELECT c.bounded_text, e.embedding
+          FROM chunks c
+          LEFT JOIN chunk_embeddings e
+            ON e.chunk_pk = c.chunk_pk AND e.model_id = ? AND e.content_hash = c.embedding_input_hash
+          WHERE c.item_pk = ? ORDER BY c.chunk_index
+        `).all(vectorModelId, row.item_pk)
+        : this.db.query(
+          'SELECT bounded_text, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
+        ).all(row.item_pk)) as Array<{ bounded_text: string; embedding: unknown }>
       : [];
+    // Cosine of each chunk's current vector to the query; undefined where the
+    // chunk has none (or one of another width), so it ranks after the rest.
+    const relevance = scoreByVector
+      ? chunkRows.map((chunk) => {
+          if (chunk.embedding === null || chunk.embedding === undefined) return undefined;
+          const vector = decodeEmbedding(chunk.embedding);
+          return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
+        })
+      : undefined;
     const { chunks, truncated } = selectEvidencePassages(
-      chunkRows.map((chunk) => chunk.bounded_text),
+      // Layout padding (OCR and PDF text keep column alignment as runs of
+      // spaces) is not evidence; dropping it lets the same budget carry
+      // several times the text (2026-10-02 live Private store: 36% padding
+      // overall, 69% in one scanned report).
+      chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)),
       maxChars,
       passageFocus,
+      { title: row.title, ...(relevance ? { relevance } : {}) },
     );
     // Item-level context seam: the reaction line is prepended as its own
     // leading block rather than written into a chunk. Chunks stay a faithful
@@ -8562,7 +8728,9 @@ export class LocalConnectorStore {
     // a released citation can carry "confirmed by 👍 ×2". It rides ahead of
     // the char budget deliberately: it is bounded and it is the only part of
     // the evidence a truncation must never silently drop.
-    const reactionLine = renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json));
+    const reactionLine = servesContent
+      ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json))
+      : undefined;
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
@@ -8615,6 +8783,20 @@ export class LocalConnectorStore {
       ${namesOnlyNotIn}`;
     const parityWhere = `${contentWhere}
       ${heldNotIn}`;
+    // Which files the scope asks to be read. A names copy whose text no copy
+    // holds yet is still waiting to be read, so it counts here even though it
+    // stays out of every text, chunk and parity count above: counting it as
+    // names only reported a freshly chosen Full folder as already finished.
+    const unread = new Set(tier.metadataLayerContentUnread);
+    const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
+    const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0
+      ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
+      : '';
+    const fileScopeWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${contentFilters.sql}
+      ${hiddenNotIn}
+      ${fileNamesOnlyNotIn}`;
     const jsonList = (pks: readonly number[]): string[] => (pks.length > 0 ? [JSON.stringify(pks)] : []);
     const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params, ...jsonList(tier.hidden)];
     const contentParams = [
@@ -8624,6 +8806,12 @@ export class LocalConnectorStore {
       ...jsonList(tier.metadataLayer),
     ];
     const parityParams = [...contentParams, ...jsonList(tier.held)];
+    const fileScopeParams = [
+      ...(accountScope ? [accountScope] : []),
+      ...contentFilters.params,
+      ...jsonList(tier.hidden),
+      ...jsonList(keptNamesOnlyPks),
+    ];
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -8654,7 +8842,7 @@ export class LocalConnectorStore {
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
-            ${contentWhere}
+            ${fileScopeWhere}
         ) AS full_ingestion_files
     `).get(
       ...itemParams,
@@ -8664,7 +8852,7 @@ export class LocalConnectorStore {
       ...parityParams,
       ...parityParams,
       ...contentParams,
-      ...contentParams,
+      ...fileScopeParams,
     ) as {
       items: number;
       files: number;
@@ -8683,8 +8871,8 @@ export class LocalConnectorStore {
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
-          ${contentWhere}
-      `).all(...contentParams) as Array<{
+          ${fileScopeWhere}
+      `).all(...fileScopeParams) as Array<{
         locator_uri: string | null;
         title: string | null;
         mime_type: string | null;
@@ -9103,19 +9291,22 @@ export function createConnectorStoreCorpusAdapter(
           rawExposed: false,
         };
       }
+      const lanes = [
+        { name: 'keyword', items: rows },
+        { name: 'recency', items: recencyRows },
+      ];
       const fused = fuseRankedCandidateLanes({
-        lanes: [
-          { name: 'keyword', items: rows },
-          { name: 'recency', items: recencyRows },
-        ],
+        lanes,
         getId: (row) => row.sourceItem.localItemId,
-        limit: Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS)),
+        limit: allCandidates(lanes),
         tieBreaker: connectorStoreCandidateComparator(lexicalContentPreference),
       });
+      const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
+        candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
       const hits = withPinnedNewestChatHits({
         store,
         recencyRows,
-        hits: contentFirstCandidates(fused).map((candidate) => connectorStoreHitFromRow(
+        hits: rankedCandidates(fused, request.maxResults, complete).map((candidate) => connectorStoreHitFromRow(
           store,
           candidate.item,
           candidate.score,
@@ -9309,36 +9500,44 @@ async function hybridConnectorStoreSearch(
   // common-token FTS saturation gives off-domain questions nonzero keyword
   // rows, so a keyword-empty arming condition never fires on exactly the
   // questions the bar exists for).
-  const gateArmed = semanticRelevanceBar !== undefined;
+  const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
+  const gateArmed = relevanceBar !== undefined;
   const vectorRows = gateArmed
-    ? scoredVectorRows.filter((row) => row.bestCosine >= semanticRelevanceBar)
+    ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
     : scoredVectorRows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
   const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
-  const contentBar = semanticRelevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
-  const contentPreference = connectorStoreContentPreference(new Set(contentBar === undefined
+  const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
+  const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
     : vectorRows
       .filter((row) => row.bestCosine >= contentBar)
-      .map((row) => row.sourceItem.localItemId)));
+      .map((row) => row.sourceItem.localItemId));
+  const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
 
+  const lanes = [
+    { name: 'keyword', items: keywordRows },
+    { name: 'vector', items: vectorRows },
+    ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows }] : []),
+  ];
   const fused = fuseRankedCandidateLanes({
-    lanes: [
-      { name: 'keyword', items: keywordRows },
-      { name: 'vector', items: vectorRows },
-      ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows }] : []),
-    ],
+    lanes,
     getId: (row) => row.sourceItem.localItemId,
-    limit: maxResults,
+    limit: allCandidates(lanes),
     tieBreaker: connectorStoreCandidateComparator(contentPreference),
   });
+  const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => {
+    const id = candidate.item.sourceItem.localItemId;
+    return (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(id))
+      || (candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(id));
+  };
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: contentFirstCandidates(fused, contentPreference).map((candidate) => connectorStoreHitFromRow(
+    hits: rankedCandidates(fused, maxResults, complete, contentPreference).map((candidate) => connectorStoreHitFromRow(
       store,
       candidate.item,
       candidate.score,
@@ -9457,13 +9656,23 @@ function connectorStoreKeywordLaneRows(
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
   ftsOptions: { prefix?: boolean } = {},
-): { rows: ConnectorStoreSearchRow[]; matchCount: SourceIndexCorpusMatchCount; matchedItemIds: ReadonlySet<string> } {
+): {
+  rows: ConnectorStoreSearchRow[];
+  matchCount: SourceIndexCorpusMatchCount;
+  matchedItemIds: ReadonlySet<string>;
+  completeItemIds: ReadonlySet<string>;
+} {
   const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
   const rows = plain.rows;
   const content = rows.every(connectorStoreRowHasContent)
-    ? { rows: [], saturated: false }
+    ? { rows: [], saturated: false, concepts: plain.concepts }
     : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
   const contentRows = content.rows;
+  // Rows that match every concept of the question, in their name or text.
+  const complete = new Set<string>();
+  for (const concepts of [plain.concepts, content.concepts]) {
+    for (const [id, matched] of concepts.matched) if (matched >= concepts.total) complete.add(id);
+  }
   const seen = new Set<string>();
   const merged: ConnectorStoreSearchRow[] = [];
   for (const row of [
@@ -9475,14 +9684,21 @@ function connectorStoreKeywordLaneRows(
     seen.add(row.sourceItem.localItemId);
     merged.push(row);
   }
+  // Content first only among equals: a readable item that matches part of
+  // the question does not outrank a name that matches all of it.
+  const ordered = [
+    ...merged.filter((row) => complete.has(row.sourceItem.localItemId)),
+    ...merged.filter((row) => !complete.has(row.sourceItem.localItemId)),
+  ];
   return {
-    rows: merged.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
+    rows: ordered.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS))),
     matchCount: {
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
       saturated: plain.saturated || content.saturated,
     },
     matchedItemIds: seen,
+    completeItemIds: complete,
   };
 }
 
@@ -9513,16 +9729,28 @@ function connectorStoreContentPreference(vettedVectorItemIds: ReadonlySet<string
 
 const lexicalContentPreference: ContentPreference = connectorStoreContentPreference(new Set());
 
-// Fusion decides which candidates make the cut; within it, a title-only or
-// metadata-only item never outranks one the Analyst can actually read.
-function contentFirstCandidates(
+// The final order and cut over fusion's order. A candidate that matches the
+// whole question (every concept of it in its name or text, or a vetted vector
+// hit) comes before one that matches only part of it; within each, a
+// title-only or metadata-only item never outranks one the Analyst can
+// actually read. So a readable document never buries the file named for the
+// question just because it shares one of the question's words, and a name
+// never buries a document that answers the question as fully.
+function rankedCandidates(
   candidates: readonly FusedRankedCandidate<ConnectorStoreSearchRow>[],
+  limit: number,
+  complete: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean,
   hasContent: ContentPreference = lexicalContentPreference,
 ): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
-  return [
-    ...candidates.filter(hasContent),
-    ...candidates.filter((candidate) => !hasContent(candidate)),
-  ];
+  const tiers: FusedRankedCandidate<ConnectorStoreSearchRow>[][] = [[], [], [], []];
+  for (const candidate of candidates) {
+    tiers[(complete(candidate) ? 0 : 2) + (hasContent(candidate) ? 0 : 1)]!.push(candidate);
+  }
+  return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+}
+
+function allCandidates(lanes: ReadonlyArray<{ items: readonly unknown[] }>): number {
+  return Math.max(1, lanes.reduce((total, lane) => total + lane.items.length, 0));
 }
 
 // RRF tie-breaker: a content-preferred candidate first (a vetted vector hit on
@@ -9627,8 +9855,33 @@ function connectorStoreKeywordLaneAudit(
 export interface ConnectorStoreContentProviderOptions {
   store: LocalConnectorStore;
   accountScope?: string;
+  // The scope whose contents may be read.
   filters?: ConnectorStoreSearchFilters;
+  // The wider scope whose NAMES are searchable. An item inside it but outside
+  // `filters` (or any item in it when `contentAllowed` is false) sits in a
+  // folder the owner set to Names only: the provider returns it without text,
+  // marked `namesOnly`, so coverage says "kept unread by choice" rather than
+  // "could not be read". Omitted, nothing is reported as Names only.
+  metadataFilters?: ConnectorStoreSearchFilters;
+  contentAllowed?: boolean;
+  /**
+   * The store's own embedding provider (the one its vector lane searches
+   * with), used only to rank a long item's passages by similarity to the
+   * query. Share one memoizeQueryEmbeddings() wrapper with the adapter so the
+   * query is embedded once. A Private store only accepts an approved provider.
+   */
+  embeddingProvider?: SourceEmbeddingProvider;
 }
+
+// The coverage sentence for an item in a Names-only folder. Source-agnostic:
+// it names the owner's choice, never the folder.
+// The coverage sentence for an item whose name is in this tier and whose
+// contents are tiered Private: read only by the Private lane, never here.
+export const CONNECTOR_STORE_CONTENT_PRIVATE_GAP =
+  "this item's contents are marked Private; only its name is in this tier.";
+
+export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
+  "the owner set this item's folder to Names only; its name is searchable and its contents are not read.";
 
 // LocalContentProvider over the store: bounded chunks, the item's stored
 // sensitivity, and the stored locator uri. Local by construction — every read
@@ -9637,6 +9890,25 @@ export function createConnectorStoreContentProvider(
   options: ConnectorStoreContentProviderOptions,
 ): LocalContentProvider {
   const { store } = options;
+  const embeddingProvider = options.embeddingProvider
+    && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider))
+    ? options.embeddingProvider
+    : undefined;
+  // The query's vector for passage ranking, or nothing. Never fails the read:
+  // without it, passages fall back to lexical and document order.
+  let storeHasVectors: boolean | undefined;
+  const queryVector = async (query: string | undefined): Promise<readonly number[] | undefined> => {
+    const text = query?.trim();
+    if (!embeddingProvider || !text) return undefined;
+    try {
+      storeHasVectors ??= store.hasEmbeddings(embeddingProvider.modelId);
+      if (!storeHasVectors) return undefined;
+      const [vector] = await embeddingProvider.embed([{ text }], { taskType: 'RETRIEVAL_QUERY' });
+      return vector && vector.length === embeddingProvider.dimension ? vector : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   return {
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
       if (request.trustDomain !== store.trustDomain) {
@@ -9647,13 +9919,54 @@ export function createConnectorStoreContentProvider(
       }
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
-      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return undefined;
+      const contentInScope = options.contentAllowed !== false
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+      if (!contentInScope) {
+        if (!options.metadataFilters
+          || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
+          return undefined;
+        }
+        const names = store.localContent(localItemId, request.maxChars, undefined, { withoutContent: true });
+        if (!names) return undefined;
+        // Content tiered Private is not the owner's Names-only choice: the
+        // answer to it is the Private lane's, and coverage says so.
+        if (store.contentHeldPrivate(localItemId)) {
+          return {
+            sensitivity: buildSourceSensitivity({ trustTier: names.trustTier, trustDomain: store.trustDomain }),
+            chunks: [],
+            contentPrivate: true,
+            coverageGaps: [CONNECTOR_STORE_CONTENT_PRIVATE_GAP],
+            ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
+          };
+        }
+        return {
+          sensitivity: buildSourceSensitivity({ trustTier: names.trustTier, trustDomain: store.trustDomain }),
+          chunks: [],
+          namesOnly: true,
+          coverageGaps: [CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP],
+          ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
+        };
+      }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
+      const anchorLane = request.provenance.chunk?.span?.lane;
+      const vector = await queryVector(request.query);
       const content = store.localContent(localItemId, request.maxChars, {
         ...(request.query?.trim() ? { query: request.query } : {}),
+        ...(request.maxPassages !== undefined ? { maxPassages: request.maxPassages } : {}),
         ...(anchorChunkIndex !== undefined ? { anchorChunkIndex } : {}),
+        ...(anchorLane === 'keyword' || anchorLane === 'semantic' ? { anchorLane } : {}),
+        ...(vector && embeddingProvider ? { queryVector: vector, queryVectorModelId: embeddingProvider.modelId } : {}),
       });
       if (!content) return undefined;
+      if (content.chunks.length === 0 && store.contentHeldPrivate(localItemId)) {
+        return {
+          sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
+          chunks: [],
+          contentPrivate: true,
+          coverageGaps: [CONNECTOR_STORE_CONTENT_PRIVATE_GAP],
+          ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
+        };
+      }
       // An item with no chunks has two very different explanations and the
       // Analyst acts differently on each: "extraction is pending" invites a
       // retry and reads as a stalled lane, while "the owner indexes this
@@ -9669,6 +9982,7 @@ export function createConnectorStoreContentProvider(
         chunks: content.chunks,
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
+        ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
         ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
       };
     },
@@ -9745,7 +10059,6 @@ function assertConnectorStoreStorageProfile(profile: SourceIndexStorageProfile):
 interface NormalizedConnectorStoreClassification {
   baselineTrustTier: SourceTrustTier;
   baselineTrustDomain: SourceTrustDomain;
-  sensitivityMap?: SensitivityMap;
   ownerRules?: readonly OwnerTierRule[];
 }
 
@@ -9756,7 +10069,6 @@ function normalizeClassificationOptions(
   return {
     baselineTrustTier: options.baselineTrustTier ?? 'S3',
     baselineTrustDomain: options.baselineTrustDomain ?? 'internal',
-    ...(options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),
     ...(options.ownerRules?.length ? { ownerRules: [...options.ownerRules] } : {}),
   };
 }
@@ -9783,10 +10095,10 @@ function classifyConnectorStoreItem(
 ): SourceSensitivity {
   if (!classification) return placeInExistingStore(item, placement, storeTrustDomain);
 
-  // The SHARED per-item engine, not just the sensitivity map.
+  // The SHARED per-item engine.
   //
-  // This policy used to run the map alone and then fall straight to its
-  // baseline. Every connector-store lane configures an `internal` baseline, so
+  // This policy once ran the (since retired) sensitivity map alone and then
+  // fell straight to its baseline. Every connector-store lane configures an `internal` baseline, so
   // the engine's conservative detectors — credentials, financial, health,
   // identity — never ran on a store lane at all: a bank statement classified
   // as ordinary internal mail and became cloud-embedding eligible, and a
@@ -9794,13 +10106,7 @@ function classifyConnectorStoreItem(
   // the S5 rule in the sync loop. The mail and file connectors then shipped a
   // detector-backed classify() for exactly this decision; supplying a policy
   // silently replaced it with the weaker half.
-  //
-  // The engine consults the map itself, and in its own order: a credential
-  // finding outranks a map category (fail closed), which is the one behaviour
-  // this changes for a map that was already configured.
-  const classified = classifyItemTier(classificationInputFromRawItem(item), {
-    ...(classification.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : {}),
-  });
+  const classified = classifyItemTier(classificationInputFromRawItem(item));
   // The S5 floor outranks every rule: a secret is tombstoned, never placed.
   if (classified.tier === 'S5') {
     return buildSourceSensitivity({ trustTier: 'S5', trustDomain: 'secure_local' });
@@ -9812,12 +10118,6 @@ function classifyConnectorStoreItem(
     (rule.tier === 'secure' || rule.tier === 'secrets')
     && ownerRuleMatches(rule, placementSignalsFromRawItem(item), item.identity.provider))) {
     return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
-  }
-  if (classified.decidedBy === 'sensitivity_map') {
-    return buildSourceSensitivity({
-      trustTier: classified.tier,
-      trustDomain: classified.trustDomain,
-    });
   }
   // Raise-only above the lane's baseline. The engine's own floor is
   // secure_local for everything it cannot positively call clean, and adopting
@@ -9867,12 +10167,11 @@ function classificationInputFromRawItem(item: RawItem): ClassifyItemTierInput {
   // rather than being folded into the text haystack.
   const labels = metadataStringArray(item.metadata, 'labels');
   // The item's own name is part of its path, so it belongs in the haystack the
-  // sensitivity map's path patterns are tested against — JOINED, not chosen
-  // between. Picking the first available signal meant a source that publishes a
+  // detectors' path hints read — JOINED, not chosen between. Picking the first available signal meant a source that publishes a
   // locator URL but no folder path (any provider whose paths are built from
   // opaque folder ids) had its filename invisible to path matching, so a file
-  // called `password-manager-export.csv` classified as ordinary. Matching is
-  // substring containment and this classifier only ever RAISES a tier, so a
+  // called `password-manager-export.csv` classified as ordinary. This
+  // classifier only ever RAISES a tier, so a
   // longer haystack can tighten a decision and can never loosen one.
   const path = [
     metadataString(item.metadata, 'pathDisplay')
@@ -10563,6 +10862,22 @@ export interface ConnectorStorePassageFocus {
   query?: string;
   /** The chunk a retrieval lane matched (keyword or vector), kept first. */
   anchorChunkIndex?: number;
+  /**
+   * Which lane matched the anchor chunk. A keyword anchor is kept only when
+   * its own text carries a discriminating query term: a match through the
+   * item's name lands on an arbitrary chunk (bm25 favours the shortest), so it
+   * says nothing about which passage answers.
+   */
+  anchorLane?: 'keyword' | 'semantic';
+  /**
+   * The query's embedding, with the model it was made by. Present, each chunk
+   * holding a current vector of that model is scored by cosine, which picks
+   * the item's most query-like passages when no query term singles one out.
+   */
+  queryVector?: readonly number[];
+  queryVectorModelId?: string;
+  /** At most this many passages (MAX_PASSAGES_PER_CANDIDATE by default). */
+  maxPassages?: number;
 }
 
 // At most this many passages from one item, so a long document contributes
@@ -10572,37 +10887,86 @@ const MAX_PASSAGES_PER_CANDIDATE = 3;
 // An item that fits its budget is returned whole, exactly as before. A longer
 // one yields its best passages instead of its first ones: the chunk a
 // retrieval lane matched, then the chunks densest in query terms, kept in
-// document order and clipped around their term windows. With neither signal
-// (no query terms, no anchor) the prefix is the only defensible choice.
+// document order and clipped around their term windows.
+//
+// Only terms that discriminate WITHIN the item count. A term the item's own
+// name carries explains why the item matched, not which passage answers: a
+// dated file name puts its date in every page header of a scanned report, and
+// windows around those dates were page headers, not the report's values
+// (2026-10-02 live: three header slivers per report). With no
+// discriminating term, the passages are the chunks most similar to the query
+// by embedding (when the store holds vectors), else the item from the top,
+// as whole contiguous text rather than slivers.
 function selectEvidencePassages(
   chunks: readonly string[],
   maxChars: number | undefined,
   focus: ConnectorStorePassageFocus | undefined,
+  context: { title?: string | null; relevance?: readonly (number | undefined)[] } = {},
 ): { chunks: readonly string[]; truncated: boolean } {
   if (maxChars === undefined || maxChars <= 0) return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
-  const termGroups = focus.query ? sourceIndexChunkQueryTerms(focus.query) : [];
-  const anchor = focus.anchorChunkIndex !== undefined
+  const termGroups = withoutNameTerms(focus.query ? sourceIndexChunkQueryTerms(focus.query) : [], context.title);
+  const lexical = chunks.map((text) => (termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0));
+  const relevance = (index: number): number => context.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
+  const anchorIndex = focus.anchorChunkIndex !== undefined
     && focus.anchorChunkIndex >= 0
     && focus.anchorChunkIndex < chunks.length
     ? focus.anchorChunkIndex
     : undefined;
-  const scored = chunks
-    .map((text, index) => ({ index, score: termGroups.length > 0 ? sourceIndexChunkTermScore(text, termGroups) : 0 }))
-    .filter((entry) => entry.score > 0 && entry.index !== anchor)
-    .sort((left, right) => right.score - left.score || left.index - right.index);
-  const picked = [
-    ...(anchor !== undefined ? [anchor] : []),
-    ...scored.map((entry) => entry.index),
-  ].slice(0, MAX_PASSAGES_PER_CANDIDATE);
-  if (picked.length === 0) return budgetChunks(chunks, maxChars);
-  const bounded = boundedSourceIndexChunks(
-    picked.sort((left, right) => left - right).map((index) => chunks[index]!),
-    maxChars,
-    termGroups,
-  );
-  return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+  const anchor = anchorIndex !== undefined && (focus.anchorLane !== 'keyword' || lexical[anchorIndex]! > 0)
+    ? anchorIndex
+    : undefined;
+  if (lexical.some((score) => score > 0)) {
+    const scored = lexical
+      .map((score, index) => ({ index, score }))
+      .filter((entry) => entry.score > 0 && entry.index !== anchor)
+      .sort((left, right) => right.score - left.score
+        || relevance(right.index) - relevance(left.index)
+        || left.index - right.index);
+    const picked = [
+      ...(anchor !== undefined ? [anchor] : []),
+      ...scored.map((entry) => entry.index),
+    ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
+    const bounded = boundedSourceIndexChunks(
+      picked.sort((left, right) => left - right).map((index) => chunks[index]!),
+      maxChars,
+      termGroups,
+    );
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+  }
+  // Most relevant first (the anchor, then by embedding), filled whole until
+  // the budget runs out, then read in document order.
+  const ranked = chunks
+    .map((_, index) => index)
+    .sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0)
+      || relevance(right) - relevance(left)
+      || left - right);
+  const kept = new Map<number, string>();
+  let remaining = maxChars;
+  for (const index of ranked) {
+    if (remaining <= 0) break;
+    const text = chunks[index]!;
+    const included = text.length > remaining ? text.slice(0, remaining) : text;
+    kept.set(index, included);
+    remaining -= included.length;
+  }
+  const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  return {
+    chunks: ordered.map(([, text]) => text),
+    truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
+  };
+}
+
+// Query term groups minus those the item's name carries (see above).
+function withoutNameTerms(
+  termGroups: ReadonlyArray<readonly string[]>,
+  title: string | null | undefined,
+): ReadonlyArray<readonly string[]> {
+  if (!title) return termGroups;
+  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
+  if (nameTokens.size === 0) return termGroups;
+  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
 
 function budgetChunks(

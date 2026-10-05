@@ -361,14 +361,18 @@ Enumerated from the workflow files: **the workflows need none.**
 
 One value is *optional* and is not a secret:
 
-- **`OLYMPUS_GOOGLE_PILOT_CLIENT_ID`** — the publisher-owned Google Desktop
-  OAuth client id, read by `scripts/release-artifact-ci.ts` and
-  `scripts/release-artifact.ts`. Today no workflow sets it, so the `static
-  checks` lane proves the *fail-closed refusal* instead of building the
-  artifact. Setting it (as a repository **variable**, and wiring it into the
-  `static` job's env) flips that lane to building and uploading a real release
-  tarball on every push. A Google Desktop client id is a public identifier and
-  carries no secret, but do not add it as a side effect of the flip — it is a
+- **`OLYMPUS_GOOGLE_PILOT_CLIENT_ID`** — the release's Google Desktop client
+  decision, read by `scripts/release-artifact-ci.ts` and
+  `scripts/release-artifact.ts` through `scripts/release-google-pilot-choice.ts`:
+  a publisher-owned Desktop client id, or `none`. **Olympus 1.0 ships `none`**
+  (owner decision 2026-10-03, `docs/V0_4_RELEASE.md` Decisions): every host's
+  Gmail and Drive connect uses the publisher Web client and relay, so no host
+  loses one-click Google sign-in. Unset, the builder refuses. Today no
+  workflow sets it, so the `static checks` lane proves that *fail-closed
+  refusal* instead of building the artifact. Setting it (as a repository
+  **variable**, `none` for 1.0, wired into the `static` job's env) flips that
+  lane to building and uploading a real release tarball on every push. It is
+  not a secret, but do not add it as a side effect of the flip — it is a
   release decision, and it changes what CI publishes.
 
 ## 10. Prove it before publishing `[anchor]` — reversible, and the last gate
@@ -389,7 +393,7 @@ bun install --frozen-lockfile
 bun run typecheck
 bun scripts/test-lane.ts fast
 bun run dist:check
-OLYMPUS_GOOGLE_PILOT_CLIENT_ID=<publisher-client-id> bun scripts/release-artifact.ts
+bun scripts/release-artifact.ts       # 1.0: packages the source-default beta.11 Desktop client
 bun scripts/public-flip-scan.ts       # must exit 0 — this is what gates step 11
 ```
 

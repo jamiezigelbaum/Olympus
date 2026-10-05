@@ -66,6 +66,12 @@ export interface LocalContentRequest {
   trustDomain: SourceTrustDomain;
   maxChars?: number;
   query?: string;
+  /**
+   * For an item longer than `maxChars`: at most this many of its passages
+   * (the provider's own small default otherwise). A caller reading one item
+   * in depth raises it so the budget is filled with the item's text.
+   */
+  maxPassages?: number;
 }
 
 export interface LocalContentBlock {
@@ -75,6 +81,15 @@ export interface LocalContentBlock {
   facts?: readonly StructuredEvidenceFact[];
   truncated?: boolean;
   coverageGaps?: readonly string[];
+  // The owner chose to keep this item's contents unread (a folder set to
+  // Names only, or a metadata-only ingestion rule). Its name still matches;
+  // its missing text is a settled choice, not a failed read, and coverage
+  // reports it apart from items Olympus genuinely could not read.
+  namesOnly?: boolean;
+  // The item's contents are tiered Private (held by a secure_local copy) and
+  // only its name is in this tier. Not a failed read and not a Names-only
+  // choice: coverage counts it apart from both.
+  contentPrivate?: boolean;
   // Locator (path/url) for the item, supplied by the LOCAL provider only. The
   // routed search membrane stays path-free; the locator enters via this local
   // lane, lives on the internal pack, and reaches Castor only through the
@@ -215,6 +230,16 @@ export interface EvidencePackBuildDetail {
   // answer. Empty when every searched corpus is fully readable, or when no
   // provider can report it cheaply.
   corpusReadabilityGaps?: readonly CorpusReadabilityGap[];
+  // Indexes into pack.candidates whose contents the owner keeps unread on
+  // purpose (LocalContentBlock.namesOnly). Counts and indexes only.
+  namesOnlyCandidateIndexes?: readonly number[];
+  // Indexes into pack.candidates whose contents are tiered Private
+  // (LocalContentBlock.contentPrivate). Counts and indexes only.
+  contentPrivateCandidateIndexes?: readonly number[];
+  // Located candidates with no readable content for a reason other than the
+  // owner's Names only choice: no provider, nothing returned, or no text.
+  // Truncated and policy-denied candidates are not counted here.
+  unreadCandidates?: number;
   // Four-tier classification (P1b), beside the pack by the same precedent:
   // Secrets that matched the question, by location only, and counts of
   // searched items whose tier is not final yet. Neither enters the pack, so
@@ -250,6 +275,9 @@ export async function buildEvidencePackDetailed(
   const extractionGaps: string[] = [];
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
+  const namesOnlyCandidateIndexes: number[] = [];
+  const contentPrivateCandidateIndexes: number[] = [];
+  let unreadCandidates = 0;
 
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(
@@ -321,6 +349,9 @@ export async function buildEvidencePackDetailed(
     // it instead returns S5 content, that is an invariant failure: hard-stop
     // the entire build rather than misreporting it as an extraction miss.
     assertEvidenceCandidateModelEligible(candidate);
+    if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
+    else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);
+    else if (!provider || !content || content.chunks.length === 0) unreadCandidates += 1;
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
 
@@ -369,6 +400,9 @@ export async function buildEvidencePackDetailed(
     policyDeniedCandidates,
     policyDeniedCoverageGaps,
     corpusReadabilityGaps,
+    namesOnlyCandidateIndexes,
+    contentPrivateCandidateIndexes,
+    unreadCandidates,
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
     ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),
   };

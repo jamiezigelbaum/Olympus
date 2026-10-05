@@ -526,7 +526,8 @@ describe('background page embedding block', () => {
 
     // The line that was already there, unchanged.
     // The owner's line: percent done, and no ETA until a rate is measured.
-    expect(html).toContain('Indexing — 74% done, estimating time left…');
+    expect(html).toContain('Indexing — 74% done');
+    expect(html).not.toContain('estimating');
     // And the four things the owner asked for, now under Details.
     expect(html).toContain('Embeddings: running now (metadata caught up)');
     expect(html).toContain('No fixed hours');

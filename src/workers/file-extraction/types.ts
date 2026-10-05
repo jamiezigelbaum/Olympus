@@ -396,6 +396,19 @@ export interface ExtractorRegistryConfig {
   ocr?: {
     ocrTimeoutMs?: number;
     pdfRenderTimeoutMs?: number;
+    /**
+     * `auto` (default): the built-in Vision engine on macOS, tesseract
+     * elsewhere. `tesseract`: the installed commands even on a Mac.
+     */
+    engine?: 'auto' | 'tesseract';
+    /**
+     * Page cap for the built-in engine; pages past it are recorded, not read.
+     */
+    maxPages?: number;
+    /**
+     * Overrides `process.platform` for engine selection, for tests.
+     */
+    platform?: NodeJS.Platform;
   };
   vlmPdf?: {
     client?: VlmClient;

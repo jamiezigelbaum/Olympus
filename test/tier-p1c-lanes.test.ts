@@ -33,7 +33,7 @@ import {
 import { createWhatsAppTierLane, WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, createXBookmarksTierLane } from '../src/workers/x-bookmarks/tier-set.ts';
 import { cloudProvider, localProvider, snapshotStore } from './helpers/tier-fixtures.ts';
-import { parseSensitivityMap, USER_FACING_TIER_MAPPING, type SensitivityMap } from '../src/core/sensitivity-map.ts';
+import { privacyRuleToTierRule } from '../src/workers/classification/privacy-profile.ts';
 import {
   LocalXBookmarksApiUsageStore,
   createXBookmarksConnectorStore,
@@ -42,26 +42,13 @@ import {
 } from '../src/workers/x-bookmarks/index.ts';
 import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connector.ts';
 
-/** The owner's map: a Private folder and a Private keyword. */
-function ownerMap(): SensitivityMap {
-  const category = (id: string, match: { keywords?: string[]; pathPatterns?: string[] }) => ({
-    id,
-    label: id,
-    targetTierName: 'secure',
-    targetTrustTier: USER_FACING_TIER_MAPPING.secure.targetTrustTier,
-    targetTrustDomain: USER_FACING_TIER_MAPPING.secure.targetTrustDomain,
-    examples: ['example'],
-    match: { keywords: match.keywords ?? [], senderPatterns: [], pathPatterns: match.pathPatterns ?? [] },
-  });
-  return parseSensitivityMap({
-    schemaVersion: 2,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories: [
-      category('therapy', { pathPatterns: ['/therapy/'] }),
-      category('deal', { keywords: ['acme merger'] }),
-    ],
-  });
+/** The owner's privacy profile: an always-Private Dropbox folder. */
+function ownerRules() {
+  return [privacyRuleToTierRule({ kind: 'folder', source_id: 'dropbox.files', key: '/therapy' })];
 }
+
+/** A structured identifier the shared detector raises to Private at once. */
+const IBAN_LINE = 'Wire the deposit to IBAN GB82 WEST 1234 5698 7654 32.';
 
 const roots: string[] = [];
 const closers: Array<() => void> = [];
@@ -250,8 +237,8 @@ describe('P1c Dropbox lane', () => {
   });
 });
 
-describe('P1c: the owner\'s sensitivity map judges every new item', () => {
-  test('Dropbox: a map Private folder or keyword keeps a new file Private and away from the cloud embedder', async () => {
+describe('P1c: the owner\'s privacy rules and the shared detectors judge every new item', () => {
+  test('Dropbox: an always-Private folder or Private text keeps a new file Private and away from the cloud embedder', async () => {
     const root = workspace();
     const env = {
       OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
@@ -285,7 +272,7 @@ describe('P1c: the owner\'s sensitivity map judges every new item', () => {
       secureStore: secure,
       env,
       policy: defaultDropboxIngestionPolicy(),
-      tierClassification: { sensitivityMap: ownerMap() },
+      tierClassification: { rules: ownerRules() },
     });
     closers.push(() => {
       lane.internal.current()?.close();
@@ -293,7 +280,7 @@ describe('P1c: the owner\'s sensitivity map judges every new item', () => {
     });
     await createDropboxProviderStoreSyncHandler({ store: secure, account: 'personal', broker, metadataClient, tierSet: lane.set })
       .pull({ approved_scope_key: 'dropbox.personal:/' });
-    // A map-Private folder: the names never reach the Personal store.
+    // An always-Private folder: the names never reach the Personal store.
     expect(ids(lane.internal.current(), 'session')).toEqual([]);
     expect(ids(secure, 'session')).toEqual(['id:session']);
 
@@ -315,7 +302,7 @@ describe('P1c: the owner\'s sensitivity map judges every new item', () => {
       fetchedAt: '2026-09-23T00:00:00.000Z',
     });
     expect((await land('id:session', 'We talked about sleep and the week ahead.')).accepted).toBe(true);
-    expect((await land('id:memo', 'Draft terms for the acme merger, board review Friday.')).accepted).toBe(true);
+    expect((await land('id:memo', `Draft terms for the acme merger, board review Friday. ${IBAN_LINE}`)).accepted).toBe(true);
     expect((await land('id:book', 'Chapter three covers the history of cartography.')).accepted).toBe(true);
     expect(ids(secure, 'sleep')).toEqual(['id:session']);
     expect(ids(secure, 'board')).toEqual(['id:memo']);
@@ -328,7 +315,7 @@ describe('P1c: the owner\'s sensitivity map judges every new item', () => {
     expect(cloud.inputs.some((input) => input.includes('acme') || input.includes('sleep'))).toBe(false);
   });
 
-  test('Readwise: a map Private keyword raises a new item to the Private store, embedded only privately', async () => {
+  test('Readwise: Private text raises a new item to the Private store, embedded only privately', async () => {
     const root = workspace();
     const store = new LocalConnectorStore({ dbPath: join(root, 'readwise.sqlite'), corpusId: 'internal.readwise.library', family: 'readwise', trustDomain: 'internal' });
     closers.push(() => store.close());
@@ -339,11 +326,10 @@ describe('P1c: the owner\'s sensitivity map judges every new item', () => {
       env: { OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'readwise-secure.sqlite') },
       embeddingProvider: cloud,
       secureEmbeddingProvider: local,
-      tierClassification: { sensitivityMap: ownerMap() },
     });
     closers.push(() => lane.newStores.secure_local?.current()?.close());
     const specs: Spec[] = [
-      { id: 'hl-deal', title: 'Note', text: 'Thoughts on the acme merger timeline.' },
+      { id: 'hl-deal', title: 'Note', text: `Thoughts on the acme merger timeline. ${IBAN_LINE}` },
       { id: 'hl-book', title: 'Book', text: 'Maps change how cities imagine themselves.' },
     ];
     await lane.set.sync(laneConnector('readwise', 'readwise', () => specs), { fetchContent: true, placement: READWISE_STORE_PLACEMENT });

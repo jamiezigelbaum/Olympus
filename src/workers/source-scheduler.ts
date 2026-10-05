@@ -93,6 +93,14 @@ export type SourceSchedulerCadence = 'manual' | 'continuous';
  * while one poisoned timestamp cannot park a live source indefinitely.
  */
 export const SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1_000;
+/**
+ * How soon a task runs again when its pass left work ready to do now (a
+ * candidate scan not finished, a full batch processed), and how soon a
+ * source's downstream extraction and embedding run after an upstream pass
+ * made progress. Each pass stays bounded by the task's own limits; this only
+ * removes the idle interval between passes while there is a backlog.
+ */
+export const SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5_000;
 export const SOURCE_SCHEDULER_SOURCE_IDS_ENV = 'OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS';
 const GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = 'gmail_request_budget_clock_regression';
 const GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = 'google_drive_request_budget_clock_regression';
@@ -182,6 +190,25 @@ export function sourceSchedulerConstructionLogLines(input: {
   ];
 }
 
+/**
+ * The boot summary line. "Selected" is the number of constructed sources the
+ * scheduler will actually run: every constructed source when there is no
+ * allowlist, otherwise the constructed sources the allowlist names. Printing
+ * the allowlist's length instead read "0 selected" on an install with no
+ * allowlist, where every constructed source runs.
+ */
+export function sourceSchedulerEnabledLogLine(input: {
+  constructedSourceIds: readonly string[];
+  selectedSourceIds: readonly string[];
+}): string {
+  const allowlist = new Set(input.selectedSourceIds);
+  const selected = allowlist.size === 0
+    ? input.constructedSourceIds.length
+    : input.constructedSourceIds.filter((sourceId) => allowlist.has(sourceId)).length;
+  return `In-process source scheduler enabled for ${input.constructedSourceIds.length} constructed source(s); `
+    + `${selected} selected.`;
+}
+
 export interface SourceSchedulerRetryAt {
   at: string;
   effectiveIntervalMs?: number;
@@ -242,6 +269,11 @@ export interface SourceSchedulerTaskRunResult {
   checkpoint?: string | null;
   /** A structured provider/cost guard deferral; never inferred from free-form text. */
   retryAt?: SourceSchedulerRetryAt;
+  /**
+   * More work is ready right now (a backlog): run this task again within
+   * seconds instead of waiting out its interval. A retryAt deferral wins.
+   */
+  continueSoon?: boolean;
 }
 
 export interface SourceSchedulerSource {
@@ -311,6 +343,10 @@ export interface SourceSchedulerOptions {
   stateStore?: SourceSchedulerStateStore;
   /** Consecutive zero-change runs before a lane is marked degraded. */
   zeroChangeDegradeRuns?: number;
+  /** Delay before a backlog pass continues. Defaults to SOURCE_SCHEDULER_CONTINUE_AFTER_MS. */
+  continueAfterMs?: number;
+  setTimeoutImpl?: typeof setTimeout;
+  clearTimeoutImpl?: typeof clearTimeout;
 }
 
 export interface SourceSchedulerStateStore {
@@ -438,6 +474,10 @@ export class SourceScheduler {
   private afterTickDrain: Promise<void> | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly fastWakeTimers = new Map<number, ReturnType<typeof setInterval>>();
+  private readonly continueAfterMs: number;
+  private readonly setTimeoutImpl: typeof setTimeout;
+  private readonly clearTimeoutImpl: typeof clearTimeout;
+  private continueWake: { at: number; timer: ReturnType<typeof setTimeout> } | undefined;
 
   constructor(options: SourceSchedulerOptions) {
     this.enabled = options.enabled;
@@ -455,6 +495,9 @@ export class SourceScheduler {
     this.afterTick = options.afterTick;
     this.stateStore = options.stateStore;
     this.zeroChangeDegradeRuns = options.zeroChangeDegradeRuns ?? DEFAULT_ZERO_CHANGE_DEGRADE_RUNS;
+    this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
+    this.setTimeoutImpl = options.setTimeoutImpl ?? setTimeout;
+    this.clearTimeoutImpl = options.clearTimeoutImpl ?? clearTimeout;
     const firstRun = this.now().getTime();
     this.states = this.sources.flatMap((source) => source.tasks.map((task) =>
       this.createTaskState(source, task, firstRun)
@@ -503,6 +546,50 @@ export class SourceScheduler {
     }
     for (const timer of this.fastWakeTimers.values()) this.clearIntervalImpl(timer);
     this.fastWakeTimers.clear();
+    if (this.continueWake) {
+      this.clearTimeoutImpl(this.continueWake.timer);
+      this.continueWake = undefined;
+    }
+  }
+
+  /**
+   * One pending early wake for the soonest backlog continuation, so a task
+   * that asked to continue does not wait for the next regular tick.
+   */
+  private scheduleContinueWake(at: number): void {
+    if (!this.timer) return;
+    if (this.continueWake && this.continueWake.at <= at) return;
+    if (this.continueWake) this.clearTimeoutImpl(this.continueWake.timer);
+    const timer = this.setTimeoutImpl(() => {
+      this.continueWake = undefined;
+      void this.runDueTasks();
+    }, Math.max(0, at - this.now().getTime()));
+    (timer as { unref?: () => void }).unref?.();
+    this.continueWake = { at, timer };
+  }
+
+  /**
+   * After an upstream pass made progress, the same source's downstream work
+   * (extraction after a listing, embedding after either) runs within seconds
+   * rather than at its own idle interval: new items, or newly read text, are
+   * exactly what those tasks exist to pick up.
+   */
+  private wakeDownstream(state: SchedulerTaskState, at: number): void {
+    const downstream: ReadonlySet<SourceSchedulerTaskKind> = state.task.kind === 'sync'
+      ? new Set(['extract', 'embed'])
+      : state.task.kind === 'extract' ? new Set(['embed']) : new Set();
+    if (downstream.size === 0) return;
+    let woke = false;
+    for (const sibling of this.states) {
+      if (sibling === state || sibling.source !== state.source || sibling.running) continue;
+      if (!downstream.has(sibling.task.kind)) continue;
+      if (sibling.nextRunAt <= at) continue;
+      // A failure backoff stays a backoff.
+      if (sibling.consecutiveFailures > 0) continue;
+      sibling.nextRunAt = at;
+      woke = true;
+    }
+    if (woke) this.scheduleContinueWake(at);
   }
 
   private refreshFastWakeTimers(): void {
@@ -622,6 +709,28 @@ export class SourceScheduler {
             state.running = false;
           }
         }
+        // Work this group made due while it held the key (a backlog
+        // continuation, or downstream work woken by a pass) runs now rather
+        // than at the next tick, which would find the key free but the wake
+        // already spent. Bounded: one more pass per task, scheduled ticks only.
+        if (provenance === 'scheduled') {
+          const ran = new Set(group);
+          const now = this.now().getTime();
+          const due = this.states.filter((state) => !ran.has(state)
+            && !state.running
+            && taskCadence(state.source, state.task) === 'continuous'
+            && taskConcurrencyKey(state.source, state.task) === concurrencyKey
+            && state.nextRunAt <= now);
+          for (const state of due) {
+            if (state.running) continue;
+            state.running = true;
+            try {
+              await this.runTask(state, state.nextRunAt, provenance);
+            } finally {
+              state.running = false;
+            }
+          }
+        }
       } finally {
         this.busyConcurrencyKeys.delete(concurrencyKey);
       }
@@ -693,9 +802,13 @@ export class SourceScheduler {
         ?? (runningTask.kind === 'sync' ? state.source.embeddingDeferredReason?.() : undefined);
       const configuredIntervalMs = taskIntervalMs(state.source, state.task);
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
+      const continueAt = Date.parse(completedAt) + this.continueAfterMs;
+      const continuing = result.continueSoon === true && !retryAt;
       const nextRunAt = retryAt?.at
         ? Date.parse(retryAt.at)
-        : nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
+        : continuing
+          ? Math.min(continueAt, nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt)))
+          : nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
 
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, 'checkpoint');
@@ -727,6 +840,8 @@ export class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      if (continuing) this.scheduleContinueWake(nextRunAt);
+      if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const errorKind = safeSchedulerErrorKind(error);
@@ -1112,11 +1227,7 @@ export function createCanonicalDropboxSchedulerSource(input: {
           provider: input.embeddingProvider!,
           limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS,
         });
-        return progressFromCounts({
-          chunks_seen: result.chunksSeen,
-          chunks_embedded: result.chunksEmbedded,
-          chunks_skipped: result.chunksSkipped,
-        });
+        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
       },
     });
   }
@@ -1134,11 +1245,7 @@ export function createCanonicalDropboxSchedulerSource(input: {
           throw new Error('A secure_local tier store requires a local/private or approved Venice embedding provider.');
         }
         const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
-        return progressFromCounts({
-          chunks_seen: result.chunksSeen,
-          chunks_embedded: result.chunksEmbedded,
-          chunks_skipped: result.chunksSkipped,
-        });
+        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
       },
     });
   }
@@ -1161,10 +1268,22 @@ export function createCanonicalDropboxSchedulerSource(input: {
 }
 
 /**
- * One scheduled extraction pass for a file lane: queue the next page of
- * candidates, then extract a small batch. The pace is deliberately modest —
- * every extracted chunk feeds the lane's embedding task — and a whole backlog
- * is drained on the owner's word instead (`olympus source extract-pdfs`).
+ * Most candidate pages one extraction pass reads looking for its plan limit.
+ * A lane's candidates are read from the corpus's shared store, so one page can
+ * hold nothing in this lane's scope (another folder's files, files already
+ * read); stopping there left a freshly chosen folder unread until the next
+ * idle interval. This bounds the scan, not the work: queued jobs are still
+ * capped by the plan limit and extraction by the batch size.
+ */
+export const FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40;
+
+/**
+ * One scheduled extraction pass for a file lane: queue up to `planLimit`
+ * candidates (reading as many candidate pages as that takes, within a bound),
+ * then extract a small batch. Every extracted chunk feeds the lane's embedding
+ * task. While the scan is unfinished or a full batch was processed the pass
+ * asks to continue within seconds, so a backlog (a newly chosen folder) drains
+ * pass after pass instead of one batch per idle interval.
  */
 export function fileExtractionSchedulerTask(input: {
   id: string;
@@ -1173,29 +1292,56 @@ export function fileExtractionSchedulerTask(input: {
   planLimit: number;
   batchSize: number;
   mimeTypes?: readonly string[];
+  maxPlanPages?: number;
 }): SourceSchedulerTask {
+  const maxPages = Math.max(1, input.maxPlanPages ?? FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS);
   return {
     id: input.id,
     kind: 'extract',
     writer: true,
     run: async (context?: SourceSchedulerTaskRunContext) => {
-      const plan = await input.runner.plan({
-        ...input.lane,
-        limit: input.planLimit,
-        policyDecision: 'index_allowed',
-        ...(input.mimeTypes ? { mimeTypes: input.mimeTypes } : {}),
-        ...(context?.checkpoint ? { cursor: context.checkpoint } : {}),
-      });
+      let cursor = context?.checkpoint ?? undefined;
+      const startCursor = cursor;
+      let done = false;
+      let candidates = 0;
+      let jobsQueued = 0;
+      let jobsExisting = 0;
+      let jobsUnroutable = 0;
+      const extractorKinds = new Set<string>();
+      for (let page = 0; page < maxPages; page += 1) {
+        const plan = await input.runner.plan({
+          ...input.lane,
+          limit: input.planLimit,
+          policyDecision: 'index_allowed',
+          ...(input.mimeTypes ? { mimeTypes: input.mimeTypes } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        candidates += plan.candidates;
+        jobsQueued += plan.jobsQueued;
+        jobsExisting += plan.jobsExisting;
+        jobsUnroutable += plan.jobsUnroutable;
+        for (const kind of plan.extractorKinds) extractorKinds.add(kind);
+        if (plan.done) {
+          done = true;
+          cursor = undefined;
+          break;
+        }
+        // A page that names no next position cannot be resumed from; keep the
+        // old cursor and stop rather than read the same page again.
+        if (plan.nextCursor === undefined || plan.nextCursor === cursor) break;
+        cursor = plan.nextCursor;
+        if (candidates >= input.planLimit) break;
+      }
       const run = await input.runner.run({
         ...input.lane,
         limit: input.batchSize,
-        preflightExtractorKinds: plan.extractorKinds,
+        preflightExtractorKinds: [...extractorKinds],
       });
       const counts = {
-        candidates_seen: plan.candidates,
-        jobs_queued: plan.jobsQueued,
-        jobs_existing: plan.jobsExisting,
-        jobs_unroutable: plan.jobsUnroutable,
+        candidates_seen: candidates,
+        jobs_queued: jobsQueued,
+        jobs_existing: jobsExisting,
+        jobs_unroutable: jobsUnroutable,
         jobs_processed: run.processedJobs,
         jobs_indexed: run.counts.indexed,
         jobs_metadata_only: run.counts.metadata_only,
@@ -1212,9 +1358,13 @@ export function fileExtractionSchedulerTask(input: {
         });
       }
       return {
-        status: plan.jobsQueued > 0 || run.processedJobs > 0 ? 'progress' : 'idle',
+        status: jobsQueued > 0 || run.processedJobs > 0 ? 'progress' : 'idle',
         counts,
-        checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null,
+        checkpoint: done ? null : cursor ?? null,
+        // Continue while the scan moved and is unfinished, or a full batch ran
+        // (more queued jobs are likely waiting). A scan stuck on one page
+        // waits for the interval like any idle lane.
+        continueSoon: (!done && cursor !== startCursor) || run.processedJobs >= input.batchSize,
       };
     },
   };
@@ -1912,6 +2062,21 @@ function googleDriveSchedulerFailure(error: unknown): SourceSchedulerTaskFailure
       degradedReason: errorKind,
     },
   });
+}
+
+/** A bounded embedding pass; a pass that used its whole limit has more waiting. */
+function embedPassResult(
+  result: { chunksSeen: number; chunksEmbedded: number; chunksSkipped: number },
+  limit: number,
+): SourceSchedulerTaskRunResult {
+  return {
+    ...progressFromCounts({
+      chunks_seen: result.chunksSeen,
+      chunks_embedded: result.chunksEmbedded,
+      chunks_skipped: result.chunksSkipped,
+    }),
+    ...(result.chunksEmbedded >= limit ? { continueSoon: true } : {}),
+  };
 }
 
 function progressFromCounts(counts: Record<string, number>): SourceSchedulerTaskRunResult {

@@ -92,7 +92,10 @@ import {
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
+import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
+import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
+import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 
 
 /** Legs run in this order, least private first. */
@@ -254,6 +257,7 @@ export class TieredStoreSet {
     // The sniffer's background pass settles this set's routed items through
     // this planner, so a verdict queues a move rather than rewriting placement.
     registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
+    registerTierSetForLedger(this.ledger.dbPath, this);
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */
@@ -399,6 +403,7 @@ export class TieredStoreSet {
     } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
+    this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -433,6 +438,7 @@ export class TieredStoreSet {
     entries: ReadonlyArray<{ trustDomain: SourceTrustDomain; connector: SourceConnector; sync?: ConnectorStoreSyncOptions }>,
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
+    this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'per_leg');
     const legRuns: TieredStoreLegRun[] = [];
     for (const entry of entries) {
@@ -443,6 +449,28 @@ export class TieredStoreSet {
       run.finalize();
     }
     return tieredRun(legRuns, run.counts, undefined);
+  }
+
+  /**
+   * A listing re-judges only what it lists, and an incremental one never
+   * re-lists an unchanged item. Before each run, a bounded page of items
+   * already stored is settled: a newly saved raising owner rule (an "always
+   * Private" folder) raises the ones it matches (tier-rules-sweep.ts), and
+   * items a names-only folder covers stop waiting for text that never comes
+   * (tier-names-only-settle.ts). The sniffer's tick runs both too. Never
+   * fails the sync.
+   */
+  private settleStoredItems(): void {
+    try {
+      sweepOwnerRuleRaises({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      settleNamesOnlyItems({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
   }
 
   /**
@@ -506,7 +534,7 @@ export class TieredStoreSet {
     // and rules file re-read when edited, the sniffer), keyed by the set
     // ledger the sniffer's queue sits beside. Resolved per call, so an edited
     // map or rules file applies at the next pass.
-    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath, undefined);
+    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
   }
 
   /** @internal */
@@ -1014,7 +1042,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
     const classification = this.classification;
-    let decision = decideItemTiers(connector, item, text, classification, ledger);
+    // Names-only by the owner's choice: the text never arrives, so the names
+    // are the whole decision and the item never waits on it.
+    let decision = decideItemTiers(connector, item, text, classification, ledger, { namesOnly: deferred && input.metadataOnly });
     // With the owner's rules file or map unusable, the decision (made with
     // the last good ones) may not place anything below Private: hold it
     // pending (secure_local, embedding held) until the file is fixed.

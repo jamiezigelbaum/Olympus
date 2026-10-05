@@ -13,6 +13,8 @@ import { classifyItemTiers, type TierDecision } from '../src/workers/classificat
 import {
   TierLedger,
   TierLedgerGenerationConflictError,
+  TierLedgerRaiseAbandonRefusedError,
+  TierLedgerSecretsRollbackRefusedError,
   placementIsRaise,
   type TierPlacementPlan,
 } from '../src/workers/classification/tier-ledger.ts';
@@ -291,5 +293,137 @@ describe('tier ledger copies (P1b)', () => {
       { trustDomain: 'internal', layers: 'metadata' },
       { trustDomain: 'secure_local', layers: 'content' },
     ])).toBe(true);
+  });
+});
+
+// 2026-10-02 live (Dropbox): six items decided Personal after a pending
+// sniffer question kept embed_hold on their Personal copy. The move flip
+// re-layered that source copy in place and kept the hold, so each stayed
+// unembedded and counted as "awaiting privacy classification" with nothing
+// left to decide it.
+describe('embedding holds follow the decision through a move', () => {
+  const split: TierPlacementPlan['copies'] = [{ ...INTERNAL, layers: 'metadata' }, { ...SECURE, layers: 'content' }];
+
+  function heldThenDecidedPersonal(store: TierLedger): number {
+    store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), { copies: split, embedHold: false });
+    // A re-judgment with an open question holds the content (and every current copy).
+    expect(store.recordRoutedPlacement(ITEM, decision({ state: 'pending', contentPending: true }), { copies: split, embedHold: true }).outcome)
+      .toBe('updated');
+    expect(store.corpusCopyCounts(INTERNAL.corpusId).held).toBe(1);
+    // Answered Personal: the item moves to the Personal store, whole.
+    expect(store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL)).outcome).toBe('queued_move');
+    const generation = store.getCurrent(ITEM)!.generation;
+    store.stageMove(ITEM, {
+      expectedGeneration: generation,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      destination: [{ ...INTERNAL, layers: 'both' }],
+      hideSource: false,
+    });
+    return generation;
+  }
+
+  test('the flip applies the placement\'s hold to the copies it makes current', () => {
+    const store = ledger();
+    const generation = heldThenDecidedPersonal(store);
+    const flipped = store.completeMove(ITEM, { expectedGeneration: generation, destination: [{ ...INTERNAL, layers: 'both' }], embedHold: false });
+    expect(flipped.state).toBe('current');
+    expect(store.copies(ITEM).find((copy) => copy.corpusId === INTERNAL.corpusId)).toMatchObject({ state: 'current', layers: 'both', embedHold: false });
+    expect(store.corpusCopyCounts(INTERNAL.corpusId).held).toBe(0);
+    store.close();
+  });
+
+  test('a decided item left held by an older flip is settled when the ledger opens; a pending one stays held', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-ledger-hold-'));
+    try {
+      const dbPath = join(dir, 'store.tier-ledger.sqlite');
+      const first = new TierLedger({ dbPath });
+      const generation = heldThenDecidedPersonal(first);
+      // The flip as it was before the fix: no hold passed, the re-layered copy keeps it.
+      first.completeMove(ITEM, { expectedGeneration: generation, destination: [{ ...INTERNAL, layers: 'both' }] });
+      const pending = { ...ITEM, providerItemId: 'item-2' };
+      first.recordRoutedPlacement(pending, decision({ state: 'pending', contentPending: true }), { copies: split, embedHold: true });
+      expect(first.corpusCopyCounts(INTERNAL.corpusId).held).toBe(2);
+      first.close();
+
+      const reopened = new TierLedger({ dbPath });
+      expect(reopened.copies(ITEM).find((copy) => copy.state === 'current')?.embedHold).toBe(false);
+      expect(reopened.copies(pending).every((copy) => copy.embedHold)).toBe(true);
+      expect(reopened.corpusCopyCounts(INTERNAL.corpusId).held).toBe(1);
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('abandoning a move that never flipped', () => {
+  const visible = (store: TierLedger) => store.copies(ITEM).filter((copy) => copy.state === 'current').map((copy) => [copy.corpusId, copy.layers]);
+
+  test('a queued lower move is left exactly where it was: copies unchanged, tiers unchanged', () => {
+    const store = ledger();
+    store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), whole(SECURE));
+    const before = store.copies(ITEM);
+    expect(store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL))).toMatchObject({ outcome: 'queued_move', raise: false });
+    expect(() => store.abandonMove(ITEM, { expectedGeneration: 2 })).toThrow(TierLedgerGenerationConflictError);
+
+    const abandoned = store.abandonMove(ITEM, { expectedGeneration: 1 });
+    expect(abandoned).toMatchObject({ state: 'current', generation: 1, contentTier: 'secure', targetContentTier: null, targetMetadataTier: null });
+    expect(visible(store)).toEqual([[SECURE.corpusId, 'both']]);
+    expect(store.copies(ITEM).map(({ updatedAt: _updatedAt, ...copy }) => copy))
+      .toEqual(before.map(({ updatedAt: _updatedAt, ...copy }) => copy));
+    expect(store.history(ITEM).at(-1)).toMatchObject({ generation: 1, decidedBy: 'rollback', state: 'current' });
+    // Not mid-move any more: the next decision is the router's again.
+    expect(store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL)).outcome).toBe('queued_move');
+    store.close();
+  });
+
+  test('a raise that hid its source is never abandoned: its copies stay hidden', () => {
+    const store = ledger();
+    store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL));
+    store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure', decidedBy: 'sensitive_detector' }), {
+      copies: [{ ...INTERNAL, layers: 'metadata' }, { ...SECURE, layers: 'content' }],
+      embedHold: false,
+    });
+    expect(() => store.abandonMove(ITEM, { expectedGeneration: 1 })).toThrow(TierLedgerRaiseAbandonRefusedError);
+    expect(visible(store)).toEqual([]);
+    expect(store.getCurrent(ITEM)).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
+    store.close();
+  });
+
+  test('a move interrupted after staging forgets its staged copy, which never blocks a later move', () => {
+    const store = ledger();
+    store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), whole(SECURE));
+    store.stageMove(ITEM, {
+      expectedGeneration: 1,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      destination: [{ ...INTERNAL, layers: 'both' }],
+      hideSource: false,
+    });
+    store.abandonMove(ITEM, { expectedGeneration: 1 });
+    expect(visible(store)).toEqual([[SECURE.corpusId, 'both']]);
+    // Its store row stays hidden: the item's other copy rows say where it is served.
+    expect(store.copies(ITEM).map((copy) => copy.corpusId)).toEqual([SECURE.corpusId]);
+    // A staged copy no longer turns an unchanged placement into a move.
+    expect(store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), whole(SECURE)).outcome).not.toBe('queued_move');
+
+    // The same move again stages and flips normally.
+    store.stageMove(ITEM, {
+      expectedGeneration: 1,
+      target: { metadataTier: 'private', contentTier: 'private' },
+      destination: [{ ...INTERNAL, layers: 'both' }],
+      hideSource: false,
+    });
+    store.completeMove(ITEM, { expectedGeneration: 1, destination: [{ ...INTERNAL, layers: 'both' }] });
+    expect(visible(store)).toEqual([[INTERNAL.corpusId, 'both']]);
+    store.close();
+  });
+
+  test('a move toward Secrets is never abandoned', () => {
+    const store = ledger();
+    store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL));
+    store.beginMove(ITEM, { metadataTier: 'secrets', contentTier: 'secrets' }, 1);
+    expect(() => store.abandonMove(ITEM, { expectedGeneration: 1 })).toThrow(TierLedgerSecretsRollbackRefusedError);
+    expect(store.getCurrent(ITEM)).toMatchObject({ state: 'moving' });
+    store.close();
   });
 });

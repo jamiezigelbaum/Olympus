@@ -14,7 +14,6 @@ import {
   createSourceCorpusRegistry,
   type SourceCorpusRegistry,
 } from '../core/source-corpus-registry.ts';
-import type { SensitivityMap } from '../core/sensitivity-map.ts';
 import { SOURCE_TRUST_DOMAINS } from '../core/source-index/types.ts';
 import type {
   SovereigntyEngine,
@@ -256,15 +255,6 @@ export interface SourceDashboardViewModel {
   where_your_data_lives: DashboardTrustDomainCard[];
   unassigned_corpora: DashboardUnassignedCorpora;
   excluded_by_configuration: DashboardExcludedByConfiguration;
-  /**
-   * The owner's own secure categories, read off the sensitivity map.
-   *
-   * OMITTED ENTIRELY when no map is configured or the configured one does not
-   * parse. Absent means "nothing to say", never "no categories": a page that
-   * rendered an empty category list for an unreadable file would be asserting
-   * the owner protects nothing.
-   */
-  sensitivity?: DashboardSensitivity;
   /**
    * What each tier permits, hardcoded from the enforcement code rather than
    * measured. Always emitted; optional in the type only because hand-written
@@ -538,40 +528,6 @@ export interface DashboardExcludedSource {
   items_metadata_only_content_present: number;
   unenforceable_rule_ids?: readonly string[];
   entries: readonly DashboardExcludedRule[];
-}
-
-/**
- * The owner's secure categories, as configured.
- *
- * `editable` is false and stays false until a write route exists: no route in
- * this worker writes the sensitivity map, so a page offering an add or remove
- * control would offer a button that cannot work.
- *
- * The categories' MATCH TERMS never cross this boundary — only how many there
- * are. Keywords, sender patterns and path patterns are the owner's real email
- * addresses and folder paths, `notes` is free text that routinely contains
- * them, and this view model is reachable with the weak `dash_` query token
- * while its own policy block declares no paths and no file names are returned.
- */
-export interface DashboardSensitivity {
-  /** Always true where this block exists at all; absent is how "not configured" is said. */
-  configured: boolean;
-  /** Always false: no route in this worker writes the sensitivity map. */
-  editable: boolean;
-  categories: DashboardSensitivityCategory[];
-}
-
-export interface DashboardSensitivityCategory {
-  id: string;
-  label: string;
-  /** The owner's own examples, joined. Always at least one — the parser requires it. */
-  interpretation: string;
-  /** Only ever `secure` or `secrets`: the map is raise-only and refuses the rest. */
-  target_tier_name: string;
-  target_trust_tier: string;
-  target_trust_domain: string;
-  /** How many keywords, sender patterns and path patterns match this category. A count, never the terms. */
-  match_terms: number;
 }
 
 /**
@@ -1160,15 +1116,6 @@ export interface SourceDashboardBuildOptions {
   /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
   fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
   fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
-  /**
-   * The owner's sensitivity map, already loaded and parsed by the caller.
-   *
-   * Read-only and optional: this page never opens a file of its own, so the map
-   * arrives the same way the ledger snapshot does. Absent means no map is
-   * configured or the configured one did not parse, and the `sensitivity`
-   * section is then omitted rather than emitted empty.
-   */
-  sensitivityMap?: SensitivityMap;
 }
 
 export interface DashboardPendingConnect {
@@ -2034,7 +1981,6 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
   const excludedByConfiguration = excludedByConfigurationFrom(
     options.ingestionLedger?.excluded_by_configuration,
   );
-  const sensitivity = sensitivityFrom(options.sensitivityMap);
   const folderPicker: DashboardFolderPicker = {
     available: options.ingestionDispositionsAvailable === true,
     label: 'Choose what gets ingested',
@@ -2059,7 +2005,10 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       : {}),
     summary,
     onboarding: onboarding(summary, cardsWithProgress, folderPicker),
-    google_pilot: googlePilotStatus(options.googlePilotClientConfigured === true),
+    google_pilot: googlePilotStatus(
+      options.googlePilotClientConfigured === true
+        || (options.publisherOAuthSources ?? []).some((source) => source === 'gmail' || source === 'google-drive'),
+    ),
     answer_lanes: answerLanes,
     where_your_data_lives: trustCards,
     unassigned_corpora: unassignedCorpora,
@@ -2067,9 +2016,6 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // opens a store of its own, so the exclusion facts arrive the same way the
     // per-source ingestion health does.
     excluded_by_configuration: excludedByConfiguration,
-    // Omitted, not emptied, when no map is configured — which is the ordinary
-    // state on a fresh install.
-    ...(sensitivity ? { sensitivity } : {}),
     sensitivity_tiers: DASHBOARD_SENSITIVITY_TIERS,
     folder_picker: folderPicker,
     sources: cardsWithProgress,
@@ -2334,6 +2280,17 @@ function sourceCardFromDefinition(
   return card;
 }
 
+/**
+ * Whether Gmail and Drive connect through an Olympus-owned Google app, and the
+ * unverified-app note that comes with one.
+ *
+ * `configured` is true for the publisher Web client (relay + publisher
+ * exchange), which is what every dashboard origin and ChatGPT use, OR for a
+ * packaged Desktop pilot client. Olympus 1.0 release builds carry no Desktop
+ * client (owner, 2026-10-03), so keying this on the Desktop id alone told
+ * dashboard.json readers to set up their own Google app over cards that offer
+ * one-click Connect, and dropped the unverified-app note from those sheets.
+ */
 function googlePilotStatus(configured: boolean): NonNullable<SourceDashboardViewModel['google_pilot']> {
   return {
     mode: configured ? 'shared_pilot' : 'advanced_byo_required',
@@ -4404,33 +4361,6 @@ function excludedSourceFrom(
 }
 
 /**
- * The owner's secure categories, minus everything that would leak.
- *
- * `interpretation` is the owner's own `examples` list joined — authored by them,
- * capped at 12 by the parser and never empty. The match terms are counted and
- * not carried, and `notes` is dropped outright: both hold real sender addresses
- * and folder paths.
- */
-function sensitivityFrom(map: SensitivityMap | undefined): DashboardSensitivity | undefined {
-  if (!map) return undefined;
-  return {
-    configured: true,
-    editable: false,
-    categories: map.categories.map((category) => ({
-      id: category.id,
-      label: category.label,
-      interpretation: category.examples.join(', '),
-      target_tier_name: category.targetTierName,
-      target_trust_tier: category.targetTrustTier,
-      target_trust_domain: category.targetTrustDomain,
-      match_terms: category.match.keywords.length
-        + category.match.senderPatterns.length
-        + category.match.pathPatterns.length,
-    })),
-  };
-}
-
-/**
  * The needs-review total with the reasons it was summed from.
  *
  * `total` is handed in rather than recomputed: it is `coverage.needs_review_items`
@@ -4685,6 +4615,8 @@ function providerLabel(provider: SovereigntyProfileProvider): string {
       return 'Anthropic';
     case 'openai-compatible':
       return 'OpenAI-compatible';
+    case 'built-in':
+      return 'Built into Olympus';
   }
 }
 

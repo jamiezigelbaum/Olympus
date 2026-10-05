@@ -140,6 +140,13 @@ export interface DashboardStatusGroup {
 export interface DashboardVocabularyOptions {
   now?: Date;
   degradedCredentials?: readonly WorkerCredentialDegradation[];
+  /**
+   * Which dashboard the words are for. The ChatGPT dashboard has no How to fix
+   * sheet and its owner signs in through Olympus's own apps, so a provider
+   * refusal there reads DASHBOARD_CHATGPT_REFUSAL_COPY. Defaults to the local
+   * dashboard.
+   */
+  surface?: 'local' | 'chatgpt';
 }
 
 export interface DashboardStatusResolution {
@@ -165,7 +172,7 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   // doing something. It outranks the unknown fallback too — an expired
   // credential still needs them whatever else on the card has drifted — so the
   // marker rides along rather than swallowing the word.
-  if (degradationForSource(source, input.degradedCredentials)) {
+  if (dashboardDegradationForSource(source, input.degradedCredentials)) {
     return {
       status: 'Needs you',
       mappedUnknown: unknownValue !== undefined,
@@ -369,7 +376,7 @@ export function dashboardAttentionLine(
   source: DashboardSourceCard,
   options?: DashboardVocabularyOptions,
 ): string {
-  const degradation = degradationForSource(source, options?.degradedCredentials);
+  const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
     return clause ? `can't sign in · ${clause}` : `can't sign in`;
@@ -378,17 +385,19 @@ export function dashboardAttentionLine(
   // line below, because "not connected" over an attempt the provider
   // explicitly rejected explains nothing the owner can act on. The provider's
   // own words stay in the sheet's How to fix disclosure.
-  if (source.connection.provider_refusal) return dashboardProviderRefusalLine(source);
+  if (source.connection.provider_refusal) return dashboardProviderRefusalLine(source, options);
   switch (source.connection.state) {
     case 'reauth_required':
       return DASHBOARD_SIGNED_OUT;
     case 'awaiting_consent': {
       // The label is the provider's own name off the card, so the sentence
       // points at the tab the owner is actually looking at.
-      const base = `waiting for you to approve in the ${source.label} tab`;
+      // The sign-in may be in any browser or on any device, so the line says
+      // what to do, never which tab to look in (owner rule, 2026-10-02).
+      const base = `finish signing in to ${source.label}`;
       const minutes = source.connection.pending?.expires_in_minutes;
       return minutes !== undefined && minutes > 0
-        ? `${base} · expires in ${dashboardDuration(minutes * 60)}`
+        ? `${base} · link expires in ${Math.max(1, Math.ceil(minutes))} min`
         : base;
     }
     case 'needs_setup':
@@ -472,8 +481,9 @@ const REDIRECT_REFUSAL_CODES: ReadonlySet<string> = new Set([
  * the address to register are technical detail; they live in the connect
  * sheet's How to fix disclosure, never on the row.
  */
-export function dashboardProviderRefusalLine(source: DashboardSourceCard): string {
+export function dashboardProviderRefusalLine(source: DashboardSourceCard, options?: DashboardVocabularyOptions): string {
   const code = source.connection.provider_refusal?.code ?? '';
+  if (options?.surface === 'chatgpt') return DASHBOARD_CHATGPT_REFUSAL_COPY.line[chatgptRefusalKind(code)];
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `rejected the sign-in address — fix it in your ${source.label} app settings`;
   }
@@ -482,13 +492,20 @@ export function dashboardProviderRefusalLine(source: DashboardSourceCard): strin
 }
 
 /** The same refusal as a full sentence, for the top of the connect sheet. */
-export function dashboardProviderRefusalSentence(source: DashboardSourceCard): string {
+export function dashboardProviderRefusalSentence(source: DashboardSourceCard, options?: DashboardVocabularyOptions): string {
   const code = source.connection.provider_refusal?.code ?? '';
+  if (options?.surface === 'chatgpt') return DASHBOARD_CHATGPT_REFUSAL_COPY.sentence[chatgptRefusalKind(code)](source.label);
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `${source.label} rejected the sign-in address. Fix it in your ${source.label} app settings, then connect again.`;
   }
   if (code === 'access_denied') return `${source.label} sign-in was declined. Connect again to retry.`;
   return `${source.label} refused the sign-in. How to fix has the details.`;
+}
+
+function chatgptRefusalKind(code: string): keyof typeof DASHBOARD_CHATGPT_REFUSAL_COPY.line {
+  if (REDIRECT_REFUSAL_CODES.has(code)) return 'address';
+  if (code === 'access_denied') return 'declined';
+  return 'unfinished';
 }
 
 /** The raw refusal, for the How to fix disclosure only. */
@@ -520,9 +537,9 @@ export const DASHBOARD_INDEXING_NAME = 'Indexing';
 /**
  * "98% done, 4,055 items left, about 2 hours" — the half after the name.
  *
- * Moving with no measured rate says "estimating time left"; a stopped lane
- * says stalled; a lane something parked says paused. No ETA is printed
- * without a rate behind it.
+ * Moving with no measured rate says nothing about time (owner rule,
+ * 2026-10-02: no ETA unless measured, and no placeholder for one); a stopped
+ * lane says stalled; a lane something parked says paused.
  */
 export function dashboardIndexingFacts(progress: DashboardIndexingProgress): string {
   if (progress.state === 'done') return 'up to date';
@@ -533,9 +550,7 @@ export function dashboardIndexingFacts(progress: DashboardIndexingProgress): str
   }
   switch (progress.state) {
     case 'moving':
-      parts.push(progress.etaMs !== undefined && progress.etaMs > 0
-        ? dashboardEtaWords(progress.etaMs)
-        : 'estimating time left…');
+      if (progress.etaMs !== undefined && progress.etaMs > 0) parts.push(dashboardEtaWords(progress.etaMs));
       break;
     case 'stalled':
       parts.push('stalled');
@@ -1017,7 +1032,13 @@ function degradationClause(degradation: WorkerCredentialDegradation): string {
  * like 'email' and 'file' that several cards share, and a shared name would
  * light up every one of them.
  */
-function degradationForSource(
+/**
+ * The worker credential degradation that names this source, if any: matched by
+ * label, provider, source id or its family prefix, case- and punctuation-blind.
+ * The one match both dashboards make (shared-status.ts reads it too); the name
+ * is matched, never printed.
+ */
+export function dashboardDegradationForSource(
   source: DashboardSourceCard,
   degraded: readonly WorkerCredentialDegradation[] | undefined,
 ): WorkerCredentialDegradation | undefined {
@@ -1057,3 +1078,696 @@ function unknownStatus(value: string): DashboardStatusResolution {
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
 }
+
+/**
+ * Sentences the ChatGPT dashboard's producer composes into the view model
+ * (src/workers/chatgpt/dashboard-view-model.ts). Same keys the producer used
+ * while they were pending there; every value is a fixed string.
+ */
+export const DASHBOARD_CHATGPT_VOCABULARY = {
+  installingNoSource: 'Connect a source to begin',
+  installingModel: 'Getting search ready on your Mac',
+  installingFirstIndex: 'Indexing your sources for the first time',
+  connectOnMac: 'Connect sources in Olympus on your Mac.',
+  reconnect: 'Reconnect',
+  checkAgain: 'Check again',
+  openOnMac: 'Open Olympus on your Mac',
+  stageReading: 'Reading',
+  stageSearchable: 'Indexing',
+  embeddingNeedsAttention: 'Search has stopped working on your Mac.',
+  answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
+  /**
+   * A built-in model whose install failed, by its fixed failure code
+   * (ModelInstallFailedReason); the item's fix starts the install again.
+   */
+  modelInstallFailed: {
+    embedding: {
+      disk_full: 'Couldn\'t download the search model: the disk is full.',
+      network: 'Couldn\'t download the search model: the network dropped.',
+      checksum: 'Couldn\'t download the search model: the download was damaged.',
+      unknown: 'Couldn\'t download the search model.',
+    },
+    answers: {
+      disk_full: 'Couldn\'t download the private model: the disk is full.',
+      network: 'Couldn\'t download the private model: the network dropped.',
+      checksum: 'Couldn\'t download the private model: the download was damaged.',
+      unknown: 'Couldn\'t download the private model.',
+    },
+  },
+  fixOnMac: 'Open Olympus on your Mac to fix this.',
+  privateMatches: 'Some matching items are private and stay on your Mac.',
+  changeModelsOnMac: 'Change models in Olympus on your Mac.',
+} as const;
+
+/**
+ * A provider refusal as the ChatGPT dashboard words it, by the refusal's kind.
+ * ChatGPT has no How to fix sheet, and its owner signs in through Olympus's own
+ * apps (no app settings of their own to fix), so every refusal points at the
+ * row's Reconnect. `line` is the reason half after "<Source> — "; `sentence`
+ * stands alone. A declined sign-in already reads as a retry on both
+ * dashboards, so it keeps the shared words. The local dashboard keeps its own
+ * words for the rest (dashboardProviderRefusalLine).
+ */
+export const DASHBOARD_CHATGPT_REFUSAL_COPY = {
+  line: {
+    address: 'sign-in didn\'t go through — try Reconnect',
+    declined: 'sign-in was declined — connect again to retry',
+    unfinished: 'didn\'t finish signing in — try Reconnect',
+  },
+  sentence: {
+    address: (source: string) => `${source} sign-in didn't go through. Try Reconnect.`,
+    declined: (source: string) => `${source} sign-in was declined. Connect again to retry.`,
+    unfinished: (source: string) => `${source} didn't finish signing in. Try Reconnect.`,
+  },
+} as const;
+
+/**
+ * The ChatGPT dashboard's own copy for the five connection states. The view
+ * model carries only the state; the page owns these words (the relay renders
+ * two of the states without reading this file). `disabledReason` is printed
+ * beside every other control while the state holds.
+ */
+export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
+  /**
+   * No Olympus link for this ChatGPT account. The relay cannot tell an owner
+   * who has not linked yet from one with no install, so the page offers
+   * Connect first and the install link beside it.
+   */
+  not_connected: {
+    title: 'Olympus isn\'t connected to ChatGPT yet',
+    disabledReason: 'Connect Olympus first',
+    install: 'Not installed yet?',
+  },
+  /** Linked to this ChatGPT account, first-run setup (models, first index) not finished. */
+  installing: {
+    title: 'Olympus is setting up on your Mac…',
+    disabledReason: 'Available once Olympus is set up',
+  },
+  mac_offline: {
+    title: 'Your Mac is offline or asleep, so answers are paused',
+    lastSeen: 'Last seen {when}',
+    disabledReason: 'Your Mac is offline',
+  },
+  relay_unavailable: {
+    title: 'Olympus can\'t reach your Mac right now.',
+    disabledReason: 'Can\'t reach your Mac',
+  },
+  /** Labels for `connection.action.id`; `help` is shown as text when the action has no link. */
+  actions: {
+    /** Re-reads the dashboard, whose result carries ChatGPT's own connect prompt. */
+    connect: { label: 'Connect Olympus', help: '' },
+    open_olympus: { label: 'Open Olympus on your Mac', help: 'Open Olympus on your Mac, then check again here.' },
+    wake_mac: {
+      label: 'How to keep it available',
+      help: 'Keep your Mac on, awake and online with Olympus running. Answers resume on their own when it is back.',
+    },
+    retry: { label: 'Try again', help: '' },
+  },
+} as const;
+
+/** Every other word the ChatGPT dashboard page prints. */
+export const DASHBOARD_CHATGPT_PAGE_COPY = {
+  title: 'Olympus',
+  loading: 'Checking your Mac…',
+  upToDate: 'Olympus is up to date.',
+  needsYou: 'Needs you',
+  sources: 'Sources',
+  sourcesLocal: 'On your Mac',
+  sourcesCloud: 'Accounts',
+  sourcesOnMac: 'Set up on your Mac',
+  sourcesOnMacHelp: 'These connect on your Mac in Olympus. They\'ll show up here once connected.',
+  notConnected: 'Not connected',
+  noSources: 'No sources yet.',
+  progress: 'Progress',
+  progressInitial: 'First index',
+  progressRefresh: 'Catching up',
+  percentDone: '{percent}% done',
+  left: '{count} {unit} left',
+  eta: 'about {duration}',
+  stalled: 'stalled',
+  progressPaused: 'paused while your Mac is offline',
+  details: 'Details',
+  stageLine: '{stage}: {done} of {total} {unit}',
+  models: 'Models',
+  modelSearch: 'Search',
+  modelAnswers: 'Answers',
+  modelBuiltIn: 'Built-in',
+  modelCustom: 'Custom',
+  modelReady: 'Ready',
+  modelDownloading: 'Downloading {percent}%',
+  modelNotWorking: 'Not working',
+  modelNotReady: 'Not ready',
+  modelGettingReady: 'Getting ready',
+  modelNeedsYou: 'Needs you',
+  modelChecking: 'Checking',
+  /** The install lines under the Models summary; {model} is one of modelNames. */
+  modelNames: { search: 'the search model', answers: 'the private model' },
+  modelInstallDownloading: 'Downloading {model}',
+  modelInstallVerifying: 'Checking {model}…',
+  modelInstallFailed: 'Couldn\'t download {model}: {reason}',
+  modelInstallBytes: '{done} of {total}',
+  modelInstallReasons: {
+    disk_full: 'the disk is full',
+    network: 'the connection dropped',
+    checksum: 'the download was damaged',
+    unknown: 'something went wrong',
+  },
+  synced: 'Synced {when}',
+  updated: 'Updated {when}',
+  checkAgain: 'Check again',
+  tryAgain: 'Try again',
+  openOlympus: 'Open Olympus',
+  moreActions: 'More actions for {source}',
+  confirmPrompt: 'Are you sure?',
+  confirm: 'Yes, {label}',
+  cancel: 'Cancel',
+  working: 'Working…',
+  justNow: 'just now',
+  minutesAgo: '{n} min ago',
+  hoursAgo: '{n} hr ago',
+  daysAgo: '{n} days ago',
+  dayAgo: '1 day ago',
+  durationMinutes: '{n} min',
+  durationHours: '{n} hr',
+  durationHoursMinutes: '{h} hr {m} min',
+  durationDays: '{n} days',
+  durationLessThanMinute: 'less than a minute',
+  units: {
+    files: { one: 'file', many: 'files' },
+    messages: { one: 'message', many: 'messages' },
+    items: { one: 'item', many: 'items' },
+  },
+  /** A source's progress bar: its first unfinished stage. */
+  sourceStages: { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing' },
+  findingItems: 'Finding items',
+  sourceProgress: '{stage} — {percent}%, {done} of {total} {unit}',
+  /** One plain sentence per stalled reason; {source} is the source's name. */
+  stalledReasons: {
+    waiting_for_credentials: 'Paused: Olympus needs you to sign in to {source} again',
+    scope_pending: 'Paused until you choose folders',
+    provider_unavailable: 'Paused: {source} isn\'t responding; Olympus will retry',
+    model_downloading: 'Waiting for the search model to finish downloading',
+  },
+  linkExpires: 'link expires in {n} min',
+  linkExpired: 'link expired',
+  /** Beside a control whose fix only the Mac can make: the fix's olympusplugin.ai help page. */
+  howOnMac: 'How to fix this on your Mac',
+  /** Under "Set up on your Mac": the help page those sources' fixes name. */
+  howConnectOnMac: 'How to connect these on your Mac',
+} as const;
+
+/**
+ * Control labels the ChatGPT producer puts on setup fixes
+ * (src/workers/chatgpt/dashboard-view-model.ts, which proposed them as
+ * CHATGPT_SETUP_LABELS). Closed set, owner words.
+ */
+export const DASHBOARD_CHATGPT_SETUP_LABELS = {
+  connect: 'Connect',
+  chooseFolders: 'Choose folders',
+  chooseMail: 'Choose mail',
+  disconnect: 'Disconnect',
+  changeModels: 'Change',
+} as const;
+
+/**
+ * Words for the ChatGPT page's in-place Connect flow and its folder and mail
+ * pickers (src/workers/dashboard/chatgpt/picker.ts). Folder names, label names
+ * and senders are never part of this copy: the picker prints them only beside
+ * these words, inside the picker view.
+ */
+export const DASHBOARD_CHATGPT_PICKER_COPY = {
+  back: 'Back to Olympus',
+  cancel: 'Cancel',
+  tryAgain: 'Try again',
+  checkAgain: 'Check again',
+  connectTitle: 'Connect {source}',
+  connectStarting: 'Opening sign-in…',
+  connectWaiting: 'Waiting for you to finish signing in…',
+  connectWaitingHelp: 'Sign in to {source} in the window that opened. This page updates on its own when you are done.',
+  connectReopen: 'Open sign-in again',
+  connectTimeout: 'Olympus has not heard back from {source} yet. If you finished signing in, check again.',
+  connectFailed: 'Olympus could not start signing in to {source}. Try again.',
+  connected: '{source} is connected.',
+  foldersTitle: 'Choose folders',
+  foldersIntro: 'Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.',
+  mailTitle: 'Choose mail',
+  mailIntro: 'Choose which {source} mail Olympus may read. Nothing starts until you save.',
+  loadingFolders: 'Loading folders…',
+  loadingMail: 'Reading your labels and senders…',
+  loadFailed: 'Olympus could not load this list. Try again.',
+  up: 'Back',
+  upTo: 'Back to {name}',
+  pathMore: '…',
+  accountRow: 'Everything in {source}',
+  exceptions: 'Exceptions ({n})',
+  foldersHeading: 'Folders',
+  thisFolder: 'This folder',
+  unknownFolder: 'A folder not opened yet',
+  insideFolder: 'A folder inside {name}',
+  noFolders: 'No folders here.',
+  loadMore: 'Load more folders',
+  loadMoreCount: { one: 'Load 1 more folder', many: 'Load {n} more folders' },
+  /** The level has more folders than Olympus reads at once; some are not listed. */
+  truncated: 'This folder has more folders than Olympus can list here, so this list is incomplete.',
+  states: { ingest: 'Fully indexed', metadata_only: 'Names only', exclude: 'Skipped' },
+  statesLower: { ingest: 'fully indexed', metadata_only: 'names only', exclude: 'skipped' },
+  notIncluded: 'Not included',
+  mixed: 'Mixed',
+  mixedSome: 'Mixed: some folders inside are {state}',
+  /** The row control's segments: [full label, short label under ~420px]. */
+  segments: { ingest: ['Full', 'Full'], metadata_only: ['Names only', 'Names'], exclude: ['Skip', 'Skip'] },
+  choiceGroup: 'Choice for {name}',
+  openFolder: 'Open {name}',
+  cannotChoose: 'Olympus cannot read this folder.',
+  wholeOnlyFull: 'The whole account is all or nothing. Set Names only or Skip on folders instead.',
+  inheritedFrom: 'Inherited from {parent}',
+  overridden: 'This folder is set to {own}, but {parent} is {state}, which wins.',
+  notPossible: 'Not possible while {parent} is {state}.',
+  capReached: 'You have {max} folder choices, the most Olympus can save. Clear a folder\'s choice to choose another.',
+  folderFiles: { one: '{n} file', many: '{n} files' },
+  wholePrompt: 'Olympus will read every folder in {source}, now and later, except folders you set to Names only or Skip.',
+  wholeConfirm: 'Yes, use the entire account',
+  summaryTitle: 'What happens when you save',
+  summaryNone: 'Nothing chosen yet, so nothing will be read.',
+  summaryWhole: 'Everything else in {source}: fully indexed, including folders added later.',
+  summaryFolder: { one: 'folder', many: 'folders' },
+  summaryIngest: '{n} fully indexed',
+  summaryMetadata: '{n} with names only',
+  summaryExclude: '{n} skipped',
+  summarySize: 'about {size}',
+  needChoice: 'Choose at least one folder first.',
+  needConfirm: 'Confirm the entire account first.',
+  saveFolders: 'Save and start',
+  saveNoStart: 'Save',
+  saveMail: 'Save and start',
+  saving: 'Saving…',
+  saveFailed: 'Olympus could not save. Your choices are still here. Try again.',
+  conflict: 'These choices were changed somewhere else, so this view has been refreshed. Check it and save again.',
+  saved: '{source}: saved. Olympus is starting.',
+  discardPrompt: 'Discard your changes?',
+  discard: 'Discard changes',
+  keep: 'Keep choosing',
+  mailWindow: 'Read the full text of mail from',
+  mailWindowHelp: 'For older mail Olympus keeps only the subject, sender, date and labels.',
+  mailWindows: {
+    '6m': 'The last 6 months',
+    '1y': 'The last year',
+    '2y': 'The last 2 years',
+    '5y': 'The last 5 years',
+    all: 'All time',
+  },
+  mailRecommended: 'Recommended',
+  mailCategories: 'Gmail categories',
+  mailCategoriesHelp: 'Checked categories are read. Promotions and Social are skipped at first.',
+  mailCategoryNames: {
+    primary: ['Primary', 'Personal mail'],
+    updates: ['Updates', 'Receipts, statements, confirmations'],
+    forums: ['Forums', 'Mailing lists and groups'],
+    social: ['Social', 'Social network notifications'],
+    promotions: ['Promotions', 'Marketing and offers'],
+  },
+  mailCategoryCount: '{count} in your mailbox',
+  mailLabels: 'Labels',
+  mailLabelsHelp: 'Checked labels are read. Uncheck a label to skip all mail that has it.',
+  mailLabelsEmpty: 'This mailbox has no labels of its own.',
+  mailSentLabel: 'Sent',
+  mailSenders: 'Senders',
+  mailPrivate: 'Always private',
+  mailPrivateHelp: 'One address or @domain per line. Their new mail is treated as private and never goes to the cloud.',
+  mailSkip: 'Skip',
+  mailSkipHelp: 'One address or @domain per line. Their new mail is never read.',
+  mailSuggestions: 'Frequent senders in a sample of your recent mail',
+  mailSuggestionCount: '{n} of {total}',
+  mailEstimate: 'About {content} messages read in full and {metadata} by subject and sender only.',
+  mailCost: 'Indexing costs at most ${cost}.',
+  mailEstimateNote: 'Counts are Gmail\'s own estimates. Nothing has been read yet.',
+  mailUpdateEstimate: 'Update estimate',
+  mailSummaryWindow: 'Full text from {window}',
+  mailSummarySkipped: { one: '{n} category or label skipped', many: '{n} categories and labels skipped' },
+  mailSummaryPrivate: { one: '{n} sender always private', many: '{n} senders always private' },
+  mailSummarySkipSenders: { one: '{n} sender skipped', many: '{n} senders skipped' },
+} as const;
+
+/**
+ * Words for the ChatGPT page's privacy setup (src/workers/dashboard/chatgpt/privacy.ts)
+ * and the dashboard's Privacy row. Two tiers are a person's to choose:
+ * shared with ChatGPT (the default) and private (answered on the Mac only);
+ * secrets are detected on the Mac and never a choice. Folder, label and
+ * sender names and the person's own description are never part of this copy.
+ */
+export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
+  back: 'Back to Olympus',
+  title: 'What\'s private for you?',
+  intro: 'Olympus shares your items with ChatGPT unless you say they\'re private. Private items are answered on your Mac and never sent to ChatGPT. Passwords and other secrets are always kept on your Mac.',
+  loading: 'Loading your privacy settings…',
+  loadFailed: 'Olympus could not load your privacy settings. Try again.',
+  tryAgain: 'Try again',
+  descriptionLabel: 'In your own words',
+  descriptionPlaceholder: 'For example: my health and therapy, money and taxes, anything about my kids, my divorce',
+  /** Under the description box: the description is saved through ChatGPT, so it sees it. */
+  descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
+  rulesTitle: 'Always private (optional)',
+  rulesEmpty: 'No folders, labels or senders yet.',
+  /** Under the always-private rules: their names travel through ChatGPT to be listed and saved. */
+  namesShared: 'Folder and label names and senders you add here are shown to ChatGPT.',
+  kindFolder: 'Folder in {source}',
+  kindLabel: 'Gmail label',
+  kindSender: 'Sender',
+  remove: 'Remove',
+  removeFor: 'Remove {name}',
+  removed: 'Removed: {name}',
+  undo: 'Undo',
+  undoFor: 'Undo removing {name}',
+  addFolder: 'Add a folder',
+  addLabel: 'Add a Gmail label',
+  addSender: 'Add a sender',
+  needFolderSource: 'Connect Dropbox or Google Drive to add a folder.',
+  needGmail: 'Connect Gmail to add a label.',
+  pending: {
+    one: '{n} item is waiting to be checked on your Mac.',
+    many: '{n} items are waiting to be checked on your Mac.',
+  },
+  save: 'Save',
+  saving: 'Saving…',
+  cancel: 'Cancel',
+  saveFailed: 'Olympus could not save. Your changes are still here. Try again.',
+  saved: 'Privacy saved.',
+  /** The inline step before a save that lowers protection; {list} names the removed rules. */
+  confirmRemove: 'This removes protection from {list}.',
+  confirmDescription: 'This changes your description, which decides what Olympus keeps private.',
+  confirm: 'Confirm',
+  /** A save refused because the settings changed elsewhere: the draft stays until the person picks. */
+  conflict: 'Your changes weren\'t saved because the privacy settings changed elsewhere.',
+  conflictNow: 'What is saved now:',
+  conflictDescription: 'Your description: {text}',
+  conflictNoDescription: 'No description',
+  applyAgain: 'Apply my changes again',
+  discardMine: 'Discard my changes',
+  /** A folder rule saved without its name. */
+  folderUnnamed: 'A folder in {source}',
+  discardPrompt: 'Discard your changes?',
+  discard: 'Discard changes',
+  keep: 'Keep editing',
+  backToPrivacy: 'Back to privacy',
+  folderSourceTitle: 'Add a folder',
+  folderSourceIntro: 'Which account is the folder in?',
+  folderTitle: 'Add a folder',
+  folderIntro: 'Open a folder in {source} to look inside it. Make private covers everything in the folder.',
+  makePrivate: 'Make private',
+  makePrivateFor: 'Make {name} private',
+  alreadyPrivate: 'Already private',
+  labelTitle: 'Add a Gmail label',
+  labelIntro: 'Mail with a private label is answered only on your Mac.',
+  loadingLabels: 'Loading your labels…',
+  noLabels: 'This mailbox has no labels of its own.',
+  sentLabel: 'Sent',
+  senderTitle: 'Add a sender',
+  senderIntro: 'Mail from this sender is answered only on your Mac.',
+  senderLabel: 'Email address or @domain',
+  senderPlaceholder: 'name@example.com or @example.com',
+  senderAdd: 'Add',
+  senderInvalid: 'Enter an email address like name@example.com, or a domain like @example.com.',
+  senderDuplicate: 'That sender is already private.',
+  section: 'Privacy',
+  row: {
+    none: 'Your description · no always-private rules',
+    one: 'Your description · {n} always-private rule',
+    many: 'Your description · {n} always-private rules',
+  },
+  rowNoCount: 'Your description and always-private rules',
+  edit: 'Edit',
+  editLabel: 'Edit what\'s private',
+  dashboardPending: {
+    one: '{n} item waiting to be checked',
+    many: '{n} items waiting to be checked',
+  },
+} as const;
+
+/** The dashboard's prompt to set up privacy, until the person has said what's private for them. */
+export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
+  sentence: 'Tell Olympus what\'s private for you',
+  label: 'Set up privacy',
+} as const;
+
+/**
+ * The private answer panel under a ChatGPT search result
+ * (src/workers/dashboard/chatgpt/private-answer.ts). `{n}`, `{percent}`,
+ * `{list}` are filled in by the panel. Nothing here names a source item.
+ */
+export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
+  pageTitle: 'Olympus private answer',
+  title: 'Private answer from your Mac',
+  /** The muted line under the title once the answer is shown. */
+  notSent: 'Not sent to ChatGPT',
+  /** The muted line once the person hid the answer; Show brings it back from memory. */
+  hidden: 'Private answer hidden',
+  show: 'Show',
+  /** The Show button's accessible name (its visible text is its start). */
+  showLabel: 'Show private answer',
+  hide: 'Hide',
+  hideLabel: 'Hide private answer',
+  tryAgain: 'Try again',
+  /** No job exists in these two states, so the panel can only say what to do and to ask again. */
+  noModel: 'Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.',
+  downloading: 'The private model is downloading ({percent}%). Ask again when it\'s ready.',
+  downloadingUnknown: 'The private model is downloading. Ask again when it\'s ready.',
+  downloadingLabel: 'Private model download',
+  preparing: 'Preparing the answer on your Mac…',
+  /** A full-detail answer reads selected parts more closely, not necessarily every page. */
+  preparingFull: 'Reading your report in more detail on your Mac…',
+  slow: 'Your Mac is taking longer than usual to prepare the answer.',
+  failed: 'Olympus couldn\'t answer this on your Mac.',
+  claimed: 'This answer was already opened in another window.',
+  expired: 'This answer has expired. Ask again to get a new one.',
+  rateLimited: 'Too many requests — try again in a moment.',
+  macOffline: 'Your Mac is offline, so the private answer can\'t be shown.',
+  unreachable: 'Olympus couldn\'t reach your Mac. Try again in a moment.',
+  generic: 'Olympus couldn\'t show the private answer here.',
+  /** The collapsed disclosure under the answer; it opens a list of titles. */
+  sourcesToggle: 'Sources ({n})',
+  /** Brief inline result after a source is opened on the person's Mac. */
+  openedOnMac: 'Opened on your Mac',
+  openFailed: 'Couldn\'t open it on your Mac',
+  unanswered: 'Not found in your private items: {list}',
+} as const;
+
+/**
+ * The local folder picker's words (native Control UI page and the standalone
+ * /dashboard/dispositions page). The same layout and wording as the approved
+ * ChatGPT picker (DASHBOARD_CHATGPT_PICKER_COPY), minus what only applies
+ * there. Rendered onto the picker form as JSON: the browser controller is
+ * serialized into the standalone page, so it cannot import this module.
+ */
+export const DASHBOARD_PICKER_COPY = {
+  foldersTitle: 'Choose folders',
+  foldersIntro: 'Choose what Olympus may read. A folder follows the one above it until you change it. Nothing starts until you save.',
+  backTo: 'Back to {source}',
+  up: 'Back',
+  locations: 'Locations',
+  loadingFolders: 'Loading folders…',
+  loadFailed: 'Olympus could not load this list. Try again.',
+  tryAgain: 'Try again',
+  connectFirst: 'Connect this account first, then return here to choose folders. Connecting does not start anything.',
+  connect: 'Connect {source}',
+  pathMore: '…',
+  accountRow: 'Everything in {source}',
+  exceptions: 'Exceptions ({n})',
+  foldersHeading: 'Folders',
+  thisFolder: 'This folder',
+  unknownFolder: 'A folder not opened yet',
+  insideFolder: 'A folder inside {name}',
+  noFolders: 'No folders here.',
+  loadMore: 'Load more folders',
+  states: { ingest: 'Fully indexed', metadata_only: 'Names only', exclude: 'Skipped' },
+  statesLower: { ingest: 'fully indexed', metadata_only: 'names only', exclude: 'skipped' },
+  mixed: 'Mixed',
+  mixedSome: 'Mixed: some folders inside are {state}',
+  /** The row control's segments: [full label, short label when the picker is narrow]. */
+  segments: { ingest: ['Full', 'Full'], metadata_only: ['Names only', 'Names'], exclude: ['Skip', 'Skip'] },
+  choiceGroup: 'Choice for {name}',
+  openFolder: 'Open {name}',
+  cannotChoose: 'Olympus cannot read this folder.',
+  wholeOnlyFull: 'The whole account is all or nothing. Set Names only or Skip on folders instead.',
+  inheritedFrom: 'Inherited from {parent}',
+  overridden: 'This folder is set to {own}, but {parent} is {state}, which wins.',
+  notPossible: 'Not possible while {parent} is {state}.',
+  capReached: 'You have {max} folder choices, the most Olympus can save. Clear a folder\'s choice to choose another.',
+  wholePrompt: 'Olympus will read every folder in {source}, now and later, except folders you set to Names only or Skip.',
+  wholeConfirm: 'Yes, use the entire account',
+  wholeCancel: 'Cancel',
+  summaryTitle: 'What happens when you save',
+  summaryNone: 'Nothing chosen yet, so nothing will be read.',
+  summaryWhole: 'Everything else in {source}: fully indexed, including folders added later.',
+  summaryFolder: { one: 'folder', many: 'folders' },
+  summaryIngest: '{n} fully indexed',
+  summaryMetadata: '{n} with names only',
+  summaryExclude: '{n} skipped',
+  needChoice: 'Choose at least one folder first.',
+  needConfirm: 'Confirm the entire account first.',
+  saveFolders: 'Save and start',
+  saveNoStart: 'Save',
+  saving: 'Saving…',
+  discard: 'Discard changes',
+  discarded: 'Changes discarded. Loading your saved folders…',
+  saveFailed: 'Olympus could not save. Your choices are still here. Try again.',
+  conflict: 'The account or saved choices changed somewhere else. Reopen this picker before saving.',
+  cycle: 'The folder list loops back on itself. Reopen this picker before continuing.',
+  readOnly: 'Write access expired. Reconnect before browsing private folders.',
+  browseFailed: 'Could not list folders. Your choices are still here; try again when the connection is ready.',
+  saved: 'Saved. Opening the source status…',
+  unconfirmed: 'Could not confirm the result. Reopen the picker to check your saved choices before retrying.',
+} as const;
+
+/**
+ * The local dashboard's words for the ChatGPT dashboard's rules, ported on
+ * 2026-10-02 (source-rows.ts, and the Home, Setup and Privacy pages). Where
+ * both surfaces say the same thing the value is the ChatGPT block's own, so
+ * they cannot drift apart; wording that names ChatGPT or "your Mac" is
+ * rewritten here for the computer Olympus runs on. Never "Public": the owner's
+ * choices are private or not.
+ */
+export const DASHBOARD_LOCAL_COPY = {
+  needsYou: DASHBOARD_CHATGPT_PAGE_COPY.needsYou,
+  sources: DASHBOARD_CHATGPT_PAGE_COPY.sources,
+  sourcesLocal: 'On this computer',
+  sourcesCloud: DASHBOARD_CHATGPT_PAGE_COPY.sourcesCloud,
+  notConnected: DASHBOARD_CHATGPT_PAGE_COPY.notConnected,
+  noSources: 'No sources connected yet.',
+  progress: DASHBOARD_CHATGPT_PAGE_COPY.progress,
+  progressInitial: DASHBOARD_CHATGPT_PAGE_COPY.progressInitial,
+  progressRefresh: DASHBOARD_CHATGPT_PAGE_COPY.progressRefresh,
+  percentDone: DASHBOARD_CHATGPT_PAGE_COPY.percentDone,
+  left: DASHBOARD_CHATGPT_PAGE_COPY.left,
+  eta: DASHBOARD_CHATGPT_PAGE_COPY.eta,
+  stalled: DASHBOARD_CHATGPT_PAGE_COPY.stalled,
+  units: DASHBOARD_CHATGPT_PAGE_COPY.units,
+  /** A source's bar: its first unfinished stage. */
+  sourceStages: DASHBOARD_CHATGPT_PAGE_COPY.sourceStages,
+  findingItems: DASHBOARD_CHATGPT_PAGE_COPY.findingItems,
+  sourceProgress: DASHBOARD_CHATGPT_PAGE_COPY.sourceProgress,
+  /** One plain sentence per reason a source is not moving; {source} is its name. */
+  stalledReasons: {
+    waiting_for_credentials: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.waiting_for_credentials,
+    scope_pending: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.scope_pending,
+    scope_pending_mail: 'Paused until you choose mail',
+    provider_unavailable: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.provider_unavailable,
+    model_downloading: DASHBOARD_CHATGPT_PAGE_COPY.stalledReasons.model_downloading,
+  },
+  /** A sign-in that is still outstanding: what to do, and how long the link stays good. */
+  connecting: 'Finish signing in to {source}',
+  linkExpires: DASHBOARD_CHATGPT_PAGE_COPY.linkExpires,
+  openSignInAgain: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen,
+  cancelSignIn: 'Cancel sign-in',
+  chooseFolders: DASHBOARD_CHATGPT_SETUP_LABELS.chooseFolders,
+  chooseMail: DASHBOARD_CHATGPT_SETUP_LABELS.chooseMail,
+  syncNow: 'Sync now',
+  seeModels: 'See models',
+  models: DASHBOARD_CHATGPT_PAGE_COPY.models,
+  modelBuiltIn: DASHBOARD_CHATGPT_PAGE_COPY.modelBuiltIn,
+  modelCustom: DASHBOARD_CHATGPT_PAGE_COPY.modelCustom,
+  modelReady: DASHBOARD_CHATGPT_PAGE_COPY.modelReady,
+  modelGettingReady: DASHBOARD_CHATGPT_PAGE_COPY.modelGettingReady,
+  modelNeedsYou: DASHBOARD_CHATGPT_PAGE_COPY.modelNeedsYou,
+  modelNotReady: DASHBOARD_CHATGPT_PAGE_COPY.modelNotReady,
+  modelNotWorking: DASHBOARD_CHATGPT_PAGE_COPY.modelNotWorking,
+  modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
+  modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
+  modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
+  modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+  modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
+  modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
+  modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
+  modelInstallBytes: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallBytes,
+  modelInstallReasons: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallReasons,
+  modelTryAgain: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain,
+  /** A built-in model whose install failed, in Needs you: its sentence, by failure code. */
+  modelInstallFailedItem: DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed,
+  modelsNotReady: 'Models are not ready, so sources stay locked.',
+  privacy: {
+    section: DASHBOARD_CHATGPT_PRIVACY_COPY.section,
+    row: DASHBOARD_CHATGPT_PRIVACY_COPY.row,
+    edit: DASHBOARD_CHATGPT_PRIVACY_COPY.edit,
+    editLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.editLabel,
+    setUpSentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
+    setUp: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label,
+    pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
+    unreadable: 'Olympus could not read your privacy settings.',
+  },
+} as const;
+
+/**
+ * The local Privacy editor (pages/privacy.ts). The ChatGPT screen's layout and
+ * most of its words; the intro and the per-rule sentences say "this computer"
+ * and "a cloud model" instead of ChatGPT and "your Mac".
+ */
+export const DASHBOARD_LOCAL_PRIVACY_COPY = {
+  crumb: 'Privacy',
+  back: 'Back to Setup',
+  title: DASHBOARD_CHATGPT_PRIVACY_COPY.title,
+  intro: 'Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.',
+  descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
+  descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
+  rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
+  rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
+  kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
+  kindLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.kindLabel,
+  kindSender: DASHBOARD_CHATGPT_PRIVACY_COPY.kindSender,
+  unnamedFolder: 'A folder',
+  remove: DASHBOARD_CHATGPT_PRIVACY_COPY.remove,
+  removeFor: DASHBOARD_CHATGPT_PRIVACY_COPY.removeFor,
+  removed: DASHBOARD_CHATGPT_PRIVACY_COPY.removed,
+  undo: DASHBOARD_CHATGPT_PRIVACY_COPY.undo,
+  addFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.addFolder,
+  addLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.addLabel,
+  addSender: DASHBOARD_CHATGPT_PRIVACY_COPY.addSender,
+  needFolderSource: DASHBOARD_CHATGPT_PRIVACY_COPY.needFolderSource,
+  needGmail: DASHBOARD_CHATGPT_PRIVACY_COPY.needGmail,
+  folderIntro: 'Open a folder to look inside it. Make private covers everything in the folder.',
+  folderUp: 'Back',
+  folderOpen: 'Open',
+  folderEmpty: 'No folders here.',
+  folderMore: 'Load more folders',
+  loading: 'Loading…',
+  loadFailed: 'Olympus could not load this list. Try again.',
+  makePrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.makePrivate,
+  alreadyPrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.alreadyPrivate,
+  labelIntro: 'Mail with a private label is answered only on this computer.',
+  noLabels: DASHBOARD_CHATGPT_PRIVACY_COPY.noLabels,
+  senderIntro: 'Mail from this sender is answered only on this computer.',
+  senderLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.senderLabel,
+  senderPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.senderPlaceholder,
+  senderAdd: DASHBOARD_CHATGPT_PRIVACY_COPY.senderAdd,
+  senderInvalid: DASHBOARD_CHATGPT_PRIVACY_COPY.senderInvalid,
+  senderDuplicate: DASHBOARD_CHATGPT_PRIVACY_COPY.senderDuplicate,
+  close: 'Done',
+  pending: {
+    one: '{n} item is waiting to be checked on this computer.',
+    many: '{n} items are waiting to be checked on this computer.',
+  },
+  nothingPending: 'Nothing is waiting to be checked.',
+  save: DASHBOARD_CHATGPT_PRIVACY_COPY.save,
+  saving: DASHBOARD_CHATGPT_PRIVACY_COPY.saving,
+  cancel: DASHBOARD_CHATGPT_PRIVACY_COPY.cancel,
+  saveFailed: DASHBOARD_CHATGPT_PRIVACY_COPY.saveFailed,
+  saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
+  unchanged: 'No changes to save.',
+  locked: 'Unlock dashboard controls in Setup to see and change what is private.',
+  readOnly: 'Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.',
+  /** What a reader without write authority sees: counts, never the words or names. */
+  counts: 'Your description and {n} always-private rules are set.',
+  countsOne: 'Your description and 1 always-private rule are set.',
+  countsUnset: 'Nothing is set as private yet.',
+  unavailable: 'Privacy settings are not available from this worker.',
+  /** The save's confirm and conflict steps: the ChatGPT panel's own words. */
+  confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
+  confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
+  confirm: DASHBOARD_CHATGPT_PRIVACY_COPY.confirm,
+  conflict: DASHBOARD_CHATGPT_PRIVACY_COPY.conflict,
+  conflictNow: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNow,
+  conflictDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictDescription,
+  conflictNoDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNoDescription,
+  applyAgain: DASHBOARD_CHATGPT_PRIVACY_COPY.applyAgain,
+  discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
+  folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
+  undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor,
+} as const;

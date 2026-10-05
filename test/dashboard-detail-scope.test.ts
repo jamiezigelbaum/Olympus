@@ -23,8 +23,8 @@ describe('dashboard detail scope', () => {
     });
 
     expect(html).toContain('<div class="dsect">Scope</div>');
-    expect(html).toContain('<b class="rid">newsletters</b> <span class="what">— invisible · 3 folders</span>');
-    expect(html).toContain('<b class="rid">shared-drive</b> <span class="what">— metadata only · 1 folder</span>');
+    expect(html).toContain('<b class="rid">newsletters</b> <span class="what">— skipped · 3 folders</span>');
+    expect(html).toContain('<b class="rid">shared-drive</b> <span class="what">— names only · 1 folder</span>');
     expect(html).toContain('Invisible rules keep items out entirely');
   });
 
@@ -35,7 +35,7 @@ describe('dashboard detail scope', () => {
       })],
     });
 
-    expect(html).toContain('— invisible · 2 rule criteria');
+    expect(html).toContain('— skipped · 2 rule criteria');
     expect(html).not.toContain('2 folders');
   });
 
@@ -110,7 +110,8 @@ describe('dashboard detail scope', () => {
     expect(withPicker).toContain('data-control-link="/dashboard/dispositions?source_id=google_drive.docs"');
     expect(withPicker).not.toContain('href="/dashboard/dispositions"');
     expect(withPicker).toContain('review scope before starting ingestion');
-    expect(withoutPicker).not.toContain('/dashboard/dispositions');
+    // The page's markup, not its control script (whose transport names every route).
+    expect(withoutPicker.replace(/<script[\s\S]*?<\/script>/g, '')).not.toContain('/dashboard/dispositions');
   });
 
   test('offers folder scope before any rules or indexed folders exist', () => {

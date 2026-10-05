@@ -6,7 +6,7 @@ import type { ModelSetupView } from '../src/core/model-setup.ts';
 import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
 import { dashboardIndexingProgress } from '../src/workers/dashboard/pages/background.ts';
 import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
-import { dashboardEtaWords, dashboardIndexingLine } from '../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_PICKER_COPY, dashboardEtaWords, dashboardIndexingLine } from '../src/workers/dashboard/vocabulary.ts';
 
 /**
  * Owner-facing pages speak the owner's language (dashboard UX review,
@@ -35,12 +35,33 @@ function jargonIn(html: string): string[] {
     .filter((line) => JARGON.test(line));
 }
 
-const SETUP_STATES = ['partial', 'full', 'fresh', 'models', 'models-applying', 'first-install', 'connect-dropbox-refused'];
+const SETUP_STATES = ['partial', 'full', 'fresh', 'models', 'models-applying', 'first-install', 'connect-dropbox-refused', 'review', 'review-unconfigured'];
+
+/**
+ * The older scope and tier words (holistic review 2026-10-02, item 21): a
+ * folder is fully indexed, names only or skipped, and the owner's tiers are
+ * Personal, Private and Secrets. The storage enums keep their old names; the
+ * pages never print them.
+ */
+const LEGACY = /\b(Full ingestion|Metadata only|metadata only|invisible|Public)\b/;
+
+function legacyIn(html: string): string[] {
+  return ownerFacingText(html)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => LEGACY.test(line));
+}
 
 describe('owner-facing dashboard pages carry no implementation jargon outside Details', () => {
   for (const view of ['home', 'background'] as const) {
     test(`native ${view}`, () => {
       const page = readResult({ view }, true);
+      expect(jargonIn(page.body)).toEqual([]);
+    });
+  }
+  for (const view of ['privacy', 'sensitivity'] as const) {
+    test(`native ${view} (review)`, () => {
+      const page = readResult({ view }, true, 'partial', 'review');
       expect(jargonIn(page.body)).toEqual([]);
     });
   }
@@ -66,10 +87,42 @@ describe('owner-facing dashboard pages carry no implementation jargon outside De
       const page = readResult(params, true);
       expect(jargonIn(page.body)).toEqual([]);
       // The picker's choices name what happens to a folder, in the review's words.
-      expect(page.body).toContain('Names only<span>Searchable by name and date</span>');
+      if ('source_id' in params) {
+        // The folder picker: one Full | Names only | Skip control per row.
+        expect(page.body).toContain('<span class="seg-long">Names only</span>');
+        expect(page.body).toContain('Everything in Dropbox');
+      } else {
+        expect(page.body).toContain('Names only<span>Searchable by name and date</span>');
+      }
       expect(page.body).not.toContain('Metadata only');
     });
   }
+
+  test('the folder picker\'s words, which the browser renders from the page, carry no jargon', () => {
+    const words = (value: unknown): string[] => typeof value === 'string' ? [value]
+      : Array.isArray(value) ? value.flatMap(words)
+        : value && typeof value === 'object' ? Object.values(value).flatMap(words) : [];
+    expect(jargonIn(words(DASHBOARD_PICKER_COPY).map((line) => `<p>${line}</p>`).join(''))).toEqual([]);
+  });
+
+  for (const state of ['review', 'review-unconfigured', 'review-indexing', 'full', 'partial', 'tier-migration']) {
+    test(`no legacy scope or tier word on any page (${state})`, () => {
+      const view = buildDashboardPreviewView(state);
+      const pages = ['home', 'setup', 'background', 'sensitivity', 'privacy'] as const;
+      for (const page of pages) {
+        expect(`${page}: ${legacyIn(readResult({ view: page }, true, 'partial', state).body).join(' | ')}`).toBe(`${page}: `);
+      }
+      for (const source of view.sources) {
+        const detail = readResult({ view: 'source', source_id: source.source_id }, true, 'partial', state).body;
+        expect(`${source.source_id}: ${legacyIn(detail).join(' | ')}`).toBe(`${source.source_id}: `);
+      }
+    });
+  }
+
+  test('the legacy check itself catches the old words', () => {
+    expect(legacyIn('<span>Metadata only</span><span>Full ingestion</span>')).toEqual(['Metadata only', 'Full ingestion']);
+    expect(legacyIn('<td>Public</td>')).toEqual(['Public']);
+  });
 
   test('the check itself catches jargon outside Details and ignores it inside', () => {
     expect(jargonIn('<p>Embeddings 98% done</p>')).toEqual(['Embeddings 98% done']);
@@ -115,8 +168,9 @@ describe('the indexing progress line', () => {
     const v = view({ chunks: 1_000_000, embedded_chunks: 851_200, missing_chunks: 148_800 });
     // 6,200 in five minutes is 1,240 a minute: 148,800 left is two hours.
     expect(line(v, { backgroundRuntime: moving(100_000) })).toBe('Indexing — 85% done, about 2 hours');
-    // Running, but no rate yet: an honest "estimating", never a guessed time.
-    expect(line(v, runtime('running'))).toBe('Indexing — 85% done, estimating time left…');
+    // Running, but no rate yet: nothing about time at all (owner rule,
+    // 2026-10-02: no ETA unless measured, and no placeholder for one).
+    expect(line(v, runtime('running'))).toBe('Indexing — 85% done');
   });
 
   test('never relabels chunks as items, and counts items only from a per-item field', () => {
@@ -130,7 +184,7 @@ describe('the indexing progress line', () => {
     const indexing = withFiles.sources.filter((source) => source.embedding_backlog !== undefined).length;
     expect(indexing).toBeGreaterThan(0);
     expect(line(withFiles, runtime('running')))
-      .toBe(`Indexing — 98% done, ${indexing * 20} items left, estimating time left…`);
+      .toBe(`Indexing — 98% done, ${indexing * 20} items left`);
   });
 
   test('says stalled when the lane stopped moving, and paused when something parked it', () => {
@@ -151,9 +205,9 @@ describe('the indexing progress line', () => {
     // New material grew the total: the percent drops, it never reads above 100
     // or below 0, and the line still says where it stands.
     const grown = line(view({ chunks: 400_000, embedded_chunks: 210_000, missing_chunks: 190_000 }), runtime('running'));
-    expect(grown).toBe('Indexing — 52% done, estimating time left…');
+    expect(grown).toBe('Indexing — 52% done');
     const overCounted = line(view({ chunks: 100, embedded_chunks: 140, missing_chunks: 5 }), runtime('running'));
-    expect(overCounted).toBe('Indexing — 100% done, estimating time left…');
+    expect(overCounted).toBe('Indexing — 100% done');
   });
 
   test('rounds an estimate to the precision a rate measured over minutes has', () => {

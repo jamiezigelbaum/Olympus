@@ -1,0 +1,14 @@
+From: Atlantic Air <noreply@air.example.com>
+To: Robin Vale <robin.vale@example.com>
+Date: Fri, 18 Sep 2026 10:00:00 +0000
+Subject: Booking confirmed: Lisbon, 6-12 November
+Message-ID: <007-flight-confirmation@demo.example.com>
+X-Olympus-Demo: synthetic sample data, fictional people
+X-Olympus-Demo-Intended-Tier: Personal
+Content-Type: text/plain; charset=utf-8
+
+Booking reference DEMO42 (fictional airline, sample data)
+
+Outbound: Fri 6 Nov 2026, flight 204, departs 18:40, arrives Lisbon 07:05 (+1).
+Return: Thu 12 Nov 2026, flight 205, departs Lisbon 09:15.
+Passengers: Robin Vale, Priya Vale. One checked bag each.
