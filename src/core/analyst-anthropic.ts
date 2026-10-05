@@ -1,4 +1,5 @@
 import { OperationError } from './operation-error.ts';
+import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from './analyst.ts';
 
 export type AnthropicAnalystFetch = (
@@ -45,7 +46,7 @@ export function createAnthropicAnalystModel(
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       let response: Response;
       try {
-        response = await fetchImpl(url, {
+        response = await fetchModelEndpoint(fetchImpl, url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -63,6 +64,13 @@ export function createAnthropicAnalystModel(
           signal: controller.signal,
         });
       } catch (error) {
+        if (isModelEndpointRedirectError(error)) {
+          throw new OperationError(
+            'source_index_error',
+            `Anthropic analyst (${model}) answered with a redirect, which is refused.`,
+            error.message,
+          );
+        }
         throw new OperationError(
           'source_index_error',
           `Anthropic analyst (${model}) was unreachable at ${url}.`,

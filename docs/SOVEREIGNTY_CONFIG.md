@@ -583,6 +583,19 @@ Hard invariants remain enforced outside user control:
   providers are refused
 - secrets are hard-denied everywhere
 - empty or exhausted fallback chains fail closed
+- model transports that carry source content or a model credential (analyst
+  chat, embeddings, vision extraction, the privacy sniffer, Delphi, and
+  credential-bearing catalog checks) refuse redirects with a typed,
+  content-free failure instead of following them
+- a local profile, local embedding model, local vision model, or Argus route
+  whose model id carries an Ollama cloud tag (`:cloud`, or a tag ending in
+  `-cloud`, such as `gpt-oss:120b-cloud`) is refused with a `config_error`;
+  only the tag is checked, so a name that merely contains "cloud" is accepted
+
+Loopback locality is asserted by the owner's configuration. Olympus checks the
+address, blocks redirects, and refuses known cloud-forwarding model ids, but it
+cannot verify what a loopback process does with a request. Never point a local
+profile at a proxy or daemon that forwards to a cloud model.
 
 An opt-in Gemini embedding profile references
 `env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY`, matching the supervised worker

@@ -5,6 +5,8 @@ import type { IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { OperationError } from '../../core/operation-error.ts';
+import { assertLocalModelIdNotCloudForwarding } from '../../core/local-model-policy.ts';
+import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../core/model-transport.ts';
 import { resolveEmbeddingEpoch } from './embedding-identity.ts';
 
 export type SourceEmbeddingBackend = 'cloud' | 'local';
@@ -234,7 +236,7 @@ async function fetchEmbeddingResponse(
     let reason: TransientEmbeddingReason;
     let waitMs: number | undefined;
     try {
-      const response = await fetchImpl(url, init);
+      const response = await fetchModelEndpoint(fetchImpl, url, init);
       attempt += 1;
       if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status)) return response;
       reason = response.status;
@@ -249,6 +251,15 @@ async function fetchEmbeddingResponse(
       }
     } catch (error) {
       if (error instanceof TransientSourceEmbeddingError) throw error;
+      // A redirect is a property of the endpoint, not a passing outage:
+      // retrying would only send the same body to be redirected again.
+      if (isModelEndpointRedirectError(error)) {
+        throw new OperationError(
+          'source_index_error',
+          `${provider} source embedding endpoint answered with a redirect, which is refused.`,
+          error.message,
+        );
+      }
       if (init.signal.aborted) throw timedOut(attempt + 1);
       attempt += 1;
       reason = 'network';
@@ -483,6 +494,9 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
     if (!this.modelId) {
       throw new OperationError('config_error', 'Local source embedding model must be configured.');
     }
+    if (this.backend === 'local') {
+      assertLocalModelIdNotCloudForwarding('Local source embedding model', this.modelId);
+    }
     this.dimension = options.dimension ?? 0;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -527,7 +541,6 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
           input: inputs.map((input) => this.formatInput(input, options.taskType)),
           ...(this.sendDimensions ? { dimensions: this.dimension } : {}),
         }),
-        redirect: 'error',
         signal: controller.signal,
       }, budget);
       if (!response.ok) {

@@ -201,6 +201,34 @@ describe('sovereignty config engine', () => {
     }))).toThrow('baseUrl must stay on loopback');
   });
 
+  test('local profiles refuse Ollama cloud-forwarding model ids by tag only', () => {
+    const withLocalModel = (model: string) => baseConfig({
+      modelProfiles: {
+        local: {
+          provider: 'local-openai-compatible',
+          trust: 'local',
+          baseUrl: 'http://127.0.0.1:11434/v1',
+          model,
+          purpose: 'analyst',
+        },
+      },
+    });
+    for (const model of ['gpt-oss:120b-cloud', 'gemma4:cloud']) {
+      let error: unknown;
+      try {
+        createSovereigntyEngine(withLocalModel(model));
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(OperationError);
+      expect((error as OperationError).code).toBe('config_error');
+      expect((error as Error).message).toContain("runs in the provider's cloud and cannot serve as a local model");
+    }
+    for (const model of ['gpt-oss:120b', 'my-cloud-model:latest', 'cloudllama:7b']) {
+      expect(() => createSovereigntyEngine(withLocalModel(model))).not.toThrow();
+    }
+  });
+
   test('schema accepts store-backed secretRef values', () => {
     const config = baseConfig({
       modelProfiles: {

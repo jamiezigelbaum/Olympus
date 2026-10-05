@@ -12,6 +12,7 @@
 // and `assertSnifferProfileAllowed` re-checks the profile at every dispatch.
 
 import { OperationError } from '../../core/operation-error.ts';
+import { assertLocalModelIdNotCloudForwarding } from '../../core/local-model-policy.ts';
 import { assertSecureAnalystPoolModelIdAllowed } from '../../core/sovereignty.ts';
 import type {
   SovereigntyEngine,
@@ -51,14 +52,19 @@ export interface SnifferLane extends SnifferLaneIdentity {
 
 /**
  * The per-dispatch check: throws SnifferLaneRefusedError unless the profile is
- * a loopback local model or a Venice profile whose model passes the secure
- * pool's model gate (no E2EE-gated ids). It does not re-read the route policy;
+ * a loopback local model (never a cloud-forwarding model id) or a Venice
+ * profile whose model passes the secure pool's model gate (no E2EE-gated ids). It does not re-read the route policy;
  * `resolveSnifferLane` applies that once, and the Venice adapter re-checks the
  * model's privacy category at every call (`localOnly`).
  */
 export function assertSnifferProfileAllowed(profileId: string, profile: SovereigntyModelProfile): SnifferLaneKind {
   if (profile.trust === 'standard_cloud') throw new SnifferLaneRefusedError('standard_cloud', profileId);
-  if (profile.provider === 'local-openai-compatible' && profile.trust === 'local') return 'local';
+  if (profile.provider === 'local-openai-compatible' && profile.trust === 'local') {
+    // Sovereignty validation already refuses this at load; re-checked per
+    // dispatch like every other property of the lane.
+    assertLocalModelIdNotCloudForwarding(`Privacy sniffer profile "${profileId}"`, profile.model);
+    return 'local';
+  }
   // The built-in private model (built-in-sniffer.ts): in-process on this
   // computer, reached only through its own fixed identity.
   if (profile.provider === 'built-in' && profile.trust === 'local' && profileId === 'built_in'
