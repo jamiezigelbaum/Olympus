@@ -2,6 +2,13 @@
 
 Status: **proposal, not approved.** Written for adversarial review before any build. Nothing here changes shipped behavior or the release plan until the owner rules.
 Date: 2026-10-04, revised 2026-10-05 after owner direction (§1.1)
+
+> **Review outcome, 2026-10-05: revise before any build.** Two adversarial reviews are consolidated in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md). This document has not yet been rewritten to answer them. Until it is, read it with these corrections:
+>
+> - **§1 outcome is overstated.** The outbound gate cannot guarantee that no Private detail leaves; a consult is an owner-approved disclosure of a derived question.
+> - **§6 (zkAPI) is wrong in several facts** (ETH only, not one transaction, no scriptable funding in a release, a 30-day note expiry that forfeits the deposit) and is **not ready to ship**.
+> - **§6A phase E1 must not ship.** Basic attestation gives no cryptographic protection against Venice; even full quote verification needs a pinned workload.
+> - **§3 and §5** have code-level corrections and nine required design changes listed in the review.
 Risk class: **Critical**. It changes trust routing, relaxes an advertised non-configurable rule, and touches the `Analyst` contract.
 Authority requested: an owner ruling on §9. [`V0_4_RELEASE.md`](../V0_4_RELEASE.md) says any proposed contract change stops for owner review; this is that stop.
 
