@@ -279,9 +279,11 @@ describe('overall stop bound', () => {
     expect(spawned).toHaveLength(2);
   }, 30_000);
 
-  test('a token directory that cannot be removed never untracks a live server', async () => {
+  // chmod 0500 does not stop root from removing the file, so the fault cannot be injected there.
+  test.skipIf(process.getuid?.() === 0)('a token directory that cannot be removed never untracks a live server', async () => {
     const warn = console.warn;
-    console.warn = () => undefined;
+    const warnings: string[] = [];
+    console.warn = (message: string) => warnings.push(message);
     try {
       const { handle, spawned } = fakeHarness({
         onSpawn: (tokenFile) => {
@@ -292,6 +294,9 @@ describe('overall stop bound', () => {
       });
       await handle.ensureRunning();
       await expect(handle.stop()).rejects.toBeInstanceOf(LlamaServerStopError);
+      // The cleanup really failed (EACCES), and was reported without a path.
+      expect(warnings.some((message) => message.includes('could not remove'))).toBe(true);
+      expect(warnings.join('\n')).not.toContain('olympus-built-in-model-');
       // It was still signalled, and it is still tracked: no second server.
       expect(spawned[0]!.signals).toEqual(['SIGTERM', 'SIGKILL']);
       await expect(handle.ensureRunning()).rejects.toBeInstanceOf(LlamaServerStillExitingError);
@@ -399,6 +404,46 @@ describe('cancellation and crashes after spawn', () => {
 });
 
 describe('per-caller cancellation of a shared start', () => {
+  test('a caller cancellation rejects as an AbortError carrying its reason; an already-cancelled caller never gets a warm endpoint', async () => {
+    const { handle } = fakeHarness({ exitsOn: ['SIGTERM'] });
+    await handle.ensureRunning();
+    const abort = new AbortController();
+    abort.abort(new Error('caller gone'));
+    const error = await handle.ensureRunning(abort.signal).catch((caught: unknown) => caught);
+    expect((error as Error).name).toBe('AbortError');
+    expect((error as Error).message).toBe('caller gone');
+    // The warm server is untouched for everyone else.
+    await expect(handle.ensureRunning()).resolves.toMatchObject({ token: expect.any(String) });
+  }, 30_000);
+
+  test('a fresh caller never inherits a cancelled start: it waits for that attempt to settle, then starts afresh', async () => {
+    let identityStarted = 0;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { handle, spawned } = fakeHarness({
+      exitsOn: ['SIGTERM'],
+      onIdentity: async () => {
+        identityStarted += 1;
+        if (identityStarted === 1) await held;
+      },
+    });
+    const abort = new AbortController();
+    const first = handle.ensureRunning(abort.signal);
+    await until(() => identityStarted === 1);
+    abort.abort(new Error('first caller cancelled'));
+    await expect(first).rejects.toThrow('first caller cancelled');
+    const fresh = handle.ensureRunning();
+    release();
+    const endpoint = await fresh;
+    expect(endpoint.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    // The cancelled attempt's server was stopped before the fresh one spawned.
+    expect(spawned).toHaveLength(2);
+    expect(spawned[0]!.signals).toEqual(['SIGTERM']);
+    expect(spawned[1]!.signals).toEqual([]);
+  }, 30_000);
+
   test('one caller aborting does not cancel the start another caller still waits for', async () => {
     let healthy = false;
     const { handle, spawned } = fakeHarness({ exitsOn: ['SIGTERM'], health: () => healthy });
@@ -482,6 +527,45 @@ describe('callers of the handle', () => {
     refuse = false;
     await expect(model.complete({ system: 's', prompt: 'p', localOnly: true })).resolves.toMatchObject({ text: '{}' });
   });
+
+  test('a request after another caller cancelled a start succeeds, and the model stays ready', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-built-in-retry-test-'));
+    temporaryDirectories.push(dir);
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    let identityStarted = 0;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { handle } = fakeHarness({
+      exitsOn: ['SIGTERM'],
+      onIdentity: async () => {
+        identityStarted += 1;
+        if (identityStarted === 1) await held;
+      },
+    });
+    const model = createBuiltInAnalystModel({
+      env,
+      model: QWEN35_4B,
+      install: async () => {
+        reportBuiltInReasoningState({ model: QWEN35_4B, env }, 'ready');
+        return { modelPath: '/m.gguf', serverPath: '/llama-server', gpu: true };
+      },
+      createServer: () => handle,
+      fetchImpl: (async () => Response.json({ choices: [{ message: { content: '{}' } }] })) as unknown as typeof fetch,
+      waitForInstall: true,
+    });
+    await model.prepare();
+    const abort = new AbortController();
+    const first = model.complete({ system: 's', prompt: 'p', localOnly: true, signal: abort.signal });
+    await until(() => identityStarted === 1);
+    abort.abort(new Error('first caller cancelled'));
+    await expect(first).rejects.toThrow();
+    const fresh = model.complete({ system: 's', prompt: 'p', localOnly: true });
+    release();
+    await expect(fresh).resolves.toMatchObject({ text: '{}' });
+    expect(readBuiltInReasoningStatus(QWEN35_4B, env).state).toBe('ready');
+  }, 30_000);
 
   test('"Try again" (prepare) re-arms a cached install after a runtime failure', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-built-in-retry-test-'));

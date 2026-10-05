@@ -370,8 +370,22 @@ export function createLlamaServerHandle(
 
   return {
     async ensureRunning(signal) {
+      // An already-cancelled caller never gets a warm endpoint.
+      if (signal?.aborted) throw callerCancelled(signal.reason);
       clearIdle();
       if (endpoint && current && !current.exited) return endpoint;
+      // Never join a start that was cancelled (every earlier caller gave up):
+      // wait for it to settle, which retires its child, then start afresh.
+      while (starting?.controller.signal.aborted) {
+        const cancelled = starting;
+        try {
+          await abortable(cancelled.promise.then(() => undefined, () => undefined), signal);
+        } catch {
+          throw callerCancelled(signal?.reason);
+        }
+        if (starting === cancelled) starting = undefined;
+        if (endpoint && current && !current.exited) return endpoint;
+      }
       if (!starting) {
         const controller = new AbortController();
         const shared: SharedStart = {
@@ -401,6 +415,7 @@ export function createLlamaServerHandle(
         if (signal.aborted) {
           shared.waiters -= 1;
           if (shared.waiters <= 0) shared.controller.abort(signal.reason);
+          throw callerCancelled(signal.reason);
         }
         throw error;
       }
@@ -432,6 +447,17 @@ interface ServerProcess {
   cleanupTokenDir(): void;
 }
 
+/**
+ * A caller's cancellation, as the AbortError the analyst callers recognise
+ * by name; the caller's own reason is kept (as itself, or as the cause).
+ */
+function callerCancelled(reason: unknown): Error {
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  const error = new Error(reason instanceof Error ? reason.message : 'The request was cancelled.', { cause: reason });
+  error.name = 'AbortError';
+  return error;
+}
+
 /** One start shared by concurrent ensureRunning() callers. */
 interface SharedStart {
   promise: Promise<LlamaServerEndpoint>;
@@ -444,14 +470,17 @@ interface SharedStart {
 /**
  * Removes a token directory, best effort: a failure here must never stop a
  * process from being tracked, signalled or seen to exit. Returns whether the
- * directory is gone. The note carries no path or token.
+ * directory is gone. A failed removal is tried again only by a later cleanup
+ * of the same server (on its exit, or at process exit); after the last one
+ * the directory stays in the temp folder, holding the token of a server that
+ * is gone. The note carries no path or token.
  */
 function removeTokenDir(tokenDir: string): boolean {
   try {
     rmSync(tokenDir, { recursive: true, force: true });
     return true;
   } catch {
-    console.warn('Olympus built-in model: could not remove a model server token directory; it will be retried.');
+    console.warn('Olympus built-in model: could not remove a model server token directory.');
     return false;
   }
 }

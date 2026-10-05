@@ -99513,9 +99513,27 @@ function createLlamaServerHandle(launch, options = {}) {
   };
   return {
     async ensureRunning(signal) {
+      if (signal?.aborted)
+        throw callerCancelled(signal.reason);
       clearIdle();
       if (endpoint2 && current && !current.exited)
         return endpoint2;
+      while (starting?.controller.signal.aborted) {
+        const cancelled = starting;
+        try {
+          await abortable(cancelled.promise.then(() => {
+            return;
+          }, () => {
+            return;
+          }), signal);
+        } catch {
+          throw callerCancelled(signal?.reason);
+        }
+        if (starting === cancelled)
+          starting = undefined;
+        if (endpoint2 && current && !current.exited)
+          return endpoint2;
+      }
       if (!starting) {
         const controller = new AbortController;
         const shared2 = {
@@ -99544,6 +99562,7 @@ function createLlamaServerHandle(launch, options = {}) {
           shared.waiters -= 1;
           if (shared.waiters <= 0)
             shared.controller.abort(signal.reason);
+          throw callerCancelled(signal.reason);
         }
         throw error2;
       }
@@ -99559,12 +99578,19 @@ function createLlamaServerHandle(launch, options = {}) {
     }
   };
 }
+function callerCancelled(reason) {
+  if (reason instanceof Error && reason.name === "AbortError")
+    return reason;
+  const error2 = new Error(reason instanceof Error ? reason.message : "The request was cancelled.", { cause: reason });
+  error2.name = "AbortError";
+  return error2;
+}
 function removeTokenDir(tokenDir) {
   try {
     rmSync12(tokenDir, { recursive: true, force: true });
     return true;
   } catch {
-    console.warn("Olympus built-in model: could not remove a model server token directory; it will be retried.");
+    console.warn("Olympus built-in model: could not remove a model server token directory.");
     return false;
   }
 }
