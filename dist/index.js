@@ -8361,8 +8361,7 @@ var init_engine = __esm(() => {
     "aws_access_key_id",
     "slack_token",
     "api_secret_token",
-    "credential_assignment",
-    "explicit_s5_marker"
+    "credential_assignment"
   ]);
   CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
 });
