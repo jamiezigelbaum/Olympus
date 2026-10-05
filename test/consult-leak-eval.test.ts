@@ -40,15 +40,15 @@ describe('consult gate leak eval (dry run)', () => {
     expect(report.gates).toEqual({ passed: true, failures: [] });
   });
 
-  test('held-out clean sets (never tuned against): English within budget; unsupported languages reported', () => {
+  test('held-out clean sets (never tuned against): shipped languages within budget; German reported', () => {
     const report = runConsultLeakEval();
-    expect(Object.keys(report.heldOut).sort()).toEqual(['author', 'blind2', 'de', 'es', 'fr', 'reviewer', 'reviewer2Disclosed']);
+    expect(Object.keys(report.heldOut).sort()).toEqual(['author', 'blind2', 'de', 'es', 'fr', 'pt', 'reviewer', 'reviewer2Disclosed']);
     for (const [set, result] of Object.entries(report.heldOut)) {
       if (UNSUPPORTED_LANGUAGE_SETS.has(set)) continue;
       expect({ set, rate: result.rate <= CONSULT_LEAK_GATES.heldOutFalseRefusalRateMax }).toEqual({ set, rate: true });
     }
-    // Pinned so a change is visible: with no permissive Spanish, French or
-    // German word list, every question in those languages is refused.
+    // Pinned so a change is visible: German ships only as a user-installed
+    // pack, so without it every German question is refused.
     for (const set of UNSUPPORTED_LANGUAGE_SETS) expect({ set, rate: report.heldOut[set]!.rate }).toEqual({ set, rate: 1 });
   });
 
@@ -57,7 +57,7 @@ describe('consult gate leak eval (dry run)', () => {
     expect(report.leakCategoryPasses).toEqual([]);
     expect(report.canaryLeaks).toEqual([]);
     const admissions = packAdmissions();
-    expect(Object.keys(admissions).sort()).toEqual(['cldr-names', 'nl-opentaal']);
+    expect(Object.keys(admissions).sort()).toEqual(['cldr-names', 'es-hunspell', 'fr-grammalecte', 'nl-opentaal', 'pt-br-hunspell', 'pt-pt-hunspell', 'rx-rxnorm']);
   });
 
   test('known gap: paraphrased rare combinations pass the gate, and are reported, not hidden', () => {

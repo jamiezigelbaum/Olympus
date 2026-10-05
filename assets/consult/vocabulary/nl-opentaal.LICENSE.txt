@@ -1,3 +1,7 @@
+Pack: nl-opentaal.txt.gz
+Source: npm dictionary-nl 2.0.0 (OpenTaal), expanded by scripts/build-consult-vocabulary.ts.
+Licence chosen: Revised BSD (BSD-3-Clause), from BSD-3-Clause OR CC-BY-3.0.
+
 _for English, please see below_
 
 

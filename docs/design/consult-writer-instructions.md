@@ -201,15 +201,26 @@ The value of a consult is set by how the question is framed:
 
 ## Language
 
-Write in plain language: the owner's language or English. Every word you use
-must be an ordinary dictionary word, a unit, a country name or a common
-standard abbreviation; the gate refuses any other word, whatever it is (a
-name, a product, a code, a word in a language it has no list for). Today the
-gate has word lists for English and Dutch only, plus unit and country names
-in English, Spanish, French, German, Italian, Portuguese and Dutch. A question
-in any other language is refused until a list for it is licensed and shipped,
-so when the owner writes in such a language, write the consult in English.
-Name the country only when the answer depends on it; never a city or region.
+Write in the owner's language when the gate supports it, otherwise in English.
+Every word you use must be an ordinary dictionary word, a unit, a country name,
+a medicine name or a common standard abbreviation. The gate refuses any other
+word, whatever it is: a name, a product, a code, or a word in a language it has
+no list for.
+
+- **Supported out of the box:** English, Dutch, French, Spanish and Portuguese,
+  plus unit and country names in those languages, German and Italian, and
+  medicine names.
+- **Supported after the user installs a pack:** German and Italian. Their word
+  lists are GPL-licensed, so Olympus does not ship them; the user runs
+  `bun scripts/install-consult-language-pack.ts de` (or `it`).
+- **Not supported:** every other language, including any script written
+  without spaces (Chinese, Japanese, Thai).
+
+When the owner writes in a language that is not supported, write the consult in
+English. Compound words that a dictionary does not list whole (common in Dutch
+and German) are refused; split them into separate words or use a simpler term.
+
+Name a country only when the answer depends on it. Never name a city or region.
 
 ## Form the gate requires
 

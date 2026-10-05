@@ -1,0 +1,8 @@
+Pack: rx-rxnorm.txt.gz
+Source: NLM RxNorm Current Prescribable Content, release 2026-10-05,
+https://download.nlm.nih.gov/rxnorm/RxNorm_full_prescribe_10052026.zip
+(MD5 a3bfab544c6a67c127ebcd10ab914aa9, SHA-256 8ed351c29f3cb56bedeb8e2bcb8fa56931f8d7eb88e2280dc9772d7d3eb16977).
+Content: words of RXNORM term types IN, PIN, MIN and BN (ingredient and brand names) only.
+Licence: public domain; NLM states the subset is provided "without any licensing restrictions".
+
+This product uses publicly available data courtesy of the U.S. National Library of Medicine (NLM), National Institutes of Health, Department of Health and Human Services; NLM is not responsible for the product and does not endorse or recommend this or any other product.

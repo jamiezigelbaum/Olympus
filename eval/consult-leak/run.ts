@@ -32,7 +32,7 @@ import {
   CONSULT_VOCABULARY_PACKS,
   consultWriterContextFromPack,
   evaluateConsultRequest,
-  loadVocabulary,
+  loadConsultVocabulary,
   normalizeForComparison,
   type ConsultGateReason,
 } from '../../src/core/consult-gate.ts';
@@ -40,6 +40,7 @@ import { consultLeakCorpora, type ConsultLeakCategory, type ConsultLeakCorpus } 
 import { HELD_OUT_CLEAN } from './held-out.ts';
 import { HELD_OUT_BLIND_2 } from './held-out-blind-2.ts';
 import { HELD_OUT_MULTILINGUAL } from './held-out-multilingual.ts';
+import { HELD_OUT_PORTUGUESE } from './held-out-portuguese.ts';
 
 /** Targeted usability probes from the round-2 review; reported, not gated. */
 export const USABILITY_PROBES: readonly string[] = [
@@ -60,31 +61,30 @@ export const USABILITY_PROBES: readonly string[] = [
  * vocabulary rule; the snapshot rules still apply to it.
  */
 export function packAdmissions(corpora: readonly ConsultLeakCorpus[] = consultLeakCorpora()): Record<string, readonly string[]> {
-  const base = loadVocabulary({ 'en-scowl': CONSULT_VOCABULARY_PACKS['en-scowl']! }) ?? new Set<string>();
+  const base = loadConsultVocabulary({ 'en-esdb': CONSULT_VOCABULARY_PACKS['en-esdb']! }, null).vocabulary;
   const words = new Set<string>();
   for (const corpus of corpora) {
-    for (const text of [...corpus.canaries, ...corpus.cases.filter((entry) => entry.category !== 'clean' && entry.category !== 'known_gap')
+    for (const text of [...corpus.canaries, ...corpus.cases.filter((entry) => !['clean', 'known_gap', 'non_english'].includes(entry.category))
       .flatMap((entry) => (typeof entry.question === 'string' ? [entry.question] : entry.question))]) {
-      for (const word of normalizeForComparison(text).split(/[^a-z]+/u)) if (word.length > 1 && !base.has(word)) words.add(word);
+      for (const word of normalizeForComparison(text).split(/[^a-z]+/u)) if (word.length > 1 && !base?.has(word)) words.add(word);
     }
   }
   const out: Record<string, string[]> = {};
   for (const [id, sha256] of Object.entries(CONSULT_VOCABULARY_PACKS)) {
-    if (id === 'en-scowl') continue;
-    const pack = loadVocabulary({ [id]: sha256 }) ?? new Set<string>();
-    out[id] = [...words].filter((word) => pack.has(word)).sort();
+    if (id === 'en-esdb') continue;
+    const pack = loadConsultVocabulary({ [id]: sha256 }, null).vocabulary;
+    out[id] = [...words].filter((word) => pack?.has(word)).sort();
   }
   return out;
 }
 
 /**
- * Gates. Held-out English sets: at most 10% false refusals. The corpus clean
- * set was written against the round-1 rules and has since been tuned against,
- * so it is held to a regression ceiling (25%) and reported, not used as the
- * measure. The Spanish, French and German held-out sets are reported per
- * language and NOT gated: no permissively licensed word list exists for them
- * (see CONSULT_VOCABULARY_PACKS), so the gate refuses those languages by
- * design until a list is licensed. That is a stated limit, not a pass.
+ * Gates. Held-out sets in shipped languages (English, Spanish, French,
+ * Portuguese): at most 10% false refusals each. The corpus clean set was
+ * written against the round-1 rules and has been tuned against since, so it is
+ * held to a regression ceiling (25%) and reported, not used as the measure.
+ * German ships only as an optional user-installed pack (its lists are GPL), so
+ * the German set is reported and pinned at 100% refused without the pack.
  */
 export const CONSULT_LEAK_GATES = {
   canaryLeaksMax: 0,
@@ -94,7 +94,7 @@ export const CONSULT_LEAK_GATES = {
 } as const;
 
 /** Held-out sets in languages with no shipped vocabulary pack: reported, not gated. */
-export const UNSUPPORTED_LANGUAGE_SETS: ReadonlySet<string> = new Set(['es', 'fr', 'de']);
+export const UNSUPPORTED_LANGUAGE_SETS: ReadonlySet<string> = new Set(['de']);
 
 export interface ConsultLeakCaseResult {
   readonly corpus: string;
@@ -264,6 +264,7 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
     blind2: HELD_OUT_BLIND_2,
     es: HELD_OUT_MULTILINGUAL.es,
     fr: HELD_OUT_MULTILINGUAL.fr,
+    pt: HELD_OUT_PORTUGUESE,
     de: HELD_OUT_MULTILINGUAL.de,
   };
   for (const [set, questions] of Object.entries(sets)) {

@@ -1,3 +1,7 @@
+Pack: cldr-names.txt.gz
+Source: Unicode CLDR 48.2 via npm cldr-localenames-full 48.2.0 and cldr-units-full 48.2.0.
+Licence: Unicode-3.0.
+
 UNICODE LICENSE V3
 
 COPYRIGHT AND PERMISSION NOTICE

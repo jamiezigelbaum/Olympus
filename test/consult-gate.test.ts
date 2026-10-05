@@ -381,8 +381,8 @@ describe('consult gate', () => {
     expectRefused('What usually happens on 2024-03-14 for deposits?', 'snapshot_date');
     expectRefused('What usually happens on March 14th, 2024 for deposits?', 'snapshot_date');
     expectRefused('What usually happens on 14-03-2024 for deposits?', 'snapshot_date');
-    // Other languages are refused as unknown words: the writer writes English.
-    expectRefused('Que se passe-t-il le 14 mars 2024 pour une caution?', 'unknown_word');
+    // French is a shipped language, so the date rule decides.
+    expectRefused('Que se passe-t-il le 14 mars 2024 pour une caution?', 'snapshot_date');
     // Day and month alone are still the date.
     expectRefused('What usually happens on the 14th of March?', 'snapshot_date');
     // Near-misses: a month alone, another day.
@@ -432,10 +432,11 @@ describe('consult gate', () => {
     expectRefused('What deductions are x\u0301\u0302\u0303\u0304\u0305llowed?', 'combining_mark_stack');
     expectRefused('What <b>deductions</b> are allowed?', 'not_plain_text');
     expectRefused('What deductions are allowed &amp; why?', 'not_plain_text');
-    // Ordinary accents in NFKC form pass; other languages and scripts are
-    // refused as unknown words, since consults are written in English.
+    // Ordinary accents in NFKC form pass, and so do the shipped languages
+    // (English, Dutch, French, Spanish, Portuguese); other languages and
+    // scripts are refused as unknown words.
     expectPass('Is a caf\u00e9 deposit rule different?');
-    expectRefused('Quelles retenues sur une caution sont autorisées après un état des lieux?', 'unknown_word');
+    expectPass('Quelles retenues sur une caution sont autorisées après un état des lieux?');
     expectRefused('退去時の敷金からどのような控除が認められますか?', 'unknown_word');
   });
 
@@ -472,7 +473,7 @@ describe('consult gate', () => {
       .toEqual({ decision: 'pass', reasons: [] });
     expectPass('What matters when a deposit is held for one, three, or six months?');
     expectPass('Assume a fixed-term tenancy has ended. What is the usual timeline for returning a deposit?');
-    expectRefused('\u00BFCu\u00E1nto tiempo tiene un arrendador para devolver una fianza?', 'unknown_word');
+    expectPass('\u00BFCu\u00E1nto tiempo tiene un arrendador para devolver una fianza?');
     expectPass('Is a 2.5 percent annual cap on deposit interest typical?');
   });
 

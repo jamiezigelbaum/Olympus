@@ -1,130 +1,249 @@
 /**
- * Build the consult gate's vocabulary packs (src/core/consult-gate.ts) under
- * assets/consult/vocabulary/. Each pack is a gzip-compressed, sorted list of
- * lower-case a-z words, one per line, with no comment lines; its SHA-256 is
- * pinned in src/core/consult-gate.ts (CONSULT_VOCABULARY_PACKS) and checked at
- * load. Offline: the source packages are fetched by hand with `npm pack`.
+ * Build one consult-gate vocabulary pack (src/core/consult-gate.ts).
  *
- * Packs and sources (licences reproduced next to the packs):
- *   en-scowl   SCOWL by Kevin Atkinson, via npm wordlist-english 1.2.1.
- *              All dialects, sizes <= 70, words with no capital letter.
- *              Licence: SCOWL copyright notice (permissive; SCOWL-COPYRIGHT.txt).
- *   nl-opentaal OpenTaal Dutch spelling dictionary, via npm dictionary-nl 2.0.0.
- *              Stems with no capital letter, expanded with the dictionary's
- *              own prefix and suffix rules (one level, no compounds).
- *              Licence: Revised BSD (chosen of BSD-3-Clause OR CC-BY-3.0;
- *              OPENTAAL-LICENSE.txt).
- *   cldr-names Unicode CLDR 48.2: unit display names and unit patterns, and
- *              country and macro-region names (territory codes of two
- *              letters or three digits; no subdivisions, no cities), for
- *              en, es, fr, de, it, pt, nl. Licence: Unicode-3.0 (UNICODE-LICENSE.txt).
+ * A pack is a gzip-compressed text file: a few header lines starting with "#"
+ * (pack id, source, licence, regeneration command), then lower-case a-z
+ * words, one per line, sorted by byte value. Its SHA-256 is printed, and must
+ * be pinned in CONSULT_VOCABULARY_PACKS (shipped packs) or is recorded in the
+ * local manifest (user-installed packs, scripts/install-consult-language-pack.ts).
+ *
+ * Every pack is normalised the same way as the gate: decompose and drop
+ * accents, fold ligatures and special letters (oe, ae, o, l, d, th, ss, i),
+ * lower-case, split at anything that is not a letter, keep a-z words of two or
+ * more letters. Entries written with a capital letter (proper nouns) are
+ * skipped, except in the medicines pack, whose brand names are its point.
  *
  * Usage:
- *   bun scripts/build-consult-vocabulary.ts <wordlist-english dir> <dictionary-nl dir> <cldr-localenames-full dir> <cldr-units-full dir>
+ *   bun scripts/build-consult-vocabulary.ts <pack> <out-dir> <source...>
+ * Packs and their sources:
+ *   en-esdb-<size>   ESDB word list file (`./scowl word-list <size> A,B,Z,C,D 1 --deaccent --wo-poses=abbr`)
+ *   nl-opentaal      unpacked npm dictionary-nl 2.0.0
+ *   fr-grammalecte   unpacked npm dictionary-fr 3.0.0
+ *   es-hunspell      unpacked npm dictionary-es 4.0.0
+ *   pt-br-hunspell   unpacked npm dictionary-pt 4.0.0
+ *   pt-pt-hunspell   unpacked npm dictionary-pt-pt 2.0.0
+ *   de-hunspell      unpacked npm dictionary-de 3.0.0 (user-installed only, GPL)
+ *   it-hunspell      unpacked npm dictionary-it 2.0.0 (user-installed only, GPL)
+ *   cldr-names       unpacked npm cldr-localenames-full and cldr-units-full 48.2.0
+ *   rx-rxnorm        unpacked RxNorm Current Prescribable Content (RXNCONSO.RRF)
  */
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 
-const [scowlDir, nlDir, namesDir, unitsDir] = process.argv.slice(2);
-if (!scowlDir || !nlDir || !namesDir || !unitsDir) throw new Error('usage: see the header');
-const OUT = 'assets/consult/vocabulary';
-const LOCALES = ['en', 'es', 'fr', 'de', 'it', 'pt', 'nl'];
+const LIGATURES: Readonly<Record<string, string>> = {
+  '\u0153': 'oe', '\u00E6': 'ae', '\u00F8': 'o', '\u0142': 'l', '\u0111': 'd', '\u00F0': 'd', '\u00FE': 'th', '\u00DF': 'ss', '\u0131': 'i',
+};
 
-function words(text: string): string[] {
-  return text.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase().replace(/ß/gu, 'ss')
-    .split(/[^\p{L}]+/u).filter((part) => /^[a-z]+$/u.test(part));
+export function vocabularyWords(text: string): string[] {
+  let folded = '';
+  for (const char of text.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase()) folded += LIGATURES[char] ?? char;
+  return folded.split(/[^\p{L}]+/u).filter((part) => part.length >= 2 && /^[a-z]+$/u.test(part));
 }
 
-function writePack(id: string, set: Set<string>): void {
-  const body = `${[...set].sort().join('\n')}\n`;
-  const gz = gzipSync(Buffer.from(body, 'utf8'), { level: 9 });
-  writeFileSync(join(OUT, `${id}.txt.gz`), gz);
-  console.log(`${id}\t${set.size} words\t${body.length} bytes raw\t${gz.length} bytes gz\tsha256 ${createHash('sha256').update(gz).digest('hex')}`);
+export interface PackHeader {
+  readonly id: string;
+  readonly source: string;
+  readonly licence: string;
 }
 
-// en-scowl
-{
-  const set = new Set<string>();
-  for (const dialect of ['english', 'american', 'british', 'canadian', 'australian']) {
-    for (const size of [10, 20, 35, 40, 50, 55, 60, 70]) {
-      for (const word of JSON.parse(readFileSync(join(scowlDir, `${dialect}-words-${size}.json`), 'utf8')) as string[]) {
-        if (/\p{Lu}/u.test(word)) continue;
-        for (const part of words(word)) set.add(part);
-      }
-    }
-  }
-  writePack('en-scowl', set);
+/** Write a pack; returns its SHA-256 and word count. */
+export function writePack(outDir: string, header: PackHeader, words: Set<string>): { sha256: string; words: number; bytes: number } {
+  const lines = [
+    `# consult-vocabulary-pack ${header.id}`,
+    `# source: ${header.source}`,
+    `# licence: ${header.licence}`,
+    '# generated by scripts/build-consult-vocabulary.ts; do not edit by hand',
+    ...[...words].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+  ];
+  const gz = gzipSync(Buffer.from(`${lines.join('\n')}\n`, 'utf8'), { level: 9 });
+  writeFileSync(join(outDir, `${header.id}.txt.gz`), gz);
+  return { sha256: createHash('sha256').update(gz).digest('hex'), words: words.size, bytes: gz.length };
 }
 
-// nl-opentaal: stems plus one level of the dictionary's own affix rules.
-{
-  const aff = readFileSync(join(nlDir, 'index.aff'), 'utf8').split('\n');
-  const rules = new Map<string, Array<{ prefix: boolean; strip: string; add: string; condition: RegExp }>>();
+interface AffixRule {
+  readonly prefix: boolean;
+  readonly cross: boolean;
+  readonly strip: string;
+  readonly add: string;
+  readonly condition: RegExp;
+}
+
+/**
+ * Expand a hunspell dictionary: every stem with no capital letter (or, for
+ * German, every stem: German writes all nouns capitalised, so the proper-noun
+ * filter would drop the language's nouns; the cost is that the German pack also
+ * admits the names its dictionary lists), plus one
+ * application of each of its prefix and suffix rules, and their cross product
+ * where both rules allow it. Compound rules are not applied, so compounds not
+ * listed whole are absent. Stems marked forbidden or compound-only are skipped.
+ */
+export function expandHunspell(dir: string, keepCapitalized = false): Set<string> {
+  const aff = readFileSync(join(dir, 'index.aff'), 'utf8').split('\n');
+  let flagMode = 'char';
+  const aliases: string[][] = [];
   const excluded = new Set<string>();
+  const rules = new Map<string, AffixRule[]>();
+  const splitFlags = (text: string): string[] => {
+    if (!text) return [];
+    if (flagMode === 'long') return text.match(/../gu) ?? [];
+    if (flagMode === 'num') return text.split(',');
+    return [...text];
+  };
   for (const line of aff) {
     const parts = line.trim().split(/\s+/u);
-    if (parts[0] === 'FORBIDDENWORD' || parts[0] === 'ONLYINCOMPOUND' || parts[0] === 'NEEDAFFIX') excluded.add(parts[1]!);
+    if (parts[0] === 'FLAG') flagMode = parts[1] === 'long' ? 'long' : parts[1] === 'num' ? 'num' : 'char';
+  }
+  for (const line of aff) {
+    const parts = line.trim().split(/\s+/u);
+    if (parts[0] === 'AF' && parts.length === 2 && !/^\d+$/u.test(parts[1]!)) aliases.push(splitFlags(parts[1]!));
+    if (['FORBIDDENWORD', 'ONLYINCOMPOUND', 'NEEDAFFIX'].includes(parts[0]!) && parts[1]) excluded.add(parts[1]);
+    if ((parts[0] === 'SFX' || parts[0] === 'PFX') && parts.length >= 4 && (parts[2] === 'Y' || parts[2] === 'N') && /^\d+$/u.test(parts[3]!)) {
+      rules.set(`${parts[0]}:${parts[1]}:cross`, [{ prefix: false, cross: parts[2] === 'Y', strip: '', add: '', condition: /$/u }]);
+      continue;
+    }
     if ((parts[0] === 'SFX' || parts[0] === 'PFX') && parts.length >= 5) {
       const [kind, flag, strip, rawAdd, condition] = parts as [string, string, string, string, string];
-      const add = rawAdd.split('/')[0]!;
-      const list = rules.get(flag) ?? [];
       const prefix = kind === 'PFX';
+      const cross = rules.get(`${kind}:${flag}:cross`)?.[0]?.cross ?? false;
+      const add = rawAdd.split('/')[0]!;
       const pattern = condition === '.' ? '' : condition;
-      list.push({
-        prefix,
-        strip: strip === '0' ? '' : strip,
-        add: add === '0' ? '' : add,
-        condition: new RegExp(prefix ? `^${pattern}` : `${pattern}$`, 'u'),
-      });
+      let compiled: RegExp;
+      try {
+        compiled = new RegExp(prefix ? `^${pattern}` : `${pattern}$`, 'u');
+      } catch {
+        continue;
+      }
+      const list = rules.get(flag) ?? [];
+      list.push({ prefix, cross, strip: strip === '0' ? '' : strip, add: add === '0' ? '' : add, condition: compiled });
       rules.set(flag, list);
     }
   }
-  const set = new Set<string>();
-  const dic = readFileSync(join(nlDir, 'index.dic'), 'utf8').split('\n').slice(1);
+  const words = new Set<string>();
+  const dic = readFileSync(join(dir, 'index.dic'), 'utf8').split('\n').slice(1);
   for (const entry of dic) {
-    const [stem, flagText = ''] = entry.split('/');
-    if (!stem || /\p{Lu}/u.test(stem)) continue;
-    const flags = flagText.match(/../gu) ?? [];
+    const slash = entry.search(/(?<!\\)\//u);
+    const stem = (slash < 0 ? entry : entry.slice(0, slash)).trim().split(/\s+/u)[0] ?? '';
+    const flagText = slash < 0 ? '' : (entry.slice(slash + 1).trim().split(/\s+/u)[0] ?? '');
+    if (!stem || (!keepCapitalized && /\p{Lu}/u.test(stem))) continue;
+    const flags = /^\d+$/u.test(flagText) && aliases.length > 0 ? (aliases[Number(flagText) - 1] ?? []) : splitFlags(flagText);
     if (flags.some((flag) => excluded.has(flag))) continue;
+    const prefixed: string[] = [];
     const forms = [stem];
+    const apply = (base: string, rule: AffixRule): string | undefined => {
+      if (!rule.condition.test(base)) return undefined;
+      if (rule.prefix) return base.startsWith(rule.strip) ? rule.add + base.slice(rule.strip.length) : undefined;
+      return base.endsWith(rule.strip) ? base.slice(0, base.length - rule.strip.length) + rule.add : undefined;
+    };
     for (const flag of flags) {
       for (const rule of rules.get(flag) ?? []) {
-        if (!rule.condition.test(stem)) continue;
-        if (rule.prefix) {
-          if (stem.startsWith(rule.strip)) forms.push(rule.add + stem.slice(rule.strip.length));
-        } else if (stem.endsWith(rule.strip)) {
-          forms.push(stem.slice(0, stem.length - rule.strip.length) + rule.add);
+        const form = apply(stem, rule);
+        if (form === undefined) continue;
+        forms.push(form);
+        if (rule.prefix && rule.cross) prefixed.push(form);
+      }
+    }
+    for (const base of prefixed) {
+      for (const flag of flags) {
+        for (const rule of rules.get(flag) ?? []) {
+          if (rule.prefix || !rule.cross) continue;
+          const form = apply(base, rule);
+          if (form !== undefined) forms.push(form);
         }
       }
     }
     for (const form of forms) {
-      const split = words(form);
-      if (split.length === 1) set.add(split[0]!);
+      const split = vocabularyWords(form);
+      if (split.length === 1) words.add(split[0]!);
     }
   }
-  writePack('nl-opentaal', set);
+  return words;
 }
 
-// cldr-names: unit names and patterns, country and macro-region names.
-{
-  const set = new Set<string>();
-  for (const locale of LOCALES) {
-    const territories = (JSON.parse(readFileSync(join(namesDir, 'main', locale, 'territories.json'), 'utf8')) as {
-      main: Record<string, { localeDisplayNames: { territories: Record<string, string> } }>;
-    }).main[locale]!.localeDisplayNames.territories;
-    for (const [code, name] of Object.entries(territories)) {
-      if (/^(?:[A-Z]{2}|\d{3})(?:-alt-[a-z]+)?$/u.test(code)) for (const part of words(name)) set.add(part);
+function packageVersion(dir: string): string {
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name: string; version: string };
+  return `${pkg.name} ${pkg.version}`;
+}
+
+const HUNSPELL_PACKS: Readonly<Record<string, string>> = {
+  'nl-opentaal': 'BSD-3-Clause (chosen from BSD-3-Clause OR CC-BY-3.0)',
+  'fr-grammalecte': 'MPL-2.0',
+  'es-hunspell': 'MPL-1.1 (chosen from GPL-3.0+ OR LGPL-3.0+ OR MPL-1.1+)',
+  'pt-br-hunspell': 'MPL-2.0 (chosen from LGPL-3.0 OR MPL-2.0)',
+  'pt-pt-hunspell': 'MPL-1.1 (chosen from GPL-2.0 OR LGPL-2.1 OR MPL-1.1)',
+  'de-hunspell': 'GPL-2.0 OR GPL-3.0 (user-installed; never shipped)',
+  'it-hunspell': 'GPL-3.0 (user-installed; never shipped)',
+};
+
+export function buildPack(pack: string, outDir: string, sources: readonly string[]): { sha256: string; words: number; bytes: number } {
+  const esdb = /^en-esdb-(\d+)$/u.exec(pack);
+  if (esdb) {
+    const words = new Set<string>();
+    for (const line of readFileSync(sources[0]!, 'utf8').split('\n')) {
+      if (!line || /\p{Lu}/u.test(line)) continue;
+      for (const word of vocabularyWords(line)) words.add(word);
     }
-    const units = (JSON.parse(readFileSync(join(unitsDir, 'main', locale, 'units.json'), 'utf8')) as {
-      main: Record<string, { units: Record<string, unknown> }>;
-    }).main[locale]!.units;
-    const visit = (value: unknown): void => {
-      if (typeof value === 'string') for (const part of words(value.replace(/\{\d\}/gu, ' '))) set.add(part);
-      else if (value && typeof value === 'object') for (const child of Object.values(value)) visit(child);
-    };
-    visit(units);
+    return writePack(outDir, {
+      id: 'en-esdb',
+      source: `English Speller Database (SCOWL) rel-2026.02.25, size ${esdb[1]}, all spellings, variant level 1, no abbreviations, no capitalised entries`,
+      licence: 'SCOWL/ESDB copyright notice (permissive); see en-esdb.LICENSE.txt',
+    }, words);
   }
-  writePack('cldr-names', set);
+  const licence = HUNSPELL_PACKS[pack];
+  if (licence) {
+    return writePack(outDir, {
+      id: pack,
+      source: `npm ${packageVersion(sources[0]!)}, expanded with its own affix rules (one level, no compounds) by scripts/build-consult-vocabulary.ts`,
+      licence: licence.startsWith('MPL') ? `${licence}. This file is Covered Software under the MPL; its source form is the upstream package named above plus scripts/build-consult-vocabulary.ts.` : licence,
+    }, expandHunspell(sources[0]!, pack === 'de-hunspell'));
+  }
+  if (pack === 'cldr-names') {
+    const [namesDir, unitsDir] = sources as [string, string];
+    const words = new Set<string>();
+    for (const locale of ['en', 'es', 'fr', 'de', 'it', 'pt', 'nl']) {
+      const territories = (JSON.parse(readFileSync(join(namesDir, 'main', locale, 'territories.json'), 'utf8')) as {
+        main: Record<string, { localeDisplayNames: { territories: Record<string, string> } }>;
+      }).main[locale]!.localeDisplayNames.territories;
+      for (const [code, name] of Object.entries(territories)) {
+        if (/^(?:[A-Z]{2}|\d{3})(?:-alt-[a-z]+)?$/u.test(code)) for (const word of vocabularyWords(name)) words.add(word);
+      }
+      const units = (JSON.parse(readFileSync(join(unitsDir, 'main', locale, 'units.json'), 'utf8')) as {
+        main: Record<string, { units: Record<string, unknown> }>;
+      }).main[locale]!.units;
+      const visit = (value: unknown): void => {
+        if (typeof value === 'string') for (const word of vocabularyWords(value.replace(/\{\d\}/gu, ' '))) words.add(word);
+        else if (value && typeof value === 'object') for (const child of Object.values(value)) visit(child);
+      };
+      visit(units);
+    }
+    return writePack(outDir, {
+      id: 'cldr-names',
+      source: `Unicode CLDR 48.2 (${packageVersion(namesDir)}, ${packageVersion(unitsDir)}): unit names, country and macro-region names in en es fr de it pt nl`,
+      licence: 'Unicode-3.0; see cldr-names.LICENSE.txt',
+    }, words);
+  }
+  if (pack === 'rx-rxnorm') {
+    // RXNCONSO columns: RXCUI|LAT|TS|LUI|STT|SUI|ISPREF|RXAUI|SAUI|SCUI|SDUI|SAB|TTY|CODE|STR|...
+    const keep = new Set(['IN', 'PIN', 'MIN', 'BN']);
+    const words = new Set<string>();
+    for (const line of readFileSync(sources[0]!, 'utf8').split('\n')) {
+      const fields = line.split('|');
+      if (fields[11] !== 'RXNORM' || !keep.has(fields[12] ?? '')) continue;
+      for (const word of vocabularyWords(fields[14] ?? '')) words.add(word);
+    }
+    return writePack(outDir, {
+      id: 'rx-rxnorm',
+      source: 'NLM RxNorm Current Prescribable Content, release 2026-10-05 (RxNorm_full_prescribe_10052026.zip): RXNORM term types IN, PIN, MIN, BN',
+      licence: 'Public domain (no licence required); NLM attribution in rx-rxnorm.LICENSE.txt',
+    }, words);
+  }
+  throw new Error(`unknown pack ${pack}`);
+}
+
+if (import.meta.main) {
+  const [pack, outDir, ...sources] = process.argv.slice(2);
+  if (!pack || !outDir || sources.length === 0) throw new Error('usage: bun scripts/build-consult-vocabulary.ts <pack> <out-dir> <source...>');
+  const result = buildPack(pack, outDir, sources);
+  console.log(`${pack}\t${result.words} words\t${result.bytes} bytes gz\tsha256 ${result.sha256}`);
 }

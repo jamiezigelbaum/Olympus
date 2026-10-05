@@ -290,6 +290,7 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
     'hasIdentifierShape',
     'hasTechnicalFingerprint',
     'hasUnknownWord',
+    'loadConsultVocabulary',
     'hasNumberWord',
     'classifyPath',
     'isKnownProvenancePath',
