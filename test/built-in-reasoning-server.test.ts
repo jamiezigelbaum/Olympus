@@ -403,6 +403,51 @@ describe('cancellation and crashes after spawn', () => {
   }, 30_000);
 });
 
+describe('stop() supersedes every request made before it', () => {
+  test('a request waiting on a cancelled start is refused by a stop(), never restarting the server', async () => {
+    let identityStarted = 0;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { handle, spawned } = fakeHarness({
+      exitsOn: ['SIGTERM'],
+      onIdentity: async () => {
+        identityStarted += 1;
+        if (identityStarted === 1) await held;
+      },
+    });
+    const abort = new AbortController();
+    const first = handle.ensureRunning(abort.signal);
+    await until(() => identityStarted === 1);
+    abort.abort(new Error('first caller cancelled'));
+    await expect(first).rejects.toThrow('first caller cancelled');
+    const fresh = handle.ensureRunning().then(() => 'started', (error: unknown) => error);
+    await handle.stop();
+    release();
+    const outcome = await fresh;
+    expect(outcome).toBeInstanceOf(LlamaServerStartError);
+    expect((outcome as Error).message).toContain('stopped while starting');
+    expect(spawned).toHaveLength(1);
+    expect(handle.pid).toBeUndefined();
+  }, 30_000);
+
+  test('a request waiting for a retiring server to exit is refused by a later stop()', async () => {
+    const { handle, spawned } = fakeHarness({ stopGraceMs: 60_000, killWaitMs: 60_000 });
+    await handle.ensureRunning();
+    const firstStop = handle.stop().catch(() => undefined);
+    const waiting = handle.ensureRunning().then(() => 'started', (error: unknown) => error);
+    const secondStop = handle.stop().catch(() => undefined);
+    const outcome = await waiting;
+    expect(outcome).toBeInstanceOf(LlamaServerStartError);
+    expect((outcome as Error).message).toContain('stopped while starting');
+    spawned[0]!.exitNow();
+    await Promise.all([firstStop, secondStop]);
+    expect(spawned).toHaveLength(1);
+    expect(handle.pid).toBeUndefined();
+  }, 30_000);
+});
+
 describe('per-caller cancellation of a shared start', () => {
   test('a caller cancellation rejects as an AbortError carrying its reason; an already-cancelled caller never gets a warm endpoint', async () => {
     const { handle } = fakeHarness({ exitsOn: ['SIGTERM'] });

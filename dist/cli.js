@@ -99391,7 +99391,7 @@ function createLlamaServerHandle(launch, options = {}) {
     generation += 1;
     const superseded = starting;
     starting = undefined;
-    superseded?.controller.abort(new LlamaServerStartError("The built-in model server was stopped while starting."));
+    superseded?.controller.abort(new LlamaServerStartError(STOPPED_WHILE_STARTING));
     retireCurrent();
     await awaitRetired();
   };
@@ -99413,7 +99413,7 @@ function createLlamaServerHandle(launch, options = {}) {
         throw signal.reason instanceof Error ? signal.reason : new LlamaServerStartError("The request was cancelled.");
       }
       if (generation !== startGeneration)
-        throw new LlamaServerStartError("The built-in model server was stopped while starting.");
+        throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
     };
     superseded();
     const retired = awaitRetired();
@@ -99487,7 +99487,7 @@ function createLlamaServerHandle(launch, options = {}) {
         if (current === spawned)
           current = undefined;
         if (generation !== startGeneration)
-          throw new LlamaServerStartError("The built-in model server was stopped while starting.");
+          throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
         throw new LlamaServerStartError(`The built-in model server exited while starting.${stderrTail ? ` ${lastLine(stderrTail)}` : ""}`);
       }
       if (await healthy(fetchImpl, baseUrl)) {
@@ -99503,7 +99503,7 @@ function createLlamaServerHandle(launch, options = {}) {
       await new Promise((resolve10) => setTimeout(resolve10, HEALTH_POLL_MS));
     }
     if (current !== spawned || spawned.exited) {
-      throw new LlamaServerStartError("The built-in model server was stopped while starting.");
+      throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
     }
     if (signal?.aborted) {
       fail(signal.reason instanceof Error ? signal.reason : new LlamaServerStartError("The request was cancelled."));
@@ -99518,6 +99518,7 @@ function createLlamaServerHandle(launch, options = {}) {
       clearIdle();
       if (endpoint2 && current && !current.exited)
         return endpoint2;
+      const callerGeneration = generation;
       while (starting?.controller.signal.aborted) {
         const cancelled = starting;
         try {
@@ -99529,6 +99530,8 @@ function createLlamaServerHandle(launch, options = {}) {
         } catch {
           throw callerCancelled(signal?.reason);
         }
+        if (generation !== callerGeneration)
+          throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
         if (starting === cancelled)
           starting = undefined;
         if (endpoint2 && current && !current.exited)
@@ -99713,7 +99716,7 @@ function lastLine(text) {
 `);
   return (lines[lines.length - 1] ?? "").slice(0, 300);
 }
-var LlamaServerStartError, LlamaServerStillExitingError, LlamaServerStopError, HEALTH_POLL_MS = 250, DEFAULT_STOP_GRACE_MS2 = 5000, DEFAULT_KILL_WAIT_MS = 5000, LLAMA_SERVER_ENV_ALLOWLIST;
+var LlamaServerStartError, LlamaServerStillExitingError, LlamaServerStopError, HEALTH_POLL_MS = 250, STOPPED_WHILE_STARTING = "The built-in model server was stopped while starting.", DEFAULT_STOP_GRACE_MS2 = 5000, DEFAULT_KILL_WAIT_MS = 5000, LLAMA_SERVER_ENV_ALLOWLIST;
 var init_server4 = __esm(() => {
   init_model_transport();
   LlamaServerStartError = class LlamaServerStartError extends Error {

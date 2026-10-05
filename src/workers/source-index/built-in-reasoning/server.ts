@@ -84,6 +84,8 @@ export class LlamaServerStopError extends Error {
 }
 
 const HEALTH_POLL_MS = 250;
+/** Why a start (or a request waiting to start one) that a stop() superseded is refused. */
+const STOPPED_WHILE_STARTING = 'The built-in model server was stopped while starting.';
 /** SIGTERM to SIGKILL. llama-server stops its in-flight decode and exits well inside this. */
 const DEFAULT_STOP_GRACE_MS = 5_000;
 /**
@@ -243,7 +245,7 @@ export function createLlamaServerHandle(
     generation += 1;
     const superseded = starting;
     starting = undefined;
-    superseded?.controller.abort(new LlamaServerStartError('The built-in model server was stopped while starting.'));
+    superseded?.controller.abort(new LlamaServerStartError(STOPPED_WHILE_STARTING));
     retireCurrent();
     await awaitRetired();
   };
@@ -263,7 +265,7 @@ export function createLlamaServerHandle(
       if (signal?.aborted) {
         throw signal.reason instanceof Error ? signal.reason : new LlamaServerStartError('The request was cancelled.');
       }
-      if (generation !== startGeneration) throw new LlamaServerStartError('The built-in model server was stopped while starting.');
+      if (generation !== startGeneration) throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
     };
     // Cancelled before it began: nothing is created, so nothing is left unobserved.
     superseded();
@@ -340,7 +342,7 @@ export function createLlamaServerHandle(
       }
       if (current !== spawned || spawned.exited) {
         if (current === spawned) current = undefined;
-        if (generation !== startGeneration) throw new LlamaServerStartError('The built-in model server was stopped while starting.');
+        if (generation !== startGeneration) throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
         throw new LlamaServerStartError(
           `The built-in model server exited while starting.${stderrTail ? ` ${lastLine(stderrTail)}` : ''}`,
         );
@@ -359,7 +361,7 @@ export function createLlamaServerHandle(
     }
     // Cancelled or stopped while the identity check ran: never hand out an endpoint.
     if (current !== spawned || spawned.exited) {
-      throw new LlamaServerStartError('The built-in model server was stopped while starting.');
+      throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
     }
     if (signal?.aborted) {
       fail(signal.reason instanceof Error ? signal.reason : new LlamaServerStartError('The request was cancelled.'));
@@ -374,6 +376,8 @@ export function createLlamaServerHandle(
       if (signal?.aborted) throw callerCancelled(signal.reason);
       clearIdle();
       if (endpoint && current && !current.exited) return endpoint;
+      // A request made before a stop() is superseded by it, like any start.
+      const callerGeneration = generation;
       // Never join a start that was cancelled (every earlier caller gave up):
       // wait for it to settle, which retires its child, then start afresh.
       while (starting?.controller.signal.aborted) {
@@ -383,6 +387,7 @@ export function createLlamaServerHandle(
         } catch {
           throw callerCancelled(signal?.reason);
         }
+        if (generation !== callerGeneration) throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
         if (starting === cancelled) starting = undefined;
         if (endpoint && current && !current.exited) return endpoint;
       }
