@@ -248,6 +248,28 @@ export const V0_4_CANONICAL_DOCUMENTS = [
 export const V0_4_PUBLIC_PACKAGE_FILES = [
   'assets/icon.png',
   'assets/olympus-banner.png',
+  // Consult gate vocabulary packs (src/core/consult-gate.ts), each beside its
+  // licence file, listed one by one; docs/THIRD_PARTY_DATA.md describes them.
+  'assets/consult/vocabulary/cldr-countries.txt.gz',
+  'assets/consult/vocabulary/cldr-countries.LICENSE.txt',
+  'assets/consult/vocabulary/cldr-units.txt.gz',
+  'assets/consult/vocabulary/cldr-units.LICENSE.txt',
+  'assets/consult/vocabulary/en-esdb.txt.gz',
+  'assets/consult/vocabulary/en-esdb.LICENSE.txt',
+  'assets/consult/vocabulary/es-hunspell.txt.gz',
+  'assets/consult/vocabulary/es-hunspell.LICENSE.txt',
+  'assets/consult/vocabulary/fr-grammalecte.txt.gz',
+  'assets/consult/vocabulary/fr-grammalecte.LICENSE.txt',
+  'assets/consult/vocabulary/nl-opentaal.txt.gz',
+  'assets/consult/vocabulary/nl-opentaal.LICENSE.txt',
+  'assets/consult/vocabulary/pt-br-hunspell.txt.gz',
+  'assets/consult/vocabulary/pt-br-hunspell.LICENSE.txt',
+  'assets/consult/vocabulary/pt-pt-hunspell.txt.gz',
+  'assets/consult/vocabulary/pt-pt-hunspell.LICENSE.txt',
+  'assets/consult/vocabulary/rx-brands.txt.gz',
+  'assets/consult/vocabulary/rx-brands.LICENSE.txt',
+  'assets/consult/vocabulary/rx-ingredients.txt.gz',
+  'assets/consult/vocabulary/rx-ingredients.LICENSE.txt',
   'package.json',
   'openclaw.plugin.json',
   'index.js',
@@ -288,6 +310,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'docs/SOVEREIGNTY_CONFIG.md',
   'docs/UNINSTALL.md',
   'docs/V0_4_RELEASE.md',
+  'docs/THIRD_PARTY_DATA.md',
 ] as const;
 
 const PUBLIC_OPERATION_NAMES = {

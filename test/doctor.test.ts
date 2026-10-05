@@ -203,6 +203,23 @@ describe('runDoctor', () => {
     expect(result.checks.find((check) => check.name === 'email_worker')).toMatchObject({ ok: false });
     expect(JSON.stringify(result)).toContain('has not been resolved');
   });
+  test('consult vocabulary: a missing pack is informational, an altered pack fails doctor', async () => {
+    const check = async (states: Array<'verified' | 'missing' | 'hash_mismatch'>) => checkByName((await runDoctor(doctorDeps({
+      config: defaultConfig(),
+      delphi: healthyDelphi(),
+      consultVocabularyStatus: () => states.map((state, index) => ({ id: `pack-${index}`, origin: 'shipped' as const, state })),
+    }))).checks, 'consult_vocabulary');
+    expect(await check(['verified', 'verified'])).toMatchObject({ ok: true });
+    expect((await check(['verified', 'verified'])).hint).toBeUndefined();
+    const missing = await check(['verified', 'missing']);
+    expect(missing).toMatchObject({ ok: true });
+    expect(missing.detail).toContain('pack-1 missing');
+    expect(missing.hint).toContain('missing');
+    const altered = await check(['missing', 'hash_mismatch']);
+    expect(altered).toMatchObject({ ok: false });
+    expect(altered.detail).toContain('pack-1 hash_mismatch');
+    expect(altered.hint).toContain('not intact');
+  });
   test('reports all green when lanes, worker, and source index are healthy', async () => {
     const { fetchImpl } = fakeWorkerFetch({
       '/v1/health': { status: 'ok', configured: true },
@@ -231,6 +248,7 @@ describe('runDoctor', () => {
       'argus_model_pool',
       'sovereignty_model_lanes',
       'zkapi_consult_transport',
+      'consult_vocabulary',
       'email_worker',
       'worker_credential_lanes',
       'dropbox_content_extraction_throughput',
@@ -238,6 +256,11 @@ describe('runDoctor', () => {
       'source_scheduler_status',
       'source_ingestion_health',
     ]);
+    expect(checkByName(result.checks, 'consult_vocabulary')).toEqual({
+      name: 'consult_vocabulary',
+      ok: true,
+      detail: 'Consult vocabulary (no consult is sent until the consult lane lands): languages en (default); cldr-units verified, en-esdb verified, rx-ingredients verified.',
+    });
     expect(checkByName(result.checks, 'argus_model_pool').detail).toContain('no sovereignty posture configured yet');
     expect(checkByName(result.checks, 'email_worker').detail).toContain('no worker health or credential failures');
     expect(checkByName(result.checks, 'source_index_status').detail)
