@@ -219,7 +219,7 @@ export function privacyLogic(config: PrivacyLogicConfig) {
    * choice's default side.
    */
   const TOPICS: Array<{ id: string; words: string[]; options: Array<[string, PrivacyTopicSide]> }> = [
-    { id: 'family', words: ['family', 'families', 'familial'], options: [
+    { id: 'family', words: ['family', 'families', 'familial', 'kid', 'kids', 'child', 'children', 'son', 'sons', 'daughter', 'daughters', 'parent', 'parents', 'mother', 'father', 'mom', 'dad', 'spouse', 'wife', 'husband', 'sibling', 'siblings'], options: [
       ['medical', 'private'], ['legal_money', 'private'], ['conversations', 'private'],
       ['logistics', 'share'], ['contacts', 'share'], ['history', 'share']] },
     { id: 'health', words: ['health', 'healthcare', 'health care', 'medical'], options: [

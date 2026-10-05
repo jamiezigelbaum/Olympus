@@ -21,6 +21,8 @@ describe('which broad areas a description names', () => {
   test.each([
     ['my family stuff', ['family']],
     ['Families and kids', ['family']],
+    ['anything about my kids', ['family']],
+    ['my wife and my parents', ['family']],
     ['health', ['health']],
     ['my medical history and healthcare', ['health']],
     ['finances', ['money']],

@@ -90414,7 +90414,7 @@ function privacyLogic(config2) {
   }
   const DESCRIPTION_MAX = 2000;
   const TOPICS = [
-    { id: "family", words: ["family", "families", "familial"], options: [
+    { id: "family", words: ["family", "families", "familial", "kid", "kids", "child", "children", "son", "sons", "daughter", "daughters", "parent", "parents", "mother", "father", "mom", "dad", "spouse", "wife", "husband", "sibling", "siblings"], options: [
       ["medical", "private"],
       ["legal_money", "private"],
       ["conversations", "private"],

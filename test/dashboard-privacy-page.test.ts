@@ -65,7 +65,7 @@ describe('the Privacy editor page', () => {
   test('broad words in the saved description bring the follow-up questions, pre-filled from its sentences', () => {
     const html = privacyPage();
     // "health" and "money" in the preview's description: their questions, every choice at its default.
-    expect(html).toContain('<div class="pquestions" data-privacy-questions="health,money"><div class="sect">A few quick questions</div>');
+    expect(html).toContain('<div class="pquestions" data-privacy-questions="family,health,money"><div class="sect">A few quick questions</div>');
     expect(html).toContain('<h3 class="pqtitle">Which money things are private?</h3>');
     expect(html).toContain('<div class="pqopt" role="radiogroup" aria-labelledby="privacy-q-money-tax"><span class="pqlabel" id="privacy-q-money-tax">Tax and payroll papers</span>');
     expect(html).toContain('<label class="pqchoice"><input type="radio" name="privacy-q-money-tax" value="private" data-privacy-topic="money" data-privacy-option="tax" checked><span>Private</span></label>');
