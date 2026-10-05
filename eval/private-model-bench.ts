@@ -179,7 +179,14 @@ async function runPanel(model: ReturnType<typeof createBuiltInAnalystModel>, mod
     relevance = embeddingPanelRelevance(() => provider);
   }
   const { answerPrivately } = await import('../src/core/analyst-built-in.ts');
-  const panel = createBuiltInPrivateAnswerModel({ model, available: () => true, answer: answerPrivately, ...(relevance ? { relevance } : {}) });
+  // Synthetic bench items with no store behind them: every one is eligible.
+  const panel = createBuiltInPrivateAnswerModel({
+    model,
+    available: () => true,
+    answer: answerPrivately,
+    eligible: async (items) => items.map(() => true),
+    ...(relevance ? { relevance } : {}),
+  });
   const byId = new Map(PANEL_ITEMS.map((item) => [item.id, item]));
   let passed = 0;
   const outcomes: Array<Record<string, unknown>> = [];

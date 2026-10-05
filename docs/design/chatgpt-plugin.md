@@ -537,25 +537,45 @@ percent when known; counts only, no job).
      the Private-eligible items; otherwise it is discarded and the answer is
      computed again from the current evidence. No eligible item left means
      `failed`.
-   - **Evidence at dispatch (2026-10-05).** A job's evidence is cached when
-     it is queued, and an analysis can wait minutes for the one model slot.
-     So when an analysis leaves the queue, before any model input (the
-     panel's relevance embeddings, its depth re-read, inference), the job's
-     own Private search runs again (the same search: corpus registry, owner
-     scope, each store's tier-ledger copy filter and the cross-store
-     visibility gate, all read at that moment). A cached item it no longer
-     returns Private-eligible (re-tiered to Secret, deleted, out of scope) is
-     dropped, and the rest are read in their current form; none left ends
-     the analysis with no evidence and no model call. A claim's own
-     computation that takes the slot in the same turn as its claim-time
-     search is not searched twice. Without a search to re-check with, nothing
-     is read. The depth re-read narrows this further: an item its store now
-     refuses is dropped, never answered from the passages it carried; a read
-     that merely fails (an error) keeps only the passages the dispatch-time
-     search returned, never text whose eligibility was not re-established.
-     A dropped item is not counted as read, as unreadable, or as a source.
-     Reviewer finding: a precompute queued while an item was Private and
-     dispatched after it became Secret sent the cached text to the model.
+   - **Live eligibility at every model input (2026-10-05).** Searches only
+     propose evidence; whether an item may be read is decided by one live
+     guard (`checkPrivateEvidenceItems` in
+     `src/workers/source-index/analyst-answer.ts`), asked per item from live
+     state with no search and no cache: the item's corpus is still a
+     registered Private corpus, and its store still serves its content under
+     the owner's current read scope (the item exists and is not tombstoned,
+     the store's copy is current in the tier ledger and holds the content
+     layer, so a move to Secrets refuses it; the owner's folder scope and
+     metadata-only rules allow its text; its stored tier is not S5). Anything
+     it cannot vouch for (an error, a missing corpus or provider, an item
+     without its store identity) is not eligible. It is asked immediately
+     before every model submission, with only promise continuations (no I/O,
+     no timer) between its answer and the submission: when an analysis is
+     dispatched (a refused item's cached text then leaves the job), before
+     the panel's document embeddings (after the question's embedding), before
+     the depth re-read and before the answer, and inside every answer-model
+     call (main call, any retry or audit; one refusal stops the answer). It
+     is asked again before an answer is sealed and once more after sealing,
+     before it is released: an answer that read an item no longer eligible is
+     discarded, never shown (a precompute is computed again once from the
+     claim's evidence; a claim's own answer fails). A depth re-read that the
+     store refuses, or denies by policy, drops the item; one that fails
+     otherwise or comes back empty keeps the item's earlier passages only if
+     the guard confirms it after the read. A dropped item is not counted as
+     read, as unreadable, or as a source. A typical claimed full answer asks
+     the guard 7 times (each a batched per-item lookup). **Residual:** the
+     guard cannot recall text already handed to the on-device model when a
+     tier change lands after that submission was issued, or in the
+     continuations between the guard's answer and the submission; a running
+     analysis is not cancelled on revocation, its answer is discarded at
+     sealing. The guarantee is that no submission starts with an item the
+     guard has just refused, and no answer derived from a now-ineligible
+     item is sealed or shown. Reviewer findings: a precompute queued while an
+     item was Private and dispatched after it became Secret sent the cached
+     text to the model; a single re-check at dispatch also missed a claim's
+     retry, revocation during hydration or the question embedding, a stale
+     claim-time set at sealing, policy-denied depth reads and partial
+     re-checks.
    - **Hard deadline.** Every claim settles `ready` or `failed` within a
      deadline counted from the claim (100 s, inside the panel's two-minute
      wait), and each analysis has the same bound from its start, both
@@ -634,7 +654,7 @@ percent when known; counts only, no job).
      `[private-answer] outcome=… precomputed=yes|no wait_at_claim_ms=…
      search_to_ready_ms=… queued_ms=… refresh_ms=… recheck_ms=… dropped=…
      matched=… items=… evidence_bytes=… model_ms=… main_…` (`recheck_ms`
-     when the dispatch-time search ran, `dropped` when it dropped items). `wait_at_claim_ms` is what the
+     is the dispatch-time eligibility check, `dropped` the items it dropped). `wait_at_claim_ms` is what the
      panel waited after its claim; `search_to_ready_ms` is from the search to
      the answer being ready.
    - **Claim budget.** An unknown, expired or wrong-install id answers 410

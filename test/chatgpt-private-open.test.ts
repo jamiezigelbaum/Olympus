@@ -13,6 +13,9 @@ import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } fro
 import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { createDropboxOpenTargets, dropboxPreviewUrl, localDropboxRoots, localOpenArguments } from '../src/workers/dropbox-files/open-target.ts';
 
+/** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
+const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
+
 const INSTALL = 'a'.repeat(32);
 const PANEL_ORIGIN = 'https://olympus.web-sandbox.oaiusercontent.com';
 const EVIDENCE = [{ title: 'evidence', trust_domain: 'secure_local' }];
@@ -41,7 +44,7 @@ function makeJobs(
 ) {
   const clock = { now: 1_000_000 };
   const { noOpener, ...rest } = extra;
-  const jobs = new PrivateAnswerJobs({
+  const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
     model: () => model,
     installId: () => INSTALL,
     now: () => clock.now,

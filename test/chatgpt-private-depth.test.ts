@@ -27,6 +27,9 @@ import { SEARCH_TOOL, SOURCE_ANSWER_TOOL, callChatGptTool, type ChatGptSurfaceOp
 import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 
+/** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
+const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
+
 function hit(id: string, title: string, text: string): PrivateEvidenceItem {
   return {
     provenance: {
@@ -68,7 +71,7 @@ describe('reading leading items in depth', () => {
   const longText = (label: string, pages: number) => Array.from({ length: pages }, (_, page) => `${label} page ${page + 1}: value ${page + 1}.`).join(' ').padEnd(12_000, ' x');
 
   function panelWith(answer: (q: string, items: readonly BuiltInEvidenceItem[], options: AnswerPrivatelyOptions) => Promise<{ answer: string; citations: Array<{ id: string; title?: string; claim: string }>; unanswered: string[]; modelId: string }>, extra: Partial<Parameters<typeof createBuiltInPrivateAnswerModel>[0]> = {}) {
-    return createBuiltInPrivateAnswerModel({
+    return createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE,
       model: { name: 'built_in' } as unknown as BuiltInAnalystModel,
       available: () => true,
       answer,
@@ -202,7 +205,7 @@ describe('reading leading items in depth', () => {
 
     // Through the jobs: the claim fails, and the log says no evidence.
     const lines: string[] = [];
-    const jobs = new PrivateAnswerJobs({ model: () => panel, installId: () => 'e'.repeat(32), log: (line) => lines.push(line), claimHoldMs: 0, audit: () => {} });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => panel, installId: () => 'e'.repeat(32), log: (line) => lines.push(line), claimHoldMs: 0, audit: () => {} });
     const evidence = [hit('a', 'a.pdf', 'SENTINEL_REFUSED_PASSAGE_4d1b')];
     const { jobId } = jobs.begin({ question: 'q', count: 1, evidence, refresh: async () => evidence });
     const key = await generatePanelKeyPair();
@@ -290,7 +293,7 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
     }
     expect(String((SEARCH_TOOL.inputSchema.properties.detail as { description: string }).description)).toContain('"full" when the user asks for all the details');
     const { model } = recordingModel();
-    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
     const options: ChatGptSurfaceOptions = {
       dashboardView: async () => ({}) as never,
       evidenceSearch: async () => ({ evidence: [], coverage: {} }),
@@ -303,7 +306,7 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
 
   test('it flows into the private job, the job\'s _meta says detail "full", and the same question in each detail is a separate answer', async () => {
     const { model, calls } = recordingModel();
-    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 });
     const options: ChatGptSurfaceOptions = {
       dashboardView: async () => ({}) as never,
       evidenceSearch: async () => ({ evidence: [], coverage: {} }),
@@ -332,7 +335,7 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
   test('a full job has the longer deadline; a summary job keeps the short one', async () => {
     const never: PrivateAnswerModel = { status: () => ({ state: 'ready' }), answerPrivately: () => new Promise(() => {}) };
     const lines: string[] = [];
-    const jobs = new PrivateAnswerJobs({
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
       model: () => never, installId: () => INSTALL, log: (line) => lines.push(line), claimHoldMs: 0,
       analysisTimeoutMs: 40, fullAnalysisTimeoutMs: 400, audit: () => {},
     });
@@ -376,7 +379,7 @@ describe('a private match probe that is slow or fails', () => {
       privateMatchProbe: probe,
       privateMatchProbeTimeoutMs: 30,
       privateMatchProbeLog: (line) => lines.push(line),
-      privateAnswers: new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 }),
+      privateAnswers: new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0 }),
     };
   }
 

@@ -62,6 +62,7 @@ import type {
 import { mergeRetrievalDegradations } from '../../core/source-index/retrieval.ts';
 import {
   assertEvidencePackModelEligible,
+  assertModelTrustTierAllowed,
 } from '../../core/source-model-policy.ts';
 import {
   assertSecureAnalystPoolModelIdAllowed,
@@ -2631,6 +2632,58 @@ export async function searchPrivateEvidence(input: {
     .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
     .filter((candidate) => candidate.trustDomain === 'secure_local' && candidate.corpusId !== '');
   return { matched: candidates.length, candidates };
+}
+
+/**
+ * Whether each Private evidence item may be read by a model right now: the
+ * private answer panel's eligibility guard, asked immediately before every
+ * model submission and before an answer is sealed. Per item, from live state
+ * only (no search, no cache): the item's corpus is still a registered
+ * Private (secure_local) corpus; and its store's content provider still
+ * serves its CONTENT under the owner's current read scope, which is the
+ * store's own checks read now: the item exists and is not tombstoned, this
+ * store's copy is current in the tier ledger (a move to Secrets supersedes
+ * it) and holds the content layer, the owner's folder scope and metadata-only
+ * rules allow its text, and its stored tier is not S5. Lanes are built per
+ * call, so scope and registry are current. Fails closed: an error, a missing
+ * corpus or provider, a names-only or content-held-elsewhere answer, or an
+ * item without its store identity is not eligible. No query is passed, so
+ * no embedding is computed.
+ */
+export async function checkPrivateEvidenceItems(input: {
+  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  items: readonly Readonly<Record<string, unknown>>[];
+}): Promise<boolean[]> {
+  if (input.items.length === 0) return [];
+  let lanes: AnalystAnswerLanes;
+  try {
+    lanes = input.lanes({
+      question: 'eligibility',
+      retrieval_mode: 'keyword',
+      include_internal: false,
+      include_secure_local: true,
+      include_secure_local_content: true,
+    });
+  } catch {
+    return input.items.map(() => false);
+  }
+  return Promise.all(input.items.map(async (item) => {
+    try {
+      const corpusId = typeof item.corpusId === 'string' ? item.corpusId : undefined;
+      const provenance = item.provenance as SourceIndexProvenance | undefined;
+      if (!corpusId || !provenance?.sourceItem?.localItemId || item.trustDomain !== 'secure_local') return false;
+      if (lanes.registry.get(corpusId)?.trustDomain !== 'secure_local') return false;
+      const provider = lanes.contentProviders[corpusId];
+      if (!provider) return false;
+      const content = await provider.fetchLocalContent({ provenance, trustDomain: 'secure_local', maxChars: 1 });
+      if (!content || content.namesOnly || content.contentPrivate) return false;
+      if (content.sensitivity.trustDomain !== 'secure_local') return false;
+      assertModelTrustTierAllowed(content.sensitivity.trustTier);
+      return true;
+    } catch {
+      return false;
+    }
+  }));
 }
 
 /**

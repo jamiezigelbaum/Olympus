@@ -42,6 +42,7 @@ import {
 import {
   createAnalystSourceIndexAnswerHandler,
   readPrivateEvidenceItem,
+  checkPrivateEvidenceItems,
   searchPrivateEvidence,
   searchReleasedEvidence,
   type AnalystAnswerLanes,
@@ -4307,8 +4308,15 @@ export async function main(): Promise<void> {
   const sourceOpenTargets: Record<string, (locator: string) => { url?: string; localPath?: string } | undefined> = {
     dropbox: createDropboxOpenTargets(),
   };
+  // Whether each Private item may be read by a model right now, from live
+  // store, ledger and scope state: asked before every model submission and
+  // before an answer is sealed. Without the answer lanes nothing is eligible.
+  const privateEvidenceEligible = async (items: readonly Readonly<Record<string, unknown>>[]) => (sourceAnswerLanes
+    ? checkPrivateEvidenceItems({ lanes: sourceAnswerLanes, items })
+    : items.map(() => false));
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: workerBuiltInModel?.model,
+    eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
     // The panel reads its few most relevant items, ranked by the Private
@@ -4330,6 +4338,7 @@ export async function main(): Promise<void> {
   });
   const privateAnswers = new PrivateAnswerJobs({
     model: () => privateAnswerModel,
+    eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
     // While an analysis runs (from the search) and from a claim to
     // ready/failed, the sniffer stays off the shared model.

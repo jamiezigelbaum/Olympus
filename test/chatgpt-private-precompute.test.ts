@@ -27,6 +27,9 @@ import {
   PANEL_ANSWER_LIMITS,
 } from '../src/workers/chatgpt/private-answer-model.ts';
 
+/** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
+const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
+
 const INSTALL = 'd'.repeat(32);
 
 function item(id: string, extra: Record<string, unknown> = {}): PrivateEvidenceItem {
@@ -66,7 +69,7 @@ function gatedModel(options: { gated?: boolean; used?: (evidence: readonly Priva
 function makeJobs(model: PrivateAnswerModel, extra: Partial<ConstructorParameters<typeof PrivateAnswerJobs>[0]> = {}) {
   const lines: string[] = [];
   const activity = { begins: 0, ends: 0, begin() { this.begins += 1; }, end() { this.ends += 1; } };
-  const jobs = new PrivateAnswerJobs({
+  const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
     model: () => model,
     installId: () => INSTALL,
     log: (line) => lines.push(line),
@@ -213,9 +216,9 @@ describe('2. claim-time revalidation of the precomputed answer', () => {
     expect(calls).toHaveLength(1);
   });
 
-  test('an item that left the Private search before the precompute was dispatched is never read: no model call', async () => {
+  test('an item no longer eligible when the precompute is dispatched is never read: no model call', async () => {
     const { model, calls } = gatedModel();
-    const { jobs, lines } = makeJobs(model);
+    const { jobs, lines } = makeJobs(model, { eligible: async (items) => items.map(() => false) });
     const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: [item('gone')], refresh: async () => [] });
     await tick();
     expect(calls).toHaveLength(0);
@@ -358,17 +361,17 @@ describe('4. the panel reads a few relevant items', () => {
       }),
     };
     const relevance = embeddingPanelRelevance(() => local);
-    const scores = await relevance('q: april labs', [{ title: '2026-03 panel', text: 'april mentioned' }, { title: '2026-04 april labs', text: 'values' }]);
+    const scores = await relevance('q: april labs', async () => [{ title: '2026-03 panel', text: 'april mentioned' }, { title: '2026-04 april labs', text: 'values' }]);
     expect(scores![1]!).toBeGreaterThan(scores![0]!);
     const cloud = embeddingPanelRelevance(() => ({ ...local, backend: 'cloud' as const }));
     seen.length = 0;
-    expect(await cloud('q', [{ title: 'secret name', text: 'secret text' }])).toBeUndefined();
+    expect(await cloud('q', async () => [{ title: 'secret name', text: 'secret text' }])).toBeUndefined();
     expect(seen).toEqual([]);
   });
 
   test('the built-in panel model reads the relevant items, reports which it read, and renders compactly', async () => {
     let prompt: AnalystModelRequest | undefined;
-    const panelModel = createBuiltInPrivateAnswerModel({
+    const panelModel = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE,
       model: {
         spec: { modelId: 'test' },
         complete: async (request: AnalystModelRequest) => {
@@ -379,7 +382,7 @@ describe('4. the panel reads a few relevant items', () => {
       } as never,
       available: () => true,
       answer: (await import('../src/core/analyst-built-in.ts')).answerPrivately,
-      relevance: async (_question, items) => items.map((entry) => (entry.title?.includes('04-14') ? 0.9 : 0.5)),
+      relevance: async (_question, items) => (await items()).map((entry) => (entry?.title?.includes('04-14') ? 0.9 : 0.5)),
     });
     const hits = [
       { provenance: { sourceItem: { localItemId: 'm' }, citation: { title: '2026-04-03 other test.pdf', authoredAt: '2026-04-21T08:00:00Z', uri: '/Labs/2026-04-03 other test.pdf', sourceLabel: 'dropbox' } }, chunks: ['other results'] },
@@ -432,7 +435,12 @@ describe('5. dispatch-time eligibility: a queued analysis re-checks its cached e
     };
     const blocker = gatedModel({ gated: true });
     let answerCalls = 0;
-    const panelModel = createBuiltInPrivateAnswerModel({
+    // The live guard reads the same state the search does.
+    const eligible = async (items: readonly PrivateEvidenceItem[]) => {
+      const now = new Set([...(await refresh()), item('other')].filter((entry) => entry.trust_tier === undefined).map(privateEvidenceKey));
+      return items.map((entry) => now.has(privateEvidenceKey(entry)));
+    };
+    const panelModel = createBuiltInPrivateAnswerModel({ eligible,
       model: { spec: { modelId: 'test' }, complete: async () => ({ text: '{}' }), stop: async () => {} } as never,
       available: () => true,
       answer: async (_question, items) => {
@@ -441,8 +449,9 @@ describe('5. dispatch-time eligibility: a queued analysis re-checks its cached e
         return { answer: 'ok', citations: [], unanswered: [], modelId: 'test' };
       },
       relevance: async (_question, items) => {
-        for (const entry of items) seen.push(`${entry.title ?? ''}\n${entry.text}`);
-        return items.map(() => 0.5);
+        const admitted = await items();
+        for (const entry of admitted) if (entry) seen.push(`${entry.title ?? ''}\n${entry.text}`);
+        return admitted.map(() => 0.5);
       },
       readItem: async (hit) => {
         seen.push(JSON.stringify(hit));
@@ -456,7 +465,7 @@ describe('5. dispatch-time eligibility: a queued analysis re-checks its cached e
         ? blocker.model.answerPrivately(question, evidence, signal, observe, request)
         : panelModel.answerPrivately(question, evidence, signal, observe, request)),
     };
-    const { jobs, lines } = makeJobs(model);
+    const { jobs, lines } = makeJobs(model, { eligible });
     jobs.begin({ question: 'blocker', count: 1, evidence: [item('other')], refresh: async () => [item('other')] });
     await tick();
     const { jobId } = jobs.begin({ question: 'q', count: 2, evidence: [lease(), password()], refresh });

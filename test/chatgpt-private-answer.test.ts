@@ -47,6 +47,9 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 
+/** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
+const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
+
 const INSTALL = 'a'.repeat(32);
 const OTHER_INSTALL = 'b'.repeat(32);
 const PANEL_ORIGIN = 'https://olympus.web-sandbox.oaiusercontent.com';
@@ -69,7 +72,7 @@ function readyModel(overrides: Partial<PrivateAnswerModel> = {}): PrivateAnswerM
 }
 
 function makeJobs(model: PrivateAnswerModel, clock = { now: 1_000_000 }, extra: Partial<ConstructorParameters<typeof PrivateAnswerJobs>[0]> = {}) {
-  return new PrivateAnswerJobs({ model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, claimHoldMs: 0, ...extra });
+  return new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, now: () => clock.now, log: () => {}, claimHoldMs: 0, ...extra });
 }
 
 /**
@@ -210,9 +213,13 @@ describe('one-time jobs', () => {
     expect(events).toEqual(['analysis_deadline']);
   });
 
-  test('evidence is re-read at dispatch and at claim time; an item re-tiered to Secret since is dropped', async () => {
+  test('eligibility is checked live at dispatch and before sealing; evidence is searched again at claim time', async () => {
     const model = readyModel();
-    const jobs = makeJobs(model);
+    let reclassified = false;
+    // The live guard: `password` is Secret once reclassified.
+    const jobs = makeJobs(model, undefined, {
+      eligible: async (items) => items.map((item) => !(reclassified && item.item === 'password')),
+    });
     const searchTime = [
       { item: 'lease', trust_domain: 'secure_local' },
       { item: 'password', trust_domain: 'secure_local' },
@@ -223,7 +230,6 @@ describe('one-time jobs', () => {
       { item: 'password', trust_domain: 'secure_local', trust_tier: 'secrets' },
       { item: 'note', trust_domain: 'internal' },
     ];
-    let reclassified = false;
     let refreshed = 0;
     const { jobId } = jobs.begin({
       question: 'q',
@@ -231,8 +237,8 @@ describe('one-time jobs', () => {
       evidence: searchTime,
       refresh: async () => { refreshed += 1; return reclassified ? claimTime : searchTime; },
     });
-    // The precompute's dispatch searched again before reading anything.
-    expect(refreshed).toBe(1);
+    // Dispatch asks the live guard, not the search.
+    expect(refreshed).toBe(0);
     await settled(jobs);
     // Both items were still Private when it was dispatched: it read both.
     expect(model.calls[0]!.evidence).toEqual(searchTime);
@@ -240,9 +246,8 @@ describe('one-time jobs', () => {
     const panel0 = await generatePanelKeyPair();
     await jobs.claim(jobId!, panel0.publicKey);
     await settled(jobs);
-    // The claim searched again; its own computation went straight to the
-    // model slot from that search, so it was not searched a third time.
-    expect(refreshed).toBe(2);
+    // The claim searched again, once.
+    expect(refreshed).toBe(1);
     // The precompute read an item that is Secret now: discarded, and answered
     // again from the current evidence, which holds no Secret item.
     expect(model.calls).toHaveLength(2);
@@ -288,7 +293,7 @@ describe('one-time jobs', () => {
 
   test('a job id for another install, or an unknown id, is gone', async () => {
     let installId = INSTALL;
-    const jobs = new PrivateAnswerJobs({ model: () => readyModel(), installId: () => installId });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => readyModel(), installId: () => installId });
     const panel = await generatePanelKeyPair();
     expect(await jobs.claim(mintCredential('private', OTHER_INSTALL), panel.publicKey)).toMatchObject({ status: 410 });
     expect(await jobs.claim(mintCredential('private', INSTALL), panel.publicKey)).toMatchObject({ status: 410 });
@@ -314,7 +319,7 @@ describe('one-time jobs', () => {
       .toEqual({ count: 2, panelState: 'no_model' });
     expect(makeJobs(readyModel({ status: () => ({ state: 'model_downloading', percent: 41.6 }) })).begin({ question: 'q', count: 99, evidence: EVIDENCE, refresh: async () => EVIDENCE }))
       .toEqual({ count: 50, panelState: 'model_downloading', percent: 42 });
-    const unlinked = new PrivateAnswerJobs({ model: () => readyModel(), installId: () => undefined });
+    const unlinked = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => readyModel(), installId: () => undefined });
     expect(unlinked.begin({ question: 'q', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE })).toEqual({ count: 1, panelState: 'no_model' });
     expect(unlinked.size).toBe(0);
   });
@@ -790,7 +795,7 @@ describe('end to end through a real relay', () => {
         return { answer: SECRET_ANSWER, citations: [] };
       },
     });
-    const jobs = new PrivateAnswerJobs({ model: () => model, installId: () => identity.installId, claimHoldMs: 0 });
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => identity.installId, claimHoldMs: 0 });
     const handler = createPrivateAnswerHandler({ jobs, isRelayed: (request) => request.headers.has('x-olympus-relay') });
     const engine = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
     const statuses: RelayClientStatus[] = [];

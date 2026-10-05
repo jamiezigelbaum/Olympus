@@ -35,6 +35,9 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 
+/** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
+const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
+
 const INSTALL = 'c'.repeat(32);
 const QUESTION = 'SENTINEL_QUESTION_91c2 what did my blood work show';
 const EVIDENCE = [{ title: 'SENTINEL_EVIDENCE_91c2', trust_domain: 'secure_local', chunks: ['SENTINEL_PASSAGE_91c2'] }];
@@ -59,7 +62,7 @@ function harness(
   const lines: string[] = [];
   const events: string[] = [];
   const activity = { begins: 0, ends: 0, begin() { this.begins += 1; }, end() { this.ends += 1; } };
-  const jobs = new PrivateAnswerJobs({
+  const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
     model: () => model(answer, options.extra),
     installId: () => INSTALL,
     analysisTimeoutMs: options.timeoutMs ?? 60,
@@ -125,7 +128,7 @@ describe('1. every claimed job settles within its deadline', () => {
   test('a job dropped while it waits in the queue settles at once and ends its activity', async () => {
     const clock = { now: 0 };
     const activity = { begins: 0, ends: 0, begin() { this.begins += 1; }, end() { this.ends += 1; } };
-    const jobs = new PrivateAnswerJobs({
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
       model: () => model(() => new Promise(() => {})),
       installId: () => INSTALL,
       now: () => clock.now,
@@ -164,7 +167,7 @@ describe('1. every claimed job settles within its deadline', () => {
     expect(activity).toMatchObject({ begins: 2, ends: 2 });
     expect(lines).toHaveLength(1);
     const line = lines[0]!;
-    expect(line).toMatch(/^\[private-answer\] outcome=sealed precomputed=no wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=\d+ refresh_ms=\d+ matched=1 items=1 unreadable=0 evidence_bytes=21 model_ms=\d+ main_ms=12 main_prompt_bytes=3000 main_prompt_tokens=900 main_prefill_ms=4 main_output_tokens=40 main_generate_ms=8 total_ms=\d+$/);
+    expect(line).toMatch(/^\[private-answer\] outcome=sealed precomputed=no wait_at_claim_ms=\d+ search_to_ready_ms=\d+ queued_ms=\d+ refresh_ms=\d+ recheck_ms=\d+ matched=1 items=1 unreadable=0 evidence_bytes=21 model_ms=\d+ main_ms=12 main_prompt_bytes=3000 main_prompt_tokens=900 main_prefill_ms=4 main_output_tokens=40 main_generate_ms=8 total_ms=\d+$/);
     expect(line).not.toMatch(CONTENT);
     expect(line).not.toContain(jobId);
   });
@@ -254,7 +257,7 @@ describe('2. the sniffer yields to a private answer', () => {
     cleanups.push(() => service?.stop());
 
     let finishAnswer!: () => void;
-    const jobs = new PrivateAnswerJobs({
+    const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
       model: () => model(() => {
         log.push('answer:start');
         return new Promise((resolve) => { finishAnswer = () => { log.push('answer:done'); resolve({ answer: 'ok', citations: [] }); }; });
@@ -297,7 +300,7 @@ describe('2. the sniffer yields to a private answer', () => {
 describe('4. the panel reads a bounded slice of work', () => {
   test('the most relevant readable items, clipped passages, a tight prompt, a short answer and no audit', async () => {
     const seen: { count?: number; longest?: number; options?: AnswerPrivatelyOptions } = {};
-    const panelModel = createBuiltInPrivateAnswerModel({
+    const panelModel = createBuiltInPrivateAnswerModel({ eligible: ALL_ELIGIBLE,
       model: { stop: async () => {} } as never,
       available: () => true,
       answer: async (_question, items, options) => {
