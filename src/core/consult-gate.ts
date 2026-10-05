@@ -1173,25 +1173,40 @@ function runMatcher(question: readonly string[], minLength: number, minContent: 
     list.push(index);
     positions.set(token, list);
   });
-  let active = new Map<number, { length: number; content: number }>();
+  // Double-buffered run lengths per question position; only the positions
+  // touched by the previous token are cleared, so no allocation per token.
+  let previousLength = new Int32Array(question.length);
+  let previousContent = new Int32Array(question.length);
+  let currentLength = new Int32Array(question.length);
+  let currentContent = new Int32Array(question.length);
+  let previousActive: readonly number[] = [];
+  const clear = (): void => {
+    for (const position of previousActive) {
+      previousLength[position] = 0;
+      previousContent[position] = 0;
+    }
+  };
   return {
     feed(token: string): boolean {
-      const next = new Map<number, { length: number; content: number }>();
+      const active = positions.get(token) ?? [];
+      const content = isContent(token) ? 1 : 0;
       let hit = false;
-      for (const position of positions.get(token) ?? []) {
-        const previous = active.get(position - 1);
-        const run = {
-          length: (previous?.length ?? 0) + 1,
-          content: (previous?.content ?? 0) + (isContent(token) ? 1 : 0),
-        };
-        next.set(position, run);
-        if (run.length >= minLength && run.content >= minContent) hit = true;
+      for (const position of active) {
+        const length = (position > 0 ? previousLength[position - 1]! : 0) + 1;
+        const contentCount = (position > 0 ? previousContent[position - 1]! : 0) + content;
+        currentLength[position] = length;
+        currentContent[position] = contentCount;
+        if (length >= minLength && contentCount >= minContent) hit = true;
       }
-      active = next;
+      clear();
+      [previousLength, currentLength] = [currentLength, previousLength];
+      [previousContent, currentContent] = [currentContent, previousContent];
+      previousActive = active;
       return hit;
     },
     reset(): void {
-      active = new Map();
+      clear();
+      previousActive = [];
     },
   };
 }
