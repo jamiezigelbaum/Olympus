@@ -30005,7 +30005,7 @@ function releaseAnalystAnswer(input) {
     decision: "needs_approval",
     reasons: ["uncited_non_public_answer"],
     requiredApproval: packHasSecureLocal(input.detail.pack) ? "s4_release" : "user_review"
-  } : originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision();
+  } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.detail.pack, input.releaseSecureContent);
   return {
     decision,
     facts,
@@ -30032,6 +30032,25 @@ function scannedUnsupportedNoContentDecision(input) {
     caller: "worker"
   });
   return releaseDecisionWithReason(safeScanned.decision === "allow" ? { ...safeScanned, allowedText: input.safeUnsupportedDraft } : safeScanned, input.reason);
+}
+function withSecureLocalContextGate(decision, facts, pack, releaseSecureContent) {
+  if (decision.decision !== "allow" && decision.decision !== "redact")
+    return decision;
+  if (!packHasSecureLocal(pack))
+    return decision;
+  if (!releaseSecureContent) {
+    return {
+      decision: "needs_approval",
+      reasons: [
+        "secure_local_context_uncited_requires_approval",
+        ...decision.reasons.filter((reason) => reason !== "release_gate_passed")
+      ],
+      requiredApproval: "s4_release"
+    };
+  }
+  if (facts.some((fact) => fact.sensitivity.trustDomain === "secure_local"))
+    return decision;
+  return releaseDecisionWithReason(decision, "secure_local_context_uncited_derivative_allowed");
 }
 function releaseDecisionWithReason(decision, reason) {
   return {
