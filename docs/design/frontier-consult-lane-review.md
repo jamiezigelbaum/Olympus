@@ -139,3 +139,22 @@ Endpoint custody (owner-asserted locality); numeric token-run length and byte bo
 No guarantee against timing or content correlation; no confidentiality from the inference provider for what is sent; no recovery of what a hosted caller already saw (the original question and its timing); no end-to-end censorship or capture resistance and no guaranteed withdrawal; no trustless proof setup; no attach-only way to get isolation and status through the inference API.
 
 Not verified by this reviewer: the original post (taken from the brief), the vault's current owner and time-to-live, current fees and anonymity-set size, and the private answer panel's code.
+
+## E. Revision 5 submitted, awaiting adversarial review (2026-10-05)
+
+Revision 5 is not yet reviewed. It rewrites track A around the ChatGPT private answer panel after owner decisions of 2026-10-05: automatic consults once a route is set up (approval only in opt-in strict mode); the outbound gate as the only pre-send check; the baseline answer exactly as fast as today; no default spending cap with costs stated up front; vocabulary packs per configured language with Brazilian Portuguese shipped; zkAPI labelled "route not verified" on macOS until the owner decides on the recommended daemon fork (prototype done); consult records as ordinary Private items.
+
+How it answers section D: blocker 1 is met on the panel path, where the Private result stays sealed to the panel, and is carried as a precondition of the later OpenClaw stage. Blocker 2 is unchanged in substance (throwaway Tor per consult, shipped in Z1) and the strong label stays unproduced until route verification (§Z.6). Blocker 3: the strong label still requires all three layers.
+
+Questions a reviewer should press:
+
+1. Whether the follow-up poll design (fixed schedule, fixed-size fresh seals) really makes relay-visible traffic independent of the gate verdict and the consult outcome, and what the 30-minute job lifetime and the stored question add to exposure.
+2. Whether the writer seeing only the question, baseline answer and gaps, while the gate compares against the full evidence snapshot, is sound.
+3. Whether the rewrite as a panel-only composer, outside `Analyst.analyze`, honestly leaves the `Analyst` contract unchanged in meaning as well as in type.
+4. Whether preemption of consult work can delay a fresh baseline in practice (the abort-to-free latency is unmeasured).
+5. Whether releasing the zkAPI reply before settlement, and warming the route during the writer, are free of privacy cost as claimed.
+6. Whether a consult reply stored as a searchable Private item opens an injection path into later answers.
+7. Whether every eligibility-guard site (G1–G7) is placed immediately before the submission or release it protects.
+8. Whether the recommended daemon fork (§Z.6; prototype in `~/Code/Claude/zkapi-fork/`, awaiting owner decision) proves what the proposed label "confined to this session's Tor listener" says, given one sandbox profile over the whole process tree, the `localhost`-only host filter, the deprecated `sandbox-exec`, and the pre-existing bridge-token exposure on the wallet API port.
+
+Unmeasured, and stated as such in the proposal: writer and rewrite durations, gate speed on real packs, abort-to-free latency, every zkAPI stage time.
