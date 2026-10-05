@@ -127,9 +127,10 @@ describe('every read item is judged by the private model before it may be Person
 });
 
 describe('the sniffer prompt asks one generic question', () => {
-  test('a person\'s own information versus general or reference material, with names as signals', () => {
-    expect(SNIFFER_SYSTEM_PROMPT).toContain('OWN private information');
-    expect(SNIFFER_SYSTEM_PROMPT).toContain('general, reference or published material');
+  test('a person\'s own records versus work, reference and their public-facing self, with names as signals', () => {
+    expect(SNIFFER_SYSTEM_PROMPT).toContain('own RECORDS, or their private inner life');
+    expect(SNIFFER_SYSTEM_PROMPT).toContain('PERSONAL, even when it is about the owner or names them');
+    expect(SNIFFER_SYSTEM_PROMPT).toContain('health or wellness material that is not one person\'s record');
     expect(SNIFFER_SYSTEM_PROMPT).toContain('the names (title and folder path) count');
     expect(SNIFFER_CATEGORIES).toContain('reference');
     const prompt = buildSnifferBatchPrompt('content', [{ i: 1, material: 'Names: a.pdf\nExcerpt: text' }]);

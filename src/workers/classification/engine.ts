@@ -307,7 +307,6 @@ const SECRET_FINDING_TYPES = new Set([
   'slack_token',
   'api_secret_token',
   'credential_assignment',
-  'explicit_s5_marker',
 ]);
 
 const FINANCIAL_STRONG_TERMS = [

@@ -81,13 +81,15 @@ function secretText(n: number): string {
   const header = ['-----BEGIN ', 'RSA PRIVATE', ' KEY-----'].join('');
   const token = ['sk', '-', 'evalfixture'.repeat(3)].join('');
   const assignment = ['pass', 'word', ' = ', 'correcthorse', 'battery42'].join('');
-  const marker = ['highly ', 'confidential'].join('');
+  // A 'highly confidential' or 'do not distribute' stamp is not a secret
+  // (owner ruling 2026-10-05): the fifth case is a real credential instead.
+  const slack = ['xo', 'xb-', '1234567890', '-', 'evalfixturetoken'].join('');
   return [
     `The staging deploy uses ${aws} for the bucket.`,
     `${header}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n`,
     `Here is the key for the build bot: ${token}`,
     `Router login ${assignment}`,
-    `Board memo, ${marker}: acquisition terms attached.`,
+    `The release bot posts with ${slack} in the deploy channel.`,
   ][n % 5]!;
 }
 

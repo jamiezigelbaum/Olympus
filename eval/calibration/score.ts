@@ -9,13 +9,18 @@
 // owner's privacy words and folder rules are read (never written) so the
 // classifier sees what the live one sees.
 //
-//   bun eval/calibration/score.ts [--dir DIR] [--gguf PATH --server PATH] [--no-gpu] [--limit N]
+//   bun eval/calibration/score.ts [--dir DIR] [--split dev|test] [--gguf PATH --server PATH] [--no-gpu] [--limit N]
+//
+// --split scores one fixed half of the labels (by a hash of each item's id):
+// tune on `dev`, judge the result on `test`, so a change is not fitted to the
+// very answers it is scored on.
 //
 // Reports Private precision (of what Olympus made Private, the share the owner
 // says is private), Private recall, how many items were still held when the
 // model was done, and every miss by file name (names only, never text). Held
 // items count as Private, because that is what the owner experiences.
 
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -63,7 +68,12 @@ function installedModel(): { gguf: string; server: string } {
 async function main(): Promise<void> {
   const sample = readSample(dir);
   const labels = readLabels(dir).labels;
+  const split = flag('--split');
+  if (split !== undefined && split !== 'dev' && split !== 'test') throw new Error('--split is dev or test.');
+  const inSplit = (id: string) => split === undefined
+    || ((createHash('sha256').update(id).digest()[0]! % 2 === 0) === (split === 'dev'));
   const labeled = sample.items
+    .filter((item) => inSplit(item.id))
     .filter((item) => labels[item.id]?.label === 'personal' || labels[item.id]?.label === 'private')
     .slice(0, Number(flag('--limit') ?? Number.MAX_SAFE_INTEGER));
   const unsure = sample.items.filter((item) => labels[item.id]?.label === 'unsure').length;
@@ -84,6 +94,22 @@ async function main(): Promise<void> {
     },
     waitForInstall: true,
   });
+
+  // What the model said, per call: matched to items by name for the misses list.
+  const exchanges: Array<{ prompt: string; text: string }> = [];
+  const recordingModel: typeof model = {
+    ...model,
+    async complete(request) {
+      const result = await model.complete(request);
+      exchanges.push({ prompt: request.prompt, text: result.text });
+      return result;
+    },
+  };
+  const said = (name: string): string => exchanges
+    .filter((exchange) => exchange.prompt.includes(name))
+    .map((exchange) => (/"tier"\s*:\s*"(\w+)"[^}]*"category"\s*:\s*"(\w+)"/.exec(exchange.text) ?? []).slice(1).join('/'))
+    .filter(Boolean)
+    .join(', ') || 'not asked';
 
   const ledger = new TierLedger({ dbPath: ':memory:' });
   const store = new TierSnifferStore({ dbPath: ':memory:' });
@@ -106,7 +132,7 @@ async function main(): Promise<void> {
       const report = await runSnifferPass({
         targets: [{ ledger, sniffer: store }],
         lane,
-        model,
+        model: recordingModel,
         maxCallsPerPass: 10_000,
         pendingPageSize: 5_000,
         ...(ownerContext ? { ownerContext } : {}),
@@ -126,7 +152,8 @@ async function main(): Promise<void> {
         owner: labels[item.id]!.label as 'personal' | 'private',
         olympus: held ? 'held' : madePrivate ? 'private' : 'personal',
         madePrivate,
-        why: record.reasons.filter((reason) => reason.startsWith('content:') || reason.startsWith('metadata:owner_rule')),
+        why: record.reasons.filter((reason) => reason !== 'metadata:default:personal'),
+        modelSaid: said(item.name),
       };
     });
     const tp = rows.filter((row) => row.madePrivate && row.owner === 'private').length;
@@ -139,18 +166,18 @@ async function main(): Promise<void> {
     const held = rows.filter((row) => row.olympus === 'held').length;
 
     const summary = [
-      `Labeled: ${labeled.length} (${rows.filter((row) => row.owner === 'private').length} Private, ${rows.filter((row) => row.owner === 'personal').length} Personal; ${unsure} not sure, left out).`,
+      `${split ? `Split: ${split}. ` : ''}Labeled: ${labeled.length} (${rows.filter((row) => row.owner === 'private').length} Private, ${rows.filter((row) => row.owner === 'personal').length} Personal; ${unsure} not sure, left out).`,
       `Private precision: ${pct(precision)} (target 95%) — ${fp.length} Personal file(s) made Private.`,
       `Private recall:    ${pct(recall)} (target 99%) — ${fn.length} Private file(s) left Personal.`,
       `Still held when the model was done: ${held}. Model calls: ${calls}. Time: ${Math.round((Date.now() - startedAt) / 1000)} s.`,
     ];
     const misses = [
-      ...fp.map((row) => `  made Private, owner says Personal: ${row.file}  [${row.olympus}; ${row.why.join(' ')}]`),
-      ...fn.map((row) => `  left Personal, owner says Private: ${row.file}  [${row.why.join(' ')}]`),
+      ...fp.map((row) => `  made Private, owner says Personal: ${row.file}  [${row.olympus}; model: ${row.modelSaid}; ${row.why.join(' ')}]`),
+      ...fn.map((row) => `  left Personal, owner says Private: ${row.file}  [model: ${row.modelSaid}; ${row.why.join(' ')}]`),
     ];
     process.stdout.write(`\n${summary.join('\n')}\n${misses.length ? `\nMisses:\n${misses.join('\n')}\n` : '\nNo misses.\n'}`);
-    const resultPath = join(dir, `score-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-    writeFileSync(resultPath, JSON.stringify({ at: new Date().toISOString(), precision, recall, held, calls, rows }, null, 1), { mode: 0o600 });
+    const resultPath = join(dir, `score-${split ?? 'all'}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+    writeFileSync(resultPath, JSON.stringify({ at: new Date().toISOString(), split: split ?? 'all', precision, recall, held, calls, rows }, null, 1), { mode: 0o600 });
     process.stdout.write(`\nFull result: ${resultPath}\n`);
   } finally {
     store.close();
