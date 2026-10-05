@@ -1,17 +1,19 @@
-// Outside-help settings, the internal mechanism (design frontier-consult-lane
+// Outside-help settings, the internal reader (design frontier-consult-lane
 // §A.9, stage C3). Every test uses its own temporary HOME; nothing here may
 // touch the real ~/.olympus.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
-  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -20,15 +22,15 @@ import { join, relative } from 'node:path';
 import {
   CONSULT_SETTINGS_MAX_BYTES,
   DEFAULT_CONSULT_SETTINGS,
+  __consultSettingsTestHooks,
   bindConsultJobPolicy,
   consultGateOptionsFromSettings,
   consultOutsideHelpEnabled,
   consultSettingsPath,
   parseConsultSettings,
+  parseConsultSettingsText,
   readConsultSettings,
   recheckConsultJobPolicy,
-  writeConsultSettings,
-  type ConsultSettingsChange,
 } from '../src/core/consult-settings.ts';
 import { operations } from '../src/core/operations.ts';
 
@@ -42,6 +44,7 @@ function tempHome(): string {
 }
 
 afterEach(() => {
+  __consultSettingsTestHooks.afterOpen = undefined;
   for (const home of homes.splice(0)) {
     try {
       chmodSync(join(home, '.olympus', 'consult.json'), 0o600);
@@ -61,30 +64,28 @@ const VALID = {
   strict: false,
 };
 
-const ON: ConsultSettingsChange = {
-  enabled: true,
-  languages: ['en', 'pt-BR'],
-  domains: { units: true, countries: true, medicines: true, medicineBrands: false },
-  strict: false,
-};
-
 function settingsFile(home: string): string {
   return join(home, '.olympus', 'consult.json');
 }
 
-function placeFile(home: string, text: string, mode = 0o600): string {
+function placeFile(home: string, content: string | Buffer, mode = 0o600): string {
   mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
   const path = settingsFile(home);
-  writeFileSync(path, text, { mode });
+  writeFileSync(path, content, { mode });
   chmodSync(path, mode);
   return path;
+}
+
+function placeSettings(home: string, settings: Record<string, unknown>): void {
+  placeFile(home, JSON.stringify(settings));
 }
 
 describe('parseConsultSettings', () => {
   test('accepts exactly the schema', () => {
     expect(parseConsultSettings(VALID)).toEqual(VALID as never);
     expect(parseConsultSettings({ ...VALID, revision: 0, enabled: false, strict: true, languages: ['de', 'it', 'nl', 'fr', 'es', 'pt-PT'] })).toBeDefined();
-    expect(Object.isFrozen(parseConsultSettings(VALID))).toBe(true);
+    const parsed = parseConsultSettings(VALID)!;
+    expect(Object.isFrozen(parsed) && Object.isFrozen(parsed.languages) && Object.isFrozen(parsed.domains)).toBe(true);
   });
 
   const rejected: Array<[string, unknown]> = [
@@ -120,8 +121,34 @@ describe('parseConsultSettings', () => {
   }
 });
 
+describe('parseConsultSettingsText rejects duplicate keys before the schema', () => {
+  const body = (inner: string) => `{"v":1,"revision":3,${inner},"languages":["en"],"domains":{"units":true,"countries":false,"medicines":true,"medicineBrands":false},"strict":false}`;
+
+  test('a well-formed document is valid', () => {
+    expect(parseConsultSettingsText(body('"enabled":true')).state).toBe('valid');
+  });
+  test('"enabled":false,"enabled":true is refused, not read as on', () => {
+    const read = parseConsultSettingsText(body('"enabled":false,"enabled":true'));
+    expect(read).toMatchObject({ state: 'invalid', reason: 'duplicate_key' });
+    expect(consultOutsideHelpEnabled(read)).toBe(false);
+  });
+  test('an escaped spelling of the same key is a duplicate', () => {
+    expect(parseConsultSettingsText(body('"enabled":false,"\\u0065nabled":true'))).toMatchObject({ reason: 'duplicate_key' });
+  });
+  test('a duplicate inside domains is refused', () => {
+    const text = '{"v":1,"revision":3,"enabled":true,"languages":["en"],"domains":{"units":true,"units":false,"countries":false,"medicines":true,"medicineBrands":false},"strict":false}';
+    expect(parseConsultSettingsText(text)).toMatchObject({ reason: 'duplicate_key' });
+  });
+  test('the same key in different objects, and key-like strings in values, are not duplicates', () => {
+    expect(parseConsultSettingsText('{"a":{"x":1},"b":{"x":2},"c":["a","a"],"d":"a,\\"a\\""}')).toMatchObject({ reason: 'invalid_shape' });
+  });
+  test('malformed JSON is malformed_json', () => {
+    expect(parseConsultSettingsText('{"v":1,')).toMatchObject({ reason: 'malformed_json' });
+  });
+});
+
 describe('readConsultSettings fails closed', () => {
-  test('absent file, absent directory and an environment without HOME read as off', () => {
+  test('absent file and an environment without HOME read as off', () => {
     const home = tempHome();
     expect(readConsultSettings({ env: { HOME: home } })).toEqual({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
     expect(readConsultSettings({ env: {} })).toEqual({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
@@ -130,19 +157,31 @@ describe('readConsultSettings fails closed', () => {
 
   test('a valid file with outside help on is the only thing that turns it on', () => {
     const home = tempHome();
-    placeFile(home, JSON.stringify(VALID));
+    placeSettings(home, VALID);
     const read = readConsultSettings({ env: { HOME: home } });
     expect(read.state).toBe('valid');
     expect(consultOutsideHelpEnabled(read)).toBe(true);
     expect(consultGateOptionsFromSettings(read.settings)).toEqual({ languages: ['en', 'pt-BR'], domains: VALID.domains });
   });
 
+  test('reads at each use: a change is visible to the next read with no restart', () => {
+    const home = tempHome();
+    const location = { env: { HOME: home } };
+    expect(consultOutsideHelpEnabled(readConsultSettings(location))).toBe(false);
+    placeSettings(home, VALID);
+    expect(consultOutsideHelpEnabled(readConsultSettings(location))).toBe(true);
+    placeSettings(home, { ...VALID, revision: 4, enabled: false });
+    expect(readConsultSettings(location)).toMatchObject({ state: 'valid', settings: { revision: 4, enabled: false } });
+  });
+
   const invalidCases: Array<[string, (home: string) => void, string]> = [
     ['malformed JSON', (home) => placeFile(home, '{"v":1,'), 'malformed_json'],
-    ['an unknown key', (home) => placeFile(home, JSON.stringify({ ...VALID, extra: 1 })), 'invalid_shape'],
+    ['an unknown key', (home) => placeSettings(home, { ...VALID, extra: 1 }), 'invalid_shape'],
+    ['a duplicated key', (home) => placeFile(home, JSON.stringify({ ...VALID, enabled: false }).replace('"enabled":false', '"enabled":false,"enabled":true')), 'duplicate_key'],
+    ['invalid UTF-8', (home) => placeFile(home, Buffer.concat([Buffer.from('{"v":1,"x":"'), Buffer.from([0xc3, 0x28]), Buffer.from('"}')])), 'invalid_utf8'],
     ['a group-writable file', (home) => placeFile(home, JSON.stringify(VALID), 0o620), 'insecure_permissions'],
     ['a world-writable file', (home) => placeFile(home, JSON.stringify(VALID), 0o602), 'insecure_permissions'],
-    ['an oversized file', (home) => placeFile(home, JSON.stringify({ ...VALID, pad: 'x'.repeat(CONSULT_SETTINGS_MAX_BYTES) })), 'too_large'],
+    ['an oversized file', (home) => placeSettings(home, { ...VALID, pad: 'x'.repeat(CONSULT_SETTINGS_MAX_BYTES) }), 'too_large'],
     ['a directory', (home) => mkdirSync(settingsFile(home), { recursive: true }), 'not_a_regular_file'],
     ['a symlink to a valid file', (home) => {
       const target = join(home, 'elsewhere.json');
@@ -163,101 +202,86 @@ describe('readConsultSettings fails closed', () => {
     });
   }
 
+  test('a FIFO is refused without blocking', () => {
+    const home = tempHome();
+    mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
+    const made = spawnSync('mkfifo', ['-m', '600', settingsFile(home)]);
+    if (made.status !== 0) throw new Error('mkfifo unavailable');
+    // No writer ever opens the FIFO: a blocking open or read would hang here.
+    expect(readConsultSettings({ env: { HOME: home } })).toMatchObject({ state: 'invalid', reason: 'not_a_regular_file' });
+  });
+
   test('an unreadable file reads as invalid, never throws', () => {
     if (typeof process.getuid === 'function' && process.getuid() === 0) return; // root reads anything
     const home = tempHome();
     placeFile(home, JSON.stringify(VALID), 0o000);
     expect(readConsultSettings({ env: { HOME: home } })).toMatchObject({ state: 'invalid', reason: 'unreadable' });
   });
+
+  test('path resolution failures stay inside the fail-closed boundary', () => {
+    const env = Object.defineProperty({}, 'HOME', { get() { throw new Error('no home for you'); } }) as Record<string, string | undefined>;
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'invalid', reason: 'unreadable', settings: DEFAULT_CONSULT_SETTINGS });
+  });
+});
+
+describe('the file examined is the file read', () => {
+  test('swapping the path after open does not change what is read', () => {
+    const home = tempHome();
+    placeSettings(home, { ...VALID, enabled: false });
+    const replacement = join(home, 'replacement.json');
+    writeFileSync(replacement, JSON.stringify(VALID), { mode: 0o600 });
+    __consultSettingsTestHooks.afterOpen = (path) => renameSync(replacement, path);
+    // The descriptor still names the original (off) file.
+    expect(readConsultSettings({ env: { HOME: home } })).toMatchObject({ state: 'valid', settings: { enabled: false } });
+    __consultSettingsTestHooks.afterOpen = undefined;
+    expect(readConsultSettings({ env: { HOME: home } })).toMatchObject({ state: 'valid', settings: { enabled: true } });
+  });
+
+  test('swapping in an insecure file after open is judged by the original descriptor', () => {
+    const home = tempHome();
+    placeSettings(home, VALID);
+    const replacement = join(home, 'replacement.json');
+    writeFileSync(replacement, JSON.stringify(VALID));
+    chmodSync(replacement, 0o666);
+    __consultSettingsTestHooks.afterOpen = (path) => renameSync(replacement, path);
+    expect(readConsultSettings({ env: { HOME: home } }).state).toBe('valid');
+    __consultSettingsTestHooks.afterOpen = undefined;
+    expect(readConsultSettings({ env: { HOME: home } })).toMatchObject({ reason: 'insecure_permissions' });
+  });
+
+  test('a file that grows past the limit after open is too large', () => {
+    const home = tempHome();
+    placeSettings(home, VALID);
+    __consultSettingsTestHooks.afterOpen = (path) => appendFileSync(path, ' '.repeat(CONSULT_SETTINGS_MAX_BYTES + 10));
+    expect(readConsultSettings({ env: { HOME: home } })).toMatchObject({ state: 'invalid', reason: 'too_large' });
+  });
 });
 
 describe('settings location honours the injected HOME', () => {
-  test('the path comes from env.HOME, never the process owner\'s home', () => {
+  test('the path comes from env.HOME with no operating-system fallback', () => {
     const home = tempHome();
     expect(consultSettingsPath({ HOME: home })).toBe(join(home, '.olympus', 'consult.json'));
     expect(consultSettingsPath({ HOME: '  ' })).toBeUndefined();
     expect(consultSettingsPath({})).toBeUndefined();
   });
-
-  test('a write without a HOME refuses instead of falling back', () => {
-    expect(() => writeConsultSettings({ env: {} }, 0, ON)).toThrow('no HOME');
-  });
-});
-
-describe('writeConsultSettings', () => {
-  test('creates an owner-only file in an owner-only directory, atomically, at revision 1', () => {
-    const home = tempHome();
-    const result = writeConsultSettings({ env: { HOME: home } }, 0, ON);
-    expect(result).toMatchObject({ ok: true, settings: { revision: 1, enabled: true } });
-    const path = settingsFile(home);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(join(home, '.olympus')).mode & 0o777).toBe(0o700);
-    // Only the file itself remains: no temp file and no lease lockfile.
-    expect(readdirSync(join(home, '.olympus'))).toEqual(['consult.json']);
-    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ v: 1, revision: 1, ...ON });
-  });
-
-  test('reads at each use: a change is visible to the next read with no restart', () => {
-    const home = tempHome();
-    const location = { env: { HOME: home } };
-    expect(consultOutsideHelpEnabled(readConsultSettings(location))).toBe(false);
-    writeConsultSettings(location, 0, ON);
-    expect(consultOutsideHelpEnabled(readConsultSettings(location))).toBe(true);
-    writeConsultSettings(location, 1, { ...ON, enabled: false });
-    expect(readConsultSettings(location)).toMatchObject({ state: 'valid', settings: { revision: 2, enabled: false } });
-  });
-
-  test('compare-and-swap: a stale revision is refused and leaves the file untouched', () => {
-    const home = tempHome();
-    const location = { env: { HOME: home } };
-    expect(writeConsultSettings(location, 0, ON).ok).toBe(true);
-    const before = readFileSync(settingsFile(home), 'utf8');
-    expect(writeConsultSettings(location, 0, { ...ON, enabled: false })).toEqual({ ok: false, reason: 'revision_conflict', currentRevision: 1 });
-    expect(writeConsultSettings(location, 5, { ...ON, enabled: false })).toEqual({ ok: false, reason: 'revision_conflict', currentRevision: 1 });
-    expect(readFileSync(settingsFile(home), 'utf8')).toBe(before);
-    expect(writeConsultSettings(location, 1, { ...ON, enabled: false })).toMatchObject({ ok: true, settings: { revision: 2 } });
-  });
-
-  test('never overwrites an invalid file', () => {
-    const home = tempHome();
-    placeFile(home, '{"v":1,"enabled":true}');
-    expect(writeConsultSettings({ env: { HOME: home } }, 0, ON)).toEqual({ ok: false, reason: 'current_invalid', invalidReason: 'invalid_shape' });
-    expect(readFileSync(settingsFile(home), 'utf8')).toBe('{"v":1,"enabled":true}');
-  });
-
-  test('replaces an existing file with owner-only permissions', () => {
-    const home = tempHome();
-    placeFile(home, JSON.stringify({ ...VALID, revision: 4 }), 0o644);
-    expect(writeConsultSettings({ env: { HOME: home } }, 4, ON)).toMatchObject({ ok: true, settings: { revision: 5 } });
-    expect(statSync(settingsFile(home)).mode & 0o777).toBe(0o600);
-  });
-
-  test('refuses a change that is not valid settings, writing nothing', () => {
-    const home = tempHome();
-    const location = { env: { HOME: home } };
-    expect(() => writeConsultSettings(location, 0, { ...ON, languages: [] })).toThrow('not valid');
-    expect(() => writeConsultSettings(location, 0, { ...ON, languages: ['xx' as never] })).toThrow('not valid');
-    expect(() => writeConsultSettings(location, -1, ON)).toThrow('non-negative');
-    expect(existsSync(settingsFile(home))).toBe(false);
-  });
 });
 
 describe('per-job binding', () => {
-  test('a job keeps the policy it bound; final authorization refuses once outside help is off', () => {
+  test('a job keeps the policy it bound and authorizes only at that revision', () => {
     const home = tempHome();
     const location = { env: { HOME: home } };
-    writeConsultSettings(location, 0, ON);
+    placeSettings(home, VALID);
     const policy = bindConsultJobPolicy(readConsultSettings(location));
-    expect(policy).toEqual({ settingsRevision: 1, outsideHelp: true, languages: ['en', 'pt-BR'], domains: ON.domains, strict: false });
-    expect(Object.isFrozen(policy)).toBe(true);
+    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false });
+    expect(Object.isFrozen(policy) && Object.isFrozen(policy.languages) && Object.isFrozen(policy.domains)).toBe(true);
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
 
-    // A later change does not alter the bound policy.
-    writeConsultSettings(location, 1, { ...ON, languages: ['en'] });
+    // A later change does not alter the bound policy, and it refuses.
+    placeSettings(home, { ...VALID, revision: 4, languages: ['en'] });
     expect(policy.languages).toEqual(['en', 'pt-BR']);
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
 
-    writeConsultSettings(location, 2, { ...ON, enabled: false });
+    placeSettings(home, { ...VALID, revision: 5, enabled: false });
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_off' });
 
     rmSync(settingsFile(home));
@@ -267,25 +291,31 @@ describe('per-job binding', () => {
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_invalid' });
   });
 
+  test('turning outside help off and on again between bind and recheck refuses', () => {
+    const home = tempHome();
+    const location = { env: { HOME: home } };
+    placeSettings(home, VALID);
+    const policy = bindConsultJobPolicy(readConsultSettings(location));
+    placeSettings(home, { ...VALID, revision: 4, enabled: false });
+    placeSettings(home, { ...VALID, revision: 5, enabled: true });
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
+  });
+
   test('a job bound while outside help was off never consults, even if it is turned on later', () => {
     const home = tempHome();
     const location = { env: { HOME: home } };
     const policy = bindConsultJobPolicy(readConsultSettings(location));
     expect(policy).toMatchObject({ settingsRevision: 0, outsideHelp: false });
-    writeConsultSettings(location, 0, ON);
+    placeSettings(home, VALID);
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'bound_off' });
   });
 });
 
 // Design §A.9: changed only on the Mac, never from ChatGPT, an agent tool or
-// the relay. Until the Mac dashboard enable path (C5) lands, nothing calls the
-// writer at all; the hosted-agent surfaces must never import the module.
-describe('nothing outside the Mac can change the settings', () => {
-  const WRITER_SYMBOLS = ['writeConsultSettings'];
+// the relay. This stage ships no writer at all, and only doctor imports the
+// settings module.
+describe('the settings module stays off the hosted surfaces', () => {
   const SETTINGS_MODULE = 'src/core/consult-settings.ts';
-  /** Files allowed to call the writer. Empty until C5's Mac dashboard path. */
-  const WRITER_CALLERS: readonly string[] = [];
-  /** Files allowed to import the settings module at all. */
   const SETTINGS_IMPORTERS: readonly string[] = ['src/core/doctor.ts'];
 
   function sourceFiles(dir: string): string[] {
@@ -304,33 +334,11 @@ describe('nothing outside the Mac can change the settings', () => {
     return out;
   }
 
-  const sources = [...sourceFiles('src'), ...sourceFiles('connect-relay'), ...sourceFiles('exchange'), ...sourceFiles('scripts')];
-
-  test('no source file other than the module references the writer', () => {
-    const offenders = sources.filter((file) => file !== SETTINGS_MODULE
-      && WRITER_SYMBOLS.some((symbol) => readFileSync(join(repoRoot, file), 'utf8').includes(symbol)))
-      .filter((file) => !WRITER_CALLERS.includes(file));
-    expect(offenders).toEqual([]);
-  });
-
   test('only the allowed modules import the settings module', () => {
+    const sources = [...sourceFiles('src'), ...sourceFiles('connect-relay'), ...sourceFiles('exchange'), ...sourceFiles('scripts')];
     const importers = sources.filter((file) => file !== SETTINGS_MODULE
       && /from ['"][./]*(?:core\/)?consult-settings(?:\.ts)?['"]/.test(readFileSync(join(repoRoot, file), 'utf8')));
     expect(importers.sort()).toEqual([...SETTINGS_IMPORTERS].sort());
-  });
-
-  test('MCP, setup tools, the ChatGPT surface and the relay never reach the settings module', () => {
-    const hostedSurfaces = sources.filter((file) =>
-      file.startsWith('src/mcp/')
-      || file.startsWith('connect-relay/')
-      || file.startsWith('exchange/')
-      || file.startsWith('src/workers/chatgpt/')
-      || file.startsWith('src/workers/remote-')
-      || file.startsWith('src/core/remote-')
-      || /^src\/core\/setup[^/]*\.ts$/.test(file));
-    expect(hostedSurfaces.length).toBeGreaterThan(0);
-    const offenders = hostedSurfaces.filter((file) => readFileSync(join(repoRoot, file), 'utf8').includes('consult-settings'));
-    expect(offenders).toEqual([]);
   });
 
   test('no registered operation (every MCP, native, CLI and remote tool) is a consult settings operation', () => {

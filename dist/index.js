@@ -15186,9 +15186,9 @@ function constantTimeStringEqual(actual, expected) {
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync12, mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname18, join as join22 } from "node:path";
-import { homedir as homedir15 } from "node:os";
+import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname17, join as join22 } from "node:path";
+import { homedir as homedir14 } from "node:os";
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -17447,11 +17447,8 @@ var UNIT_WORDS = new Set([
 ]);
 
 // src/core/consult-settings.ts
-init_atomic_file();
-import { lstatSync as lstatSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync16 } from "node:fs";
-import { homedir as homedir14 } from "node:os";
-import { dirname as dirname17, join as join21 } from "node:path";
-init_file_lease();
+import { closeSync as closeSync3, constants as constants3, fstatSync, openSync as openSync3, readSync } from "node:fs";
+import { join as join21 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var DEFAULT_CONSULT_SETTINGS = Object.freeze({
@@ -17465,15 +17462,11 @@ var DEFAULT_CONSULT_SETTINGS = Object.freeze({
 var TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
 var DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
 var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
-function consultSettingsPath(env) {
-  if (env === undefined)
-    return join21(process.env.HOME?.trim() || homedir14(), ".olympus", "consult.json");
+function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
   return home ? join21(home, ".olympus", "consult.json") : undefined;
 }
-function resolvePath3(location) {
-  return location.path ?? consultSettingsPath(location.env);
-}
+var __consultSettingsTestHooks = { afterOpen: undefined };
 function parseConsultSettings(value) {
   if (!isPlainObject(value))
     return;
@@ -17496,52 +17489,77 @@ function parseConsultSettings(value) {
     return;
   if (!DOMAIN_KEYS.every((key) => typeof domains[key] === "boolean"))
     return;
-  return freezeSettings({
+  return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
     enabled,
-    languages,
-    domains: Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key]])),
+    languages: Object.freeze([...languages]),
+    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key]]))),
     strict
   });
 }
-function readConsultSettings(location = {}) {
-  const path = resolvePath3(location);
-  if (path === undefined)
-    return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
-  let stats;
-  try {
-    stats = lstatSync3(path);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") {
-      return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
-    }
-    return invalid("unreadable");
-  }
-  if (!stats.isFile() || stats.isSymbolicLink())
-    return invalid("not_a_regular_file");
-  if ((stats.mode & 18) !== 0)
-    return invalid("insecure_permissions");
-  if (typeof process.getuid === "function" && stats.uid !== process.getuid())
-    return invalid("insecure_permissions");
-  if (stats.size > CONSULT_SETTINGS_MAX_BYTES)
-    return invalid("too_large");
-  let text;
-  try {
-    text = readFileSync16(path, "utf8");
-  } catch {
-    return invalid("unreadable");
-  }
-  if (Buffer.byteLength(text, "utf8") > CONSULT_SETTINGS_MAX_BYTES)
-    return invalid("too_large");
+function parseConsultSettingsText(text) {
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
     return invalid("malformed_json");
   }
+  if (hasDuplicateObjectKey(text))
+    return invalid("duplicate_key");
   const settings = parseConsultSettings(parsed);
   return settings ? { state: "valid", settings } : invalid("invalid_shape");
+}
+function readConsultSettings(location = {}) {
+  try {
+    const path = location.path ?? consultSettingsPath(location.env ?? process.env);
+    if (path === undefined)
+      return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
+    let descriptor;
+    try {
+      descriptor = openSync3(path, constants3.O_RDONLY | constants3.O_NOFOLLOW | constants3.O_NONBLOCK);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "ENOENT" || code === "ENOTDIR")
+        return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
+      if (code === "ELOOP" || code === "EMLINK")
+        return invalid("not_a_regular_file");
+      return invalid("unreadable");
+    }
+    try {
+      __consultSettingsTestHooks.afterOpen?.(path);
+      const stats = fstatSync(descriptor);
+      if (!stats.isFile())
+        return invalid("not_a_regular_file");
+      if ((stats.mode & 18) !== 0)
+        return invalid("insecure_permissions");
+      if (typeof process.getuid === "function" && stats.uid !== process.getuid())
+        return invalid("insecure_permissions");
+      if (stats.size > CONSULT_SETTINGS_MAX_BYTES)
+        return invalid("too_large");
+      const buffer = Buffer.alloc(CONSULT_SETTINGS_MAX_BYTES + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const read = readSync(descriptor, buffer, length, buffer.length - length, null);
+        if (read === 0)
+          break;
+        length += read;
+      }
+      if (length > CONSULT_SETTINGS_MAX_BYTES)
+        return invalid("too_large");
+      let text;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
+      } catch {
+        return invalid("invalid_utf8");
+      }
+      return parseConsultSettingsText(text);
+    } finally {
+      closeSync3(descriptor);
+    }
+  } catch {
+    return invalid("unreadable");
+  }
 }
 function consultGateOptionsFromSettings(settings) {
   return { languages: [...settings.languages], domains: { ...settings.domains } };
@@ -17549,12 +17567,36 @@ function consultGateOptionsFromSettings(settings) {
 function invalid(reason) {
   return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
 }
-function freezeSettings(settings) {
-  return Object.freeze({
-    ...settings,
-    languages: Object.freeze([...settings.languages]),
-    domains: Object.freeze({ ...settings.domains })
-  });
+function hasDuplicateObjectKey(text) {
+  const frames = [];
+  for (let index = 0;index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "{") {
+      frames.push({ keys: new Set, expectKey: true });
+    } else if (char === "[") {
+      frames.push({ keys: undefined, expectKey: false });
+    } else if (char === "}" || char === "]") {
+      frames.pop();
+    } else if (char === ",") {
+      const top = frames.at(-1);
+      if (top?.keys)
+        top.expectKey = true;
+    } else if (char === '"') {
+      let end = index + 1;
+      while (text[end] !== '"')
+        end += text[end] === "\\" ? 2 : 1;
+      const top = frames.at(-1);
+      if (top?.keys && top.expectKey) {
+        const key = JSON.parse(text.slice(index, end + 1));
+        if (top.keys.has(key))
+          return true;
+        top.keys.add(key);
+        top.expectKey = false;
+      }
+      index = end;
+    }
+  }
+  return false;
 }
 function isPlainObject(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -17572,7 +17614,7 @@ function errorCode(error) {
 
 // src/core/doctor.ts
 function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir15();
+  const home = env.HOME?.trim() || homedir14();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" ? inspectEngine({ homeDir: home }) : { installed: false, state: "not_loaded" };
   const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync12(workerServicePaths(process.platform, home).unitPath) : false;
@@ -17940,9 +17982,15 @@ async function consultVocabularyCheck(deps) {
   const settings = doctorConsultSettings(deps);
   const configured = settings.state === "valid";
   const status = deps.consultVocabularyStatus ? deps.consultVocabularyStatus() : consultVocabularyFileStatus(consultGateOptionsFromSettings(settings.settings), deps.env ?? process.env);
-  const missing = status.some((entry) => entry.state === "missing");
   const integrityFailure = status.some((entry) => entry.state !== "verified" && entry.state !== "missing");
-  const hint = integrityFailure ? "A vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/." : missing ? "A selected vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." : undefined;
+  const bundledAltered = status.some((entry) => entry.origin === "shipped" && entry.state !== "verified" && entry.state !== "missing");
+  const bundledMissing = status.some((entry) => entry.origin === "shipped" && entry.state === "missing");
+  const userPacks = status.filter((entry) => entry.origin === "user" && entry.state !== "verified").map((entry) => entry.id);
+  const hints = [
+    bundledAltered ? "A bundled vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/." : bundledMissing ? "A bundled vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." : undefined,
+    userPacks.length > 0 ? `The optional language pack${userPacks.length === 1 ? "" : "s"} ${userPacks.join(", ")} ${userPacks.length === 1 ? "is" : "are"} not installed or not intact, so words in that language stay refused. Install ${userPacks.length === 1 ? "it" : "them"} with scripts/install-consult-language-pack.ts (de or it) from an Olympus checkout.` : undefined
+  ].filter((part) => part !== undefined);
+  const hint = hints.length > 0 ? hints.join(" ") : undefined;
   return {
     name,
     ok: !integrityFailure,
@@ -18666,7 +18714,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join22(dirname18(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join22(dirname17(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -18689,7 +18737,7 @@ function readIngestionHealthState(path) {
   try {
     if (!existsSync12(path))
       return;
-    const parsed = JSON.parse(readFileSync17(path, "utf8"));
+    const parsed = JSON.parse(readFileSync16(path, "utf8"));
     const record = asRecord15(parsed);
     const sources = asRecord15(record.sources);
     const normalized = {};
@@ -18710,7 +18758,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync10(dirname18(path), { recursive: true });
+  mkdirSync9(dirname17(path), { recursive: true });
   writeFileSync6(path, `${JSON.stringify(state, null, 2)}
 `);
 }

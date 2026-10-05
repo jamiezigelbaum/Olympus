@@ -1,4 +1,4 @@
-// Outside-help (consult) settings: the internal mechanism only (design
+// Outside-help (consult) settings: the internal reader (design
 // docs/design/frontier-consult-lane.md, revision 7, §A.9, build stage C3).
 //
 // One small file, `~/.olympus/consult.json`:
@@ -8,26 +8,21 @@
 //    "strict": bool}
 //
 // - Read at every use, never cached, so a change needs no worker restart.
-// - The parser is strict: an unknown key, a missing key or a malformed value
-//   makes the whole file invalid. Absent, unreadable, insecure or invalid all
-//   mean outside help is OFF (fail closed).
-// - Writes are compare-and-swap on `revision`, under a cross-process lease,
-//   replacing the file atomically with owner-only permissions.
+// - The parser is strict: invalid UTF-8, a duplicated key, an unknown key, a
+//   missing key or a malformed value makes the whole file invalid. Absent,
+//   unreadable, insecure or invalid all mean outside help is OFF (fail closed).
 // - A job binds the settings current at its creation (`bindConsultJobPolicy`);
-//   final authorization re-reads the file and refuses if outside help was
-//   turned off (`recheckConsultJobPolicy`).
+//   final authorization re-reads the file and refuses unless it is still the
+//   same revision with outside help on (`recheckConsultJobPolicy`).
 //
-// Changed only on the Mac. Nothing on the ChatGPT, MCP, setup-tool or relay
-// surface may call the writer: a hosted agent must not be able to switch on
-// egress (test/consult-settings.test.ts holds that boundary). The Mac
-// dashboard enable path is stage C5, the public `olympus consult` command is
-// C8, and strict mode's approval step is C6; none of them exists yet, so no
-// user-facing path can turn outside help on.
+// This module only reads. The compare-and-swap writer lands with its first
+// caller, the Mac dashboard enable path (stage C5), in its own module; the
+// public `olympus consult` command is C8 and strict mode's approval step is
+// C6. Until then no path at all can turn outside help on. The settings are
+// changed only on the Mac, never from ChatGPT, an agent tool or the relay.
 
-import { lstatSync, mkdirSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   CONSULT_LANGUAGE_PACKS,
   DEFAULT_CONSULT_DOMAIN_PACKS,
@@ -36,7 +31,6 @@ import {
   type ConsultGateOptions,
   type ConsultLanguage,
 } from './consult-gate.ts';
-import { withFileLeaseSync } from './file-lease.ts';
 
 export const CONSULT_SETTINGS_VERSION = 1;
 /** A settings file is a few hundred bytes; anything far larger is not one. */
@@ -61,7 +55,9 @@ export type ConsultSettingsInvalidReason =
   | 'not_a_regular_file'
   | 'insecure_permissions'
   | 'too_large'
+  | 'invalid_utf8'
   | 'malformed_json'
+  | 'duplicate_key'
   | 'invalid_shape';
 
 export type ConsultSettingsRead =
@@ -83,35 +79,35 @@ const TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'str
 const DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS) as Array<keyof ConsultDomainPacks>;
 const LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS) as ConsultLanguage[];
 
+export interface ConsultSettingsLocation {
+  /** Explicit file path; wins over `env`. */
+  readonly path?: string;
+  /** Environment whose HOME locates the file; defaults to process.env. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}
+
 /**
- * `~/.olympus/consult.json` for the given environment. An injected
- * environment is honoured exactly: without a HOME in it there is no path
- * (callers then read "absent", outside help off) rather than a silent fall
- * back to the process owner's home. Only a caller that passes no environment
- * at all gets the process's own home.
+ * `<HOME>/.olympus/consult.json` from the given environment (process.env when
+ * none is given). There is no fallback to the operating system's idea of the
+ * home directory: without a HOME there is no path, and the settings read as
+ * absent, outside help off.
  */
-export function consultSettingsPath(env?: Readonly<Record<string, string | undefined>>): string | undefined {
-  if (env === undefined) return join(process.env.HOME?.trim() || homedir(), '.olympus', 'consult.json');
+export function consultSettingsPath(env: Readonly<Record<string, string | undefined>> = process.env): string | undefined {
   const home = env.HOME?.trim();
   return home ? join(home, '.olympus', 'consult.json') : undefined;
 }
 
-export interface ConsultSettingsLocation {
-  /** Explicit file path; wins over `env`. */
-  readonly path?: string;
-  /** Environment whose HOME locates the file. */
-  readonly env?: Readonly<Record<string, string | undefined>>;
-}
-
-function resolvePath(location: ConsultSettingsLocation): string | undefined {
-  return location.path ?? consultSettingsPath(location.env);
-}
+/**
+ * Test seam: called with the open descriptor's path after the file is opened
+ * and before it is examined, so a test can swap or grow the file in between.
+ */
+export const __consultSettingsTestHooks: { afterOpen: ((path: string) => void) | undefined } = { afterOpen: undefined };
 
 /**
- * Strict parse of a settings document. Returns undefined for anything that is
- * not exactly the schema: unknown or missing keys at either level, a version
- * other than 1, a revision that is not a non-negative safe integer, non-boolean
- * flags, an empty, duplicated or unknown language list.
+ * Strict schema check of a parsed settings document. Returns undefined for
+ * anything that is not exactly the schema: unknown or missing keys at either
+ * level, a version other than 1, a revision that is not a non-negative safe
+ * integer, non-boolean flags, an empty, duplicated or unknown language list.
  */
 export function parseConsultSettings(value: unknown): ConsultSettings | undefined {
   if (!isPlainObject(value)) return undefined;
@@ -126,54 +122,86 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
   if (new Set(languages).size !== languages.length) return undefined;
   if (!isPlainObject(domains) || !hasExactKeys(domains, DOMAIN_KEYS)) return undefined;
   if (!DOMAIN_KEYS.every((key) => typeof domains[key] === 'boolean')) return undefined;
-  return freezeSettings({
+  return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
     enabled,
-    languages: languages as ConsultLanguage[],
-    domains: Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key] as boolean])) as unknown as ConsultDomainPacks,
+    languages: Object.freeze([...languages]),
+    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key] as boolean])) as unknown as ConsultDomainPacks),
     strict,
   });
 }
 
 /**
- * Read the settings now. Never throws and never caches. Anything other than a
- * regular, owner-controlled file holding exactly the schema reads as outside
- * help off.
+ * Parse settings text: valid JSON with no object holding the same key twice
+ * (compared after escape decoding, at every depth), then the strict schema.
  */
-export function readConsultSettings(location: ConsultSettingsLocation = {}): ConsultSettingsRead {
-  const path = resolvePath(location);
-  if (path === undefined) return { state: 'absent', settings: DEFAULT_CONSULT_SETTINGS };
-  let stats: ReturnType<typeof lstatSync>;
-  try {
-    stats = lstatSync(path);
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT' || errorCode(error) === 'ENOTDIR') {
-      return { state: 'absent', settings: DEFAULT_CONSULT_SETTINGS };
-    }
-    return invalid('unreadable');
-  }
-  if (!stats.isFile() || stats.isSymbolicLink()) return invalid('not_a_regular_file');
-  // A file another local account could write would let that account switch on
-  // egress; a file owned by someone else is not this owner's choice.
-  if ((stats.mode & 0o022) !== 0) return invalid('insecure_permissions');
-  if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) return invalid('insecure_permissions');
-  if (stats.size > CONSULT_SETTINGS_MAX_BYTES) return invalid('too_large');
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    return invalid('unreadable');
-  }
-  if (Buffer.byteLength(text, 'utf8') > CONSULT_SETTINGS_MAX_BYTES) return invalid('too_large');
+export function parseConsultSettingsText(text: string): ConsultSettingsRead {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     return invalid('malformed_json');
   }
+  if (hasDuplicateObjectKey(text)) return invalid('duplicate_key');
   const settings = parseConsultSettings(parsed);
   return settings ? { state: 'valid', settings } : invalid('invalid_shape');
+}
+
+/**
+ * Read the settings now. Never throws and never caches. The file is opened
+ * once, without following a symlink and without blocking (a FIFO cannot hang
+ * it); type, owner, mode and size are checked on that descriptor, and at most
+ * one byte past the limit is read from the same descriptor. Anything other
+ * than a regular, owner-controlled file holding exactly the schema reads as
+ * outside help off.
+ */
+export function readConsultSettings(location: ConsultSettingsLocation = {}): ConsultSettingsRead {
+  try {
+    const path = location.path ?? consultSettingsPath(location.env ?? process.env);
+    if (path === undefined) return { state: 'absent', settings: DEFAULT_CONSULT_SETTINGS };
+    let descriptor: number;
+    try {
+      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === 'ENOENT' || code === 'ENOTDIR') return { state: 'absent', settings: DEFAULT_CONSULT_SETTINGS };
+      // ELOOP: the final component is a symlink, which is never followed.
+      if (code === 'ELOOP' || code === 'EMLINK') return invalid('not_a_regular_file');
+      return invalid('unreadable');
+    }
+    try {
+      __consultSettingsTestHooks.afterOpen?.(path);
+      const stats = fstatSync(descriptor);
+      if (!stats.isFile()) return invalid('not_a_regular_file');
+      // A file another local account could write would let that account
+      // switch on egress; a file owned by someone else is not this owner's.
+      if ((stats.mode & 0o022) !== 0) return invalid('insecure_permissions');
+      if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) return invalid('insecure_permissions');
+      if (stats.size > CONSULT_SETTINGS_MAX_BYTES) return invalid('too_large');
+      // Read to EOF but never past the limit plus one byte, so a file that
+      // grows after the size check is still caught.
+      const buffer = Buffer.alloc(CONSULT_SETTINGS_MAX_BYTES + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const read = readSync(descriptor, buffer, length, buffer.length - length, null);
+        if (read === 0) break;
+        length += read;
+      }
+      if (length > CONSULT_SETTINGS_MAX_BYTES) return invalid('too_large');
+      let text: string;
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, length));
+      } catch {
+        return invalid('invalid_utf8');
+      }
+      return parseConsultSettingsText(text);
+    } finally {
+      closeSync(descriptor);
+    }
+  } catch {
+    return invalid('unreadable');
+  }
 }
 
 /** True only for a valid file that turns outside help on. */
@@ -184,60 +212,6 @@ export function consultOutsideHelpEnabled(read: ConsultSettingsRead): boolean {
 /** The gate options the settings select (languages and domain packs). */
 export function consultGateOptionsFromSettings(settings: ConsultSettings): ConsultGateOptions {
   return { languages: [...settings.languages], domains: { ...settings.domains } };
-}
-
-export interface ConsultSettingsChange {
-  readonly enabled: boolean;
-  readonly languages: readonly ConsultLanguage[];
-  readonly domains: ConsultDomainPacks;
-  readonly strict: boolean;
-}
-
-export type ConsultSettingsWriteResult =
-  | { readonly ok: true; readonly settings: ConsultSettings }
-  | { readonly ok: false; readonly reason: 'revision_conflict'; readonly currentRevision: number }
-  | { readonly ok: false; readonly reason: 'current_invalid'; readonly invalidReason: ConsultSettingsInvalidReason };
-
-/**
- * Compare-and-swap write. Succeeds only when the file's current revision equals
- * `expectedRevision` (0 when there is no file); the new file carries
- * `expectedRevision + 1`. A file that exists but is invalid is never
- * overwritten. The check and the replacement run under one cross-process lease
- * and the file is replaced atomically, created owner-only (0600) inside an
- * owner-only directory.
- *
- * Internal: no ChatGPT, MCP, setup-tool or relay path may call this. The Mac
- * dashboard enable path (C5) will be its first caller.
- */
-export function writeConsultSettings(
-  location: ConsultSettingsLocation,
-  expectedRevision: number,
-  change: ConsultSettingsChange,
-): ConsultSettingsWriteResult {
-  const path = resolvePath(location);
-  if (path === undefined) throw new Error('Consult settings have no location: the environment has no HOME.');
-  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
-    throw new Error('Consult settings expectedRevision must be a non-negative integer.');
-  }
-  const next = parseConsultSettings({
-    v: CONSULT_SETTINGS_VERSION,
-    revision: expectedRevision + 1,
-    enabled: change.enabled,
-    languages: change.languages,
-    domains: change.domains,
-    strict: change.strict,
-  });
-  if (!next) throw new Error('Consult settings change is not valid.');
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  return withFileLeaseSync<ConsultSettingsWriteResult>(path, (lease) => {
-    const current = readConsultSettings({ path });
-    if (current.state === 'invalid') return { ok: false, reason: 'current_invalid', invalidReason: current.reason };
-    if (current.settings.revision !== expectedRevision) {
-      return { ok: false, reason: 'revision_conflict', currentRevision: current.settings.revision };
-    }
-    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}\n`));
-    return { ok: true, settings: next };
-  });
 }
 
 /**
@@ -265,17 +239,23 @@ export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolic
 
 export type ConsultJobPolicyRecheck =
   | { readonly ok: true }
-  | { readonly ok: false; readonly reason: 'bound_off' | 'settings_absent' | 'settings_invalid' | 'settings_off' };
+  | {
+    readonly ok: false;
+    readonly reason: 'bound_off' | 'settings_absent' | 'settings_invalid' | 'settings_off' | 'settings_stale';
+  };
 
 /**
- * Final authorization's settings check: the job must have bound outside help
- * on, and the file re-read now must still be valid with outside help on.
+ * Final authorization's settings check (design §A.8 step 2, test B5): the job
+ * must have bound outside help on, and the file re-read now must be valid,
+ * still on, and exactly the revision the job bound. Any change since the job
+ * was created, even one that turned outside help off and on again, refuses.
  */
 export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: ConsultSettingsRead): ConsultJobPolicyRecheck {
   if (!policy.outsideHelp) return { ok: false, reason: 'bound_off' };
   if (current.state === 'absent') return { ok: false, reason: 'settings_absent' };
   if (current.state === 'invalid') return { ok: false, reason: 'settings_invalid' };
   if (!current.settings.enabled) return { ok: false, reason: 'settings_off' };
+  if (current.settings.revision !== policy.settingsRevision) return { ok: false, reason: 'settings_stale' };
   return { ok: true };
 }
 
@@ -283,12 +263,38 @@ function invalid(reason: ConsultSettingsInvalidReason): ConsultSettingsRead {
   return { state: 'invalid', reason, settings: DEFAULT_CONSULT_SETTINGS };
 }
 
-function freezeSettings(settings: ConsultSettings): ConsultSettings {
-  return Object.freeze({
-    ...settings,
-    languages: Object.freeze([...settings.languages]),
-    domains: Object.freeze({ ...settings.domains }),
-  });
+/**
+ * Whether any object in already-valid JSON text names the same key twice.
+ * JSON.parse silently keeps the last one, so `"enabled":false,"enabled":true`
+ * would otherwise read as on. Keys are compared after escape decoding.
+ */
+function hasDuplicateObjectKey(text: string): boolean {
+  const frames: Array<{ keys: Set<string> | undefined; expectKey: boolean }> = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '{') {
+      frames.push({ keys: new Set(), expectKey: true });
+    } else if (char === '[') {
+      frames.push({ keys: undefined, expectKey: false });
+    } else if (char === '}' || char === ']') {
+      frames.pop();
+    } else if (char === ',') {
+      const top = frames.at(-1);
+      if (top?.keys) top.expectKey = true;
+    } else if (char === '"') {
+      let end = index + 1;
+      while (text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+      const top = frames.at(-1);
+      if (top?.keys && top.expectKey) {
+        const key = JSON.parse(text.slice(index, end + 1)) as string;
+        if (top.keys.has(key)) return true;
+        top.keys.add(key);
+        top.expectKey = false;
+      }
+      index = end;
+    }
+  }
+  return false;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

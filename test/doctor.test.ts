@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { runDoctor } from '../src/core/doctor.ts';
-import { writeConsultSettings } from '../src/core/consult-settings.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import {
@@ -221,6 +220,28 @@ describe('runDoctor', () => {
     expect(altered.detail).toContain('pack-1 hash_mismatch');
     expect(altered.hint).toContain('not intact');
   });
+  test('consult vocabulary: the hint follows each pack\'s origin', async () => {
+    const check = async (entries: Array<{ id: string; origin: 'shipped' | 'user'; state: 'verified' | 'missing' | 'hash_mismatch' }>) => checkByName((await runDoctor(doctorDeps({
+      config: defaultConfig(),
+      delphi: healthyDelphi(),
+      consultVocabularyStatus: () => entries,
+    }))).checks, 'consult_vocabulary');
+    // An optional user-installed pack (German, Italian): the install procedure, not a reinstall.
+    const userMissing = await check([{ id: 'en-esdb', origin: 'shipped', state: 'verified' }, { id: 'de-hunspell', origin: 'user', state: 'missing' }]);
+    expect(userMissing.ok).toBe(true);
+    expect(userMissing.hint).toContain('optional language pack de-hunspell');
+    expect(userMissing.hint).toContain('install-consult-language-pack.ts');
+    expect(userMissing.hint).not.toContain('Reinstall Olympus');
+    // A bundled pack: the install is damaged; repair by reinstalling.
+    const bundledMissing = await check([{ id: 'en-esdb', origin: 'shipped', state: 'missing' }]);
+    expect(bundledMissing.hint).toContain('bundled vocabulary pack is missing');
+    expect(bundledMissing.hint).toContain('Reinstall Olympus');
+    expect(bundledMissing.hint).not.toContain('install-consult-language-pack');
+    const bundledAltered = await check([{ id: 'en-esdb', origin: 'shipped', state: 'hash_mismatch' }, { id: 'it-hunspell', origin: 'user', state: 'missing' }]);
+    expect(bundledAltered.ok).toBe(false);
+    expect(bundledAltered.hint).toContain('not intact');
+    expect(bundledAltered.hint).toContain('optional language pack it-hunspell');
+  });
   test('consult settings: off, on and invalid are reported content-free from the injected HOME', async () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-doctor-consult-settings-'));
     try {
@@ -237,13 +258,15 @@ describe('runDoctor', () => {
       });
       expect(checkByName(checks, 'consult_vocabulary').detail).toContain('languages en (default)');
 
-      const written = writeConsultSettings({ env: { HOME: home } }, 0, {
+      mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, '.olympus', 'consult.json'), JSON.stringify({
+        v: 1,
+        revision: 1,
         enabled: true,
         languages: ['en', 'pt-BR'],
         domains: { units: true, countries: false, medicines: true, medicineBrands: false },
         strict: false,
-      });
-      expect(written.ok).toBe(true);
+      }), { mode: 0o600 });
       checks = await run();
       expect(checkByName(checks, 'consult_settings')).toEqual({
         name: 'consult_settings',

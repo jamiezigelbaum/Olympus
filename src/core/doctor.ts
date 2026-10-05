@@ -662,13 +662,24 @@ async function consultVocabularyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const status = deps.consultVocabularyStatus
     ? deps.consultVocabularyStatus()
     : consultVocabularyFileStatus(consultGateOptionsFromSettings(settings.settings), deps.env ?? process.env);
-  const missing = status.some((entry) => entry.state === 'missing');
   const integrityFailure = status.some((entry) => entry.state !== 'verified' && entry.state !== 'missing');
-  const hint = integrityFailure
-    ? 'A vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/.'
-    : missing
-      ? 'A selected vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/.'
-      : undefined;
+  // Bundled packs ship with Olympus, so a missing or altered one means the
+  // install is damaged. German and Italian are optional packs the owner builds
+  // locally; for those the fix is the install procedure, not a reinstall.
+  const bundledAltered = status.some((entry) => entry.origin === 'shipped' && entry.state !== 'verified' && entry.state !== 'missing');
+  const bundledMissing = status.some((entry) => entry.origin === 'shipped' && entry.state === 'missing');
+  const userPacks = status.filter((entry) => entry.origin === 'user' && entry.state !== 'verified').map((entry) => entry.id);
+  const hints = [
+    bundledAltered
+      ? 'A bundled vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/.'
+      : bundledMissing
+        ? 'A bundled vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/.'
+        : undefined,
+    userPacks.length > 0
+      ? `The optional language pack${userPacks.length === 1 ? '' : 's'} ${userPacks.join(', ')} ${userPacks.length === 1 ? 'is' : 'are'} not installed or not intact, so words in that language stay refused. Install ${userPacks.length === 1 ? 'it' : 'them'} with scripts/install-consult-language-pack.ts (de or it) from an Olympus checkout.`
+      : undefined,
+  ].filter((part): part is string => part !== undefined);
+  const hint = hints.length > 0 ? hints.join(' ') : undefined;
   return {
     name,
     ok: !integrityFailure,
