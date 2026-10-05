@@ -129,6 +129,7 @@ export type ZkapiConsultErrorCode =
   | 'daemon_identity_failed'
   | 'daemon_api_key_rejected'
   | 'session_process_exited'
+  | 'confinement_self_test_failed'
   | 'policy_unavailable'
   | 'model_unavailable'
   | 'daily_cap_reached'
@@ -325,6 +326,7 @@ const MESSAGES: Record<ZkapiConsultErrorCode, string> = {
   daemon_identity_failed: 'A port of this session is not held by the process group Olympus started.',
   daemon_api_key_rejected: 'The daemon rejected the configured local API key.',
   session_process_exited: 'The Tor client or the daemon of this session stopped unexpectedly.',
+  confinement_self_test_failed: 'The network confinement for this platform did not pass its self-test, so the session was refused.',
   policy_unavailable: 'The daemon could not load the model policy in time.',
   model_unavailable: 'The selected model is not in the daemon\'s live model list.',
   daily_cap_reached: 'The daily zkAPI request limit you set is reached.',
@@ -372,10 +374,7 @@ export function zkapiRouteLabel(receipt: ZkapiSessionReceipt): string {
     return 'anonymous route (payment, key and network identity hidden)';
   }
   const unsettled = receipt.settlement === 'not_confirmed' ? '; lease settlement not confirmed' : '';
-  if (confined === 'non_loopback_blocked') {
-    return `payment privacy; inference through a fresh Tor client; the daemon could not reach the internet or DNS directly, but loopback was not port-filtered, so the daemon and companion route is not verified${unsettled}`;
-  }
-  return `payment privacy; inference through a fresh Tor client; no network confinement, so the daemon and companion route is not verified${unsettled}`;
+  return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
 }
 
 function networkIdentityFor(receipt: ZkapiSessionReceipt): ZkapiNetworkIdentity {
@@ -436,71 +435,135 @@ function versionSupported(version: string | undefined): boolean {
 // Confinement
 
 /**
- * macOS: `sandbox-exec` (deprecated but shipped). The profile denies every
- * network operation, then allows loopback only. The kernel enforces it for the
- * daemon, its wallet companion and any other descendant, whatever language
- * they are written in, and it also denies the system DNS resolver socket.
- * It cannot filter loopback by port for this daemon: the managed companion
- * reaches the network through a proxy the daemon opens on a random loopback
- * port, which a profile written before start cannot name.
+ * What a confinement enforces, as one description: the sandbox profile and
+ * every label or doctor sentence about confinement are derived from it.
  */
-const DARWIN_SANDBOX_PROFILE = [
-  '(version 1)',
-  '(allow default)',
-  '(deny network*)',
-  '(allow network-bind (local ip "localhost:*"))',
-  '(allow network-inbound (local ip "localhost:*"))',
-  '(allow network-outbound (remote ip "localhost:*"))',
-].join('');
+export interface ZkapiConfinementPolicy {
+  /** Connections to any non-loopback address. */
+  nonLoopback: 'denied' | 'allowed';
+  /** Unix-domain connections, including the system resolver socket. */
+  unixSockets: 'denied' | 'allowed';
+  /** Which loopback ports the daemon and its descendants may connect to. */
+  loopbackOutbound: 'session_ports_only' | 'any';
+}
+
+export function confinementLevel(policy: ZkapiConfinementPolicy): ZkapiConfinementLevel {
+  if (policy.nonLoopback !== 'denied' || policy.unixSockets !== 'denied') return 'none';
+  return policy.loopbackOutbound === 'session_ports_only' ? 'loopback_filtered' : 'non_loopback_blocked';
+}
+
+/** The one sentence every label and doctor line uses for a confinement level. */
+export function confinementStatement(level: ZkapiConfinementLevel): string {
+  if (level === 'loopback_filtered') {
+    return 'network confinement allowed only this session\'s Tor and daemon ports';
+  }
+  if (level === 'non_loopback_blocked') {
+    return 'in this session\'s sandbox probe, non-loopback and resolver connections failed inside the sandbox and succeeded outside it, but loopback is not port-filtered';
+  }
+  return 'no network confinement';
+}
+
+/**
+ * The macOS profile for a policy. `sandbox-exec` is deprecated but shipped; the
+ * kernel enforces the profile for the daemon, its wallet companion and every
+ * other descendant, whatever language they are written in.
+ */
+export function darwinSandboxProfile(policy: ZkapiConfinementPolicy, ports: { tor: number; daemon: number }): string {
+  const rules = ['(version 1)', '(allow default)'];
+  if (policy.nonLoopback === 'denied' || policy.unixSockets === 'denied') {
+    rules.push('(deny network*)');
+    rules.push('(allow network-bind (local ip "localhost:*"))');
+    rules.push('(allow network-inbound (local ip "localhost:*"))');
+    if (policy.loopbackOutbound === 'any') {
+      rules.push('(allow network-outbound (remote ip "localhost:*"))');
+    } else {
+      rules.push(`(allow network-outbound (remote ip "localhost:${ports.tor}"))`);
+      rules.push(`(allow network-outbound (remote ip "localhost:${ports.daemon}"))`);
+    }
+  }
+  return rules.join('');
+}
+
+/**
+ * The policy this platform can enforce for zkapi-clientd. Loopback stays
+ * open on macOS: the managed companion reaches the network through a proxy the
+ * daemon opens on a random loopback port (upstream `internal/relay/connect.go`),
+ * which a profile written before start cannot name.
+ */
+const DARWIN_POLICY: ZkapiConfinementPolicy = { nonLoopback: 'denied', unixSockets: 'denied', loopbackOutbound: 'any' };
 
 // Plain CommonJS so it runs under Bun or Node. 192.0.2.1 is TEST-NET-1: it
 // routes nowhere, so an unconfined probe sends nothing anyone can receive.
+// The same script runs inside and outside the sandbox; only the difference
+// counts. A loopback listener inside the probe is the positive control.
 const SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
+const withTcp = process.argv[2] === 'tcp';
+const loopback = () => new Promise((resolve) => {
+  const server = net.createServer((c) => c.end());
+  server.listen(0, '127.0.0.1', () => {
+    const s = net.createConnection({ host: '127.0.0.1', port: server.address().port });
+    s.once('connect', () => { s.destroy(); server.close(); resolve('connected'); });
+    s.once('error', () => { server.close(); resolve('failed'); });
+  });
+});
 const tcp = () => new Promise((resolve) => {
   const started = Date.now();
   const s = net.createConnection({ host: '192.0.2.1', port: 9 });
   s.setTimeout(3000, () => { s.destroy(); resolve('timeout'); });
   s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve(Date.now() - started < 1000 ? 'refused_fast' : 'error_slow'));
+  s.once('error', () => resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'));
 });
 const udp = () => new Promise((resolve) => {
   const s = dgram.createSocket('udp4');
-  s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'denied' : 'sent'); });
+  s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'failed' : 'sent'); });
 });
 const resolver = () => new Promise((resolve) => {
   const s = net.createConnection({ path: '/private/var/run/mDNSResponder' });
   s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve('denied'));
+  s.once('error', () => resolve('failed'));
 });
 (async () => {
-  const result = { tcp: await tcp(), udp: await udp(), dns: await resolver() };
+  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver() };
+  if (withTcp) result.tcp = await tcp();
   process.stdout.write(JSON.stringify(result));
 })();
 `;
 
+function runSelfTestProbe(argv: string[], env: NodeJS.ProcessEnv): Record<string, string> | undefined {
+  try {
+    return JSON.parse(execFileSync(argv[0]!, argv.slice(1), {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })) as Record<string, string>;
+  } catch {
+    return undefined;
+  }
+}
+
 export function defaultZkapiConfinement(): ZkapiConfinement {
   if (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
+    const level = confinementLevel(DARWIN_POLICY);
     return {
-      level: 'non_loopback_blocked',
-      limit: 'macOS sandbox: direct internet and DNS are blocked; loopback cannot be port-filtered for this daemon',
-      wrap: (argv) => ['/usr/bin/sandbox-exec', '-p', DARWIN_SANDBOX_PROFILE, ...argv],
+      level,
+      limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
+      wrap: (argv, ports) => ['/usr/bin/sandbox-exec', '-p', darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
       selfTest: async (workDir, env) => {
         const script = join(workDir, 'confinement-self-test.cjs');
         writeFileSync(script, SELF_TEST_SCRIPT, { mode: 0o600 });
-        try {
-          const out = execFileSync('/usr/bin/sandbox-exec', ['-p', DARWIN_SANDBOX_PROFILE, process.execPath, script], {
-            encoding: 'utf8',
-            timeout: 10_000,
-            env,
-            stdio: ['ignore', 'pipe', 'ignore'],
-          });
-          const result = JSON.parse(out) as Record<string, string>;
-          return result.tcp === 'refused_fast' && result.udp === 'denied' && result.dns === 'denied';
-        } catch {
-          return false;
-        }
+        // Outside: UDP and the resolver socket must work, so a failure inside
+        // is the sandbox's doing and not an offline machine.
+        const outside = runSelfTestProbe([process.execPath, script], env);
+        const inside = runSelfTestProbe(
+          ['/usr/bin/sandbox-exec', '-p', darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script, 'tcp'],
+          env,
+        );
+        return outside?.loopback === 'connected' && outside.udp === 'sent' && outside.resolver === 'connected'
+          && inside?.loopback === 'connected' && inside.udp === 'failed' && inside.resolver === 'failed'
+          && inside.tcp === 'failed_fast';
       },
     };
   }
@@ -533,6 +596,8 @@ interface ZkapiState {
   running?: {
     sessionId: string;
     supervisor: { pid: number; instance?: ProcessInstanceIdentity };
+    /** The session's private directory (Tor data, probe scripts), removed with the groups. */
+    workDir?: string;
     groups: OwnedGroup[];
   };
 }
@@ -642,28 +707,76 @@ export function reserveZkapiRequest(
 
 /**
  * Each owned process runs under this watchdog, which leads its own process
- * group. It forwards termination to the group and, if Olympus dies without
- * cleaning up, stops the whole group itself (Tor additionally exits through
- * `__OwningControllerProcess`).
+ * group. It refuses to run unless its parent is the expected supervisor, and
+ * starts its child only after the supervisor confirms (on stdin) that the
+ * group is durably recorded. Any ending -- the child exits, a TERM/INT
+ * arrives, or the supervisor dies -- goes through one group cleanup that
+ * keeps the watchdog alive until every other member is gone, escalating to
+ * SIGKILL. Tor additionally exits through `__OwningControllerProcess`.
  */
+/** The line the watchdog prints the moment its child exits, before group cleanup. */
+const WATCHDOG_CHILD_EXITED = 'OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED';
 const WATCHDOG_SCRIPT = `
-const { spawn } = require('node:child_process');
-const [, , marker, ...argv] = process.argv;
-const parent = process.ppid;
-const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit' });
-let stopping = false;
-const stopGroup = () => {
-  if (stopping) return;
-  stopping = true;
-  try { process.kill(-process.pid, 'SIGTERM'); } catch {}
-  setTimeout(() => { try { process.kill(-process.pid, 'SIGKILL'); } catch {} }, 5000).unref();
+const { spawn, execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const [, , expectedParentText, ...argv] = process.argv;
+const expectedParent = Number(expectedParentText);
+const self = process.pid;
+if (process.ppid !== expectedParent) process.exit(70);
+let child;
+let cleaning = false;
+let exitCode = 0;
+const othersInGroup = () => {
+  if (process.platform === 'linux') {
+    let count = 0;
+    for (const name of fs.readdirSync('/proc')) {
+      if (!/^\\d+$/.test(name) || Number(name) === self) continue;
+      try {
+        const stat = fs.readFileSync('/proc/' + name + '/stat', 'utf8');
+        const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\\s+/);
+        if (Number(fields[2]) === self && fields[0] !== 'Z') count += 1;
+      } catch {}
+    }
+    return count;
+  }
+  try {
+    const out = execFileSync('/usr/bin/pgrep', ['-g', String(self)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return out.split('\\n').filter((line) => line.trim() && Number(line) !== self).length;
+  } catch (error) {
+    return error && error.status === 1 ? 0 : Infinity;
+  }
 };
-process.on('SIGTERM', () => { try { child.kill('SIGTERM'); } catch {} });
-process.on('SIGINT', () => { try { child.kill('SIGTERM'); } catch {} });
-child.on('exit', (code) => process.exit(code === null ? 1 : code));
-child.on('error', () => process.exit(127));
-setInterval(() => { if (process.ppid !== parent) stopGroup(); }, 500);
-void marker;
+const cleanup = () => {
+  if (cleaning) return;
+  cleaning = true;
+  try { process.kill(-self, 'SIGTERM'); } catch {}
+  const deadline = Date.now() + 5000;
+  const tick = () => {
+    if (othersInGroup() === 0) process.exit(exitCode);
+    if (Date.now() >= deadline) { try { process.kill(-self, 'SIGKILL'); } catch {} return; }
+    setTimeout(tick, 100);
+  };
+  setTimeout(tick, 50);
+};
+process.on('SIGTERM', cleanup);
+process.on('SIGINT', cleanup);
+// With the supervisor gone its pipes are broken: a failed write must never
+// take the watchdog down before the group is clean.
+process.on('SIGPIPE', () => {});
+process.stdout.on('error', () => {});
+process.stderr.on('error', () => {});
+process.on('uncaughtException', () => cleanup());
+const start = () => {
+  child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] });
+  const report = () => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED}\\n'); } catch {} };
+  child.on('exit', (code) => { exitCode = code === null ? 1 : code; report(); cleanup(); });
+  child.on('error', () => { exitCode = 127; report(); cleanup(); });
+};
+let received = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { received += chunk; if (!child && !cleaning && received.includes('go\\n')) start(); });
+process.stdin.on('end', () => { if (!child) process.exit(71); });
+setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
 
 interface Supervised {
@@ -671,26 +784,49 @@ interface Supervised {
   readonly child: ChildProcess;
   readonly pgid: number;
   leaderExited: boolean;
+  /** The watchdog's child (Tor or the daemon) exited; reported before group cleanup ends. */
+  childExited: boolean;
+  /** Set before Olympus stops the group on purpose, so the exit is not a failure. */
+  deliberate: boolean;
+  /** Releases the watchdog to start its child; call only once the group is recorded. */
+  go(): void;
 }
 
 function supervise(
   role: 'tor' | 'daemon',
   watchdog: string,
-  marker: string,
   argv: readonly string[],
   env: NodeJS.ProcessEnv,
   onLine: (line: string) => void,
+  onExit: (handle: Supervised) => void,
 ): Supervised {
   // detached: the watchdog leads a new group with no controlling terminal, so
   // the daemon's prompts can never land on the owner's terminal.
-  const child = spawn(process.execPath, [watchdog, marker, ...argv], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  const handle: Supervised = { role, child, pgid: child.pid ?? -1, leaderExited: false };
-  child.on('exit', () => {
+  const child = spawn(process.execPath, [watchdog, String(process.pid), ...argv], { env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const handle: Supervised = {
+    role,
+    child,
+    pgid: child.pid ?? -1,
+    leaderExited: false,
+    childExited: false,
+    deliberate: false,
+    go: () => {
+      child.stdin?.write('go\n');
+    },
+  };
+  let reported = false;
+  const report = (): void => {
+    if (reported) return;
+    reported = true;
+    onExit(handle);
+  };
+  const exited = (): void => {
     handle.leaderExited = true;
-  });
-  child.on('error', () => {
-    handle.leaderExited = true;
-  });
+    report();
+  };
+  child.on('exit', exited);
+  child.on('error', exited);
+  child.stdin?.on('error', () => undefined);
   for (const stream of [child.stdout, child.stderr]) {
     let pending = '';
     stream?.setEncoding('utf8');
@@ -700,7 +836,13 @@ function supervise(
       while (index >= 0) {
         // Each line is parsed for fixed facts and dropped; nothing is retained,
         // including the daemon's cost and balance lines.
-        onLine(pending.slice(0, index));
+        const line = pending.slice(0, index);
+        if (line === WATCHDOG_CHILD_EXITED) {
+          handle.childExited = true;
+          report();
+        } else {
+          onLine(line);
+        }
         pending = pending.slice(index + 1);
         index = pending.indexOf('\n');
       }
@@ -720,9 +862,13 @@ function groupAlive(pgid: number): boolean {
   }
 }
 
-/** Stop a whole process group, whether or not its leader still runs. True once it is gone. */
-async function stopGroup(pgid: number): Promise<boolean> {
+/**
+ * Stop a whole process group, whether or not its leader still runs. True once
+ * it is gone. `stillOurs` is re-checked immediately before each signal.
+ */
+async function stopGroup(pgid: number, stillOurs: () => boolean = () => true): Promise<boolean> {
   if (!groupAlive(pgid)) return true;
+  if (!stillOurs()) return false;
   try {
     process.kill(-pgid, 'SIGTERM');
   } catch {
@@ -731,6 +877,7 @@ async function stopGroup(pgid: number): Promise<boolean> {
   const deadline = Date.now() + STOP_GRACE_MS;
   while (groupAlive(pgid) && Date.now() < deadline) await sleep(POLL_MS);
   if (!groupAlive(pgid)) return true;
+  if (!stillOurs()) return false;
   try {
     process.kill(-pgid, 'SIGKILL');
   } catch {
@@ -741,8 +888,20 @@ async function stopGroup(pgid: number): Promise<boolean> {
   return !groupAlive(pgid);
 }
 
-/** 'ours' | 'gone' | 'unknown' for a recorded group. */
-function recordedGroupState(group: OwnedGroup): 'ours' | 'gone' | 'unknown' {
+function currentBootId(): string | undefined {
+  return processInstanceIdentity(process.pid)?.bootId;
+}
+
+/**
+ * 'ours' | 'gone' | 'unknown' for a recorded group. A different boot is
+ * checked first: nothing recorded before a reboot can still be running. A
+ * live group whose leader is absent cannot be proven ours (its id may have
+ * been reused after a crash), so it is unknown and never signalled.
+ */
+function recordedGroupState(group: OwnedGroup, recordedBootId: string | undefined): 'ours' | 'gone' | 'unknown' {
+  const boot = currentBootId();
+  const groupBoot = group.leader?.bootId ?? recordedBootId;
+  if (groupBoot && boot && groupBoot !== boot) return 'gone';
   if (!groupAlive(group.pgid)) return 'gone';
   let leaderAlive = true;
   try {
@@ -750,18 +909,17 @@ function recordedGroupState(group: OwnedGroup): 'ours' | 'gone' | 'unknown' {
   } catch (error) {
     leaderAlive = (error as { code?: string }).code === 'EPERM';
   }
-  // A process-group id cannot be reused while any member of that group lives,
-  // so a live group whose leader is gone is still the recorded group.
-  if (!leaderAlive) return 'ours';
+  if (!leaderAlive) return 'unknown';
   const current = processInstanceIdentity(group.pgid);
   if (!group.leader || !current) return 'unknown';
-  if (group.leader.bootId && current.bootId && group.leader.bootId !== current.bootId) return 'gone';
   if (group.leader.platform !== current.platform || group.leader.mechanism !== current.mechanism) return 'unknown';
   return group.leader.startTime === current.startTime ? 'ours' : 'gone';
 }
 
 function supervisorAlive(supervisor: { pid: number; instance?: ProcessInstanceIdentity }): boolean {
   if (supervisor.pid === process.pid) return false;
+  const boot = currentBootId();
+  if (supervisor.instance?.bootId && boot && supervisor.instance.bootId !== boot) return false;
   try {
     process.kill(supervisor.pid, 0);
   } catch (error) {
@@ -769,29 +927,39 @@ function supervisorAlive(supervisor: { pid: number; instance?: ProcessInstanceId
   }
   const current = processInstanceIdentity(supervisor.pid);
   if (!supervisor.instance || !current) return true;
-  if (supervisor.instance.bootId && current.bootId && supervisor.instance.bootId !== current.bootId) return false;
   return supervisor.instance.mechanism !== current.mechanism || supervisor.instance.startTime === current.startTime;
 }
 
 /**
  * Stop what an earlier session left running. Called only while holding the
  * session lease, and only once the recorded supervisor is proven dead. The
- * record is kept unless every group is confirmed gone.
+ * record (and its private directory) is kept unless every group is confirmed
+ * gone; ownership is re-checked immediately before every signal.
  */
 async function recoverStrandedGroups(statePath: string, now: Date): Promise<'clear' | 'busy' | 'stranded'> {
   const running = readState(statePath)?.running;
   if (!running) return 'clear';
   if (supervisorAlive(running.supervisor)) return 'busy';
+  const recordedBoot = running.supervisor.instance?.bootId;
   let allGone = true;
   for (const group of running.groups) {
-    const state = recordedGroupState(group);
+    const state = recordedGroupState(group, recordedBoot);
     if (state === 'unknown') {
       allGone = false;
       continue;
     }
-    if (state === 'ours' && !await stopGroup(group.pgid)) allGone = false;
+    if (state === 'ours' && !await stopGroup(group.pgid, () => recordedGroupState(group, recordedBoot) === 'ours')) {
+      allGone = false;
+    }
   }
   if (!allGone) return 'stranded';
+  if (running.workDir) {
+    try {
+      rmSync(running.workDir, { recursive: true, force: true });
+    } catch {
+      // a leftover private temp directory holds no secret
+    }
+  }
   updateState(statePath, now, (state) => {
     const { running: _gone, ...rest } = state;
     return rest;
@@ -851,14 +1019,14 @@ function sleep(ms: number): Promise<void> {
 
 /** Gives up (false) on abort, deadline or `giveUp`, each checked before the condition. */
 async function waitFor(
-  condition: () => boolean | Promise<boolean>,
+  condition: (remainingMs: number) => boolean | Promise<boolean>,
   timeoutMs: number,
   options: { signal?: AbortSignal | undefined; giveUp?: () => boolean; pollMs?: number } = {},
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (options.signal?.aborted || options.giveUp?.()) return false;
-    if (await condition()) return !options.giveUp?.();
+    if (await condition(Math.max(0, deadline - Date.now()))) return !options.giveUp?.();
     if (Date.now() >= deadline) return false;
     await sleep(Math.min(options.pollMs ?? POLL_MS, Math.max(0, deadline - Date.now())));
   }
@@ -1016,7 +1184,7 @@ function modelListing(body: string, model: string): { listed: boolean; allowance
  * Anything else is `unavailable`, which refuses a send.
  */
 export function inspectLoopbackListener(port: number): ZkapiListenerInspection {
-  let pid: number | undefined;
+  let pids: number[];
   if (process.platform === 'darwin') {
     try {
       const out = execFileSync('/usr/sbin/lsof', ['-nP', '-a', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp'], {
@@ -1024,24 +1192,28 @@ export function inspectLoopbackListener(port: number): ZkapiListenerInspection {
         timeout: 5_000,
         stdio: ['ignore', 'pipe', 'ignore'],
       });
-      const pids = [...new Set(out.split('\n').filter((line) => /^p\d+$/.test(line)).map((line) => Number(line.slice(1))))];
-      if (pids.length !== 1) return pids.length === 0 ? { kind: 'not_visible' } : { kind: 'unavailable' };
-      pid = pids[0]!;
+      pids = [...new Set(out.split('\n').filter((line) => /^p\d+$/.test(line)).map((line) => Number(line.slice(1))))];
     } catch (error) {
       return (error as { status?: number }).status === 1 ? { kind: 'not_visible' } : { kind: 'unavailable' };
     }
   } else if (process.platform === 'linux') {
-    const found = linuxListenerPid(port);
-    if (typeof found !== 'number') return found;
-    pid = found;
+    const found = linuxListenerPids(port);
+    if (!Array.isArray(found)) return found;
+    pids = found;
   } else {
     return { kind: 'unavailable' };
   }
-  const pgid = processGroupOf(pid);
-  return { kind: 'found', pid, ...(pgid !== undefined ? { pgid } : {}) };
+  if (pids.length === 0) return { kind: 'not_visible' };
+  // Every process holding a listener on the port must be in one group;
+  // otherwise no group is reported and ownership fails.
+  const pgids = new Set(pids.map((pid) => processGroupOf(pid)));
+  const [pgid] = [...pgids];
+  return pgids.size === 1 && pgid !== undefined
+    ? { kind: 'found', pid: pids[0]!, pgid }
+    : { kind: 'found', pid: pids[0]! };
 }
 
-function linuxListenerPid(port: number): number | ZkapiListenerInspection {
+function linuxListenerPids(port: number): number[] | ZkapiListenerInspection {
   const inodes = new Set<string>();
   const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
   for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
@@ -1059,13 +1231,15 @@ function linuxListenerPid(port: number): number | ZkapiListenerInspection {
     }
   }
   if (inodes.size === 0) return { kind: 'not_visible' };
-  let pids: string[];
+  let entries: string[];
   try {
-    pids = readdirSync('/proc').filter((name) => /^\d+$/.test(name));
+    entries = readdirSync('/proc').filter((name) => /^\d+$/.test(name));
   } catch {
     return { kind: 'unavailable' };
   }
-  for (const pid of pids) {
+  const owners = new Set<number>();
+  const seen = new Set<string>();
+  for (const pid of entries) {
     let fds: string[];
     try {
       fds = readdirSync(`/proc/${pid}/fd`);
@@ -1075,13 +1249,18 @@ function linuxListenerPid(port: number): number | ZkapiListenerInspection {
     for (const fd of fds) {
       try {
         const match = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`));
-        if (match && inodes.has(match[1]!)) return Number(pid);
+        if (match && inodes.has(match[1]!)) {
+          owners.add(Number(pid));
+          seen.add(match[1]!);
+        }
       } catch {
         // fd closed meanwhile
       }
     }
   }
-  return { kind: 'not_visible' };
+  // A listening socket this user cannot attribute belongs to someone else.
+  if (seen.size !== inodes.size) return { kind: 'unavailable' };
+  return [...owners];
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,14 +1486,28 @@ async function runSession(
   let tor: Supervised | undefined;
   let daemon: Supervised | undefined;
   let result: ZkapiConsultResult | undefined;
+  // One signal for the whole session: the caller's cancel, or any owned
+  // process exiting when Olympus did not stop it on purpose.
+  const sessionAbort = new AbortController();
+  const onCallerAbort = (): void => sessionAbort.abort();
+  signal?.addEventListener('abort', onCallerAbort, { once: true });
+  if (signal?.aborted) sessionAbort.abort();
+  const sessionSignal = sessionAbort.signal;
+  const unexpectedExit = (): boolean => groups.some((group) => (group.leaderExited || group.childExited) && !group.deliberate);
+  const onChildExit = (handle: Supervised): void => {
+    if (!handle.deliberate) sessionAbort.abort();
+  };
+  const interrupted = (): ZkapiConsultErrorCode => (unexpectedExit() ? 'session_process_exited' : 'aborted');
   try {
     writeFileSync(watchdog, WATCHDOG_SCRIPT, { mode: 0o600 });
     const supervisorInstance = processInstanceIdentity(process.pid);
     updateState(statePath, now(), (state) => ({
       ...state,
-      running: { sessionId, supervisor: { pid: process.pid, ...(supervisorInstance ? { instance: supervisorInstance } : {}) }, groups: [] },
+      running: { sessionId, supervisor: { pid: process.pid, ...(supervisorInstance ? { instance: supervisorInstance } : {}) }, workDir, groups: [] },
     }));
-    const recordGroup = (handle: Supervised): void => {
+    // The watchdog waits on stdin; it starts its child only after this durable
+    // record names its group.
+    const recordAndStart = (handle: Supervised): void => {
       groups.push(handle);
       const leader = processInstanceIdentity(handle.pgid);
       updateState(statePath, now(), (state) => ({
@@ -1323,18 +1516,24 @@ async function runSession(
           ? { running: { ...state.running, groups: [...state.running.groups, { role: handle.role, pgid: handle.pgid, ...(leader ? { leader } : {}) }] } }
           : {}),
       }));
+      handle.go();
     };
-    const anyExited = (): boolean => groups.some((group) => group.leaderExited);
+    const anyExited = unexpectedExit;
 
     if (perConsultTor) {
-      if (await confinement.selfTest(workDir, childEnv)) receipt.confinementSelfTest = 'passed';
-      else receipt.confinementSelfTest = confinement.level === 'none' ? 'not_run' : 'failed';
+      if (await confinement.selfTest(workDir, childEnv)) {
+        receipt.confinementSelfTest = 'passed';
+      } else if (confinement.level !== 'none') {
+        // Confinement that was requested but could not prove itself refuses.
+        receipt.confinementSelfTest = 'failed';
+        return (result = fail('confinement_self_test_failed'));
+      }
       // zkapi-serve-tor.sh: a throwaway client with a fresh data directory, so
       // fresh guards and circuits; bound to Olympus's lifetime.
       const torDataDir = join(workDir, 'tor');
       mkdirSync(torDataDir, { mode: 0o700 });
       let bootstrapped = false;
-      tor = supervise('tor', watchdog, sessionId, [
+      tor = supervise('tor', watchdog, [
         torExecutable!,
         '--ClientOnly', '1',
         '--PublishServerDescriptor', '0',
@@ -1344,10 +1543,10 @@ async function runSession(
         '--__OwningControllerProcess', String(process.pid),
       ], childEnv, (line) => {
         if (line.includes('Bootstrapped 100')) bootstrapped = true;
-      });
-      recordGroup(tor);
-      if (!await waitFor(() => bootstrapped, settings.torBootstrapTimeoutMs, { signal, giveUp: anyExited })) {
-        return (result = fail(signal?.aborted ? 'aborted' : 'tor_bootstrap_failed'));
+      }, onChildExit);
+      recordAndStart(tor);
+      if (!await waitFor(() => bootstrapped, settings.torBootstrapTimeoutMs, { signal: sessionSignal, giveUp: anyExited })) {
+        return (result = fail(sessionSignal.aborted ? interrupted() : 'tor_bootstrap_failed'));
       }
       receipt.freshTorClient = true;
     }
@@ -1357,37 +1556,42 @@ async function runSession(
     daemon = supervise(
       'daemon',
       watchdog,
-      sessionId,
       perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv,
       childEnv,
       (line) => parseDaemonLine(facts, line),
+      onChildExit,
     );
-    recordGroup(daemon);
+    recordAndStart(daemon);
 
     // Every port of this session must be held by the process group Olympus
     // started; checked again immediately before anything carries the key.
+    const daemonGone = (): boolean => daemon!.leaderExited || daemon!.childExited;
     const owned = async (includeTor = true): Promise<boolean> => {
-      if (includeTor ? anyExited() : daemon!.leaderExited) return false;
+      if (includeTor ? anyExited() : daemonGone()) return false;
       const listener = await inspect(daemonPort);
       if (listener.kind !== 'found' || listener.pgid !== daemon!.pgid) return false;
       if (tor && includeTor) {
         const socks = await inspect(settings.torSocksPort);
         if (socks.kind !== 'found' || socks.pgid !== tor.pgid) return false;
       }
-      return includeTor ? !anyExited() : !daemon!.leaderExited;
+      return includeTor ? !anyExited() : !daemonGone();
     };
     const guard = async (): Promise<ZkapiConsultErrorCode | undefined> => {
-      if (signal?.aborted) return 'aborted';
+      if (sessionSignal.aborted) return interrupted();
       if (anyExited()) return 'session_process_exited';
-      return await owned() ? undefined : (anyExited() ? 'session_process_exited' : 'daemon_identity_failed');
+      if (await owned()) return undefined;
+      // A port can close a moment before its process's exit is reported.
+      await sleep(300);
+      return anyExited() ? 'session_process_exited' : 'daemon_identity_failed';
     };
 
     const ready = await waitFor(
-      async () => Boolean(facts.listen) && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: 'GET' }, signal, 2_000)),
+      async (remainingMs) => Boolean(facts.listen)
+        && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: 'GET' }, sessionSignal, Math.min(2_000, remainingMs))),
       settings.daemonReadyTimeoutMs,
-      { signal, giveUp: anyExited, pollMs: 250 },
+      { signal: sessionSignal, giveUp: anyExited, pollMs: 250 },
     );
-    if (!ready) return (result = fail(signal?.aborted ? 'aborted' : anyExited() ? 'session_process_exited' : 'daemon_start_failed'));
+    if (!ready) return (result = fail(sessionSignal.aborted ? interrupted() : 'daemon_start_failed'));
     receipt.daemonVersion = facts.version!;
     if (!versionSupported(facts.version)) return (result = fail('daemon_version_unsupported'));
     if (facts.listen !== new URL(options.baseUrl).host) return (result = fail('daemon_identity_failed'));
@@ -1401,7 +1605,7 @@ async function runSession(
     let problem = await guard();
     if (problem) return (result = fail(problem));
     // An unauthenticated request must be rejected before it reaches the backend.
-    const unauthenticated = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'POST' }, signal);
+    const unauthenticated = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'POST' }, sessionSignal);
     if (
       !unauthenticated
       || unauthenticated.status !== 401
@@ -1413,7 +1617,8 @@ async function runSession(
     const authorization = { Authorization: `Bearer ${options.apiKey}` };
     problem = await guard();
     if (problem) return (result = fail(problem));
-    const status = await probeRequest(fetchImpl, `${origin}/admin/status`, { method: 'GET', headers: authorization }, signal);
+    const status = await probeRequest(fetchImpl, `${origin}/admin/status`, { method: 'GET', headers: authorization }, sessionSignal);
+    if (sessionSignal.aborted) return (result = fail(interrupted()));
     if (!status || status.status === 401) return (result = fail('daemon_api_key_rejected'));
     const network = adminStatusNetwork(status);
     if (!network) return (result = fail('daemon_identity_failed'));
@@ -1424,16 +1629,16 @@ async function runSession(
     // policy has loaded. Listing is catalog membership, not a test request.
     let listing: { listed: boolean; allowance?: number } = { listed: false };
     let guardProblem: ZkapiConsultErrorCode | undefined;
-    await waitFor(async () => {
+    await waitFor(async (remainingMs) => {
       guardProblem = await guard();
       if (guardProblem) return true;
-      const models = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'GET', headers: authorization }, signal, MODELS_PROBE_TIMEOUT_MS);
+      const models = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'GET', headers: authorization }, sessionSignal, Math.min(MODELS_PROBE_TIMEOUT_MS, remainingMs));
       if (models?.status !== 200) return false;
       listing = modelListing(models.body, options.model);
       return listing.listed;
-    }, settings.policyWarmTimeoutMs, { signal, giveUp: anyExited, pollMs: POLICY_POLL_MS });
+    }, settings.policyWarmTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: POLICY_POLL_MS });
     if (guardProblem) return (result = fail(guardProblem));
-    if (!listing.listed) return (result = fail(signal?.aborted ? 'aborted' : anyExited() ? 'session_process_exited' : 'policy_unavailable'));
+    if (!listing.listed) return (result = fail(sessionSignal.aborted ? interrupted() : 'policy_unavailable'));
     if (listing.allowance === undefined) return (result = fail('model_unavailable'));
     receipt.listedAllowanceUsd = listing.allowance / 1_000_000;
 
@@ -1451,14 +1656,14 @@ async function runSession(
 
     const requestsBefore = new Set(facts.requests.keys());
     sent.dispatched = true;
-    const completion = await sendCompletion(question, options, origin, signal);
+    const completion = await sendCompletion(question, options, origin, sessionSignal);
 
-    // Correlate this request's own log lines, then wait for its key to settle
-    // on this same Tor client. Runs to completion even if the caller cancelled.
+    // Correlate this request's own log lines, then wait for its key to settle.
+    // Runs to completion even if the caller cancelled; stops if a process died.
     const correlated = await waitFor(() => {
       const ours = [...facts.requests.entries()].filter(([id, request]) => !requestsBefore.has(id) && request.route === '/v1/chat/completions');
       return ours.length === 1 && ours[0]![1].finished !== undefined;
-    }, settings.settleTimeoutMs, { giveUp: () => daemon!.leaderExited });
+    }, settings.settleTimeoutMs, { giveUp: unexpectedExit });
     const ours = [...facts.requests.entries()].filter(([id, request]) => !requestsBefore.has(id) && request.route === '/v1/chat/completions');
     const request = correlated && ours.length === 1 ? ours[0]![1] : undefined;
     if (request && request.keys.some((key) => key.source !== 'fresh')) receipt.keyReuse = 'not_verified';
@@ -1468,13 +1673,16 @@ async function runSession(
       receipt.settlement = await waitFor(
         () => facts.settled.get(keyRef) === true,
         settings.settleTimeoutMs,
-        { giveUp: () => daemon!.leaderExited },
+        { giveUp: unexpectedExit },
       ) ? 'confirmed' : 'not_confirmed';
       fenceClears = receipt.settlement === 'confirmed' && request!.keys[0]!.source === 'fresh';
     } else {
       // No key for this request: only a refusal the daemon makes before any
-      // lease request (model validation) proves nothing was issued.
-      const preLease = request !== undefined && request.keys.length === 0 && request.finished?.status === 400
+      // lease request (model validation) proves nothing was issued, and only
+      // in an ordinary session. A recovery session exists to settle an earlier
+      // lease, which the daemon attempts only after that same model check, so
+      // a refusal there proves nothing about the earlier lease.
+      const preLease = !recovery && request !== undefined && request.keys.length === 0 && request.finished?.status === 400
         && !completion.ok && (completion.error.daemonCode === 'invalid_model' || completion.error.daemonCode === 'model_budget_unavailable');
       receipt.settlement = preLease ? 'no_lease' : 'not_confirmed';
       fenceClears = preLease;
@@ -1491,11 +1699,12 @@ async function runSession(
       }
     }
 
-    if (perConsultTor) {
+    if (perConsultTor && !unexpectedExit()) {
+      tor!.deliberate = true;
       const torStopped = await stopGroup(tor!.pgid);
       // Secondary signal only. With Tor gone the model list must fail with the
       // daemon's exact upstream-unavailable shape; a 200 is a bypass.
-      const after = torStopped && !daemon.leaderExited && await owned(false)
+      const after = torStopped && !daemonGone() && await owned(false)
         ? await probeRequest(fetchImpl, `${origin}/v1/models`, { method: 'GET', headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS)
         : undefined;
       receipt.postStopProbe = after?.status === 200
@@ -1505,6 +1714,7 @@ async function runSession(
           : 'inconclusive';
     }
 
+    if (unexpectedExit()) return (result = fail('session_process_exited'));
     if (signal?.aborted) return (result = fail('aborted'));
     if (!completion.ok) {
       result = failure(completion.error.code, completion.error.outcome, identity(), {
@@ -1529,18 +1739,22 @@ async function runSession(
     return result;
   } finally {
     // Each cleanup step on its own: one failure never skips the next.
+    signal?.removeEventListener('abort', onCallerAbort);
     let allStopped = true;
     for (const group of [...groups].reverse()) {
+      group.deliberate = true;
       try {
         if (!await stopGroup(group.pgid)) allStopped = false;
       } catch {
         allStopped = false;
       }
     }
-    try {
-      rmSync(workDir, { recursive: true, force: true });
-    } catch {
-      // a leftover private temp directory holds no secret
+    if (allStopped) {
+      try {
+        rmSync(workDir, { recursive: true, force: true });
+      } catch {
+        // a leftover private temp directory holds no secret
+      }
     }
     const final = result;
     try {

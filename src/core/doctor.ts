@@ -586,7 +586,11 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
     detail: `zkAPI consult transport (experimental, consults only; no consult is sent until the consult lane lands): ${lines.join(' | ')}`,
     ...(ok
       ? {}
-      : { hint: 'Fix what the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon.' }),
+      : {
+        hint: lines.some((line) => line.includes('UNRESOLVED SESSION'))
+          ? 'A recovery-only zkAPI session is needed before another consult; it runs from the consult lane (no command yet). Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json.'
+          : 'Fix what the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon.',
+      }),
   };
 }
 

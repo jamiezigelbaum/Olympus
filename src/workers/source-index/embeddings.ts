@@ -7,7 +7,7 @@ import { isIP } from 'node:net';
 import { OperationError } from '../../core/operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from '../../core/local-model-policy.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../core/model-transport.ts';
-import { assertNotZkapiDaemonEndpoint } from '../../core/zkapi-consult-settings.ts';
+import { isZkapiDaemonEndpointRefusal } from '../../core/zkapi-consult-settings.ts';
 import { resolveEmbeddingEpoch } from './embedding-identity.ts';
 
 export type SourceEmbeddingBackend = 'cloud' | 'local';
@@ -252,6 +252,7 @@ async function fetchEmbeddingResponse(
       }
     } catch (error) {
       if (error instanceof TransientSourceEmbeddingError) throw error;
+      if (isZkapiDaemonEndpointRefusal(error)) throw error;
       // A redirect is a property of the endpoint, not a passing outage:
       // retrying would only send the same body to be redirected again.
       if (isModelEndpointRedirectError(error)) {
@@ -533,7 +534,6 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
-      assertNotZkapiDaemonEndpoint(this.baseUrl, 'Source embedding endpoint');
       await this.preflight?.(controller.signal);
       const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: 'POST',

@@ -40,8 +40,12 @@ const DEFAULTS = {
   daemonReadyTimeoutMs: 120 * 1000,
   /** zkapi-tor-cli.sh `warm_policy` waits up to 180 s for the model policy. */
   policyWarmTimeoutMs: 180 * 1000,
-  /** zkapi-tor-cli.sh `ensure_ready` waits up to 180 s for settlement. */
-  settleTimeoutMs: 180 * 1000,
+  /**
+   * zkapi-tor-cli.sh waits 180 s, but the daemon allows its companion call,
+   * including /wallet/settle, four minutes (`internal/zkapi/client.go`); wait
+   * longer than that so a legitimate settlement is not cut off.
+   */
+  settleTimeoutMs: 300 * 1000,
   maxResponseBytes: 256 * 1024,
 };
 export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
@@ -268,14 +272,31 @@ export function zkapiDaemonPortSet(): ReadonlySet<number> {
 export function assertNotZkapiDaemonEndpoint(url: string, label: string): void {
   const port = loopbackPort(url);
   if (port === undefined || !zkapiDaemonPorts.has(port)) return;
-  throw new OperationError(
-    'config_error',
+  throw new ZkapiDaemonEndpointRefusal(
     `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`,
-    'Point this model lane at a local model server on another port.',
   );
 }
 
-/** The loopback port a URL names, or undefined when it is not loopback HTTP(S). */
+/** A refusal, not an outage: transports rethrow it as-is and never retry. */
+export class ZkapiDaemonEndpointRefusal extends OperationError {
+  constructor(message: string) {
+    super('config_error', message, 'Point this model lane at a local model server on another port.');
+    this.name = 'ZkapiDaemonEndpointRefusal';
+  }
+}
+
+export function isZkapiDaemonEndpointRefusal(error: unknown): error is ZkapiDaemonEndpointRefusal {
+  return error instanceof ZkapiDaemonEndpointRefusal;
+}
+
+
+/**
+ * The local port a URL names, or undefined when it does not reach this
+ * machine. Covers every form that does: `localhost` and `*.localhost`, all of
+ * 127.0.0.0/8 (WHATWG URL parsing already turns decimal, hex and octal forms
+ * into dotted quads), 0.0.0.0, `::1`, `::`, and IPv4-mapped or -compatible
+ * IPv6 forms of those.
+ */
 export function loopbackPort(baseUrl: string | undefined): number | undefined {
   if (!baseUrl) return undefined;
   let url: URL;
@@ -290,8 +311,38 @@ export function loopbackPort(baseUrl: string | undefined): number | undefined {
 }
 
 function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  return host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  const host = hostname.toLowerCase().replace(/\.$/, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) return Number(v4[1]) === 127 || host === '0.0.0.0';
+  if (!host.startsWith('[') || !host.endsWith(']')) return false;
+  const words = ipv6Words(host.slice(1, -1));
+  if (!words) return false;
+  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0)) return true;
+  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 0xffff || words[5] === 0);
+  return mapped && ((words[6]! >> 8) === 127 || (words[6] === 0 && words[7] === 0));
+}
+
+function ipv6Words(text: string): number[] | undefined {
+  let body = text;
+  const tail: number[] = [];
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
+  if (dotted) {
+    const bytes = dotted.slice(1).map(Number);
+    if (bytes.some((byte) => byte > 255)) return undefined;
+    tail.push((bytes[0]! << 8) | bytes[1]!, (bytes[2]! << 8) | bytes[3]!);
+    body = text.slice(0, dotted.index);
+    if (!body.endsWith('::')) body = body.replace(/:$/, '');
+  }
+  const halves = body.split('::');
+  if (halves.length > 2) return undefined;
+  const parse = (part: string): number[] => (part ? part.split(':').map((word) => parseInt(word, 16)) : []);
+  const head = parse(halves[0] ?? '');
+  const rest = halves.length === 2 ? parse(halves[1] ?? '') : [];
+  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 0xffff)) return undefined;
+  const fill = 8 - head.length - rest.length - tail.length;
+  if (fill < 0 || (halves.length === 1 && fill !== 0)) return undefined;
+  return [...head, ...Array<number>(fill).fill(0), ...rest, ...tail];
 }
 
 /** Parse YYYY-MM-DD as a UTC midnight, refusing impossible dates. */

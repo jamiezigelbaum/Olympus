@@ -785,14 +785,16 @@ function validateProfile(id: string, profile: SovereigntyModelProfile, daemonPor
   if (profile.provider !== 'zkapi' && (profile.trust === 'local' || profile.provider === 'local-openai-compatible')) {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
     assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? '');
-    const port = loopbackPort(profile.baseUrl);
-    if (port !== undefined && daemonPorts.has(port)) {
-      throw new OperationError(
-        'config_error',
-        `Sovereignty local profile "${id}" points at port ${port}, where the zkAPI daemon serves.`,
-        'zkapi-clientd forwards every request to cloud providers through OpenRouter, so a loopback address there is not a local model. Move the local model server to another port.',
-      );
-    }
+  }
+  // Any provider, any declared trust: a profile whose endpoint is a zkAPI
+  // daemon would send its content through the consult transport's daemon.
+  const daemonPort = profile.provider === 'zkapi' ? undefined : loopbackPort(profile.baseUrl);
+  if (daemonPort !== undefined && daemonPorts.has(daemonPort)) {
+    throw new OperationError(
+      'config_error',
+      `Sovereignty profile "${id}" points at port ${daemonPort}, where the zkAPI daemon serves.`,
+      'zkapi-clientd forwards every request to cloud providers through OpenRouter, so a loopback address there is not a local model or a direct provider. Move that server to another port.',
+    );
   }
   const rawProfile = profile as unknown as Record<string, unknown>;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {

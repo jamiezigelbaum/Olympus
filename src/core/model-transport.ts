@@ -13,6 +13,8 @@
 // any part of the request or response body. Callers map it onto the same
 // failure class they use for any other transport failure.
 
+import { assertNotZkapiDaemonEndpoint } from './zkapi-consult-settings.ts';
+
 export type ModelTransportFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export const MODEL_ENDPOINT_REDIRECT_MESSAGE =
@@ -50,6 +52,10 @@ export async function fetchModelEndpoint(
   url: string,
   init: RequestInit,
 ): Promise<Response> {
+  // The one zkAPI endpoint guard: a zkAPI daemon forwards to cloud providers,
+  // so no model transport may send content or a credential to its port,
+  // whatever trust the caller's profile declared.
+  assertNotZkapiDaemonEndpoint(url, 'Model endpoint');
   let response: Response;
   try {
     response = await fetchImpl(url, { ...init, redirect: 'error' });

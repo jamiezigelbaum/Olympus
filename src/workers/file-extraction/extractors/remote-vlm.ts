@@ -207,7 +207,7 @@ export function requireLocalHttpBaseUrl(value: string | undefined, label: string
  * to cloud providers, so it is never a local vision backend. Checked when the
  * client is built and again on every request.
  */
-export function assertNotZkapiVisionEndpoint(url: string, label: string): void {
+function assertNotZkapiVisionEndpoint(url: string, label: string): void {
   const port = loopbackPort(url);
   if (port !== undefined && zkapiDaemonPortSet().has(port)) {
     throw new Error(`${label} points at the zkAPI daemon port ${port}, which forwards to cloud providers; it is not a local vision backend.`);

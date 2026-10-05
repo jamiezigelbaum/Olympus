@@ -3515,8 +3515,6 @@ function parseZkapiConsultSettings(value, label) {
     tor: DEFAULTS.tor,
     torSocksPort: DEFAULTS.torSocksPort,
     acknowledgements: parseAcknowledgements(input.acknowledgements, `${label}.acknowledgements`),
-    dailyRequestCap: DEFAULTS.dailyRequestCap,
-    dailySpendCapUsd: DEFAULTS.dailySpendCapUsd,
     timeoutMs: DEFAULTS.timeoutMs,
     torBootstrapTimeoutMs: DEFAULTS.torBootstrapTimeoutMs,
     daemonReadyTimeoutMs: DEFAULTS.daemonReadyTimeoutMs,
@@ -3584,7 +3582,10 @@ function assertNotZkapiDaemonEndpoint(url, label) {
   const port = loopbackPort(url);
   if (port === undefined || !zkapiDaemonPorts.has(port))
     return;
-  throw new OperationError("config_error", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`, "Point this model lane at a local model server on another port.");
+  throw new ZkapiDaemonEndpointRefusal(`${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
+}
+function isZkapiDaemonEndpointRefusal(error) {
+  return error instanceof ZkapiDaemonEndpointRefusal;
 }
 function loopbackPort(baseUrl) {
   if (!baseUrl)
@@ -3602,8 +3603,47 @@ function loopbackPort(baseUrl) {
   return url.protocol === "https:" ? 443 : 80;
 }
 function isLoopbackHost(hostname) {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  return host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost"))
+    return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4)
+    return Number(v4[1]) === 127 || host === "0.0.0.0";
+  if (!host.startsWith("[") || !host.endsWith("]"))
+    return false;
+  const words = ipv6Words(host.slice(1, -1));
+  if (!words)
+    return false;
+  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0))
+    return true;
+  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 65535 || words[5] === 0);
+  return mapped && (words[6] >> 8 === 127 || words[6] === 0 && words[7] === 0);
+}
+function ipv6Words(text) {
+  let body = text;
+  const tail = [];
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
+  if (dotted) {
+    const bytes = dotted.slice(1).map(Number);
+    if (bytes.some((byte) => byte > 255))
+      return;
+    tail.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
+    body = text.slice(0, dotted.index);
+    if (!body.endsWith("::"))
+      body = body.replace(/:$/, "");
+  }
+  const halves = body.split("::");
+  if (halves.length > 2)
+    return;
+  const parse = (part) => part ? part.split(":").map((word) => parseInt(word, 16)) : [];
+  const head = parse(halves[0] ?? "");
+  const rest = halves.length === 2 ? parse(halves[1] ?? "") : [];
+  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 65535))
+    return;
+  const fill = 8 - head.length - rest.length - tail.length;
+  if (fill < 0 || halves.length === 1 && fill !== 0)
+    return;
+  return [...head, ...Array(fill).fill(0), ...rest, ...tail];
 }
 function parseIsoDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
@@ -3628,25 +3668,23 @@ function parseAcknowledgements(value, label) {
   }
   return { version: record.version, accepted: [...new Set(record.accepted)] };
 }
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts;
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, ZkapiDaemonEndpointRefusal;
 var init_zkapi_consult_settings = __esm(() => {
   init_operation_error();
   ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
   DEFAULTS = {
     tor: "per_consult",
     torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
-    dailyRequestCap: 10,
-    dailySpendCapUsd: 20,
     timeoutMs: 6 * 60 * 1000,
     torBootstrapTimeoutMs: 210 * 1000,
     daemonReadyTimeoutMs: 120 * 1000,
     policyWarmTimeoutMs: 180 * 1000,
-    settleTimeoutMs: 180 * 1000,
+    settleTimeoutMs: 300 * 1000,
     maxResponseBytes: 256 * 1024
   };
   INTEGER_BOUNDS = {
     torSocksPort: [1024, 65535],
-    dailyRequestCap: [1, 100],
+    dailyRequestCap: [1, 1e6],
     timeoutMs: [30000, 30 * 60000],
     torBootstrapTimeoutMs: [1e4, 10 * 60000],
     daemonReadyTimeoutMs: [5000, 10 * 60000],
@@ -3665,6 +3703,12 @@ var init_zkapi_consult_settings = __esm(() => {
     "torExecutable"
   ]);
   zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
+  ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
+    constructor(message) {
+      super("config_error", message, "Point this model lane at a local model server on another port.");
+      this.name = "ZkapiDaemonEndpointRefusal";
+    }
+  };
 });
 
 // src/core/sovereignty.ts
@@ -4083,10 +4127,10 @@ function validateProfile(id, profile, daemonPorts) {
   if (profile.provider !== "zkapi" && (profile.trust === "local" || profile.provider === "local-openai-compatible")) {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
     assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? "");
-    const port = loopbackPort(profile.baseUrl);
-    if (port !== undefined && daemonPorts.has(port)) {
-      throw new OperationError("config_error", `Sovereignty local profile "${id}" points at port ${port}, where the zkAPI daemon serves.`, "zkapi-clientd forwards every request to cloud providers through OpenRouter, so a loopback address there is not a local model. Move the local model server to another port.");
-    }
+  }
+  const daemonPort = profile.provider === "zkapi" ? undefined : loopbackPort(profile.baseUrl);
+  if (daemonPort !== undefined && daemonPorts.has(daemonPort)) {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" points at port ${daemonPort}, where the zkAPI daemon serves.`, "zkapi-clientd forwards every request to cloud providers through OpenRouter, so a loopback address there is not a local model or a direct provider. Move that server to another port.");
   }
   const rawProfile = profile;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {
@@ -6671,6 +6715,7 @@ function isModelEndpointRedirectError(error) {
   return error instanceof ModelEndpointRedirectError;
 }
 async function fetchModelEndpoint(fetchImpl, url, init) {
+  assertNotZkapiDaemonEndpoint(url, "Model endpoint");
   let response;
   try {
     response = await fetchImpl(url, { ...init, redirect: "error" });
@@ -6711,6 +6756,7 @@ function isFetchRedirectRefusal(error) {
 }
 var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
 var init_model_transport = __esm(() => {
+  init_zkapi_consult_settings();
   ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
     code = "model_endpoint_redirect";
     status;
@@ -6935,6 +6981,8 @@ async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
       }
     } catch (error) {
       if (error instanceof TransientSourceEmbeddingError)
+        throw error;
+      if (isZkapiDaemonEndpointRefusal(error))
         throw error;
       if (isModelEndpointRedirectError(error)) {
         throw new OperationError("source_index_error", `${provider} source embedding endpoint answered with a redirect, which is refused.`, error.message);
@@ -7205,7 +7253,6 @@ class OpenAICompatibleSourceEmbeddingProvider {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
-      assertNotZkapiDaemonEndpoint(this.baseUrl, "Source embedding endpoint");
       await this.preflight?.(controller.signal);
       const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: "POST",

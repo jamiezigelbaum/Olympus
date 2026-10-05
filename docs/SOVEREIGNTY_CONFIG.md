@@ -525,9 +525,11 @@ Install Tor yourself; Olympus does not bundle it. Do not keep your own
 client with a fresh data directory on the relay port, starts the daemon (under
 network confinement where the platform allows it), verifies it, sends one
 request, waits for the daemon to report that request's key settled, stops Tor
-and stops every process it started. Between consults nothing listens on the
-relay port, so the daemon fails closed. This sequence follows the reference
-wrapper scripts in `ethereum/zkapi` pull request #16.
+and stops every process it started. If the daemon's relay is the port shown
+above, nothing listens there between consults and the daemon cannot reach the
+network; Olympus cannot read that setting, so it cannot confirm this. This
+sequence follows the reference wrapper scripts in `ethereum/zkapi` pull
+request #16.
 
 **The money, plainly.** Turning this on requires accepting eight statements
 (acknowledgement version 2):
@@ -564,13 +566,19 @@ on, so deposit the smallest amount the service accepts.
 - The daemon reads its relay and companion settings only from its private
   configuration, which Olympus does not read, and its wallet companion reaches
   the network through a proxy on a random loopback port. So Olympus cannot
-  prove where the daemon and companion connect. On macOS it runs the daemon in
-  a sandbox, self-tested every session, that blocks every connection except
-  loopback, and DNS; loopback ports cannot be filtered for this daemon. On
-  other platforms there is no confinement. **No platform therefore gets the
-  label "anonymous route" in this release**; the label names what was and was
-  not verified. With `"tor": "off"` the mode is called **payment privacy
-  only**: your network address is visible.
+  prove where the daemon and companion connect: it knows that it started a
+  fresh Tor client and that the daemon reports SOCKS5 mode, not that the
+  daemon's SOCKS endpoint is that Tor client. On macOS it runs the daemon in a
+  sandbox meant to refuse every connection except loopback, including the
+  system resolver. Each session checks this first: the same probes must fail
+  inside the sandbox and succeed outside it, and a failed check refuses the
+  session. Loopback ports cannot be filtered for this daemon, so another
+  loopback proxy would still be reachable. On other platforms there is no
+  confinement. **No platform therefore gets the label "anonymous route" in
+  this release**; the label says "a fresh Tor client was started and the
+  daemon reports SOCKS5 mode, but the actual route is not verified". With
+  `"tor": "off"` the mode is called **payment privacy only**: your network
+  address is visible.
 - A fresh Tor client is a fresh set of guards and circuits, not a guarantee of
   a different exit, and Tor does not hide the content of the question or the
   timing of requests. A question's wording and when it is sent can still link
@@ -597,7 +605,11 @@ on, so deposit the smallest amount the service accepts.
   sent until a recovery-only session runs: the same supervised session sending
   one fixed question with no content, so the daemon can settle the earlier
   lease. That earlier lease is then settled under the recovery session's
-  network identity, and recovery costs one request.
+  network identity, and recovery costs one request. A recovery the daemon
+  refuses (for example because the model is unavailable) leaves the fence in
+  place. In this release recovery is a function for the consult lane to call;
+  there is no command for it yet. Olympus waits up to five minutes for
+  settlement, longer than the daemon's own four-minute companion timeout.
 - One session at a time across every Olympus process. A failed or timed-out
   consult is never resent, on zkAPI or any other route.
 - The model check is membership in the daemon's live model list, not a test
@@ -607,9 +619,14 @@ on, so deposit the smallest amount the service accepts.
 - The balance, fee quotes and the on-chain expiry are not available from the
   daemon without its wallet-management credential, which Olympus will not
   hold. Olympus shows no live fee estimate.
-- Any loopback endpoint on a zkAPI daemon port (8787, or a configured zkapi
-  profile's port) is refused where Argus/Delphi lanes, embeddings and vision
-  dispatch, not only when the policy is validated.
+- Any endpoint that reaches this machine on a zkAPI daemon port (8787, or a
+  configured zkapi profile's port, in any loopback spelling including
+  `localhost` names and IPv4-mapped IPv6) is refused by the shared model
+  transport that every analyst, embedding and vision adapter sends through,
+  and by policy validation for every provider, whatever trust it declares.
+- If Olympus crashes mid-session, a watchdog stops the session's processes,
+  and the next session cleans up what is left only after proving it belonged
+  to the crashed session; anything it cannot prove is reported, not signalled.
 
 `olympus doctor` reports all of this as the `zkapi_consult_transport` check,
 content-free.
