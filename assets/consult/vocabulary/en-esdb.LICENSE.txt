@@ -3,7 +3,7 @@ Source: English Speller Database (formerly SCOWL), release rel-2026.02.25,
 https://github.com/en-wl/wordlist/archive/refs/tags/rel-2026.02.25.tar.gz
 (SHA-256 74e7cc3e9e03e609c1c74bb7e8862fcd988cdd64768dcbee4611581b7e633852).
 Word list: ./scowl word-list <size> A,B,Z,C,D 1 --deaccent --wo-poses=abbr, capitalised entries removed.
-Generator: scripts/build-consult-vocabulary.ts at commit GENERATOR_COMMIT of this repository
+Generator: scripts/build-consult-vocabulary.ts at commit 21a43ef0a01916dc67affad1875e0a61671751bc of this repository
 Licence: the ESDB/SCOWL copyright notice below (permissive).
 
 Copyright 2000-2026 by Kevin Atkinson
