@@ -486,13 +486,26 @@ describe('one challenge per handshake; its proof of work stops with the handshak
     return { installId: installIdForPublicKey(spki), privateKey, publicKey, publicKeySpki: base64url(spki) };
   }
 
-  test('the fixed far proof of work still matches the protocol digest', () => {
-    // Fails (deterministically) if the digest or the install id derivation
-    // changes, so the nonce above never silently stops being far.
+  /**
+   * Counters this test proves unsolved. The solver restarts from 0 on every
+   * handshake, and the windows below (a 150 ms handshake, or until the
+   * challenge arrives) cover well under half of this even on a fast machine.
+   */
+  const FAR_POW_CHECKED_PREFIX = 400_000;
+
+  test('the fixed nonce has no proof of work below the checked prefix, and its recorded first solution is valid', () => {
+    // Fails deterministically if the digest or the install id derivation
+    // changes, so the nonce never silently stops being far. The first
+    // solution (14,473,083) was found offline; only the prefix is re-proven.
     const identity = farPowIdentity();
     expect(identity.installId).toBe('ih7bcv6s3t72w5r5fdtl7umbwbpwcdra');
     expect(verifyRegistrationPow(22, FAR_POW_NONCE, identity.installId, PUBLIC_HOST, String(FAR_POW_FIRST_SOLUTION))).toBe(true);
-  });
+    const early: number[] = [];
+    for (let counter = 0; counter < FAR_POW_CHECKED_PREFIX; counter += 1) {
+      if (verifyRegistrationPow(22, FAR_POW_NONCE, identity.installId, PUBLIC_HOST, String(counter))) early.push(counter);
+    }
+    expect(early).toEqual([]);
+  }, 60_000);
 
   /** A hostile relay: sends `challenges` max-difficulty challenges and never answers. */
   async function hostileRelay(challenges: number) {
@@ -581,5 +594,22 @@ describe('one challenge per handshake; its proof of work stops with the handshak
     await stopping.stop();
     expect(await cpuOver(500)).toBeLessThan(250);
     expect(second.answers).toEqual([]);
+  });
+
+  test('an authentication result that lands after its handshake was given up on is never sent', () => {
+    // The answer is built by a stand-in whose result the child releases by
+    // hand: session 0 is dropped mid-solve, the client reconnects, and
+    // session 0's result arrives while session 1 is open and current.
+    // (mock.module is process-wide in Bun, so this runs in its own process.)
+    const child = Bun.spawnSync([process.execPath, join(import.meta.dir, 'fixtures', 'late-auth-child.ts')], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(child.stderr.toString()).toBe('');
+    expect(child.exitCode).toBe(0);
+    const { first, second } = JSON.parse(child.stdout.toString()) as { first: string[]; second: string[] };
+    expect(first).toEqual([]);
+    // Only session 1's own answer: session 0's late one is dropped, not sent over session 1.
+    expect(second.map((frame) => (JSON.parse(frame) as { marker: string }).marker)).toEqual(['session-1']);
   });
 });

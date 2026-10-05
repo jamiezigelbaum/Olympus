@@ -585,7 +585,11 @@ describe('collecting the private answer', () => {
   });
 
   test('polling stops at the cap and offers Try again', async () => {
-    const host = mount({ pollCapMs: 30, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
+    // The deadline covers the key, every request AND the decryption, so the
+    // Try again round below must fit inside it: 30 ms lost that race to real
+    // WebCrypto on a loaded machine. 1 s still ends the pending polls (every
+    // 2 ms) in the slow notice, inside host.until's >= 2 s of waiting.
+    const host = mount({ pollCapMs: 1_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
     host.push(ready());
     await host.until(() => host.text().includes(W.slow), 'the slow notice');
     expect(host.buttons().map((b) => b.textContent)).toEqual([W.tryAgain]);
@@ -598,7 +602,8 @@ describe('collecting the private answer', () => {
   });
 
   test('a request that never answers cannot hold "Preparing…": the deadline ends it with Try again', async () => {
-    const host = mount({ pollCapMs: 40, replies: ['hang'] });
+    // Same race as the test above: Try again's answer must fit in the deadline.
+    const host = mount({ pollCapMs: 1_000, replies: ['hang'] });
     host.push(ready());
     expect(host.text()).toContain(W.preparing);
     await host.until(() => host.text().includes(W.slow), 'the slow notice');
@@ -632,7 +637,11 @@ describe('collecting the private answer', () => {
   });
 
   test('one hung request is aborted after its own timeout and the panel asks again', async () => {
-    const host = mount({ pollCapMs: 5_000, requestTimeoutMs: 20, replies: ['hang', 'ready'] });
+    // The per-request timeout also bounds the answering request (the stand-in
+    // relay seals with real WebCrypto): 20 ms aborted it too on a loaded
+    // machine, so it was asked a third time. 300 ms still ends the hung one
+    // well inside host.until's >= 2 s of waiting.
+    const host = mount({ pollCapMs: 5_000, requestTimeoutMs: 300, replies: ['hang', 'ready'] });
     host.push(ready());
     await host.until(() => host.text().includes('31 March'), 'the answer');
     expect(host.fetched).toHaveLength(2);

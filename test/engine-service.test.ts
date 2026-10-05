@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -398,6 +398,8 @@ describe('engine host without OpenClaw', () => {
 });
 
 describe('doctor without OpenClaw', () => {
+  const doctorStateRoot = mkdtempSync(join(tmpdir(), 'olympus-engine-doctor-state-'));
+  afterAll(() => rmSync(doctorStateRoot, { recursive: true, force: true }));
   function deps(facts: DoctorHostFacts, env: Record<string, string> = {}): DoctorDeps {
     return {
       config: defaultConfig(),
@@ -406,6 +408,11 @@ describe('doctor without OpenClaw', () => {
       pythonModuleExists: async () => false,
       fetchImpl: (async () => { throw new Error('offline'); }) as unknown as typeof fetch,
       readHandleRegistry: () => ({ version: 1, handles: [] }),
+      // Never the developer's own secret store, pending OAuth state, or the
+      // ingestion-health baseline doctor writes (all under os.homedir()).
+      secretStore: { getSync: () => undefined, get: async () => undefined },
+      oauthStateDir: join(doctorStateRoot, 'pending-oauth'),
+      ingestionHealthStatePath: join(doctorStateRoot, 'source-ingestion-doctor-state.json'),
       env,
       hostProbe: () => facts,
     };
