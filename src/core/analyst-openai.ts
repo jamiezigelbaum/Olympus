@@ -14,6 +14,7 @@
 // routing layer can fall back to the stricter local analyst where appropriate.
 
 import { OperationError } from './operation-error.ts';
+import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from './analyst.ts';
 
 // Injectable so tests can script the wire without a network. Matches the global
@@ -122,7 +123,7 @@ export function createOpenAICompatibleAnalystModel(
       try {
         let response: Response;
         try {
-          response = await fetchImpl(url, {
+          response = await fetchModelEndpoint(fetchImpl, url, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -133,6 +134,13 @@ export function createOpenAICompatibleAnalystModel(
           });
         } catch (error) {
           if (request.signal?.aborted) throw callerAbortError(request.signal.reason);
+          if (isModelEndpointRedirectError(error)) {
+            throw new OperationError(
+              'source_index_error',
+              `${providerLabel} (${model}) answered with a redirect, which is refused.`,
+              error.message,
+            );
+          }
           throw new OperationError(
             'source_index_error',
             `${providerLabel} (${model}) was unreachable at ${url}.`,

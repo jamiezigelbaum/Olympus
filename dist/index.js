@@ -3124,6 +3124,81 @@ var init_config = __esm(() => {
   ];
 });
 
+// src/core/local-model-policy.ts
+function isCloudForwardingModelId(modelId) {
+  const trimmed = modelId.trim().toLowerCase();
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  const colon = lastSegment.lastIndexOf(":");
+  if (colon < 0)
+    return false;
+  const tag = lastSegment.slice(colon + 1);
+  return tag === "cloud" || tag.endsWith("-cloud");
+}
+function assertLocalModelIdNotCloudForwarding(label, modelId) {
+  if (!isCloudForwardingModelId(modelId))
+    return;
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
+}
+var init_local_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/model-transport.ts
+function isModelEndpointRedirectError(error) {
+  return error instanceof ModelEndpointRedirectError;
+}
+async function fetchModelEndpoint(fetchImpl, url, init) {
+  let response;
+  try {
+    response = await fetchImpl(url, { ...init, redirect: "error" });
+  } catch (error) {
+    if (isFetchRedirectRefusal(error))
+      throw new ModelEndpointRedirectError;
+    throw error;
+  }
+  if (isRedirectResponse(response)) {
+    discardBody(response);
+    throw new ModelEndpointRedirectError(response.status >= 300 && response.status <= 399 ? response.status : undefined);
+  }
+  return response;
+}
+function isRedirectResponse(response) {
+  return response.type === "opaqueredirect" || response.redirected === true || response.status >= 300 && response.status <= 399;
+}
+function discardBody(response) {
+  try {
+    const cancelled = response.body?.cancel();
+    if (cancelled && typeof cancelled.catch === "function") {
+      cancelled.catch(() => {
+        return;
+      });
+    }
+  } catch {}
+}
+function isFetchRedirectRefusal(error) {
+  if (error instanceof ModelEndpointRedirectError)
+    return true;
+  if (!(error instanceof Error))
+    return false;
+  if (error.code === "UnexpectedRedirect")
+    return true;
+  const cause = error.cause;
+  const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
+}
+var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
+var init_model_transport = __esm(() => {
+  ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
+    code = "model_endpoint_redirect";
+    status;
+    constructor(status) {
+      super(MODEL_ENDPOINT_REDIRECT_MESSAGE);
+      this.name = "ModelEndpointRedirectError";
+      this.status = status;
+    }
+  };
+});
+
 // src/core/http-timeout.ts
 async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -3943,6 +4018,7 @@ function validateProfile(id, profile) {
   }
   if (profile.trust === "local" || profile.provider === "local-openai-compatible") {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
+    assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? "");
   }
   const rawProfile = profile;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {
@@ -4128,6 +4204,7 @@ function stringArrayField(value, label) {
 var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
 var init_sovereignty = __esm(() => {
   init_operation_error();
+  init_local_model_policy();
   init_config();
   init_secret_store();
   init_source_model_policy();
@@ -8679,6 +8756,8 @@ var init_embedding_identity = __esm(() => {
 var SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
+  init_local_model_policy();
+  init_model_transport();
   init_embedding_identity();
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -11279,6 +11358,7 @@ async function fetchVeniceCreditStatus(options = {}) {
         authorization: `Bearer ${apiKey}`,
         accept: "application/json"
       },
+      redirect: "error",
       signal: controller.signal
     };
     const response = await fetchImpl(`${baseUrl}/billing/balance`, requestInit);
@@ -11801,6 +11881,8 @@ import { createHash as createHash6 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
+init_local_model_policy();
+init_model_transport();
 init_secret_store();
 
 class DelphiClient {
@@ -11861,6 +11943,7 @@ class DelphiClient {
   async complete(options) {
     const route = this.resolveRoute(options);
     const model = options.model || route.model;
+    assertLocalModelIdNotCloudForwarding(`Argus ${route.errorLabel} model`, model);
     const messages = [
       ...options.system ? [{ role: "system", content: options.system }] : [],
       { role: "user", content: options.prompt }
@@ -11958,6 +12041,8 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      if (isModelEndpointRedirectError(firstError))
+        throw argusRedirectError(lane, firstError);
       const cancelled = callerCancellation(init.signal);
       if (cancelled)
         throw cancelled;
@@ -11973,6 +12058,8 @@ class DirectHttpDelphiTransport {
         if (isAbortError(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }
+        if (isModelEndpointRedirectError(secondError))
+          throw argusRedirectError(lane, secondError);
         throw new OperationError("argus_unreachable", `Argus ${lane} lane is unreachable at ${url}.`, firstError instanceof Error ? firstError.message : "Check that the Argus endpoint is running or tunneled.");
       }
     }
@@ -11984,7 +12071,7 @@ class DirectHttpDelphiTransport {
   }
   async fetchWithTimeout(url, init, timeoutMs) {
     if (timeoutMs <= 0)
-      return this.fetchImpl(url, init);
+      return fetchModelEndpoint(this.fetchImpl, url, init);
     const controller = new AbortController;
     const abortFromCaller = () => controller.abort(init.signal?.reason);
     if (init.signal?.aborted)
@@ -11993,7 +12080,7 @@ class DirectHttpDelphiTransport {
       init.signal?.addEventListener("abort", abortFromCaller, { once: true });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await this.fetchImpl(url, {
+      return await fetchModelEndpoint(this.fetchImpl, url, {
         ...init,
         signal: controller.signal
       });
@@ -12020,6 +12107,9 @@ async function safeText(response) {
 }
 function isAbortError(error) {
   return error instanceof Error && error.name === "AbortError";
+}
+function argusRedirectError(lane, error) {
+  return new OperationError("argus_unreachable", `Argus ${lane} lane answered with a redirect, which is refused.`, error.message);
 }
 function argusTimeoutError(lane, url, timeoutMs) {
   return new OperationError("argus_unreachable", `Argus ${lane} lane timed out at ${url} after ${timeoutMs}ms.`, "The local model lane did not complete within the configured request budget; failing closed instead of leaving the caller waiting indefinitely.");

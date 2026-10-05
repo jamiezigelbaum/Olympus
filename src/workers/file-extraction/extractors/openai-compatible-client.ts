@@ -16,6 +16,8 @@ import type {
 } from '../types.ts';
 import { normalizeExtractedText } from './bounded-text.ts';
 import { requireLocalHttpBaseUrl, requireNonEmpty } from './remote-vlm.ts';
+import { assertLocalModelIdNotCloudForwarding } from '../../../core/local-model-policy.ts';
+import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../../core/model-transport.ts';
 import {
   DEFAULT_VLM_PDF_HEALTHCHECK_TIMEOUT_MS,
   VLM_ROUTER_PROFILE_UNKNOWN_ERROR_KIND,
@@ -47,6 +49,7 @@ export class OpenAICompatibleVlmClient implements VlmClient {
       'File extraction local VLM base URL',
     );
     this.model = requireNonEmpty(options.model, 'File extraction local VLM model');
+    assertLocalModelIdNotCloudForwarding('File extraction local VLM model', this.model);
     this.fetchImpl = options.fetchImpl ?? fetch;
     if (options.apiKey?.trim()) this.apiKey = options.apiKey.trim();
     this.timeoutMs = options.timeoutMs ?? DEFAULT_LOCAL_VLM_TIMEOUT_MS;
@@ -55,7 +58,7 @@ export class OpenAICompatibleVlmClient implements VlmClient {
   async describe(request: VlmDescribeRequest): Promise<VlmDescribeResult> {
     const timeout = requestTimeout(this.timeoutMs);
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+      const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: this.headers(),
         ...(timeout.signal ? { signal: timeout.signal } : {}),
@@ -102,7 +105,7 @@ export class OpenAICompatibleVlmClient implements VlmClient {
         warnings: [text ? 'local_private_model' : 'vlm_empty'],
       };
     } catch (error) {
-      if (error instanceof VlmRouterError) throw error;
+      if (error instanceof VlmRouterError || isModelEndpointRedirectError(error)) throw error;
       throw new Error(error instanceof Error ? error.message : 'Local VLM endpoint failed.');
     } finally {
       timeout.clear();
@@ -114,7 +117,7 @@ export class OpenAICompatibleVlmClient implements VlmClient {
       request.timeoutMs ?? DEFAULT_VLM_PDF_HEALTHCHECK_TIMEOUT_MS,
     );
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}/models`, {
+      const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/models`, {
         method: 'GET',
         headers: this.headers(),
         ...(timeout.signal ? { signal: timeout.signal } : {}),
@@ -136,7 +139,9 @@ export class OpenAICompatibleVlmClient implements VlmClient {
       }
     } catch (error) {
       if (error instanceof VlmRouterError) throw error;
-      const kind = vlmRouterErrorKind(error) ?? 'vlm_backend_unavailable';
+      const kind = isModelEndpointRedirectError(error)
+        ? 'model_endpoint_redirect'
+        : vlmRouterErrorKind(error) ?? 'vlm_backend_unavailable';
       throw new VlmRouterError({
         status: 503,
         errorKind: kind,

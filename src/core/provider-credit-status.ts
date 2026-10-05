@@ -150,6 +150,8 @@ export async function fetchVeniceCreditStatus(
         authorization: `Bearer ${apiKey}`,
         accept: 'application/json',
       },
+      // The key rides both billing requests: a redirect is refused, never followed.
+      redirect: 'error',
       signal: controller.signal,
     };
     const response = await fetchImpl(`${baseUrl}/billing/balance`, requestInit);

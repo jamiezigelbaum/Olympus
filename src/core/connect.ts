@@ -908,6 +908,8 @@ async function validateGeminiApiKey(options: {
     response = await fetchWithTimeout(options.fetchImpl, url, {
       method: 'GET',
       headers: { 'x-goog-api-key': options.apiKey, Accept: 'application/json' },
+      // The key rides this request: a redirect is refused, never followed.
+      redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
     if (isAbortError(error)) {
@@ -958,6 +960,8 @@ async function validatePublicApiKeySource(options: {
     response = await fetchWithTimeout(options.fetchImpl, url, {
       method: 'GET',
       headers: { Authorization: `Bearer ${options.apiKey}`, Accept: 'application/json' },
+      // The key rides this request: a redirect is refused, never followed.
+      redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
     if (isAbortError(error)) {
@@ -1137,6 +1141,8 @@ async function validateApiKeySource(options: {
         Authorization: `Bearer ${options.apiKey}`,
         Accept: 'application/json',
       },
+      // The key rides this request: a redirect is refused, never followed.
+      redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
     if (isAbortError(error)) {

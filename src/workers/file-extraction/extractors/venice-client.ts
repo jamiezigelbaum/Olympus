@@ -22,6 +22,7 @@ import {
   type VenicePrivacyCategory,
 } from '../../../core/venice-models.ts';
 import { assertSecureAnalystPoolModelIdAllowed } from '../../../core/sovereignty.ts';
+import { fetchModelEndpoint } from '../../../core/model-transport.ts';
 import type {
   ExtractionApprovedRemoteDestination,
   VlmClient,
@@ -105,7 +106,7 @@ export class VeniceVlmClient implements VlmClient {
         throw new Error('Venice extraction model has no approved remote destination.');
       }
 
-      const response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+      const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

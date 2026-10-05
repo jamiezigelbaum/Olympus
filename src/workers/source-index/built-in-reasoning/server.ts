@@ -17,6 +17,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { availableParallelism, setPriority, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fetchModelEndpoint } from '../../../core/model-transport.ts';
 
 export interface LlamaServerLaunch {
   serverPath: string;
@@ -255,7 +256,9 @@ async function healthy(fetchImpl: typeof fetch, baseUrl: string): Promise<boolea
  */
 async function servesAlias(fetchImpl: typeof fetch, baseUrl: string, token: string, alias: string): Promise<boolean> {
   try {
-    const response = await fetchImpl(`${baseUrl}/v1/models`, {
+    // The server's bearer token rides this request: a redirect is refused
+    // (and reads as "not our server"), never followed.
+    const response = await fetchModelEndpoint(fetchImpl, `${baseUrl}/v1/models`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(5_000),
     });

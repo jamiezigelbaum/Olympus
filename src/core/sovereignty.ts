@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OperationError } from './operation-error.ts';
+import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
 import { parseOptionalBooleanEnv } from './config.ts';
 import { normalizeSecretRef } from './secret-store.ts';
 import { assertModelTrustTierAllowed } from './source-model-policy.ts';
@@ -744,6 +745,7 @@ function validateProfile(id: string, profile: SovereigntyModelProfile): void {
   }
   if (profile.trust === 'local' || profile.provider === 'local-openai-compatible') {
     assertLocalProfileBaseUrl(id, profile.baseUrl);
+    assertLocalModelIdNotCloudForwarding(`Sovereignty local profile "${id}"`, profile.model ?? '');
   }
   const rawProfile = profile as unknown as Record<string, unknown>;
   if (rawProfile.apiKey !== undefined || rawProfile.secret !== undefined) {

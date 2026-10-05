@@ -44,6 +44,7 @@
 
 import { createHash } from 'node:crypto';
 import { OperationError } from '../../core/operation-error.ts';
+import { isModelEndpointRedirectError } from '../../core/model-transport.ts';
 import {
   SOURCE_TRUST_TIERS,
   type SourceTrustDomain,
@@ -102,6 +103,8 @@ export const DEFAULT_RECLASSIFICATION_LIMIT = 100;
 export const EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = 'extractor_kind_unknown';
 export const EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = 'extractor_threw';
 export const EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = 'extractor_command_timeout';
+// A model endpoint answered with a redirect, which is refused and never followed.
+export const EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = 'model_endpoint_redirect';
 export const EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = 'source_fetch_failed';
 export const EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = 'source_bytes_hash_mismatch';
 export const EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = 'extractor_empty_output';
@@ -824,6 +827,10 @@ async function settleOneJob(input: {
   try {
     output = await extractor.extract(extractorInput);
   } catch (error) {
+    // A redirecting model endpoint is a configuration fault, not this file's:
+    // it keeps its own kind so the lane can say so, and the job waits for its
+    // ordinary backoff rather than being re-run at once.
+    if (isModelEndpointRedirectError(error)) return retryable(EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT, error);
     return error instanceof ExtractionCommandTimeoutError
       ? retryable(EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT, error)
       : retryable(EXTRACTION_ERROR_KIND_EXTRACTOR_THREW, error);

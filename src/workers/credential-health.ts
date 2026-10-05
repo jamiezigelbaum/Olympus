@@ -617,6 +617,8 @@ async function probeVeniceApiKey(options: {
     const response = await options.fetchImpl(VENICE_MODELS_URL, {
       method: 'GET',
       headers: { Authorization: `Bearer ${secretRead.value}` },
+      // The key rides this request: a redirect is refused, never followed.
+      redirect: 'error',
     });
     return endpointResponseResult(handle, ['venice.api'], 'static_api_key', options.checkedAt, response);
   } catch {
