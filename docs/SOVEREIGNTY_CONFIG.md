@@ -583,19 +583,36 @@ Hard invariants remain enforced outside user control:
   providers are refused
 - secrets are hard-denied everywhere
 - empty or exhausted fallback chains fail closed
-- model transports that carry source content or a model credential (analyst
-  chat, the built-in private model, embeddings, vision extraction, the privacy
-  sniffer, Delphi, and credential-bearing catalog checks) refuse redirects with a typed,
-  content-free failure instead of following them
+- model transports that carry source content (analyst chat, the built-in
+  private model, embeddings, vision extraction, the privacy sniffer, Delphi)
+  refuse redirects: any 3xx answer fails with a typed, content-free
+  `ModelEndpointRedirectError`, which each caller maps to its usual transport
+  failure, and is not retried on the spot
+- credential-bearing catalog, connect, key-health and billing checks also
+  send `redirect: 'error'`; a redirect there surfaces as the check's existing
+  categorical failure or status result, not as the typed error
 - a local profile, local embedding model, local vision model, or Argus route
-  whose model id carries an Ollama cloud tag (`:cloud`, or a tag ending in
-  `-cloud`, such as `gpt-oss:120b-cloud`) is refused with a `config_error`;
+  whose model id carries a reserved cloud-style tag (`:cloud`, or a tag ending
+  in `-cloud`, such as `gpt-oss:120b-cloud`, which is how Ollama names models
+  its local daemon forwards to its cloud) is refused with a `config_error`;
   only the tag is checked, so a name that merely contains "cloud" is accepted
 
 Loopback locality is asserted by the owner's configuration. Olympus checks the
-address, blocks redirects, and refuses known cloud-forwarding model ids, but it
-cannot verify what a loopback process does with a request. Never point a local
-profile at a proxy or daemon that forwards to a cloud model.
+address, refuses redirects, and refuses reserved cloud-style tags, but it
+cannot verify what a loopback process does with a request. The tag check is a
+heuristic:
+
+- it refuses a genuinely local custom model whose tag ends in `-cloud`
+  (rename the tag to use it);
+- it does not catch an alias that points at a cloud model, a digest-form
+  model id, or a forwarding proxy on loopback (LM Studio, LiteLLM, an
+  OpenRouter-style gateway, or anything similar).
+
+Never point a local profile at a proxy or daemon that forwards to a cloud
+model. Redirect refusal also depends on the transport honouring it: Olympus
+sends `redirect: 'error'` and treats any 3xx it still receives as a refusal,
+but a custom fetch implementation that followed a redirect on its own would
+already have re-sent the request.
 
 An opt-in Gemini embedding profile references
 `env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY`, matching the supervised worker

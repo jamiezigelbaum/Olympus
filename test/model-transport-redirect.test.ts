@@ -142,6 +142,54 @@ describe('fetchModelEndpoint', () => {
     expectContentFree(error);
   });
 
+  // Every 3xx, not only the five fetch would follow: a 300 (or any other
+  // 3xx) carries a body the caller would otherwise read into its error.
+  const ALL_3XX = Array.from({ length: 100 }, (_, index) => 300 + index);
+  test.each(ALL_3XX)('an injected %i response is refused before any caller reads its body', async (status) => {
+    let cancelled = false;
+    const respond = async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode(`${EVIDENCE} ${API_KEY}`)); },
+      cancel() { cancelled = true; },
+    }), { status, headers: { location: `http://127.0.0.1:${target.port}/collect?${LEAK_QUERY}=1` } });
+    const error = await caught(() => fetchModelEndpoint(respond, 'http://127.0.0.1:1/v1/x', { method: 'POST', body: EVIDENCE }));
+    expect(error).toBeInstanceOf(ModelEndpointRedirectError);
+    expect((error as ModelEndpointRedirectError).status).toBe(status);
+    expect(cancelled).toBe(true);
+    expectContentFree(error);
+  });
+
+  test('an opaque-redirect response is refused', async () => {
+    const opaque = { type: 'opaqueredirect', status: 0, ok: false, redirected: false, body: null } as unknown as Response;
+    const error = await caught(() => fetchModelEndpoint(async () => opaque, 'http://127.0.0.1:1/v1/x', { method: 'POST', body: EVIDENCE }));
+    expect(error).toBeInstanceOf(ModelEndpointRedirectError);
+    expectContentFree(error);
+  });
+
+  test('a 300 whose body echoes the request never reaches the analyst error', async () => {
+    const echo = (async (_url: string, init?: RequestInit) => new Response(`${String(init?.body)} ${API_KEY}`, { status: 300 })) as unknown as typeof fetch;
+    const model = createOpenAICompatibleAnalystModel({ apiKey: API_KEY, baseUrl: 'http://127.0.0.1:1/v1', serviceTier: false, fetchImpl: echo });
+    const error = await caught(() => model.complete({ system: 'answer', prompt: EVIDENCE, localOnly: false }));
+    expect(error).toBeInstanceOf(OperationError);
+    expect((error as Error).message).toContain('redirect');
+    expectContentFree(error);
+  });
+
+  test('a stalled body cancel does not hold the refusal', async () => {
+    const stalled = { status: 302, ok: false, redirected: false, type: 'basic', body: { cancel: () => new Promise(() => {}) } } as unknown as Response;
+    const outcome = await Promise.race([
+      caught(() => fetchModelEndpoint(async () => stalled, 'http://127.0.0.1:1/v1/x', { method: 'POST' })),
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 500)),
+    ]);
+    expect(outcome).toBeInstanceOf(ModelEndpointRedirectError);
+  });
+
+  test('a rejected body cancel still surfaces the typed refusal', async () => {
+    const rejecting = { status: 307, ok: false, redirected: false, type: 'basic', body: { cancel: () => Promise.reject(new Error(`cancel failed ${API_KEY}`)) } } as unknown as Response;
+    const error = await caught(() => fetchModelEndpoint(async () => rejecting, 'http://127.0.0.1:1/v1/x', { method: 'POST' }));
+    expect(error).toBeInstanceOf(ModelEndpointRedirectError);
+    expectContentFree(error);
+  });
+
   test('every request goes out with redirect: error', async () => {
     let seen: RequestInit | undefined;
     await fetchModelEndpoint(async (_url, init) => {

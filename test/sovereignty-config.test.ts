@@ -222,7 +222,7 @@ describe('sovereignty config engine', () => {
       }
       expect(error).toBeInstanceOf(OperationError);
       expect((error as OperationError).code).toBe('config_error');
-      expect((error as Error).message).toContain("runs in the provider's cloud and cannot serve as a local model");
+      expect((error as Error).message).toContain("is a reserved cloud-style tag, so it cannot serve as a local model");
     }
     for (const model of ['gpt-oss:120b', 'my-cloud-model:latest', 'cloudllama:7b']) {
       expect(() => createSovereigntyEngine(withLocalModel(model))).not.toThrow();

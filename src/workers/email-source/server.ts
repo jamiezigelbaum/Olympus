@@ -1686,6 +1686,60 @@ export function accountFromDropboxCredentialHandle(value: string | undefined): s
 }
 
 
+/**
+ * The local VLM client for file extraction, from the
+ * OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_* settings, or undefined when that lane is
+ * off. The client refuses a model id with a reserved cloud-style tag.
+ */
+export function createFileExtractionLocalVlmClientFromEnv(
+  env: Record<string, string | undefined>,
+): OpenAICompatibleVlmClient | undefined {
+  const fileExtractionLocalVlmEnabled = parseOptionalBooleanEnv(
+    env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED,
+    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED',
+  );
+  const fileExtractionLocalVlmConfigured = [
+    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL',
+    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL',
+    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY',
+    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
+    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES',
+    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES',
+    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS',
+  ].some((name) => Boolean(env[name]?.trim()));
+  if (fileExtractionLocalVlmConfigured && !fileExtractionLocalVlmEnabled) {
+    throw new Error(
+      'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED=true is required when local VLM settings are present.',
+    );
+  }
+  return fileExtractionLocalVlmEnabled
+    ? new OpenAICompatibleVlmClient({
+        baseUrl: requiredFileExtractionEnv(
+          env,
+          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL',
+        ),
+        model: requiredFileExtractionEnv(
+          env,
+          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL',
+        ),
+        ...(env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY?.trim()
+          ? { apiKey: env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY.trim() }
+          : {}),
+        ...(parseOptionalTimeoutSecondsOrNone(
+          env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS,
+          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
+        ) !== undefined
+          ? {
+              timeoutMs: parseOptionalTimeoutSecondsOrNone(
+                env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS,
+                'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
+              )!,
+            }
+          : {}),
+      })
+    : undefined;
+}
+
 export async function main(): Promise<void> {
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
@@ -1984,50 +2038,7 @@ export async function main(): Promise<void> {
           : {}),
       })
     : undefined;
-  const fileExtractionLocalVlmEnabled = parseOptionalBooleanEnv(
-    process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED,
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED',
-  );
-  const fileExtractionLocalVlmConfigured = [
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS',
-  ].some((name) => Boolean(process.env[name]?.trim()));
-  if (fileExtractionLocalVlmConfigured && !fileExtractionLocalVlmEnabled) {
-    throw new Error(
-      'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED=true is required when local VLM settings are present.',
-    );
-  }
-  const fileExtractionLocalVlmClient = fileExtractionLocalVlmEnabled
-    ? new OpenAICompatibleVlmClient({
-        baseUrl: requiredFileExtractionEnv(
-          process.env,
-          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL',
-        ),
-        model: requiredFileExtractionEnv(
-          process.env,
-          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL',
-        ),
-        ...(process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY?.trim()
-          ? { apiKey: process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY.trim() }
-          : {}),
-        ...(parseOptionalTimeoutSecondsOrNone(
-          process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS,
-          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
-        ) !== undefined
-          ? {
-              timeoutMs: parseOptionalTimeoutSecondsOrNone(
-                process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS,
-                'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
-              )!,
-            }
-          : {}),
-      })
-    : undefined;
+  const fileExtractionLocalVlmClient = createFileExtractionLocalVlmClientFromEnv(process.env);
   // Tiered store sets (P1b). Every lane with per-tier stores registers here:
   // its set ledger (the secure store's own co-located ledger) is the one
   // visibility authority for its stores, bound to every leg at boot so no

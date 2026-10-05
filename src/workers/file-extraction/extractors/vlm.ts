@@ -63,6 +63,7 @@ import {
   type RenderedPdfPage,
 } from './pdf-render.ts';
 import { missingBytesFailure } from './text.ts';
+import { isModelEndpointRedirectError } from '../../../core/model-transport.ts';
 
 export const VLM_PDF_EXTRACTOR_KIND = 'local_vlm_pdf';
 export const VLM_PDF_EXTRACTOR_VERSION = '2026-08-17-delphi-vision-deep-v1';
@@ -357,6 +358,11 @@ export function createVlmPdfExtractor(options: VlmPdfExtractorOptions = {}): Ext
             sawEmptyContent = true;
             lastError = undefined;
           } catch (error) {
+            // A redirect is the endpoint's answer, not a passing failure:
+            // asking again would only be redirected again.
+            if (isModelEndpointRedirectError(error)) {
+              return { status: 'failed_retryable', errorKind: 'model_endpoint_redirect' };
+            }
             sawEmptyContent = false;
             lastError = error;
           }

@@ -61,6 +61,7 @@ import {
   EXTRACTION_ERROR_KIND_EMPTY_OUTPUT,
   EXTRACTION_ERROR_KIND_EXTRACTOR_THREW,
   EXTRACTION_ERROR_KIND_LEASE_LOST,
+  EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT,
   EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR,
   EXTRACTION_PAUSE_CONSECUTIVE_FAILURES,
   EXTRACTION_PAUSE_HEALTH_PROBE,
@@ -68,6 +69,7 @@ import {
   evaluateExtractionEgress,
   type ExtractionRunnerCorpus,
 } from '../src/workers/file-extraction/runner.ts';
+import { ModelEndpointRedirectError } from '../src/core/model-transport.ts';
 import type {
   ExtractionCandidatePage,
   ExtractionItemRef,
@@ -353,6 +355,30 @@ describe('extraction runner: one bad item never aborts a run', () => {
       const stored = jobs.get(failed.jobId)!;
       expect(stored.lastErrorHash).toMatch(/^[a-f0-9]{32}$/);
       expect(JSON.stringify(stored)).not.toContain('secret');
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('a thrown model-endpoint redirect settles with its own kind, not as a generic throw', async () => {
+    const jobs = jobStore();
+    try {
+      enqueue(jobs, 1);
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          async extract() {
+            throw new ModelEndpointRedirectError(302);
+          },
+        })],
+      });
+
+      const result = await runner.run({ ...LANE });
+
+      expect(result.counts.failed_retryable).toBe(1);
+      const failed = result.records.find((record) => record.status === 'failed_retryable')!;
+      expect(failed.errorKind).toBe(EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT);
+      expect(EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT).toBe('model_endpoint_redirect');
     } finally {
       jobs.close();
     }

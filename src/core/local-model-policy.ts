@@ -14,6 +14,11 @@
 // "cloud" elsewhere (`cloudllama:7b`, `my-cloud-model`, `qwen3:cloudy`,
 // `org/cloud-tools:latest`) is not a cloud-forwarding id and is accepted. An
 // id with no tag is never matched.
+//
+// This is a heuristic on a reserved tag, not proof of where a model runs. It
+// refuses a genuinely local custom model whose tag ends in `-cloud`, and it
+// does not catch an alias of a cloud model, a digest-form id, or a forwarding
+// proxy (LM Studio, LiteLLM, an OpenRouter-style gateway) on loopback.
 
 import { OperationError } from './operation-error.ts';
 
@@ -34,7 +39,7 @@ export function assertLocalModelIdNotCloudForwarding(label: string, modelId: str
   if (!isCloudForwardingModelId(modelId)) return;
   throw new OperationError(
     'config_error',
-    `${label} names model "${modelId.trim()}", which runs in the provider's cloud and cannot serve as a local model.`,
-    'Model tags ending in ":cloud" or "-cloud" (Ollama cloud models) are forwarded off this machine by the local daemon. Choose a model that runs locally, or configure the cloud model as a cloud profile.',
+    `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`,
+    'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.',
   );
 }

@@ -9,6 +9,13 @@ import { OperationError } from '../src/core/operation-error.ts';
 import { assertSnifferProfileAllowed } from '../src/workers/classification/sniffer-lane.ts';
 import { OpenAICompatibleVlmClient } from '../src/workers/file-extraction/extractors/openai-compatible-client.ts';
 import { OpenAICompatibleSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
+import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { ANSWER_PROFILE_IDS, answerProfile, applyModelChoice } from '../src/workers/chatgpt/model-choice.ts';
+import {
+  createFileExtractionLocalVlmClientFromEnv,
+  createSourceIndexEmbeddingProviderFromEnv,
+} from '../src/workers/email-source/server.ts';
 
 const CLOUD_IDS = [
   'gpt-oss:120b-cloud',
@@ -56,7 +63,7 @@ describe('isCloudForwardingModelId', () => {
     }
     expect(error).toBeInstanceOf(OperationError);
     expect((error as OperationError).code).toBe('config_error');
-    expect((error as Error).message).toContain("runs in the provider's cloud and cannot serve as a local model");
+    expect((error as Error).message).toContain("is a reserved cloud-style tag, so it cannot serve as a local model");
     expect(() => assertLocalModelIdNotCloudForwarding('Local lane', 'gpt-oss:120b')).not.toThrow();
   });
 });
@@ -110,5 +117,49 @@ describe('separately configured local model ids', () => {
     await expect(client.complete({ lane: 'fast', prompt: 'hello' })).rejects.toThrow("cannot serve as a local model");
     expect(requests).toEqual([]);
     await expect(client.complete({ lane: 'fast', prompt: 'hello', model: 'gpt-oss:120b' })).resolves.toMatchObject({ text: 'ok' });
+  });
+});
+
+describe('cloud tags through the configured lanes', () => {
+  test('the env-configured local embedding lane refuses a cloud tag', () => {
+    const env = {
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'local-openai-compatible',
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL: 'http://127.0.0.1:11434/v1',
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY: '768',
+    };
+    expect(() => createSourceIndexEmbeddingProviderFromEnv({ ...env, OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL: 'embeddinggemma:cloud' }))
+      .toThrow('cannot serve as a local model');
+    expect(createSourceIndexEmbeddingProviderFromEnv({ ...env, OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL: 'embeddinggemma:latest' })?.backend)
+      .toBe('local');
+  });
+
+  test('the env-configured local VLM lane refuses a cloud tag', () => {
+    const env = {
+      OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED: 'true',
+      OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL: 'http://127.0.0.1:11434/v1',
+    };
+    expect(() => createFileExtractionLocalVlmClientFromEnv({ ...env, OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL: 'qwen3-vl:235b-cloud' }))
+      .toThrow('cannot serve as a local model');
+    expect(createFileExtractionLocalVlmClientFromEnv({ ...env, OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL: 'qwen3-vl:8b' }))
+      .toBeInstanceOf(OpenAICompatibleVlmClient);
+  });
+
+  test('ChatGPT olympus_model_set refuses to route answers to a local profile with a cloud tag', () => {
+    const config = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+    const local = answerProfile('local');
+    config.modelProfiles[ANSWER_PROFILE_IDS.local] = { ...local, model: 'gpt-oss:120b-cloud' };
+    let error: unknown;
+    try {
+      applyModelChoice(config, { answers: 'local' }, { venice: false, local: true });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(OperationError);
+    expect((error as OperationError).code).toBe('config_error');
+    expect((error as Error).message).toContain('cannot serve as a local model');
+
+    const clean = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+    clean.modelProfiles[ANSWER_PROFILE_IDS.local] = local;
+    expect(applyModelChoice(clean, { answers: 'local' }, { venice: false, local: true }).changed).toBe(true);
   });
 });

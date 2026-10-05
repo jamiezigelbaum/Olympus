@@ -35,6 +35,7 @@ import {
   pdfImageOnly,
   textBytes,
 } from './fixtures/file-extraction-extractor-fixtures.ts';
+import { ModelEndpointRedirectError } from '../src/core/model-transport.ts';
 
 const PDF_MIME = 'application/pdf';
 
@@ -523,6 +524,18 @@ function routerError(status: number, detail: string): VlmRouterError {
     message: `Local vision endpoint returned HTTP ${status}: ${detail}.`,
   });
 }
+
+describe('vlm pdf extractor: a redirecting endpoint', () => {
+  test('a redirect is not retried page by page and keeps its own content-free kind', async () => {
+    const fake = client(async () => {
+      throw new ModelEndpointRedirectError(307);
+    });
+    const result = await pdfExtractor({ client: fake, totalPages: 3, pageRetries: 2 })
+      .extract(extractorInput({ bytes: pdfImageOnly(), mimeType: PDF_MIME }));
+    expect(result).toEqual({ status: 'failed_retryable', errorKind: 'model_endpoint_redirect' });
+    expect(fake.requests).toHaveLength(1);
+  });
+});
 
 describe('vlm pdf extractor: delphi router failure classification', () => {
   test('a request failure is labelled by HTTP status alone and is never terminal', () => {
