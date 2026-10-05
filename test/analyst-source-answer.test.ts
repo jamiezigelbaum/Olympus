@@ -31,6 +31,9 @@ import {
   type SourceTrustTier,
 } from '../src/core/source-index/types.ts';
 import { createAnalyst, type AnalystModelRequest, type CreateAnalystOptions } from '../src/core/analyst.ts';
+import { createAnthropicAnalystModel } from '../src/core/analyst-anthropic.ts';
+import { createOpenAICompatibleAnalystModel } from '../src/core/analyst-openai.ts';
+import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
 import { createStructuredEvidenceFact } from '../src/core/opsec.ts';
 import { SourceModelPolicyDeniedError } from '../src/core/source-model-policy.ts';
 import { OperationError } from '../src/core/operation-error.ts';
@@ -40,8 +43,13 @@ import {
   createConnectorStoreCorpusAdapter,
   defineConnectorCorpus,
 } from '../src/workers/connector-store/index.ts';
-import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
+import {
+  createAnalystSourceIndexAnswerHandler,
+  searchReleasedEvidence,
+  type AnalystAnswerLanes,
+} from '../src/workers/source-index/analyst-answer.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
+import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const INTERNAL = 'internal.notes.docs';
@@ -3403,6 +3411,151 @@ describe('row tiers reach the secure_local context decision', () => {
 
     expect(result.opsec.release_decision.decision).toBe('needs_approval');
     expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_requires_approval');
+  });
+
+  // One definition of Private at every boundary: an S4 row inside an
+  // internal-domain store is Private for dispatch, release and ChatGPT
+  // evidence alike. Real store; the S4 row's provider returns nothing, so
+  // only its own tier (carried on the hit) says it is Private.
+  async function mergerStore() {
+    return tieredStore('file', [
+      { id: 'plain', text: 'garden tomatoes', tier: 'S3' },
+      { id: 'secret-merger', text: 'garden tomatoes merger', tier: 'S4' },
+    ]);
+  }
+
+  function mergerLanes(store: LocalConnectorStore): AnalystAnswerLanes {
+    const storeProvider = createConnectorStoreContentProvider({ store });
+    return {
+      registry: buildSourceIndexCorpusRegistry([storeCorpus(store)]),
+      adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, retrievalMode: 'keyword' }) },
+      contentProviders: {
+        [store.corpusId]: {
+          async fetchLocalContent(request: LocalContentRequest) {
+            return request.provenance.sourceItem.providerItemId === 'secret-merger'
+              ? undefined
+              : storeProvider.fetchLocalContent(request);
+          },
+        },
+      } as LocalContentProviderMap,
+    };
+  }
+
+  function capturingCloud() {
+    const bodies: string[] = [];
+    const analyst = createAnalyst(createOpenAICompatibleAnalystModel({
+      apiKey: 'test-key',
+      fetchImpl: async (_url, init) => {
+        bodies.push(String(init.body));
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ answer: 'cloud', citations: [], unanswered: [], sufficient: true }) } }],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      },
+    }));
+    return { analyst, bodies };
+  }
+
+  test('a default request with an S4 row in a Personal store never reaches the ordinary cloud analyst', async () => {
+    const store = await mergerStore();
+    try {
+      const cloud = capturingCloud();
+      const local = titleEchoAnalyst('secret-merger.md');
+      const result = await createAnalystSourceIndexAnswerHandler({
+        analyst: local.analyst,
+        cloudAnalyst: cloud.analyst,
+        lanes: () => mergerLanes(store),
+      }).answer({ question: 'garden tomatoes', retrieval_mode: 'keyword' });
+
+      expect(cloud.bodies).toEqual([]);
+      expect(local.requests.length).toBeGreaterThan(0);
+      expect(result.audit.answer_synthesis.analyst_backend).toBe('local');
+      expect(result.audit.answer_synthesis.private_context_used).toBe(true);
+      expect(result.audit.answer_synthesis.secure_local_items_consulted).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('an explicit cloud request with an S4 row in a Personal store is refused before any cloud call', async () => {
+    const store = await mergerStore();
+    try {
+      const cloud = capturingCloud();
+      const handler = createAnalystSourceIndexAnswerHandler({
+        analyst: titleEchoAnalyst('secret-merger.md').analyst,
+        cloudAnalyst: cloud.analyst,
+        lanes: () => mergerLanes(store),
+      });
+      await expect(handler.answer({ question: 'garden tomatoes', retrieval_mode: 'keyword', analyst_provider: 'cloud' }))
+        .rejects.toMatchObject({ code: 'source_index_policy_violation' });
+      expect(cloud.bodies).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('strict mode: a no-evidence answer releases no Private title among the unreadable matches', async () => {
+    const store = await mergerStore();
+    try {
+      const { analyst } = scriptedAnalyst(() => ({
+        answer: 'No evidence supports an answer.',
+        citations: [],
+        unanswered: [],
+      }));
+      const result = await createAnalystSourceIndexAnswerHandler({
+        analyst,
+        lanes: () => mergerLanes(store),
+        secureDerivativeDefault: 'approval',
+      }).answer({ question: 'garden tomatoes', retrieval_mode: 'keyword' });
+
+      expect(JSON.stringify({ answer: result.answer, evidence: result.evidence })).not.toContain('secret-merger');
+      expect(result.policy.secure_local_content_exposed).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('ChatGPT evidence withholds an S4 row of a Personal store and counts it', async () => {
+    const store = await mergerStore();
+    try {
+      const raw = await searchReleasedEvidence({ lanes: () => mergerLanes(store), question: 'garden tomatoes' });
+      expect(raw.evidence.map((item) => item.provider_item_id)).toEqual(['plain']);
+      expect(raw.withheld).toBe(1);
+      const shown = searchToolResult(raw);
+      expect(JSON.stringify(shown)).not.toContain('secret-merger');
+    } finally {
+      store.close();
+    }
+  });
+
+  test('ordinary cloud transports refuse a pack that is secure by tier, before anything is sent', async () => {
+    const sent: string[] = [];
+    const pack: EvidencePack = {
+      question: 'q',
+      candidates: [{
+        provenance: { sourceItem: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId: 'm', localItemId: 'personal:m' }, citation: { title: 'merger.md' } },
+        trustTier: 'S4',
+        trustDomain: 'internal',
+        chunks: ['MERGER-RAW'],
+      }],
+      coverage: { searchedCorpora: [STORE], skippedCorpora: [], extractionGaps: [] },
+      builtAt: '2026-10-05T00:00:00.000Z',
+    };
+    const recordFetch = async (_url: string, init: RequestInit) => {
+      sent.push(String(init.body));
+      return new Response('{}', { status: 200 });
+    };
+    // createAnalyst marks the request local-only from the pack (the shared predicate).
+    await expect(createAnalyst(createOpenAICompatibleAnalystModel({ apiKey: 'k', fetchImpl: recordFetch }))
+      .analyze(pack, { localOnly: false })).rejects.toMatchObject({ code: 'source_index_policy_violation' });
+    const request = { system: 's', prompt: 'p', localOnly: true };
+    await expect(createAnthropicAnalystModel({ apiKey: 'k', fetchImpl: recordFetch }).complete(request))
+      .rejects.toMatchObject({ code: 'source_index_policy_violation' });
+    let ran = 0;
+    await expect(createOpenClawInferAnalystModel({
+      runner: { async run() { ran += 1; return { stdout: '', stderr: '', exitCode: 0 } as never; } },
+    }).complete(request)).rejects.toMatchObject({ code: 'source_index_policy_violation' });
+    expect(sent).toEqual([]);
+    expect(ran).toBe(0);
   });
 });
 

@@ -237,8 +237,10 @@ import {
   type SourceIndexCorpusSearchAdapter,
 } from '../../core/source-index/router.ts';
 import {
+  isSecureSensitivity,
   SOURCE_FAMILIES,
   SOURCE_TRUST_DOMAINS,
+  type SecureSensitivityInput,
   type SourceFamily,
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
@@ -1463,8 +1465,9 @@ function createTierSnifferModel(input: {
   return undefined;
 }
 
-function analystRouteTrustDomain(pack: { candidates: readonly { trustDomain: SourceTrustDomain }[] }, localOnly: boolean): SourceTrustDomain {
-  if (localOnly || pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local')) {
+function analystRouteTrustDomain(pack: { candidates: readonly SecureSensitivityInput[] }, localOnly: boolean): SourceTrustDomain {
+  // Secure by domain or by tier selects the secure pool.
+  if (localOnly || pack.candidates.some((candidate) => isSecureSensitivity(candidate))) {
     return 'secure_local';
   }
   if (pack.candidates.some((candidate) => candidate.trustDomain === 'internal')) {

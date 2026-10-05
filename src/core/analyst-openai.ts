@@ -15,7 +15,12 @@
 
 import { OperationError } from './operation-error.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
-import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from './analyst.ts';
+import {
+  refuseLocalOnlyOnOrdinaryCloud,
+  type AnalystModel,
+  type AnalystModelCompletion,
+  type AnalystModelRequest,
+} from './analyst.ts';
 
 // Injectable so tests can script the wire without a network. Matches the global
 // fetch signature closely enough for our single POST.
@@ -54,6 +59,10 @@ export interface OpenAICompatibleAnalystModelOptions {
   extraBody?: Record<string, unknown>;
   // Injectable transport (tests / proxies). Defaults to global fetch.
   fetchImpl?: OpenAIAnalystFetch;
+  // Only the Venice adapter sets this: it enforces its own approved privacy
+  // category for local-only requests before delegating here. Every other use
+  // is a standard-cloud analyst and refuses a local-only request.
+  admitsLocalOnly?: boolean;
 }
 
 const DEFAULT_MODEL = 'gpt-5.5';
@@ -86,6 +95,7 @@ export function createOpenAICompatibleAnalystModel(
 
   return {
     async complete(request: AnalystModelRequest): Promise<AnalystModelCompletion> {
+      if (options.admitsLocalOnly !== true) refuseLocalOnlyOnOrdinaryCloud(request, providerLabel);
       const url = `${baseUrl}/chat/completions`;
       const body: Record<string, unknown> = {
         ...(options.extraBody ?? {}),

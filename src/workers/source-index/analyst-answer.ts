@@ -385,8 +385,10 @@ export function createAnalystSourceIndexAnswerHandler(
       const buildDetail = (
         activeLanes: AnalystAnswerLanes,
         attempt: 'keyword' | 'hybrid' | 'selected' | 'self_heal_rebuild',
+        build: { excludeSecureSensitivity?: true } = {},
       ) => observeSourceAnswerRetrievalAttempt(attempt, () => buildEvidencePackDetailed({
           question,
+          ...build,
           ...(request.query?.trim() ? { searchQuery: request.query.trim() } : {}),
           ...(request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {}),
           ...(options.queryPlanner ? { queryPlanner: options.queryPlanner } : {}),
@@ -462,9 +464,7 @@ export function createAnalystSourceIndexAnswerHandler(
       const policyDeniedEmptyPack = pack.candidates.length === 0
         && (detail.policyDeniedCandidates ?? 0) > 0;
 
-      let localOnly = pack.candidates.some(
-        (candidate) => candidate.trustDomain === 'secure_local',
-      );
+      let localOnly = pack.candidates.some((candidate) => isSecureSensitivity(candidate));
       const requestedAnalystModel = request.analyst_model?.trim();
       const requestedAnalystProvider = request.analyst_provider ?? (requestedAnalystModel ? 'venice' : 'default');
       if (localOnly && requestedAnalystProvider === 'venice' && requestedAnalystModel) {
@@ -534,7 +534,9 @@ export function createAnalystSourceIndexAnswerHandler(
           if (!privateDefaulted || !isPrivateRouteUnavailable(error)) throw error;
           const secureIndex = allowedTrustDomains.indexOf('secure_local');
           if (secureIndex >= 0) allowedTrustDomains.splice(secureIndex, 1);
-          const rebuilt = await buildDetail(lanes, initialAttempt);
+          // Secure by tier too: an S4 item in an ordinary corpus is left out
+          // of the rebuilt pack, with its title-bearing gap.
+          const rebuilt = await buildDetail(lanes, initialAttempt, { excludeSecureSensitivity: true });
           detail = withSecureLocalExclusionReason({
             ...rebuilt,
             skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
@@ -543,12 +545,12 @@ export function createAnalystSourceIndexAnswerHandler(
           }, 'private_analyst_unavailable');
           pack = detail.pack;
           assertEvidencePackModelEligible(pack);
-          localOnly = pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local');
+          localOnly = pack.candidates.some((candidate) => isSecureSensitivity(candidate));
           if (localOnly) throw error;
           routedAnalysis = await analyze(detail, false);
         }
       }
-      const secureCandidates = pack.candidates.filter((c) => c.trustDomain === 'secure_local');
+      const secureCandidates = pack.candidates.filter((c) => isSecureSensitivity(c));
       const internalCandidates = pack.candidates.filter((c) => c.trustDomain === 'internal');
       const {
         result: analystResult,
@@ -655,7 +657,7 @@ export function createAnalystSourceIndexAnswerHandler(
             released
             && facts.some(
               (fact) =>
-                fact.sensitivity.trustDomain === 'secure_local'
+                isSecureSensitivity(fact.sensitivity)
                 && fact.releaseSurface === 'castor_answer',
             ),
           castor_safe_bridge: true,
@@ -1236,9 +1238,7 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
   // cloud call. An explicit ordinary-cloud request is a constraint: if the
   // pack makes that provider ineligible, refuse instead of silently changing
   // providers. Default routing keeps its configured availability fallbacks.
-  const noSecureLocal = pack.candidates.every(
-    (candidate) => candidate.trustDomain !== 'secure_local',
-  );
+  const noSecureLocal = pack.candidates.every((candidate) => !isSecureSensitivity(candidate));
   if (requestedProvider === 'cloud' && (localOnly || !noSecureLocal)) {
     recordSourceAnswerRoute(0, [implicitTraceStep('cloud')]);
     recordSourceAnswerSkippedAnalystLeg({
@@ -1473,8 +1473,8 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
 function secureMetadataOnlyGapResult(error: unknown, pack: EvidencePack): AnalystResult | undefined {
   if (!(error instanceof OperationError)) return undefined;
   if (error.code !== 'config_error' || !/route for secure_local is disabled/i.test(error.message)) return undefined;
-  if (!pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local')) return undefined;
-  if (pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local' && candidate.chunks.length > 0)) {
+  if (!pack.candidates.some((candidate) => isSecureSensitivity(candidate))) return undefined;
+  if (pack.candidates.some((candidate) => isSecureSensitivity(candidate) && candidate.chunks.length > 0)) {
     return undefined;
   }
   const extractionGaps = pack.coverage.extractionGaps.filter(Boolean);
@@ -2211,7 +2211,7 @@ function isUnsupportedNoContentAnswer(result: AnalystResult): boolean {
 }
 
 function packHasSecureLocal(pack: EvidencePack): boolean {
-  return pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local');
+  return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
 }
 
 // Each analyst citation becomes a structured evidence fact for the release
@@ -2227,7 +2227,7 @@ function factsFromCitations(
     const candidateIndex = candidateIndexForCitation(citation, detail);
     if (candidateIndex === -1) return [];
     const candidate = detail.pack.candidates[candidateIndex]!;
-    const secure = candidate.trustDomain === 'secure_local';
+    const secure = isSecureSensitivity(candidate);
     return [
       createStructuredEvidenceFact({
         factId: `citation-${index + 1}`,
@@ -2356,7 +2356,7 @@ function appendUnreadableMatchedEvidence(
   const seen = new Set(evidence.map(evidenceKey));
   for (const index of unreadableMatchedCandidateIndexes(detail)) {
     const candidate = detail.pack.candidates[index]!;
-    if (candidate.trustDomain === 'secure_local' && !releaseSecureContent) continue;
+    if (isSecureSensitivity(candidate) && !releaseSecureContent) continue;
     const item = candidate.provenance.sourceItem;
     const corpusId = detail.candidateCorpusIds[index] ?? 'unknown';
     const entry: SourceIndexAnswerEvidence = {
@@ -2547,7 +2547,10 @@ export async function searchReleasedEvidence(input: {
   const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
   detail.pack.candidates.forEach((candidate, index) => {
     if (contentPrivate.has(index)) return;
-    if (candidate.trustDomain !== 'public_safe' && candidate.trustDomain !== 'internal') {
+    // Secure by domain or by tier (an S4 item in a Personal corpus) is
+    // withheld like any Private item: counted, never listed.
+    if (isSecureSensitivity(candidate)
+      || (candidate.trustDomain !== 'public_safe' && candidate.trustDomain !== 'internal')) {
       withheld += 1;
       return;
     }

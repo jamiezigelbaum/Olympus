@@ -179,6 +179,10 @@ export interface BuildEvidencePackInput {
   secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
   // Counts of items still pending classification in the searched corpora.
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
+  // Leave out every candidate that is secure by isSecureSensitivity (an S4
+  // item in an ordinary corpus included), with its extraction gap: the
+  // ordinary-route rebuild after the private route was unavailable.
+  excludeSecureSensitivity?: boolean;
   now?: () => Date;
 }
 
@@ -336,10 +340,9 @@ export async function buildEvidencePackDetailed(
     }
 
     // No provider answered for this item: judge it by its own tier when the
-    // hit carries one, never by a lower corpus default, and count an item of
-    // unknown tier as secure for the build flag (its title still reaches the
-    // extraction gap).
-    if (!content && hit.trustTier === undefined) encounteredSecureLocal = true;
+    // hit carries one, never by a lower corpus default; an item of unknown
+    // tier is judged S4 (secure by isSecureSensitivity), so its title never
+    // reaches an ordinary analyst or ordinary released evidence.
     const sensitivity = content?.sensitivity ?? hitFallbackSensitivity(
       hit,
       input.registry.get(hit.corpusId)?.defaultSensitivity ?? conservativeSensitivity(hit.trustDomain),
@@ -369,7 +372,10 @@ export async function buildEvidencePackDetailed(
     // it instead returns S5 content, that is an invariant failure: hard-stop
     // the entire build rather than misreporting it as an extraction miss.
     assertEvidenceCandidateModelEligible(candidate);
-    if (isSecureSensitivity(candidate)) encounteredSecureLocal = true;
+    if (isSecureSensitivity(candidate)) {
+      encounteredSecureLocal = true;
+      if (input.excludeSecureSensitivity) continue;
+    }
     if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);
     else if (!provider || !content || content.chunks.length === 0) unreadCandidates += 1;
@@ -383,7 +389,7 @@ export async function buildEvidencePackDetailed(
   const matchCounts = coverageMatchCounts(
     routed.matchCounts,
     candidateCorpusIds,
-    candidates.some((candidate) => candidate.trustDomain === 'secure_local'),
+    candidates.some((candidate) => isSecureSensitivity(candidate)),
   );
   const coverage: EvidenceCoverage = {
     searchedCorpora: routed.searchedCorpora,
@@ -885,16 +891,17 @@ function conservativeSensitivity(trustDomain: SourceTrustDomain): SourceSensitiv
   return buildSourceSensitivity({ trustTier: conservativeTierForDomain(trustDomain), trustDomain });
 }
 
-// The corpus default, raised to the hit's own tier when that is stricter.
+// The corpus default, raised to the hit's own tier when that is stricter. A
+// hit with no tier of its own is raised to S4: unknown counts as secure.
 function hitFallbackSensitivity(
   hit: SourceIndexRoutedSearchHit,
   corpusDefault: SourceSensitivity,
 ): SourceSensitivity {
-  if (hit.trustTier === undefined) return corpusDefault;
-  if (SOURCE_TRUST_TIERS.indexOf(hit.trustTier) <= SOURCE_TRUST_TIERS.indexOf(corpusDefault.trustTier)) {
+  const tier = hit.trustTier ?? 'S4';
+  if (SOURCE_TRUST_TIERS.indexOf(tier) <= SOURCE_TRUST_TIERS.indexOf(corpusDefault.trustTier)) {
     return corpusDefault;
   }
-  return buildSourceSensitivity({ trustTier: hit.trustTier, trustDomain: corpusDefault.trustDomain });
+  return buildSourceSensitivity({ trustTier: tier, trustDomain: corpusDefault.trustDomain });
 }
 
 function conservativeTierForDomain(trustDomain: SourceTrustDomain): SourceTrustTier {

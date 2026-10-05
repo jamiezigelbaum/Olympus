@@ -182,6 +182,50 @@ describe('a private analyst outage never costs an ordinary answer', () => {
     expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
   });
 
+  test('the ordinary fallback rebuild leaves out an S4 item of a Personal corpus, with its gap', async () => {
+    const MERGER = 'merger-plans.pdf';
+    const world = answerWorld('private-cloud-only', {
+      analystOverrides: { 'venice-private': failing() },
+      lanes: () => {
+        const base = lanes();
+        const hit = (id: string, title: string) => {
+          const sourceItem = { family: 'file' as const, provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: `personal:${id}` };
+          return { sourceItem, provenance: { sourceItem, citation: { title } }, score: 1, rawExposed: false as const };
+        };
+        return {
+          ...base,
+          adapters: {
+            ...base.adapters,
+            [INTERNAL]: () => ({ hits: [hit('note-1', 'note-1.pdf'), hit('merger', MERGER)], latencyMs: 1, rawExposed: false as const }),
+          } as SourceIndexRouterAdapterMap,
+          contentProviders: {
+            ...base.contentProviders,
+            [INTERNAL]: {
+              async fetchLocalContent(request: { provenance: { sourceItem: { providerItemId: string } } }) {
+                const merger = request.provenance.sourceItem.providerItemId === 'merger';
+                return {
+                  // The merger memo's own tier is S4 inside the Personal corpus.
+                  sensitivity: buildSourceSensitivity({ trustTier: merger ? 'S4' : 'S2', trustDomain: 'internal' }),
+                  chunks: [merger ? 'MERGER-RAW-CHUNK-TEXT' : INTERNAL_RAW],
+                  ...(merger ? { truncated: true } : {}),
+                };
+              },
+            },
+          } as LocalContentProviderMap,
+        };
+      },
+    });
+    const result = await world.handler.answer({ question: 'What was my LDL?' });
+
+    expect(result.audit.answer_synthesis.analyst_backend).toBe('cloud');
+    expect(result.audit.answer_synthesis.secure_local_items_consulted).toBe(0);
+    const ordinary = world.calls['cloud-openclaw-infer']!;
+    expect(ordinary).toHaveLength(1);
+    expect(ordinary[0]!.candidates.map((candidate) => candidate.provenance.citation?.title)).toEqual(['note-1.pdf']);
+    expect(JSON.stringify(ordinary[0]!.coverage)).not.toContain('merger');
+    expect(JSON.stringify(result)).not.toContain('MERGER-RAW-CHUNK-TEXT');
+  });
+
   test('the fallback pack is fitted to the answering leg and its counts exclude secure_local', async () => {
     // local-only: the private route is the local model alone; the ordinary
     // route is cloud then local. The local model refuses secure evidence (the
