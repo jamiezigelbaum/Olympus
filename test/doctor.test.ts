@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { runDoctor } from '../src/core/doctor.ts';
+import { writeConsultSettings } from '../src/core/consult-settings.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import {
@@ -220,6 +221,52 @@ describe('runDoctor', () => {
     expect(altered.detail).toContain('pack-1 hash_mismatch');
     expect(altered.hint).toContain('not intact');
   });
+  test('consult settings: off, on and invalid are reported content-free from the injected HOME', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-doctor-consult-settings-'));
+    try {
+      const run = async () => (await runDoctor(doctorDeps({
+        config: defaultConfig(),
+        delphi: healthyDelphi(),
+        env: { HOME: home },
+      }))).checks;
+      let checks = await run();
+      expect(checkByName(checks, 'consult_settings')).toEqual({
+        name: 'consult_settings',
+        ok: true,
+        detail: 'Outside help (no consult is sent until the consult lane lands): off (no settings file).',
+      });
+      expect(checkByName(checks, 'consult_vocabulary').detail).toContain('languages en (default)');
+
+      const written = writeConsultSettings({ env: { HOME: home } }, 0, {
+        enabled: true,
+        languages: ['en', 'pt-BR'],
+        domains: { units: true, countries: false, medicines: true, medicineBrands: false },
+        strict: false,
+      });
+      expect(written.ok).toBe(true);
+      checks = await run();
+      expect(checkByName(checks, 'consult_settings')).toEqual({
+        name: 'consult_settings',
+        ok: true,
+        detail: 'Outside help (no consult is sent until the consult lane lands): on (settings revision 1).',
+      });
+      // The vocabulary line now checks the configured languages' packs.
+      const vocabulary = checkByName(checks, 'consult_vocabulary');
+      expect(vocabulary.detail).toContain('languages en, pt-BR (configured)');
+      expect(vocabulary.detail).toContain('pt-br-hunspell verified');
+
+      writeFileSync(join(home, '.olympus', 'consult.json'), '{"v":1,"revision":2,"enabled":true}', { mode: 0o600 });
+      checks = await run();
+      expect(checkByName(checks, 'consult_settings')).toMatchObject({
+        ok: false,
+        detail: 'Outside help (no consult is sent until the consult lane lands): off, because the settings file is invalid (invalid_shape).',
+      });
+      expect(checkByName(checks, 'consult_settings').hint).toContain('Outside help stays off');
+      expect(checkByName(checks, 'consult_vocabulary').detail).toContain('languages en (default)');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
   test('reports all green when lanes, worker, and source index are healthy', async () => {
     const { fetchImpl } = fakeWorkerFetch({
       '/v1/health': { status: 'ok', configured: true },
@@ -248,6 +295,7 @@ describe('runDoctor', () => {
       'argus_model_pool',
       'sovereignty_model_lanes',
       'zkapi_consult_transport',
+      'consult_settings',
       'consult_vocabulary',
       'email_worker',
       'worker_credential_lanes',
@@ -256,6 +304,11 @@ describe('runDoctor', () => {
       'source_scheduler_status',
       'source_ingestion_health',
     ]);
+    expect(checkByName(result.checks, 'consult_settings')).toEqual({
+      name: 'consult_settings',
+      ok: true,
+      detail: 'Outside help (no consult is sent until the consult lane lands): off (no settings file).',
+    });
     expect(checkByName(result.checks, 'consult_vocabulary')).toEqual({
       name: 'consult_vocabulary',
       ok: true,

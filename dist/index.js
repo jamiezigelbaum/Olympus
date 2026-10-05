@@ -15186,9 +15186,9 @@ function constantTimeStringEqual(actual, expected) {
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname17, join as join21 } from "node:path";
-import { homedir as homedir14 } from "node:os";
+import { existsSync as existsSync12, mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname18, join as join22 } from "node:path";
+import { homedir as homedir15 } from "node:os";
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -17446,9 +17446,133 @@ var UNIT_WORDS = new Set([
   "₹"
 ]);
 
+// src/core/consult-settings.ts
+init_atomic_file();
+import { lstatSync as lstatSync3, mkdirSync as mkdirSync9, readFileSync as readFileSync16 } from "node:fs";
+import { homedir as homedir14 } from "node:os";
+import { dirname as dirname17, join as join21 } from "node:path";
+init_file_lease();
+var CONSULT_SETTINGS_VERSION = 1;
+var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
+var DEFAULT_CONSULT_SETTINGS = Object.freeze({
+  v: CONSULT_SETTINGS_VERSION,
+  revision: 0,
+  enabled: false,
+  languages: Object.freeze([...DEFAULT_CONSULT_LANGUAGES]),
+  domains: Object.freeze({ ...DEFAULT_CONSULT_DOMAIN_PACKS }),
+  strict: false
+});
+var TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
+var DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
+var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
+function consultSettingsPath(env) {
+  if (env === undefined)
+    return join21(process.env.HOME?.trim() || homedir14(), ".olympus", "consult.json");
+  const home = env.HOME?.trim();
+  return home ? join21(home, ".olympus", "consult.json") : undefined;
+}
+function resolvePath3(location) {
+  return location.path ?? consultSettingsPath(location.env);
+}
+function parseConsultSettings(value) {
+  if (!isPlainObject(value))
+    return;
+  if (!hasExactKeys(value, TOP_LEVEL_KEYS))
+    return;
+  const { v, revision, enabled, languages, domains, strict } = value;
+  if (v !== CONSULT_SETTINGS_VERSION)
+    return;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
+    return;
+  if (typeof enabled !== "boolean" || typeof strict !== "boolean")
+    return;
+  if (!Array.isArray(languages) || languages.length === 0 || languages.length > LANGUAGES.length)
+    return;
+  if (!languages.every((language) => typeof language === "string" && LANGUAGES.includes(language)))
+    return;
+  if (new Set(languages).size !== languages.length)
+    return;
+  if (!isPlainObject(domains) || !hasExactKeys(domains, DOMAIN_KEYS))
+    return;
+  if (!DOMAIN_KEYS.every((key) => typeof domains[key] === "boolean"))
+    return;
+  return freezeSettings({
+    v: CONSULT_SETTINGS_VERSION,
+    revision,
+    enabled,
+    languages,
+    domains: Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key]])),
+    strict
+  });
+}
+function readConsultSettings(location = {}) {
+  const path = resolvePath3(location);
+  if (path === undefined)
+    return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
+  let stats;
+  try {
+    stats = lstatSync3(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") {
+      return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
+    }
+    return invalid("unreadable");
+  }
+  if (!stats.isFile() || stats.isSymbolicLink())
+    return invalid("not_a_regular_file");
+  if ((stats.mode & 18) !== 0)
+    return invalid("insecure_permissions");
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid())
+    return invalid("insecure_permissions");
+  if (stats.size > CONSULT_SETTINGS_MAX_BYTES)
+    return invalid("too_large");
+  let text;
+  try {
+    text = readFileSync16(path, "utf8");
+  } catch {
+    return invalid("unreadable");
+  }
+  if (Buffer.byteLength(text, "utf8") > CONSULT_SETTINGS_MAX_BYTES)
+    return invalid("too_large");
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return invalid("malformed_json");
+  }
+  const settings = parseConsultSettings(parsed);
+  return settings ? { state: "valid", settings } : invalid("invalid_shape");
+}
+function consultGateOptionsFromSettings(settings) {
+  return { languages: [...settings.languages], domains: { ...settings.domains } };
+}
+function invalid(reason) {
+  return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
+}
+function freezeSettings(settings) {
+  return Object.freeze({
+    ...settings,
+    languages: Object.freeze([...settings.languages]),
+    domains: Object.freeze({ ...settings.domains })
+  });
+}
+function isPlainObject(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+function hasExactKeys(value, keys) {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+function errorCode(error) {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
+}
+
 // src/core/doctor.ts
 function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir14();
+  const home = env.HOME?.trim() || homedir15();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" ? inspectEngine({ homeDir: home }) : { installed: false, state: "not_loaded" };
   const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync12(workerServicePaths(process.platform, home).unitPath) : false;
@@ -17489,6 +17613,7 @@ async function runDoctor(input) {
     await safeCheck("argus_model_pool", () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck("sovereignty_model_lanes", () => sovereigntyModelLaneCheck(deps)),
     await safeCheck("zkapi_consult_transport", () => zkapiConsultTransportCheck(deps)),
+    await safeCheck("consult_settings", () => consultSettingsCheck(deps)),
     await safeCheck("consult_vocabulary", () => consultVocabularyCheck(deps)),
     await safeCheck("email_worker", () => emailWorkerCheck(deps)),
     await safeCheck("worker_credential_lanes", () => workerCredentialLanesCheck(deps)),
@@ -17545,7 +17670,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join21(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join22(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -17787,16 +17912,41 @@ async function zkapiConsultTransportCheck(deps) {
     }
   };
 }
+async function consultSettingsCheck(deps) {
+  const name = "consult_settings";
+  const read = doctorConsultSettings(deps);
+  const prefix = "Outside help (no consult is sent until the consult lane lands):";
+  if (read.state === "absent")
+    return { name, ok: true, detail: `${prefix} off (no settings file).` };
+  if (read.state === "invalid") {
+    return {
+      name,
+      ok: false,
+      detail: `${prefix} off, because the settings file is invalid (${read.reason}).`,
+      hint: "Outside help stays off until ~/.olympus/consult.json is a regular file owned by you, not writable by others, holding exactly the consult settings schema. Remove the file to return to the default."
+    };
+  }
+  return {
+    name,
+    ok: true,
+    detail: `${prefix} ${read.settings.enabled ? "on" : "off"} (settings revision ${read.settings.revision}).`
+  };
+}
+function doctorConsultSettings(deps) {
+  return readConsultSettings(deps.env === undefined ? {} : { env: deps.env });
+}
 async function consultVocabularyCheck(deps) {
   const name = "consult_vocabulary";
-  const status = deps.consultVocabularyStatus ? deps.consultVocabularyStatus() : consultVocabularyFileStatus({}, deps.env ?? process.env);
+  const settings = doctorConsultSettings(deps);
+  const configured = settings.state === "valid";
+  const status = deps.consultVocabularyStatus ? deps.consultVocabularyStatus() : consultVocabularyFileStatus(consultGateOptionsFromSettings(settings.settings), deps.env ?? process.env);
   const missing = status.some((entry) => entry.state === "missing");
   const integrityFailure = status.some((entry) => entry.state !== "verified" && entry.state !== "missing");
   const hint = integrityFailure ? "A vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/." : missing ? "A selected vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." : undefined;
   return {
     name,
     ok: !integrityFailure,
-    detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${DEFAULT_CONSULT_LANGUAGES.join(", ")} (default); ${status.map((entry) => `${entry.id} ${entry.state}`).join(", ")}.`,
+    detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${settings.settings.languages.join(", ")} (${configured ? "configured" : "default"}); ${status.map((entry) => `${entry.id} ${entry.state}`).join(", ")}.`,
     ...hint ? { hint } : {}
   };
 }
@@ -18516,7 +18666,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join21(dirname17(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join22(dirname18(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -18539,7 +18689,7 @@ function readIngestionHealthState(path) {
   try {
     if (!existsSync12(path))
       return;
-    const parsed = JSON.parse(readFileSync16(path, "utf8"));
+    const parsed = JSON.parse(readFileSync17(path, "utf8"));
     const record = asRecord15(parsed);
     const sources = asRecord15(record.sources);
     const normalized = {};
@@ -18560,7 +18710,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync9(dirname17(path), { recursive: true });
+  mkdirSync10(dirname18(path), { recursive: true });
   writeFileSync6(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -18774,7 +18924,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync12(join21(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync12(join22(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });

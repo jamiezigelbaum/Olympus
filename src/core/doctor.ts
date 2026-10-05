@@ -64,10 +64,14 @@ import {
   type ZkapiConsultReadiness,
 } from './consult-transport-zkapi.ts';
 import {
-  DEFAULT_CONSULT_LANGUAGES,
   consultVocabularyFileStatus,
   type ConsultVocabularyFileStatus,
 } from './consult-gate.ts';
+import {
+  consultGateOptionsFromSettings,
+  readConsultSettings,
+  type ConsultSettingsRead,
+} from './consult-settings.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -192,6 +196,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     await safeCheck('argus_model_pool', () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck('sovereignty_model_lanes', () => sovereigntyModelLaneCheck(deps)),
     await safeCheck('zkapi_consult_transport', () => zkapiConsultTransportCheck(deps)),
+    await safeCheck('consult_settings', () => consultSettingsCheck(deps)),
     await safeCheck('consult_vocabulary', () => consultVocabularyCheck(deps)),
     await safeCheck('email_worker', () => emailWorkerCheck(deps)),
     await safeCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
@@ -611,18 +616,52 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
 }
 
 /**
+ * The outside-help (consult) settings in ~/.olympus/consult.json, content-free:
+ * off, on (with its revision) or invalid (with a reason code). Read the way
+ * every consult use reads them, from the HOME in the environment doctor was
+ * handed. A missing file is the normal off state; an invalid one also keeps
+ * outside help off, and fails doctor so the owner sees it.
+ */
+async function consultSettingsCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const name = 'consult_settings';
+  const read = doctorConsultSettings(deps);
+  const prefix = 'Outside help (no consult is sent until the consult lane lands):';
+  if (read.state === 'absent') return { name, ok: true, detail: `${prefix} off (no settings file).` };
+  if (read.state === 'invalid') {
+    return {
+      name,
+      ok: false,
+      detail: `${prefix} off, because the settings file is invalid (${read.reason}).`,
+      hint: 'Outside help stays off until ~/.olympus/consult.json is a regular file owned by you, not writable by others, holding exactly the consult settings schema. Remove the file to return to the default.',
+    };
+  }
+  return {
+    name,
+    ok: true,
+    detail: `${prefix} ${read.settings.enabled ? 'on' : 'off'} (settings revision ${read.settings.revision}).`,
+  };
+}
+
+function doctorConsultSettings(deps: DoctorDeps): ConsultSettingsRead {
+  return readConsultSettings(deps.env === undefined ? {} : { env: deps.env });
+}
+
+/**
  * The consult outbound gate's vocabulary packs, content-free: for the consult
- * languages (the default until consult settings exist), whether each selected
- * pack is present and matches its pinned hash. Doctor hashes the compressed
- * files only; it loads no word list. A missing pack is informational while
- * nothing calls the gate; a pack that is present but altered, oversized or
- * unreadable is an integrity failure and fails doctor.
+ * languages and domain packs in the consult settings (the defaults when there
+ * is no valid settings file), whether each selected pack is present and
+ * matches its pinned hash. Doctor hashes the compressed files only; it loads
+ * no word list. A missing pack is informational while nothing calls the gate;
+ * a pack that is present but altered, oversized or unreadable is an integrity
+ * failure and fails doctor.
  */
 async function consultVocabularyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const name = 'consult_vocabulary';
+  const settings = doctorConsultSettings(deps);
+  const configured = settings.state === 'valid';
   const status = deps.consultVocabularyStatus
     ? deps.consultVocabularyStatus()
-    : consultVocabularyFileStatus({}, deps.env ?? process.env);
+    : consultVocabularyFileStatus(consultGateOptionsFromSettings(settings.settings), deps.env ?? process.env);
   const missing = status.some((entry) => entry.state === 'missing');
   const integrityFailure = status.some((entry) => entry.state !== 'verified' && entry.state !== 'missing');
   const hint = integrityFailure
@@ -633,7 +672,7 @@ async function consultVocabularyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   return {
     name,
     ok: !integrityFailure,
-    detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${DEFAULT_CONSULT_LANGUAGES.join(', ')} (default); ${status.map((entry) => `${entry.id} ${entry.state}`).join(', ')}.`,
+    detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${settings.settings.languages.join(', ')} (${configured ? 'configured' : 'default'}); ${status.map((entry) => `${entry.id} ${entry.state}`).join(', ')}.`,
     ...(hint ? { hint } : {}),
   };
 }
