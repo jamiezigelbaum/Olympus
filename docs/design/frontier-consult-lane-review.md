@@ -205,3 +205,65 @@ Questions for the next review:
 2. Is AD-1 (the outside block as panel presentation) acceptable under `CONTRACTS.md`?
 3. Is deferring replay-resistant liveness reasonable, given dispatch once per job about a minute after the claim?
 4. Does the M0 pass criterion actually capture "the first answer is not slower"?
+
+## G. Fourth round: confirmation pass on revision 6, revision 7 written (2026-10-05)
+
+Reviewer: Codex (gpt-6-astra), read-only, revision 6 at `09edd944`, against `main` at `bb1755fb` and the gate at `47c5acd6`. It ran in-memory byte probes against shipped code. Its concurrency, privacy and UX sequences are code-grounded analysis, not runs. **Verdict: ready after listed changes.** No further redesign was needed, but the reviewer found ten precision problems and set conditions on AD-1. The author re-checked the cited lines. All hold:
+- the jobs boundary limits (65,536 / 20 / 10 / 300 / 2,048);
+- the growing bucket padder;
+- `claimKey` set before the answer is ready, with later `202`, `429` and plaintext `failed`;
+- the job keeping only sealed bytes, with the seal discarding its ephemeral key;
+- the handshake-dependent height reporting and `max-height:none`;
+- the card title "Private answer from your Mac";
+- reservation and fence before the last awaited ownership check (`consult-transport-zkapi.ts:1805–1822`);
+- the relay's 8 MiB response limit.
+
+None rejected.
+
+### The reviewer's status of the 19 earlier findings
+
+| # | Earlier finding | Status | Evidence (reviewer's) |
+|---|---|---|---|
+| 1 | Panel resizing exposes consult outcomes | Partly | Lock ended with follow-up; banned sizing messages needed after initialization; reopen and late initialization unspecified. Panel :864–918 |
+| 2 | `follow` protects one path; plaintext withdrawal | Partly | "Every collection after claim" conflicted with existing post-claim pending, failed and rate-limited responses; no initial pending or failed state. Jobs :529–555 |
+| 3 | Envelope size bound | Not | False for accepted inputs (65,536 units, 20 citations, escaping beyond 3 B per unit); padder turns 30 KiB into 64 KiB. Jobs :307–312, :1253–1258; Crypto :70–82 |
+| 4 | Gate guarantee overstated | Resolved | Public wording still needed correction |
+| 5 | Eligibility checked too early | Partly | `send()` still needed async ownership checks after reservation; no final authorization boundary. Transport :1729–1745, :1805–1824 |
+| 6 | Rewrite turns hostile text into document claims | Resolved | Direct deception of the reader remained (P7) |
+| 7 | Shared-server preemption | Partly | Criterion allowed abort latency and "about 1 s" |
+| 8 | Wallet listener gets the bridge token | Resolved as an F2 prerequisite | The prototype must not qualify F2 |
+| 9 | Snapshot handoff | Resolved | — |
+| 10 | Recent polling is not presence | Partly | "About a minute" conflicted with the five-minute dispatch allowance |
+| 11 | One session lifecycle | Partly | `open()` not cancellable; send, cancel and reservation races unspecified |
+| 12 | Retention, deadlines, eviction | Partly | Paid-job eviction priority leaked an outcome; the original answer could not be freshly sealed once its plaintext was dropped |
+| 13 | Searchable records | Resolved | — |
+| 14 | Fingerprint is not semantics | Resolved with conditions | See AD-1 |
+| 15 | Trigger metadata and writer bounds | Resolved at design level | C4b must implement the handoff |
+| 16 | Abandon's consequence | Resolved | — |
+| 17 | Prototype overstated | Resolved | — |
+| 18 | C4 too large | Partly | Compatibility, serialized bounds and hostile-text acceptance needed to be explicit entry and proof requirements |
+| 19 | Web sources; milestone | Resolved | — |
+
+### P1–P10 and AD-1: dispositions in revision 7
+
+| # | Problem | Disposition (where) |
+|---|---|---|
+| P1 | M0 could pass while violating "no slowdown" | **Accepted.** Endpoint is fresh-request arrival to first reveal with abort delay included. Paired randomized writer-versus-control trials on identical workloads, with the real prompt, tokenizer and schema. Phases: prefill, generation, near-deadline, hung writer, plus an A/A noise floor. Rule: median ≤ 250 ms, p95 ≤ 1 s, zero writer-caused resets, failures counted as infinite. This is the owner's default and is flagged for him in §10. Results table ready to fill. Idle-only scheduling is marked a hypothesis (§A.7) |
+| P2 | Envelope proof did not fit the accepted payload | **Accepted.** One payload contract enforced at the jobs boundary before first reveal, on every install. It tightens answer 65,536 → 2,700 units, citations 20 → 4 and gaps 10 → 4, each matched to what the model layer produces today (no production limits override; nothing shown today is cut). A total serializer handles lone surrogates, control characters, URL normalization and a marker inside its budget. An exact-size padder pads to 36,864 B of plaintext and rejects overflow. The wire size is stated separately (§A.5.1). The 32 KiB figure could not be proven for this payload; 36 KiB can |
+| P3 | "Uniform after claim" incomplete | **Accepted.** Phase 1 is today's fast acquisition (2-second polling, existing plaintext states). Phase 2 is uniform from first delivery, with infrastructure and identity exceptions listed. A `cap: 2` handshake is sent unconditionally, and paid dispatch requires it. Old/new behavior for both mismatches is stated (§A.5.2) |
+| P4 | Fresh sealing needs a retained answer and race rules | **Accepted.** The job keeps its first-answer plaintext (≤ 35,328 B; about 7 MB across 200 jobs), only on capability-2 jobs with outside help on, the smaller exposure. Withdrawal is terminal and clears everything. Sealing is checked before and after; revisions are monotonic; a late reply cannot resurrect a job; source-open tokens are stable across seals (§A.5.3) |
+| P5 | Fixed sizes do not hide every outcome | **Accepted.** Expiry and eviction no longer depend on outcomes (policy-bound lifetime, oldest-first eviction, no paid-result protection). The timing claim is narrowed; a timing test, and a response-time floor if needed, are in C4a (§A.5.4) |
+| P6 | Height lock broke the host handshake and leaked later | **Accepted.** The reported geometry is locked, not the notifications: `H = min(A + R, 640)`, with `A` the first-answer card alone and `R` = 176 px. The same rule applies after follow-up ends and on reopen. The transcript test is expanded. The withdrawal-on-resize residual is stated (§A.5.5) |
+| P7 | Plain text does not stop misleading attribution | **Accepted.** A separate container outside the card title, a pinned application-owned attribution, a 40-line / 240-character policy, blank-line collapsing, an application-owned truncation notice, and hostile-text tests. Residual risk accepted; no second model pass (§A.6) |
+| P8 | Session API did not enforce the dispatch boundary | **Accepted.** One-shot state machine with a cancellable, deadline-bound `open`. Async transport checks run first, then final authorization (settings, activity, deadlines, latch, eligibility, gate), then synchronous reservation and fetch. Rollback on a proven pre-dispatch failure; the fence is kept when dispatch is uncertain. The test asserts that no paid reservation, count or fence remains, with lifecycle receipts allowed. Caller signals are detached after dispatch (§A.8) |
+| P9 | Clocks and liveness need one definition | **Accepted.** Server-owned `firstDeliveredAt`; `followUntil` is fixed and capped by job expiry; remounts never extend it; policy is bound per job; the dispatch window uses the configured `timeoutMs`; the enable wording names the five-minute window and the replay exposure (§A.5.6, §A.10) |
+| P10 | Eval and public wording were not acceptance criteria | **Accepted.** Blocking tests B1–B6 with populations and pass marks; known-limit measurements K1–K6 with default-on thresholds; the reviewer's privacy sentence adopted for the README and the enable flow (§2, §A.10, §A.13) |
+| AD-1 | Acceptable within a bounded interpretation | **Accepted.** The four conditions are recorded. Any departure enters the contract-change process. The C4a pull request records the interpretation in `CONTRACTS.md`. AD-2 is added for panel-protocol compatibility (§A.11) |
+
+Build plan: the reviewer's suggestions are adopted.
+- C3 is the internal settings mechanism only.
+- The Mac dashboard enable path lands in C5.
+- The public CLI enable command moves to C8.
+- The C2-affected stages are re-measured live after C2.
+- F1 and F2 do not block the experimental "route not verified" release.
+- Every stage now lists its entry conditions (§A.14).

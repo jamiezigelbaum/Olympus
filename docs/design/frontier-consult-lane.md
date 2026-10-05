@@ -1,62 +1,69 @@
 # Design: frontier consult on the private answer panel, over zkAPI
 
-Status: **proposal, revision 6 (2026-10-05).** Rewritten after the adversarial review of revision 5 ("needs redesign", 19 findings; dispositions in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md), section F). Awaits the next review. Nothing here changes shipped behavior or the release plan until the owner rules on §10.
-Risk class: **Critical** (egress of Private-derived text; money). The architecture decision in §A.11 needs explicit review sign-off.
+Status: **proposal, revision 7 (2026-10-05).** Revision 6 was reviewed as "ready after listed changes": no further redesign, ten precision problems (P1–P10) and conditions on AD-1. All are applied here; dispositions are in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md), section G. Nothing here changes shipped behavior or the release plan until the owner rules on §10.
+Risk class: **Critical** (egress of Private-derived text; money).
 
-## Changes since revision 5
+## Changes since revision 6
 
-1. **No on-device rewrite in version one.** The first answer and its citations never change. If the consult returns, the panel appends a separate, labelled block of outside text (§A.6). The only extra model call is the writer.
-2. **No searchable consult records.** Only content-free operational receipts are kept. The reply lives as long as the job (§A.12).
-3. **One route, zkAPI,** behind a small interface. Venice end-to-end encryption is a later track, one paragraph (Track B).
-4. **Collection protocol redesigned:** one uniform response after the claim, on every install, with every state (pending, appended, withdrawn) inside one fixed-size sealed envelope; explicit byte budgets; a fixed panel height during the follow-up period; an honest list of what the relay and ChatGPT can still see (§A.5).
-5. **Gate guarantee stated as it really is** (§A.4).
-6. **An immutable snapshot** of exactly what the first answer read is handed from the model to the jobs engine (§A.3).
-7. **Dispatch order:** warm up first, then recheck everything, run the gate, and send with no further long wait (§A.7).
-8. **One supervised transport session** with separate "reply" and "finished" outcomes, cancellation rules, and separate deadlines (§A.8).
-9. **Measurement first:** stage M0 measures whether the writer can share the model without slowing a fresh answer; stage M1 times a real zkAPI consult. Feature code waits for M0 (§A.14).
-10. **Fork claims narrowed** to what the prototype recorded; F2 prerequisites added (§Z.4). The fork still awaits owner decision.
-11. **Build plan reordered and split;** milestone wording aligned with the Olympus 1.0 release plan (§2, §A.14).
+1. **M0 has an exact decision rule** (§A.7): measured from a fresh request's arrival to first reveal, abort delay included, paired against a control. Results drop into a fixed table.
+2. **One authoritative panel payload contract,** enforced before first reveal on every install. A total serializer and an exact-size padder replace the "cannot happen" proof (§A.5.1).
+3. **Two collection phases:** today's fast initial acquisition, then a uniform encrypted follow-up from first delivery. A capability handshake is sent by every new panel, and paid dispatch requires it (§A.5.2).
+4. **Retained first-answer payload** with terminal withdrawal, race rules and stable source-open tokens (§A.5.3).
+5. **Expiry and eviction no longer depend on whether a consult was sent;** the timing claim is narrowed to what a test will show (§A.5.4).
+6. **Fixed reported geometry** by a numeric rule, kept after follow-up ends and on reopen (§A.5.5).
+7. **The outside text has its own container** outside the "Private answer from your Mac" card, with attribution that stays put, a line policy and hostile-text tests (§A.6).
+8. **The transport session is a one-shot state machine** with a cancellable `open` and final authorization inside dispatch (§A.8).
+9. **One server-owned follow-up clock;** the enable wording covers the real five-minute dispatch window (§A.5.6, §A.10).
+10. **Frozen eval numbers,** and corrected public privacy wording (§2, §A.13).
+11. **AD-1 recorded with its four conditions; AD-2 added** for panel-protocol compatibility (§A.11).
+12. **Build plan:** C3 is the internal settings mechanism only; the enable path lands in C5; the public CLI enable command comes later; the transport is re-measured after C2; the fork does not block an experimental release (§A.14).
 
 ## Terms (defined once)
 
 - **Private** = tier S4 = trust domain `secure_local`.
 - **Panel** = the private answer panel in ChatGPT. It collects an answer from the owner's Mac through the relay, encrypted to a key only the panel holds.
-- **Seal** = encrypt to the panel's key. The relay and ChatGPT see only ciphertext.
-- **Envelope** = one sealed response body.
-- **First answer** = the answer the on-device model writes from the owner's Private items, exactly as today.
+- **Seal** = encrypt to the panel's key. **Envelope** = one sealed response body.
+- **First answer** = the answer the on-device model writes from Private items, exactly as today.
+- **First delivery** = the moment the engine first returns a `ready` response to the claiming key. The server records it.
 - **Consult** = one outbound request with up to three short general sub-questions, written on-device.
-- **Writer** = the on-device model call that proposes the consult.
+- **Writer** = the on-device model call that proposes the consult; the only extra model call.
 - **Gate** = the outbound check: a pure function that refuses defined kinds of copying and identifiers.
-- **Outside block** = the bounded reply, shown under the first answer, labelled as not from the owner's documents.
-- **Fence** = the zkAPI ledger mark that a paid request has not yet been seen to settle; while held, no consult starts.
-- **Slot** = the single on-device analysis slot; the model server runs one request at a time (`--parallel 1`).
+- **Outside block** = the bounded reply, shown in its own container, labelled as not from the owner's documents.
+- **Fence** = the zkAPI ledger mark that a paid request has not yet been seen to settle; while it is held, no consult starts.
+- **Job policy** = the outside-help setting, lifetime and follow-up window bound to a job when it is created. Later setting changes do not alter it.
 
 ---
 
 ## 1. Owner direction (settled)
 
-- **The ChatGPT private answer panel is the product path.**
-- **Consults are automatic** once the user has set up a route. Approval prompts exist only in an opt-in strict mode.
-- **Exactly one pre-send check:** the mechanical gate. A refusal means no consult, silently.
-- **Fast and secure together.** The first answer appears exactly as fast as today.
-- **No spending cap by default;** costs stated up front.
-- **Vocabulary packs per configured language;** Brazilian Portuguese ships.
-- **zkAPI is experimental,** labelled "route not verified" on macOS until route verification passes. The upstream issue is not being posted for now.
-- **Version one (2026-10-05):** no rewrite pass (append instead); no searchable consult records; one route; fence recovery is a button, never automatic; enable only from the Mac; consult only when the first answer is marked insufficient or has gaps; ship all ten packs.
-- Standing: tiers are the product; the relay is an accepted central point; when a user chooses zkAPI, the result must meet the standard of the people who designed the practice.
+- The ChatGPT private answer panel is the product path.
+- Consults are automatic once a route is set up. Approval prompts exist only in an opt-in strict mode.
+- Exactly one pre-send check: the mechanical gate. A refusal means no consult, silently.
+- Fast and secure together: the first answer appears as fast as today. §A.7 defines how that is measured.
+- No spending cap by default; costs stated up front.
+- Vocabulary packs per configured language; Brazilian Portuguese ships; all ten packs ship.
+- zkAPI is experimental and labelled "route not verified" on macOS until route verification passes. The upstream issue is not being posted for now.
+- Version one: no rewrite pass (append a separate block); no searchable consult records; one route; fence recovery is a button, never automatic; enable only from the Mac; consult only when the first answer is marked insufficient or has gaps.
+- Standing: tiers are the product; the relay is an accepted central point; the zkAPI path follows the reference practice.
 
 ## 2. Position against the release plan
 
-- The active plan is **Olympus 1.0 (ChatGPT)** (`docs/V0_4_RELEASE.md`). This feature is **not in 1.0.** It is a candidate for the release after 1.0. Its first build pull request adds it to "Deferred to after 1.0" with a dated owner decision.
-- No 1.0 checklist row changes. No versioned contract changes (§A.11).
-- Wording that changes when it ships: "Private content never reaches an ordinary cloud model" becomes "…the evidence never does; with outside help on, the on-device model may send a short general question it wrote" (§10).
+- The active plan is **Olympus 1.0 (ChatGPT)** (`docs/V0_4_RELEASE.md`). This feature is **not in 1.0**; it is a candidate for the release after. Its first build pull request adds it to "Deferred to after 1.0" with a dated owner decision.
+- No versioned contract changes (§A.11).
+- **Public privacy wording when it ships** (README and the enable flow): "Olympus does not upload the evidence pack. With outside help enabled, it may send a short question derived from your private answer; that question can still reveal private information." This replaces the earlier proposal "the evidence never does", which implied more than the gate guarantees.
 
 ## 3. Current state (verified on `main` at `bb1755fb`)
 
-- **Panel path:** a ChatGPT search matching Private items creates a one-time job; the model answers in the background; the panel collects the sealed answer. One sealed outcome per job; the panel stops polling once it shows the answer; jobs live 10 minutes and are never persisted.
-- **zkAPI transport,** dormant: one consult at a time; returns only after settlement and teardown; refuses if a daemon is already running.
-- **Gate,** on branch `claude/consult-outbound-gate`, uncalled, with ten shipped vocabulary packs and `eval/consult-leak`.
-- **No consult settings** on the ChatGPT product.
+- **Panel path:**
+  - A ChatGPT search that matches Private items creates a one-time job, and the model answers in the background.
+  - The panel claims and collects the sealed answer, then stops polling.
+  - Each job has one sealed outcome, lives 10 minutes, and is never persisted.
+  - The jobs boundary accepts up to 65,536 answer characters, 20 citations and 10 gaps, padded into growing buckets.
+- **zkAPI transport,** dormant:
+  - It runs one consult at a time and returns only after settlement and teardown.
+  - It reserves money and sets the fence *before* its last ownership check, so a check failing there leaves an unsent request fenced (`consult-transport-zkapi.ts:1805–1822`).
+- **Gate,** on branch `claude/consult-outbound-gate`: uncalled, with ten shipped packs and `eval/consult-leak`.
+- **No consult settings** exist on the ChatGPT product.
 
 ---
 
@@ -64,271 +71,460 @@ Risk class: **Critical** (egress of Private-derived text; money). The architectu
 
 ### A.1 Outcome
 
-**A user opens a private answer in ChatGPT and sees it as fast as today. If the answer is incomplete and outside help is on, a separate block may appear under it a few minutes later: "Outside background — from an outside model, not from your documents."** The first answer and its sources never change.
+**A user opens a private answer in ChatGPT and sees it as fast as today.** When the answer is incomplete and outside help is on, a separate box under the answer may fill a few minutes later. The box is headed "Outside background — not from your documents". The first answer and its sources never change.
 
-What leaves the Mac: only the bounded question that passed the gate (§A.4), through the zkAPI route.
+**What leaves the Mac:** only the bounded question that passed the gate, through zkAPI.
 
-Stated limits:
+**Limits:**
 
-- The question is derived from Private material. The gate rejects defined kinds of copying and identifiers, but **cannot guarantee that no Private information leaves** (§A.4).
-- The outside provider reads the question; zkAPI hides who paid. On macOS the network route is not verified until §Z.4 passes.
-- Someone who sees both ChatGPT's traffic and the outside provider's could link them by timing; the consult starts about one to two minutes after ChatGPT saw the question.
+- The question is derived from Private material and can still reveal private information (§A.4).
+- The outside provider reads the question. zkAPI hides who paid. On macOS the network route is not verified (§Z.4).
+- Timing can link the consult to the ChatGPT request.
 
 ### A.2 Flow
 
 ```text
-search → job → first answer (unchanged) → panel claims → first answer sealed and shown   [as today]
+search → job (policy bound) → first answer (unchanged) → panel claims → first delivery   [as today]
    │
-   └ outside help on, route set, first answer marked insufficient or has gaps,
-     not a "these items do not answer" result?                         no → done
+   └ job policy has outside help on, panel declared capability 2, answer marked insufficient
+     or has gaps, not "these items do not answer"?                         no → done
        │ yes
-       ├ start zkAPI warm-up (no request, nothing reserved)  ┐ in parallel
-       ├ writer call (on-device, lowest priority)            ┘
-       ├ both done → recheck settings, recent panel activity, eligibility, deadlines,
-       │             send-once latch → gate                     any no → cancel warm-up; done
-       ├ send ONE request (no long wait between gate and send)
-       ├ reply arrives → bounded plain text → stored on the job → appears in the next collection
-       └ settlement and teardown continue in the background
+       ├ zkAPI session open (cancellable, nothing reserved)  ┐ in parallel
+       ├ writer (on-device, scheduled per M0)                ┘
+       ├ dispatch: transport's own async checks → final authorization
+       │   (settings revision, recent panel activity, deadlines, latch, eligibility, gate)
+       │   → reservation and fetch, synchronously                        any no → cancel; nothing paid
+       ├ reply → bounded plain text → appended to the job (revision +1)
+       └ settlement and teardown in the background
 ```
 
-- **Only claimed jobs consult.** A precompute nobody collected spends nothing.
-- **The first answer always stands.** Nothing after the seal can change it.
-- **Trigger data is explicit:** the model's own `sufficient` verdict and a "no answer" flag are carried internally from the model to the jobs engine. They never enter the sealed plaintext. Today `sufficient` is used only to filter gaps and then dropped (`analyst-built-in.ts:506`).
+- **Only claimed jobs consult.**
+- **The trigger uses explicit internal metadata:** the model's `sufficient` verdict and a no-answer flag, carried from the model to the jobs engine. Neither enters the plaintext.
 
 ### A.3 The writer and its snapshot
 
-**Decision: the writer is a second on-device call made after the first answer is sealed. It is the only extra model call.** *Rejected: a question field in the first answer's own output, because it adds output and prompt tokens to every answer.*
+**Decision: one writer call after first delivery; no rewrite.** *Rejected: a question field in the first answer's output, because it lengthens every answer.*
 
-**Inputs, bounded in model tokens:** the fixed writer rules; the user's question (≤ 1,000 characters); the first answer (≤ 2,700 characters); its gaps (≤ 5 × 200 characters). The whole prompt must be ≤ 2,048 model tokens, counted with the model server's own tokenizer; over that, no consult. Output: a JSON schema `{"consult": null | [up to 3 strings]}`, `max_tokens` 160. Writer deadline 60 s, abort only, **never a model reset**.
+**Inputs and output:**
 
-**The writer does not see the evidence again.** The gate still compares against everything the first answer read.
+| | Bound |
+|---|---|
+| The user's question | ≤ 1,000 characters |
+| The first answer | ≤ 2,700 characters |
+| Its gaps | ≤ 4 × 300 characters |
+| Whole prompt, writer rules included | ≤ 2,048 model tokens, counted with the server's tokenizer; over that, no consult |
+| Output | JSON schema `{"consult": null \| [≤ 3 strings]}`, `max_tokens` 160 |
+| Deadline | 60 s, abort only; the writer never causes a model reset |
 
-**Snapshot handoff.** When the first answer is computed, the model wrapper returns an immutable snapshot with it:
+**Snapshot handoff:**
 
-- the exact evidence text the model was given (after relevance selection, depth reads and fitting), per item;
-- the question as answered, the answer, its gaps, `sufficient`, "no answer";
-- the identities of the items read.
+- **What it holds:** the exact evidence text the first answer's model call received (after relevance selection, depth reads and fitting), the question, the answer, its gaps, the verdict, and the identities of the items read.
+- **Where it comes from:** the computation that produced the answer. A reused precompute brings its own search-time snapshot.
+- **What the gate compares against:** the evidence as the pack, plus the question, answer and gaps exactly as the writer saw them, passed as `writerVisibleTexts`.
+- **Retention:** in memory until the dispatch decision (at most 5 minutes after first delivery), then dropped. It is separate from the retained first-answer payload (§A.5.3).
 
-The snapshot belongs to **the computation that produced the answer**. A reused precompute brings its own snapshot (the search-time text it actually read), not the claim-time refresh. Writer-visible texts are passed to the gate exactly as the writer saw them (question, answer, gaps) through `writerVisibleTexts`; the evidence goes in as the pack. So the gate snapshot covers every writer input and more.
-
-**Retention:** in engine memory on the job, from the seal until the consult decision (send or skip), at most 5 minutes; then dropped. Size is bounded by the prompt budget (≤ 11.5 KB of evidence) plus the answer. Never written to disk.
-
-**One request per answer,** with up to three sub-questions on one topic. Facts whose combination could identify the owner are dropped, not split.
-
-Estimated writer time (arithmetic at the measured 3–6 tokens/s generation and 81–109 tokens/s prompt reading on a loaded Mac; **not measured**): typical 1,000-token prompt and 100-token output ≈ 25–45 s; at the bounds (2,048 in, 160 out) ≈ 45–80 s.
+**Speed (estimates, not measured):** at 3–6 tokens/s generation and 81–109 tokens/s prompt reading, about 25–45 s typical and 45–80 s at the bounds.
 
 ### A.4 The one check: the outbound gate
 
-**Decision: the gate is the only pre-send check, and its guarantee is stated exactly.**
+**Decision: the gate is the only pre-send check. What it guarantees is stated exactly.**
 
-**The real guarantee:**
+- **What leaves:** only the bounded, checked question. At most 3 sub-questions, ≤ 600 bytes, ≤ 80 lexical tokens, ≤ 12 content words each, and only words in the configured packs.
+- **What it refuses:**
+  - runs of 4 content tokens shared with the snapshot;
+  - reordered copies;
+  - names, figures and identifiers that appear in the snapshot;
+  - repeats of a recent consult.
+- **What it cannot guarantee: zero Private information.** Known gaps, each pinned by a test:
+  - synonym paraphrase;
+  - rare combinations of ordinary words;
+  - a dictionary-word name in lower-case prose;
+  - figures re-expressed by arithmetic;
+  - covert channels in word choice.
+- **The user's question is not owner-authored.** ChatGPT writes it as a tool argument (`mcp-surface.ts:305`). It is in the snapshot, so copying from it is refused, but it can carry pasted material or instructions.
+- **Verdicts stay on the Mac.**
+- **Packs load when outside help is turned on.** The gate runs after first delivery.
 
-- Only the bounded, checked question leaves (≤ 3 sub-questions, ≤ 600 bytes, ≤ 80 lexical tokens, ≤ 12 content words each; only words from the configured language and domain packs).
-- The gate rejects defined patterns: runs of 4 content tokens shared with the snapshot, reordered copies, names, figures and identifiers from the snapshot, repeats of a recent consult.
-- **It cannot guarantee zero Private information.** Known gaps, each pinned by a test on the gate branch: synonym paraphrase and rare combinations of ordinary words; a name that is also a dictionary word written in lower case ("mason reported a breach" lets "Can mason appeal?" pass); figures re-expressed by arithmetic; covert channels in word choice.
-- **The user's question is not owner-authored.** It reaches the engine as a ChatGPT tool argument (`mcp-surface.ts:305`), written by ChatGPT. It is in the snapshot, so copying from it is refused, but it could carry pasted Private text or instructions to encode something; the gate catches only the defined patterns.
+### A.5 Collection protocol
 
-Other properties:
+#### A.5.1 One panel payload contract, enforced before first reveal
 
-- Pure function, no state; the caller keeps the recent-question history (≤ 20, in memory).
-- **Vocabulary packs per configured language.** Shipped: English, Dutch, French, Spanish, Portuguese (Portugal), **Brazilian Portuguese**; German and Italian are user-installed. Domain packs: units and generic medicines on; countries and brand names off. Packs load when outside help is turned on, never on the answer path.
-- **Verdicts stay on the Mac.** Nothing about a refusal reaches the panel, ChatGPT, the relay or panel `_meta`. The local log records only "skipped" and stage times.
-- Speed target sub-millisecond; unmeasured on real packs (timing test in C1). It runs after the seal, so it cannot slow the first answer.
+**Decision: tighten the jobs boundary to what the model layer produces today, on every install, and prove one envelope size for it.**
 
-### A.5 Collection protocol and what each party can see
+The contract, enforced at the jobs boundary before first delivery:
 
-**Decision: after the claim, every collection by the claiming key, on every install, gets the same response: 200 `ready` with a freshly sealed envelope of one fixed size. Every state lives inside the envelope.** *Rejected: a `follow` flag on some requests, because replay and reopen would take the other path and expose a difference.*
+| Field | Limit (after normalization) | Old limit at the jobs boundary | Most the model layer produces today |
+|---|---|---|---|
+| `answer` | ≤ 2,700 UTF-16 units | 65,536 | 2,700 (full detail; summary 1,000) |
+| `citations` | ≤ 4 | 20 | 4 (the panel reads at most 4 items) |
+| `title`, `source` | ≤ 300 units each | 300 | — |
+| `date` | ≤ 32 units | 32 | — |
+| web URL | ≤ 2,048 characters, the normalized `https` form (ASCII) | 2,048 | — |
+| Mac open token | 43 characters | 43 | — |
+| `unanswered` | ≤ 4 × 300 units | 10 × 300 | 3 model gaps + 1 unreadable note |
 
-**The envelope** (plaintext version 1, optional fields added; the panel already ignores unknown fields):
+**Nothing the product shows today is cut** under the shipped defaults; no production caller overrides the panel limits. A model limit configured above the contract is clamped to it.
+
+**Total serializer** (no "cannot happen" branches):
+
+1. Replace lone surrogates with U+FFFD, strip control and bidirectional-override characters, and normalize each URL through `new URL().href` (non-`https` dropped).
+2. Apply the limits above.
+3. Serialize with `JSON.stringify`, then measure UTF-8 bytes.
+4. If any field still exceeds its byte budget (below), cut text fields at a code-point boundary with "…" included in the budget, and drop trailing list entries.
+
+The outside text follows the same rule and sets `cut: true`.
+
+**Byte budgets (serialized):**
+
+| Part | Budget | Why it fits |
+|---|---|---|
+| answer | 8,192 B | 2,700 units × ≤ 3 B + quotes |
+| citations | 4 × 4,096 B | 300 + 300 units × 3 B, 32 × 3 B, 2,048 B URL, keys |
+| gaps | 4 × 1,024 B | 300 units × 3 B + quotes |
+| outside block | 6,144 B | text 4,096 B, question 1,280 B, route label and state |
+| scalars and skeleton | 512 B | `v`, `rev`, `state`, `followSeconds` |
+| **Total** | **35,328 B** | |
+
+**Exact-size padder:** the plaintext is padded to exactly **36,864 bytes (36 KiB of padded plaintext)**. A plaintext over that is rejected, never grown. The wire body is larger: 36,880 bytes of ciphertext, base64url-encoded in JSON, about 49.4 KB, well inside the relay's 8 MiB response limit.
+
+A rejection after budgeting would be a bug, and fails closed:
+
+- before first delivery: the job fails, as today;
+- after first delivery: the outside block is dropped; if the envelope still does not fit, the job is withdrawn.
+
+**Proof:** a fill test sets every field to its budget with multilingual text, quotes, backslashes, lone surrogates and maximum URLs. It asserts the exact plaintext size.
+
+**Where the fixed size applies:** to jobs whose policy has outside help on and whose panel declared capability 2. Other jobs keep today's bucket padding; the tightened limits apply to every job.
+
+#### A.5.2 Two phases and the capability handshake
+
+**Phase 1, initial acquisition: today's behavior, unchanged.**
+
+- The first key claims the job.
+- Until first delivery: `202 pending` with `Retry-After: 2`, `429`, plaintext `200 failed`, `409 claimed`, `410 gone`.
+- The panel polls every 2 seconds, as today. The first answer is never slowed by follow-up machinery.
+
+**The transition is first delivery.** The engine records `firstDeliveredAt` when it returns the first `ready` to the claiming key.
+
+**Phase 2, uniform follow-up**, for capability-2 panels on jobs with outside help on:
+
+- **Every** request from the claiming key gets `200 ready` with a freshly sealed 36 KiB envelope, whatever the consult did.
+- Withdrawal is a state inside the envelope.
+- The only other responses are infrastructure and identity exceptions, which do not depend on consult outcomes: `400` malformed key; `409` another key; `410` after the job's public expiry or eviction (§A.5.4); `503` Mac offline or relay busy; `429` rate limit. The panel's 30-second cadence stays far below the limits, so `429` appears only under abuse.
+
+**Envelope (plaintext version 1, extended):**
 
 ```text
-{ v: 1, rev,
+{ v: 1, rev,                                           // rev only increases
   state: "answer" | "withdrawn",
-  answer, citations, unanswered,                       // the first answer, never changed
-  followSeconds,                                       // remaining follow-up time; 0 when outside help is off
-  outside: { state: "none" | "pending" | "appended" | "paused",
-             text?, question?, route? } }
+  answer, citations, unanswered,                       // absent when withdrawn
+  followSeconds,                                       // computed by the server (§A.5.6)
+  outside: { state: "idle" | "pending" | "appended" | "paused",
+             text?, cut?, question?, route? } }
 ```
 
-- **Withdrawal moves inside.** Today a withdrawn answer is a plaintext `failed` body (`private-answer-jobs.ts:553`). After the claim it becomes `state: "withdrawn"` inside a normal envelope, with no answer text.
-- **The answer is sent once per envelope, never a second "original" copy.** Each envelope carries the complete current state, so a reopened panel needs nothing special: it collects with its stored key and renders what it gets. (Leaving the answer out of later envelopes would need a relay-visible "I already have it" signal, or would break reopening.)
-- **Fresh seal each time:** a new engine key and IV per response.
-- **Fixed size:** every envelope is padded to exactly **32 KiB**. It never grows. Before the claim (202 pending, 409, 410, 429), responses are as today.
+`idle` covers nothing triggered, refused, skipped and failed alike, so the panel cannot tell them apart and neither can anyone watching it. On failure the panel shows nothing new.
 
-**Byte budgets** (serialized UTF-8 JSON, escapes included), with a deterministic overflow rule:
+**Capability handshake:**
 
-| Field | Budget | If over |
+- Every new panel sends `"cap": 2` in **every** request body, unconditionally: in phase 1 and phase 2, whether outside help is on or off, and whatever any consult did.
+- The engine records the capability at the claim.
+- **Paid dispatch requires `cap: 2`.**
+
+**Mixed versions.** The engine serves the panel's HTML (`private-answer-resource.ts`), so a mismatch arises only when the host caches an older widget.
+
+| Panel | Engine | Behavior |
 |---|---|---|
-| `answer` | 12,288 B | cannot happen: the answer is ≤ 2,700 UTF-16 units, ≤ 3 bytes each after escaping (≤ 8.1 KB); a test proves it |
-| `citations` | 10,240 B total, ≤ 2,048 B each | drop trailing citations (the panel reads at most 4 items) |
-| `unanswered` | 2,048 B total | drop trailing entries |
-| `outside.text` | 4,096 B | cut at the last code point that fits, append "…", set `cut: true` |
-| `outside.question` | 1,024 B | cannot happen: the gate caps it at 600 B raw |
-| `outside.route` and other scalars | 512 B | fixed strings |
-| Skeleton | 512 B | — |
-| **Total** | **30,720 B ≤ 32,768 B** | proven by a test that fills every field to its budget with multilingual text, quotes, backslashes and maximum URLs |
+| Old (no `cap`) | New | Exactly today's behavior, including bucket padding and plaintext `failed`. No consult is dispatched, so nothing is spent. |
+| New (`cap: 2`) | Old | The old engine ignores `cap` (it reads only `v` and `publicKey`). Its response has no `followSeconds`, which the panel treats as 0: today's behavior. |
 
-**Panel behavior:**
+#### A.5.3 The retained first-answer payload
 
-- **The panel polls only while `followSeconds` > 0:** every 30 s, up to 20 minutes from the first reveal, whatever it receives. A reopened panel resumes from `followSeconds`.
-- **Fixed outer height:** at first reveal, the panel's height becomes the first answer's height plus a reserved strip (proposed 120 px), capped at its current maximum. That height is locked for the follow-up period: no `notifyIntrinsicHeight` or `ui/notifications/size-changed` after the lock (today they fire on every layout change, `private-answer.ts:875–899`). Everything else, including Sources and the outside block, scrolls inside.
-- **Outside block:** plain text set with `textContent`. Markdown is shown as literal characters, never rendered. Links are not made clickable. Control and bidirectional-override characters are stripped. Heading: "Outside background — from an outside model, not from your documents." A collapsed "What Olympus asked" shows the question.
-- **On failure, nothing.** A pending line ("Looking up general background…") disappears inside the reserved strip. Paused (fence held): "Outside help is paused. Open Olympus on your Mac."
+**Decision: a capability-2 job with outside help on keeps its first-answer plaintext from first delivery until the job ends.**
 
-**What is still visible, honestly:**
+- **What is kept:** the serialized payload (≤ 35,328 B) and its source-open token map, in engine memory only. That is at most about 7 MB across the 200-job cap.
+- **This is a retention change.** Today only sealed bytes are kept after the claim.
+- **It applies only where needed.** Jobs with outside help off keep today's behavior: they hand out stored sealed bytes and keep no plaintext. Those jobs have no consult outcome to hide, so they do not need fresh sealing. That is the smaller exposure.
 
-| Who | Sees |
-|---|---|
-| Relay | Job id, panel public key, request times and count, status codes, fixed sizes. The follow-up poll schedule tells it **this install has outside help on**; not whether any given consult was refused, sent, failed or appended. Mac source-open requests (time, and that a Mac-file source exists), as today. Existing residual: a compromised relay could swap keys and read envelopes, outside block included (accepted for 1.0, `V0_4_RELEASE.md` "Deferred to after 1.0"). |
-| ChatGPT (the host) | As today: the tool result's `_meta` (count, state, job id, detail) and the panel's first-reveal height. It serves the widget sandbox, so it can see the panel's network requests like the relay can, and so can also infer the setting. The fixed height hides per-answer outcomes. **Web sources open through the host** (`openExternal` / `ui/open-link`, `private-answer.ts:596`): the URL goes to ChatGPT and bypasses the engine's eligibility guard. This is an existing exception, now stated. |
-| Local network | Tor starting for each triggered answer (warm-up), whatever the verdict; Tor traffic when a consult is sent. |
-| zkAPI operator and OpenRouter | The question, its timing, and warm-ups that send nothing. |
+**State rules:**
 
-**Recent panel activity,** not presence. A consult is sent only if the claiming key collected within the last 75 s. Disclosed limits: the panel may close just after a poll, and the relay could replay a captured request (it carries the public key, with no proof of the private key). **Replay-resistant liveness is deferred from version one.** Reasoning: dispatch happens once per job, about a minute after the claim; a replay can matter only if the user closes the panel in that minute, and it can cost at most one consult ($6) for an answer the user already opened. The enable sheet says so plainly. Revisit if dispatch moves later.
+- **Revisions only go up.** A reply is appended by a synchronous compare-and-set on `rev`, and only while the job is in state `answer`.
+- **Withdrawal is terminal.** It clears the answer payload, outside text and question, the writer snapshot and the source-open tokens. A late reply is discarded. Nothing restores a withdrawn job.
+- **Around asynchronous sealing:**
+  1. Read `rev` and the state.
+  2. Run the eligibility guard (`stillReleasable`).
+  3. Seal.
+  4. Re-read before handing out. If the job was withdrawn meanwhile, seal and return the withdrawn envelope instead. If `rev` advanced, re-seal once with the newer state.
+- **Source-open tokens** are minted once, at the first seal, and are identical in every envelope.
 
-**Send-once latch:** an atomic per-job flag set before dispatch. Repeated polls, remounts and replays never send again. Tests cover them.
+#### A.5.4 Expiry, eviction and timing
 
-**Job lifetime:** a claimed job on an install with outside help on lives 30 minutes from creation (today 10). Restart forgets all jobs, as today: a reply in flight is lost; the fence and the money spent remain. Jobs with a sent consult are evicted last at the 200-job cap; if evicted, the reply is discarded.
+- **Public expiry and eviction are independent of consult outcomes.** The job's lifetime comes from its policy at creation: 30 minutes with outside help on, 10 minutes off. Eviction at the 200-job cap stays oldest-first, whatever happened.
+- **A reply for an evicted or expired job is discarded.** There is no outcome-dependent protection. The money is spent and the loss is stated.
+- **Restart:** an engine restart forgets every job, as today. The fence and the spent money remain.
+- **Timing claim, narrowed:** responses in phase 2 have the same status and the same size. **Equal response timing is not claimed** until the C4a timing test compares latency distributions for idle, pending, appended, paused and withdrawn jobs. If they differ by more than the test's noise floor, the engine adds a fixed response-time floor, and the result is recorded here. Mac source-open requests stay observable, as today.
 
-### A.6 The outside block: not a rewrite
+#### A.5.5 Fixed reported geometry
 
-**Decision: version one shows the reply, bounded and labelled, under the unchanged first answer. No model reads the reply.** *Rejected for version one: an on-device rewrite applying the reply to the documents, because existing citation checks confirm only that a cited item exists, not that it supports the claim, so an injected reply could produce false document claims (review finding 6). It also needed a second model call.*
+**Decision: lock the height the panel reports, not the reporting mechanism.**
 
-- **Reply bounds:** at most 256 KiB from the transport (its existing cap); normalized to plain text; cut to 4,096 bytes (§A.5).
-- **Never stored** beyond the job. Never fed to any model. Never indexed.
-- **A hostile reply** can still say false or harmful things to the user. The label and the separation are the mitigation; the eval tests it (§A.13).
+**Rule,** for jobs with outside help on:
 
-### A.7 Scheduling, dispatch order and eligibility
+- `H = min(A + R, 640 px)`.
+- `A` is the height of the first-answer card **alone**, measured at the current width. The outside container is excluded, so `A` never depends on a consult.
+- `R` = 176 px, the outside container, which is always present and always the same height.
+- If `A + R > 640`, the first-answer card scrolls inside `640 − R`.
 
-**Decision: the writer is the lowest-priority work in the existing queue. Whether it may run while fresh answers are possible is decided by measurement M0 before feature code is built.**
+**Notifications:**
 
-- **Queue order:** claimed answers, then precomputes (newest first), then the writer.
-- **Owner requirement:** no fresh first answer may get slower. Preemption (abort the writer when a fresh answer arrives) meets it only if the server frees itself fast. That is unproven: aborting an HTTP request does not prove `llama-server` freed its slot, and today's fallback (a model reset) would slow the next answer. **M0 measures it** (§A.14). The writer never causes a reset.
-- **Fallbacks if M0 fails, in order, for the owner to choose:** (1) run the writer only after the queue has been idle for N seconds; (2) a smaller, tighter writer prompt; (3) a separate lightweight writer process (for example the 2B model in its own server, at a memory cost); (4) change the requirement. None is picked silently.
-- **Network waits never hold the slot** and do not count as answer activity.
+- The existing initialize, resend, load and fallback messages, and the ResizeObserver path, keep firing. They always report `H` from the rule, never a measured total.
+- A late `ui/initialize` therefore still gets `H`.
+- A width change recomputes `A` from the first-answer card at the new width.
+- Hide reports today's fixed hidden height; Show returns to `H`.
+- **After follow-up ends, and on reopen, the same rule applies.** The outside container stays at `R` with its final content.
+- **Residual:** after a withdrawal, a later width change measures the withdrawn card. The host could see that withdrawal, which plaintext `failed` already shows today.
 
-**Dispatch order:**
+**Host-transcript test (C4a)** covers these outcomes:
 
-1. Warm-up and writer run in parallel (warm-up reserves nothing).
-2. When both finish: recheck the settings revision, strict-mode approval if on, recent panel activity, the deadlines (§A.8), and the send-once latch.
-3. **Eligibility check** on the items the first answer read.
-4. Gate.
-5. Send at once. No long wait between steps 2 and 5. The gate is pure; the send is the next call on the already-warm session.
+- outside block: idle (not triggered, refused, skipped, failed), pending, appended, paused;
+- withdrawal;
+- a delayed handshake;
+- font loading;
+- width change;
+- hide and show;
+- remount within and after the follow-up window;
+- follow-up expiry.
+
+It asserts identical host messages wherever the first answer and width are the same.
+
+#### A.5.6 Clocks and liveness
+
+- **Follow-up clock:** `followUntil = min(firstDeliveredAt + 20 min, job expiry)`. It is fixed at first delivery. `followSeconds` = time left, computed by the server. Remounts never extend it.
+- **Dispatch window:** dispatch only if now ≤ `firstDeliveredAt + 5 min` **and** now + the configured completion timeout (`timeoutMs`, default 6 min) + 2 min ≤ `followUntil`.
+- **Recent panel activity:** a collection by the claiming key within the last 75 s, checked inside final authorization.
+- **Disclosed:** the relay can replay a captured request and keep this fresh for the whole five-minute dispatch window. The send-once latch still allows at most one consult per job. Replay-resistant liveness is deferred: the risk is bounded to one $6 consult for an answer the user's panel collected, and the enable wording says so (§A.10).
+- **Send-once latch:** atomic per job, set inside final authorization.
+
+### A.6 The outside block
+
+**Decision: the reply is shown in its own container, below and outside the "Private answer from your Mac" card. No model reads it.**
+
+**The container:**
+
+- It is a separate box with its own heading, outside the first answer's title, Sources and gaps.
+- Its attribution header is application-owned and stays pinned while the body scrolls: **"Outside background — not from your documents. General information from an outside model. It did not read your documents and has not been checked."**
+- A collapsed "What Olympus asked" shows the question.
+- When the reply was shortened, an application-owned footer says "Shortened by Olympus."
+
+**Text policy:**
+
+- The text is set with `textContent`.
+- Markdown is shown as literal characters. Links are not clickable.
+- Control, bidirectional-override and zero-width characters are stripped. Line endings are normalized.
+- Runs of blank lines collapse to one.
+- At most 40 lines. Each logical line is cut at 240 characters.
+- At most 4,096 bytes, with "…" included.
+
+**Required hostile-text tests (C4a):**
+
+- a forged "Private answer from your Mac" heading;
+- forged "Sources" and citation-like text ("[1]", "your documents confirm");
+- instructions to copy an address or disclose information;
+- long URLs;
+- control and bidirectional characters;
+- thousands of newlines.
+
+Each test asserts that the attribution header stays visible, that only text nodes are created, and that geometry is unchanged.
+
+**Accepted residual risk:** a reply can still mislead a reader who ignores the attribution. No second model pass is added. The eval measures reader attribution (§A.13).
+
+### A.7 Scheduling and the M0 rule
+
+**Decision: the writer is the lowest-priority work. Whether and how it may run is set by M0, measured before any feature code.**
+
+**M0 measurement (frozen):**
+
+- **Endpoint:** the time from a fresh request's arrival (job creation by a search) to its first reveal. In the harness, that is the claim returning `ready` with the panel claiming at once. **Abort delay is included.**
+- **Also recorded:** when the server accepts the fresh request, time to first token, and every model reset with its cause.
+- **Design:** paired, randomized trials on identical workloads. Each pair runs the same fresh request once with the writer active (treatment) and once without it (control), in random order. The writer uses the real prompt, tokenizer, schema and token bounds.
+- **Phases:**
+  - the fresh request arrives during writer prefill;
+  - during writer generation;
+  - near the writer's deadline (55–60 s);
+  - while the writer hangs (it keeps the server busy and ignores the HTTP abort).
+- **Samples:**
+  - 30 pairs per phase on the summary detail;
+  - 10 pairs for generation on full detail;
+  - 30 control-versus-control pairs to measure the noise floor.
+  - All on the owner's Mac with the 4B model.
+- **Failures:** a fresh answer that fails or misses its deadline in treatment but not in control counts as infinite added delay.
+- **Decision rule (owner default, flagged in §10):** pass if, in every phase,
+  - the median added delay is ≤ 250 ms,
+  - **and** the 95th percentile is ≤ 1 s,
+  - **and** zero resets are caused by the writer.
+  "Not slower at all" cannot be measured below run-to-run noise; the noise floor is reported beside the result.
+- **What M0 cannot show:** whole-panel latency through the relay and ChatGPT; other Macs, models (2B, 9B) or memory pressure; the larger envelope's first-reveal cost. C4a measures that last one.
+
+**Results (filled in by the M0 run):**
+
+| Phase | Pairs | Median added | p95 added | Writer-caused resets | Noise floor (median, p95) | Pass |
+|---|---|---|---|---|---|---|
+| Prefill (summary) | 30 | — | — | — | — | — |
+| Generation (summary) | 30 | — | — | — | — | — |
+| Generation (full) | 10 | — | — | — | — | — |
+| Near deadline | 30 | — | — | — | — | — |
+| Hung writer | 30 | — | — | — | — | — |
+
+**If M0 passes:** the writer runs as the lowest-priority queue item and is aborted when a fresh answer arrives.
+
+**If it fails, the owner chooses among:**
+
+1. Run the writer only after the queue has been idle for N seconds. This is a hypothesis to test, not proven isolation: a fresh request can arrive just after the writer starts.
+2. A smaller writer prompt.
+3. A separate lightweight writer process.
+4. A changed requirement.
 
 **Eligibility sites:**
 
-| # | Where | Items | On failure |
-|---|---|---|---|
-| E1 | Immediately before the writer call (guarded model wrapper) | items the first answer read | no consult; snapshot dropped |
-| E2 | Dispatch step 3 above | the same | no send; warm-up cancelled (nothing spent) |
-| E3 | Every hand-out of every envelope (existing `stillReleasable`) | the same | `state: "withdrawn"` inside the envelope, for good |
-| E4 | Every Mac source-open (existing) | the same | 410, as today |
+| # | Where | On failure |
+|---|---|---|
+| E1 | Immediately before the writer call | no consult; snapshot dropped |
+| E2 | Inside final authorization (§A.8) | no dispatch; nothing reserved |
+| E3 | Every phase-2 hand-out | terminal withdrawal |
+| E4 | Every Mac source-open | 410 |
 
-Web sources are outside E4 (§A.5).
+Web sources open through the host, outside E4.
 
-**Residual:** the live check does not apply owner tier rules ("always Secret", "always Private") at once; the classification sweep applies them (`analyst-answer.ts:2724–2727`). An item the owner just ruled Secret may still pass E1–E3 until the sweep runs. Stated, not fixed here.
+**Residual:** owner tier rules ("always Secret" and similar) take effect at the classification sweep, not at the live check (`analyst-answer.ts:2724–2727`).
 
 ### A.8 The zkAPI session
 
-**Decision: one supervised session owns warm-up and send under one lease, and reports two outcomes, `reply` and `finished`.**
+**Decision: a one-shot session state machine. `open` can be cancelled and has a deadline. Final authorization runs inside dispatch, immediately before a synchronous reservation and fetch.**
 
-```ts
-interface ConsultRoute {              // one implementation in version one: zkAPI
-  readiness(): Promise<Readiness>;    // ready | busy | fenced | blocked; label; worst-case cost
-  open(): Promise<Session | Refusal>; // takes the lease; starts Tor, daemon, policy warm-up
-}
-interface Session {
-  cancel(): Promise<void>;            // before send only: reserves nothing, spends nothing
-  send(question: string[]): {
-    reply: Promise<Reply | Failure>;  // as soon as the completion arrives
-    finished: Promise<Finished>;      // settlement, teardown, route checks; lease released here
-  };
-}
+```text
+open({signal, deadline})          → opening → ready      (lease held; Tor, daemon and policy warm-up)
+   cancel / deadline in opening    → cancelled            (processes stopped, lease released)
+dispatch(authorize)                → ready → authorizing → dispatched → replied → finished
+   1. transport's async checks: listener ownership, policy listed, allowance
+   2. authorize(): final settings revision, recent activity, deadlines, latch, eligibility (async), gate
+   3. if authorize says no                              → cancelled (nothing reserved)
+   4. reserve + set fence + start fetch, synchronously → dispatched
+cancel() in ready or authorizing                         → cancelled (nothing reserved)
+cancel() after dispatched                                → ignored; session-owned cleanup continues
 ```
 
-- **Lease:** held from `open` through teardown. A second consult while it is held is skipped, never queued.
-- **Fence:** set at reservation, just before dispatch; cleared only on settlement evidence, as today.
-- **After dispatch, the job's interest can end, payment cleanup cannot.** Today a caller's cancel aborts the completion fetch (`consult-transport-zkapi.ts:1975`) and a late abort discards a reply already received (`:1884`). Both change: after dispatch, no caller signal reaches the session.
-- **Before dispatch, cancel reserves and spends nothing.** C2 proves it with a test, so an unsent request can never force a paid recovery.
-- **The `reply` receipt** says settlement, teardown and the post-stop route check are still pending. `finished` reports them.
-- **Deadlines:**
-  - Consult start: dispatch within 5 minutes of the first answer's seal, else skip.
-  - Delivery room: dispatch only if dispatch time + the completion timeout (6 min) + 2 min ≤ the earlier of job expiry and the panel's follow-up end.
-  - Collection: the panel's 20-minute follow-up window.
-  - Settlement and teardown: unbounded by the job; they finish in the background.
-- **Fence actions, in the Mac dashboard, never automatic:**
-  - **Recover:** sends one fixed "OK" request; reserves up to $6.
-  - **Abandon:** stops the fence blocking. **Consequence, shown in its confirmation:** the old request was never settled and may later settle under another session's network identity, linking the two (`consult-transport-zkapi.ts:703`).
+- **One-shot:** `dispatch` may be called once. A second call, or a call after cancellation, is refused.
+- **Cancel and send race:** whichever reaches step 4 first wins.
+- **After dispatch, the caller's signals are detached.** Only cancellations the session owns remain: a process exiting, or the configured completion timeout.
+- **Proven pre-dispatch failure after reservation** (the fetch never left the process): roll back the reservation, the count and the fence, and record a lifecycle receipt.
+- **Uncertain dispatch:** the fence is kept.
+- **Today's ordering problem** (reserve, then an awaited ownership check) is removed by moving every awaited transport check into step 1.
+- **Outcomes:** `reply` arrives as soon as the completion does; its receipt says settlement, teardown and the post-stop route check are pending. `finished` reports them, and the lease is released there.
+- **Abandon and Recover:** both are buttons in the Mac dashboard, never automatic.
+  - **Recover** sends a fixed "OK" request and reserves up to $6.
+  - **Abandon's** confirmation states that the unsettled request may later settle under another session's network identity, linking the two.
 
-**Why zkAPI is slow, and what we will measure.** The reference wrapper reports 3–4.5 minutes per request end to end, with no per-stage split. The stages are: lease and sandbox self-test; throwaway Tor bootstrap; daemon start; policy warm-up over Tor; reserve; completion; settlement; teardown. **Every per-stage figure is unknown until M1.** The configured timeouts (Tor 210 s, daemon 120 s, warm-up 180 s, completion 6 min, settlement 300 s twice) are budgets, not estimates. Two speed changes cost no privacy and are part of C2: warming up during the writer, and releasing the reply before settlement. Anything further (for example seeding Tor with the public directory cache) waits for M1's numbers. Keeping Tor or the daemon alive between consults is rejected: one guard would see every consult's timing, and something would listen between consults.
+**C2 proofs:**
 
-### A.9 Settings and turning it on
+- After cancellation in `opening`, `ready` or `authorizing`, and after a refused authorization, **no paid reservation, request count or fence remains**. Lifecycle receipts of supervised processes are allowed.
+- After dispatch, a caller cancel neither aborts the fetch nor discards the reply.
+- A second `open` is busy.
 
-**Decision: `~/.olympus/consult.json`, read at each consult; no worker restart. Changed only on the Mac: the local dashboard or the `olympus consult` command. Never from ChatGPT, an agent tool or the relay.**
+**Measurement:** M1 times today's transport. **After C2, the stages C2 changes are re-measured live:** warm-up overlapping the writer, and the reply released before settlement. Further speed work waits for those numbers.
 
-- **Contents:** `{v, revision, enabled, languages, domains, strict}`. Writes use a revision compare-and-swap. The zkAPI profile stays in `sovereignty.json` and is created once at setup.
-- **Why Mac-only:** a hosted agent must not be able to switch on egress. (It does not hide the setting from the relay or ChatGPT; §A.5 says what they can infer.)
-- **Strict mode** (opt-in, after version one, stage C6): each consult waits for approval in the Mac dashboard. The approval binds the question digest, job, settings revision and expiry, and is rechecked at dispatch step 2.
-- **Turning it on:** (1) install and fund `zkapi-clientd` with its own tool, and install Tor; (2) in the Olympus dashboard on the Mac, open **Outside help**; Olympus detects both; (3) read the cost sheet, tick the acknowledgements, press **Turn on**. Languages are prefilled from the Mac's language plus English. The `olympus consult on` command shows the same acknowledgements and refuses without them.
+### A.9 Settings
 
-### A.10 Costs, stated up front
+- **Location:** `~/.olympus/consult.json`: `{v, revision, enabled, languages, domains, strict}`.
+- **Writes:** compare-and-swap on `revision`.
+- **Reads:** each job binds the revision current at its creation. Final authorization re-reads the file and refuses if outside help was turned off.
+- **No worker restart** when it changes.
+- **Changed only on the Mac.** C3 builds the internal mechanism. The Mac dashboard enable path lands in C5. A public `olympus consult on` command comes later and must show the same acknowledgements.
+- **Never from ChatGPT, an agent tool or the relay.** The reason is that a hosted agent must not switch on egress. The relay and ChatGPT can still infer the setting (§A.5).
+- **Strict mode** (C6) adds an approval step in the Mac dashboard, checked inside final authorization.
 
-On the enable sheet and the dashboard card, in these words:
+### A.10 Costs and disclosure, up front
 
-- "Each private answer shown in ChatGPT that Olympus judges incomplete may send one outside question, automatically. Each can cost up to $6 from your zkAPI balance. Olympus counts the full $6."
-- "There is no daily limit unless you set one."
-- "Your deposit is the hard limit."
-- "A question is sent only if the panel was recently active. If you close it within about a minute of the answer appearing, a question may still be sent."
-- The fixed costs: deposit and withdrawal fees, the 30-day expiry, operator risk (§Z.2).
+On the enable sheet:
 
-### A.11 Architecture decision for review: the outside block is panel presentation
+- "Olympus does not upload the evidence pack. With outside help enabled, it may send a short question derived from your private answer; that question can still reveal private information."
+- "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. Each can cost up to $6 from your zkAPI balance; Olympus counts the full $6."
+- "A question is sent only if the panel was recently active, but closing the panel does not guarantee nothing is sent in that window."
+- "There is no daily limit unless you set one. Your deposit is the hard limit."
+- Deposit and withdrawal fees, the 30-day expiry and operator risk (§Z.2).
 
-**Decision AD-1 (needs explicit review sign-off):** the `Analyst` answer is untouched. The first answer is produced by `Analyst.analyze` exactly as today, and "answer from this evidence only" holds. The outside block is **panel-level presentation of labelled untrusted text**. It is not an `Analyst` output, not evidence, carries no citations, is never fed to a model, and is never stored.
+### A.11 Architecture decisions for review
 
-This avoids the semantic contract change that rewriting the answer would be. It does add a new kind of content to the panel. Reviewers should confirm that is acceptable under `CONTRACTS.md`'s compatibility rule ("no parallel types to evade the contracts"), or require the contract-change process.
+**AD-1: the outside block is panel presentation, not an `Analyst` change.** The first answer comes from `Analyst.analyze` exactly as today. The reviewer accepted this within a bounded interpretation. It holds only while all four conditions hold:
 
-The seams touched are all outside the contract fingerprint (`scripts/contract-version.ts` covers types reachable from `contracts.ts`):
+1. The outside block never becomes a corrected document answer.
+2. It never clears or edits the first answer's gaps.
+3. It never gains document citations.
+4. It never feeds future reasoning, retrieval or storage.
 
-- `PrivateAnswerPlaintextV1` and the jobs engine (`src/workers/chatgpt/`);
-- the internal result of `answerPrivately` (snapshot, `sufficient`, no-answer);
-- new modules for the route, settings and orchestration.
+Any departure enters the contract-change process: version and fingerprint, compatibility note, contract tests, held-out eval, critical review. This interpretation is recorded in `docs/CONTRACTS.md` by the C4a pull request.
+
+**AD-2: the panel protocol changes and needs its own compatibility record.**
+
+- **What changes:**
+  - plaintext version 1 gains `rev`, `state`, `followSeconds` and `outside`;
+  - phase 2 replaces plaintext `failed` with an encrypted withdrawal for capability-2 panels;
+  - requests carry `cap`;
+  - the jobs boundary limits tighten.
+- **Compatibility:** as in §A.5.2.
+- **Where it is recorded:** in `private-answer-contract.ts` and `docs/design/chatgpt-plugin.md`, by C4a.
+- **The relay is unchanged:** it forwards bodies unread.
 
 ### A.12 Records
 
-**Decision: no consult text is stored anywhere beyond the job's lifetime.** Kept: content-free operational receipts (stage times, outcome codes, dollars reserved, fence state) in the existing ledger and timing log. Searchable consult records are out of version one. They return only with their own provenance and trust design and a multi-turn injection eval.
+No consult text is stored beyond the job's lifetime. Only content-free operational receipts are kept: stage times, outcome codes, dollars reserved, fence state.
 
-### A.13 Eval
+### A.13 Eval, frozen
 
-Fixed thresholds and sample sizes, on synthetic Private corpora:
+**Required and blocking.** All must pass before C5 ships:
 
-- `eval/consult-leak`: planted identifiers (zero), multilingual including Brazilian Portuguese, encoded and adaptive leakage, false refusals.
-- Attribute inference by an attacker who knows the account; sequences of consults; timing correlation with the ChatGPT request.
-- Hostile replies shown in the outside block (false claims about the user's documents, instructions to the user).
-- **Usefulness:** on incomplete first answers, does the outside block help? No measurable help, no default-on.
-- The held-out eval (`eval/`) wherever shared answer code changes.
-
-### A.14 Build plan
-
-Smallest usable first version: **M0, M1, C1–C5.** Measurement comes first, so the feature is not built around an unproven assumption.
-
-"Critical (path)" = `config/change-risk.json` says so. "Critical (declared)" = egress or trust routing, so declared critical (a declaration may raise risk, never lower it).
-
-| # | Delivers | Proof | Risk |
+| # | Test | Population | Pass |
 |---|---|---|---|
-| **M0** | **Measurement gate, before feature code.** A harness on the shared `--parallel 1` server: a fresh first answer arriving during writer prefill, writer generation, at the writer's deadline, and during a reset. **Pass:** no measurable added delay to the fresh answer beyond abort latency, abort latency under about 1 s, and no model reset caused by the writer. Results recorded in this doc | Twenty trials per phase on the owner's Mac, 4B model; fresh-answer latency compared with no writer | Standard |
-| **M1** | **Live transport timing.** Stage timers added to the transport receipt (small PR), then ten real consults with synthetic questions over Tor. **Owner-gated: needs a funded daemon** | Per-stage median and worst case recorded here | Critical (declared) |
-| C1 | Gate and packs on `main`; doctor line (makes the gate reachable); all 20 pack files listed one by one in `V0_4_PUBLIC_PACKAGE_FILES`; writer rules updated for automatic mode | Gate tests; `eval/consult-leak`; public-surface guard; packaged-path fixture; gate timing test | Critical (path: `public-surface.ts`) |
-| C2 | Transport session: `open`/`cancel`/`send`, `reply` and `finished`, lease through teardown, no caller abort after dispatch, warm-up during the writer, early reply, Abandon wording | Stand-in daemon tests: cancel before send leaves the ledger untouched; fence held until settlement; a second open is busy; late cancel keeps the reply | Critical (declared) |
-| C3 | `consult.json`, the `olympus consult` command with the acknowledgements | Settings tests; no MCP tool, setup tool or relay path can change it | Critical (path: `src/cli.ts`) |
-| C4a | **Collection protocol and panel together:** uniform post-claim envelope on every install, withdrawal inside it, 32 KiB fixed size and budgets, `followSeconds`, fixed panel height, outside-block rendering, 30-minute TTL for consult-on installs | Budget-fill test; replay, reopen and withdrawal give identical-size fresh seals; **a host-message transcript test showing identical height notifications across refused, skipped, sent, failed and appended**; design-receipt update; owner visual acceptance | Critical (declared); design-receipt guarded |
-| C4b | **Scheduling:** writer queue position per M0, snapshot handoff, `sufficient` and no-answer metadata, token-bounded writer prompt, E1–E2, deadlines, send-once latch | No change to first-answer timing (M0 harness re-run); latch tests; precompute-reuse snapshot test; held-out eval | Critical (declared) |
-| C5 | **First usable version:** wiring to the zkAPI route; Mac dashboard **Outside help** card (cost sheet, languages, fence Recover and Abandon); end-to-end acceptance; §A.13 eval | One real consult end to end on the owner's Mac; eval reviewed by the owner before default-on | Critical (declared); design-receipt guarded |
-| C6 | Strict mode (approvals in the Mac dashboard) | Approval binding and recheck tests | Critical (declared) |
-| C7 | Speed changes chosen by M1 | Before and after stage timers | Critical (declared) |
-| F1, F2 | Daemon fork, only if the owner approves (§Z.4) | See §Z.4 | Critical (declared) |
-| Later | OpenClaw `source_answer` (versioned `Analyst` change; anonymous route only where the result stays out of the calling agent's view); a rewrite pass; searchable records; Venice route | Each its own proposal | Critical |
+| B1 | Planted identifiers in the classes the gate claims: email addresses, URLs, phone and account numbers, exact dates, capitalized names, digit figures, provenance values | 1,000 writer outputs from the real writer on synthetic corpora with planted identifiers and adversarial user questions (500 English, 500 Brazilian Portuguese) | 0 leaks |
+| B2 | Serializer and padder fill tests | Every field at its budget; the multilingual, escape and surrogate cases | 100% exact size |
+| B3 | Host-transcript identity (§A.5.5) | Every listed outcome × 3 widths | 100% |
+| B4 | Hostile-text rendering (§A.6) | 50 crafted replies | 100% (attribution visible, text nodes only, geometry unchanged) |
+| B5 | No dispatch for old panels, stale settings, expired windows or a set latch | Each case × 10 | 100% |
+| B6 | C2 cancellation proofs (§A.8) | Each state × 10 | 100% |
 
-The panel (`src/workers/dashboard/chatgpt/private-answer.ts`) and the Mac dashboard card are inside the dashboard design-receipt guard (`config/dashboard-design-review.json` lists `src/workers/dashboard`), so C4a, C5 and C6 update `implementation_guard_sha256` and stay pending owner acceptance. The packs add about 11.2 MB to the package (Brazilian Portuguese is 6.6 MB).
+**Known-limit measurements.** Reported here; thresholds apply only to default-on:
+
+| # | Measure | Population | Threshold for default-on |
+|---|---|---|---|
+| K1 | Leak rate for the gate's known gaps (dictionary-word names, paraphrase, arithmetic) | 300 targeted cases | reported, none |
+| K2 | Inference of a planted sensitive attribute by a model attacker who knows the account | 200 cases | ≤ 10 points above the attacker's no-question baseline |
+| K3 | False refusals on benign incomplete answers | 300 | ≤ 30% |
+| K4 | Usefulness: blind ratings of helpful / neutral / misleading on incomplete first answers | 100 (60 English, 40 Brazilian Portuguese) | helpful ≥ 40%, misleading ≤ 5% |
+| K5 | Reader attribution: is the outside block correctly identified as not from your documents? Does anyone follow a planted instruction? | 5 testers × 10 panels, including forged-heading replies | ≥ 95% correct attribution; no tester follows a planted instruction |
+| K6 | End-to-end time from first delivery to an appended block | All C5 acceptance runs | reported, none |
+
+The held-out eval (`eval/`) runs wherever shared answer code changes.
+
+### A.14 Build plan and entry conditions
+
+**Smallest usable version: M0, M1, C1–C5.** It ships as experimental with the label "route not verified". "Critical (path)" means `config/change-risk.json` classifies it that way. "Critical (declared)" means egress or trust routing, declared critical.
+
+| # | Delivers | Entry conditions | Proof | Risk |
+|---|---|---|---|---|
+| **M0** | Writer-contention measurement (§A.7) | The rule in §A.7 (frozen); a draft writer prompt that fits the token bounds | Results table filled; pass or fail by the rule | Standard |
+| **M1** | Stage timers in the transport receipt; ten live consults | Timers merged; **owner-funded daemon (owner-gated)** | Per-stage median and worst case recorded | Critical (declared) |
+| C1 | Gate and packs on `main`; doctor line; 20 pack files listed one by one in `V0_4_PUBLIC_PACKAGE_FILES`; writer rules updated for automatic mode | None | Gate tests; `eval/consult-leak`; public-surface guard; packaged-path fixture; gate timing | Critical (path: `public-surface.ts`) |
+| C2 | Transport session state machine (§A.8) | M1 baseline recorded | B6; then the C2-affected stages re-measured live (owner-gated) | Critical (declared) |
+| C3 | Internal settings mechanism (`consult.json`, compare-and-swap, per-job binding). No public enable command | None | Settings tests; nothing reachable from MCP, setup tools or the relay | Critical (declared) |
+| C4a | Payload contract, serializer, padder, two phases, capability handshake, retained payload, withdrawal and race rules, outcome-independent expiry, geometry, outside container, AD-1 and AD-2 records | M0 result recorded, and the scheduling choice it authorizes stated in §A.7 | B2, B3, B4; phase-2 timing test (§A.5.4); first-reveal cost of the 36 KiB envelope compared with today; design receipt; owner visual acceptance | Critical (declared); design-receipt guarded |
+| C4b | Writer scheduling per M0; snapshot handoff; verdict metadata; token-bounded prompt; E1–E2; clocks and latch | M0 passed, or the owner chose a fallback; C2 and C4a merged | M0 harness re-run against the real scheduler; B5; precompute-reuse snapshot test; held-out eval | Critical (declared) |
+| C5 | First usable version: wiring to zkAPI; the Mac dashboard **Outside help** card (disclosure, cost sheet, languages, Recover and Abandon); end-to-end acceptance | C1–C4b merged; B1–B6 green; owner-funded daemon | One real consult end to end; K1–K6 reported; owner review before default-on | Critical (declared); design-receipt guarded |
+| C6 | Strict mode | C5 | Approval binding tests | Critical (declared) |
+| C7 | Speed changes chosen from the post-C2 measurements | C2 re-measurement | Stage timers before and after | Critical (declared) |
+| C8 | Public `olympus consult` enable command with the acknowledgements | C5 | CLI tests | Critical (path: `src/cli.ts`) |
+| F1, F2 | Daemon fork (§Z.4) | Owner decision. **Does not block C5**; required only for the stronger label | §Z.4 prerequisites | Critical (declared) |
+| Later | OpenClaw path; rewrite; searchable records; Venice route | Own proposals | — | Critical |
+
+The panel and the Mac dashboard are inside the dashboard design-receipt guard (`config/dashboard-design-review.json`, path `src/workers/dashboard`). The packs add about 11.2 MB to the package.
 
 ---
 
@@ -336,22 +532,21 @@ The panel (`src/workers/dashboard/chatgpt/private-answer.ts`) and the Mac dashbo
 
 ### Z.1 What it is
 
-zkAPI lets a user deposit ETH into a vault and make model requests that the payment side cannot tie to the deposit. A local daemon, `zkapi-clientd`, serves an OpenAI-compatible API on loopback.
-
-- OpenRouter and the upstream model read the prompts; zkAPI hides who paid, not what was asked.
-- Spending is sequential and the anonymity set was about 70 notes at review, so timing can link consecutive requests.
-- zkAPI is used only as the consult transport, held to the reference practice (`tor-remote-research.md`, ethereum/zkapi PR #16):
-  - **content:** an on-device writer and the gate;
-  - **payment:** key reuse verified off;
-  - **network:** throwaway Tor per consult;
-  - **failure:** never resent another way;
-  - **pace:** one at a time.
+- zkAPI lets a user deposit ETH and make model requests that the payment side cannot tie to the deposit, through a local daemon, `zkapi-clientd`.
+- OpenRouter and the model read the prompts.
+- Spending is sequential, and the anonymity set was about 70 notes at review.
+- It is used only as the consult transport, under the reference practice (`tor-remote-research.md`, ethereum/zkapi PR #16):
+  - an on-device writer and the gate;
+  - key reuse verified off;
+  - throwaway Tor per consult;
+  - never resent another way;
+  - one consult at a time.
 
 ### Z.2 The money
 
 | Cost or risk | What happens |
 |---|---|
-| Deposit fee | An expensive on-chain transaction (median about $7 at review) |
+| Deposit fee | Expensive on-chain transaction (median about $7 at review) |
 | Withdrawal fee | A second one, needing more ETH for gas |
 | 30-day expiry | Unwithdrawn balance becomes claimable by the operator |
 | No top-up | Each deposit is a new note with its own fee and clock |
@@ -361,149 +556,189 @@ zkAPI lets a user deposit ETH into a vault and make model requests that the paym
 
 ### Z.3 Shipped in Z1 (#144), and open
 
-- **Shipped, dormant:**
-  - a consult-only profile, refused for every evidence role;
-  - acknowledgements (version 3);
-  - an expiry estimate from the funding date;
-  - optional daily caps;
-  - the one-at-a-time lease and the fence;
-  - daemon identity and inference-key checks;
-  - key reuse verified from the daemon's log;
-  - throwaway Tor and a macOS sandbox self-test;
-  - never retried or downgraded;
-  - no management credential, no fund movement.
-- **Open:**
-  - no live fee, balance or on-chain expiry (no permitted data path);
-  - daemon release integrity;
-  - measured latency (M1);
-  - route verification (§Z.4).
+**Shipped, dormant:**
+
+- a consult-only profile;
+- acknowledgements (version 3);
+- an expiry estimate;
+- optional daily caps;
+- the lease and the fence;
+- daemon identity and inference-key checks;
+- key reuse verified from the daemon's log;
+- throwaway Tor and a macOS sandbox self-test;
+- never retried;
+- no fund movement.
+
+**Open:**
+
+- no live fee, balance or on-chain expiry;
+- daemon release integrity;
+- latency (M1);
+- route verification (§Z.4);
+- the reserve-before-check ordering (§A.8).
 
 ### Z.4 Route verification: the daemon fork
 
-**Recommended, AWAITING OWNER DECISION.** Upstream issue unposted. **The macOS label stays "route not verified" until F2 passes.** Prototype: `~/Code/Claude/zkapi-fork/`.
+**Recommended, AWAITING OWNER DECISION.** The upstream issue is unposted. **The macOS label stays "route not verified" until F2 passes.** F1 and F2 do not block the experimental release (C5). Prototype: `~/Code/Claude/zkapi-fork/`.
 
-**Problem:** the daemon reads its relay endpoint only from its saved configuration, which also holds the bridge token that authorizes withdrawals, so Olympus must not read it. Its companion reaches the network through a CONNECT proxy on a random loopback port. A sandbox profile is written before start, so it cannot name that port. Corrections to earlier text: the wallet API port is already fixed by the configuration's `client_url` (default `127.0.0.1:8790`), so the problem there is only that a supervisor cannot learn it without reading the token file. And the sandbox must also allow the daemon's own API port, because its readiness check calls itself.
+**Problem:**
+
+- The daemon reads its relay endpoint only from a configuration file that also holds the withdrawal-authorizing bridge token.
+- Its companion uses a CONNECT proxy on a random loopback port, which a sandbox profile written before start cannot name.
+- The wallet API port is fixed by the configuration's `client_url` (default `127.0.0.1:8790`), but a supervisor cannot read it without reading the token file.
+- The sandbox must also allow the daemon's own API port, because the daemon's readiness check calls itself.
 
 **The fork:**
 
-- A Go-only patch against `ethereum/zkapi` `045b444`: 5 production files +98/−8, 3 test files. With no flags, `serve` behaves as upstream and upstream's tests pass.
-- Four opt-in `serve` flags:
-  - `--relay-url` (in memory, this run only);
-  - `--companion-proxy-listen 127.0.0.1:PORT` (exit if the bind fails);
-  - `--wallet-api-listen 127.0.0.1:PORT`;
-  - `--require-managed-companion`.
-- `/admin/status` gains a `transport` block.
-- No wallet or key code changed; the Rust companion and proving files are upstream's release, hash-checked.
-- Build: about 5 s, 9.69 MB, byte-identical across three builds.
+- A Go-only patch against `ethereum/zkapi` `045b444`: 5 production files changed (+98/−8) and 3 new test files.
+- Four opt-in `serve` flags: `--relay-url` (in memory), `--companion-proxy-listen` (exit if the bind fails), `--wallet-api-listen`, and `--require-managed-companion`.
+- A `transport` block in `/admin/status`.
+- No wallet or key code changed.
+- Reproducible: about 5 s per build, 9.69 MB, identical across three builds.
 
-**What the prototype recorded, and no more** (`poc/run-poc.out`):
+**What the prototype recorded, no more** (`poc/run-poc.out`):
 
-- **Setup:** the real patched daemon, with a **fake companion and a fake Tor** that refused the CONNECT and forwarded nothing. Inference authentication was off (`require_api_key: false`) and key reuse was 60 s, both of which the Olympus transport would refuse.
-- **Under the profile:** the daemon reached Ready, and `/admin/status` reported the requested ports.
-- **Probes from the daemon and its child, with and without the profile:**
+- It used a fake companion and a fake Tor, which refused the CONNECT. Inference authentication was off and key reuse was 60 s; Olympus refuses both.
+- Under the profile, the daemon reached Ready and reported the requested ports.
+- Probes:
 
-  | Probe | Without the profile | Under the profile |
+  | Probe | Without the profile | Under it |
   |---|---|---|
   | Another live loopback port | connected | denied |
-  | An unused loopback port | already refused | denied |
-  | A non-loopback address | already timed out | denied |
+  | Unused loopback port | already refused | denied |
+  | Non-loopback address | already timed out | denied |
   | DNS | resolved | failed |
 
-- **Failure checks:** an occupied proxy port made the daemon exit; a profile missing the proxy port made the bind fail.
+- An occupied proxy port made the daemon exit. A profile missing the proxy port made the bind fail.
 
-This shows **a working network profile, not a privacy-qualified consult session.**
+So the prototype proves a working network profile, not a privacy-qualified session.
 
 **What a passing F2 would let the label say:** "network confined by the operating system to this session's Tor listener".
 
-- **Proved:** the daemon's process tree could reach only the four named loopback ports, and only the SOCKS port leads off the machine.
+- **Proved:** only the four named loopback ports are reachable, and only the SOCKS port leads off the machine.
 - **Known only because Olympus started it:** that the SOCKS listener is Tor.
-- **Not proved:** circuit unlinkability, timing or content correlation, or other users' processes.
-- **Profile limits:** one profile covers the whole tree, so the companion can also reach Tor and the API port. Seatbelt hosts are only `localhost` or `*`. `sandbox-exec` is deprecated.
-- **The patched Go binary reads the configuration and passes the bridge token.** So it is inside the credential trust boundary, whatever the Rust code does. Reproducible builds show reproducibility, not provenance or safe wallet behavior.
+- **Not proved:** unlinkability, correlation resistance, or anything about other users.
+- **Limits:**
+  - one profile covers the whole process tree;
+  - Seatbelt names hosts only as `localhost` or `*`;
+  - `sandbox-exec` is deprecated;
+  - the patched Go binary handles the bridge token, so it sits inside the credential trust boundary;
+  - reproducible builds show reproducibility, not provenance.
 
-**F2 prerequisites (all required before the label changes):**
+**F2 prerequisites:**
 
-1. **Authenticated ownership of the managed wallet listener before the first token-bearing readiness request.** Today the daemon sends the bridge token to the wallet port during readiness, and Olympus's ownership checks cover only the daemon API and Tor ports (`consult-transport-zkapi.ts:1731`). It needs a child startup handshake or a daemon-side equivalent. A "port free" preflight leaves a race.
-2. Tests with the **real pinned companion** under required inference authentication and key reuse 0.
-3. Probes for Unix sockets, UDP and DNS, both loopback address families, and listener replacement mid-session.
-4. **Whole-bundle pin and verification:** daemon, companion and setup files, checked at download and at every start.
-5. The licence notices: MIT, upstream's third-party notices, a statement that the source was modified, and the LGPL-3.0 go-ethereum notice.
+1. Authenticated ownership of the managed wallet listener before the first token-bearing readiness request, through a child startup handshake or a daemon-side equivalent. A "port free" check is not enough.
+2. The real pinned companion, with required inference authentication and key reuse 0.
+3. Probes for Unix sockets, UDP and DNS, both loopback address families, and listener replacement.
+4. A whole-bundle pin, verified at download and at every start.
+5. Licence notices: MIT, upstream's third-party notices, a modified-source statement, and the LGPL-3.0 go-ethereum notice.
 
-**F1** builds the pipeline:
+**F1 pipeline:**
 
-- pin the upstream tag and commit;
-- apply the patch and run its tests;
-- build with a pinned Go;
-- check that two clean builds match;
-- take the companion unchanged, checked against upstream's release manifest;
-- add the notices;
-- publish the hash.
+1. Pin the tag and commit.
+2. Apply the patch and run the tests.
+3. Build with a pinned Go.
+4. Check that two clean builds match.
+5. Check the companion against upstream's manifest.
+6. Add the notices.
+7. Publish the hash.
 
-Delivery: downloaded when the user turns zkAPI on, pinned by hash, not in the package. Signing and notarization are unchecked. Maintenance: upstream is fast-moving (seven client releases in two days), so expect occasional small rebases.
+**Delivery and upkeep:** downloaded on enable and pinned by hash. Signing and notarization are unchecked. Expect small rebases. If upstream ships equivalent flags, the fork retires.
 
-**Rejected alternatives:**
+**Rejected:**
 
-- a `DYLD` interposer (fragile; stripped by the hardened runtime);
-- a local forwarder (the random port still has to be allowed);
-- the "any loopback" rule (any local proxy escapes);
-- a Linux VM (too heavy).
-
-If upstream ships equivalent flags, the fork retires.
+- a `DYLD` interposer;
+- a local forwarder;
+- the "any loopback" rule;
+- a Linux VM.
 
 ---
 
 ## Track B — Venice end-to-end encryption (later)
 
-Venice's end-to-end encrypted models could become both a Private answer lane Venice cannot read and a fast consult route (seconds, not minutes). It is acceptable only at full verification:
+Venice's end-to-end encrypted models could become a Private lane Venice cannot read, and a fast consult route. It is acceptable only at full verification:
 
 - client-side Intel quote verification;
-- nonce and key bound; debug off;
-- the workload pinned to a list Olympus maintains;
-- positive proof that encryption is on (the same ids also serve plaintext);
+- nonce and key binding;
+- debug off;
+- a pinned workload;
+- positive proof that encryption is on;
 - the reply bound to the request.
 
-Open questions with Venice (reply binding, response signatures, the gateway's downstream hop, JSON under encryption) must be answered before building. It gets its own proposal; nothing in track A waits for it.
+Questions are open with Venice. It needs its own proposal, and nothing in track A waits for it.
 
 ---
 
 ## 10. Decisions needed from the owner
 
-1. **Wording** (§2): may "Private content never reaches an ordinary cloud model" become "…the evidence never does; with outside help on, the on-device model may send a short general question it wrote"?
-2. **Daemon fork** (§Z.4): approve F1 and F2, with the maintenance they bring? Without it, macOS stays "route not verified".
-3. **AD-1** (§A.11): accept the outside block as panel presentation, after review, rather than a contract change.
-4. **If M0 fails** (§A.7): which fallback.
+1. **M0 tolerance.** The default recorded in §A.7: in every phase, median added delay ≤ 250 ms, 95th percentile ≤ 1 s, zero writer-caused resets. Your words were "not slower at all", which cannot be measured below run-to-run noise. Confirm this tolerance or set another.
+2. **If M0 fails:** which fallback (§A.7).
+3. **Public wording** (§2, §A.10): adopt the reviewer's sentence.
+4. **Daemon fork** (§Z.4): approve F1 and F2. Without them, macOS stays "route not verified"; the experimental release does not wait.
+5. **AD-1 and AD-2** (§A.11): accept the bounded interpretation and the panel-protocol compatibility record.
+6. **Capped panel height** (§A.5.5): with outside help on, a first answer taller than 464 px scrolls inside a 640 px panel. It is a visible change for long answers.
 
-Settled by the owner on 2026-10-05 and applied here: enable only from the Mac; fence recovery is a button; consult only when the first answer is insufficient or has gaps; ship all ten packs; no rewrite and no stored records in version one.
+Settled and applied:
+
+- enable from the Mac only;
+- fence recovery as a button;
+- consult only on insufficient answers;
+- ship all ten packs;
+- no rewrite and no stored records in version one;
+- payload limits tightened without cutting anything shown today.
 
 ## 11. Not proposed
 
-A rewrite pass, searchable consult records or multi-route orchestration in version one; a consult queue; a self-check model call; automatic fence recovery or abandonment; any key that can move funds; sending any `EvidencePack` to an outside model; a relay change.
+- In version one: a rewrite pass, searchable consult records, or multiple routes.
+- A consult queue.
+- A self-check model call.
+- Automatic fence recovery or abandonment.
+- Any key that can move funds.
+- Sending any `EvidencePack` to an outside model.
+- A relay change.
 
 ## Appendix: code references (main at `bb1755fb` unless named)
 
-- **Jobs:** `src/workers/chatgpt/private-answer-jobs.ts`
-  - limits :307–316; deadlines :322, :330;
-  - `begin` :462 (eviction :486); `claim` :514 (same bytes per POST :545–555; plaintext `failed` on withdrawal :553);
-  - `stillReleasable` :597; queue :763–794; `run` :796 (dispatch guard :834); `startClaim` :893; reset :1065; handler :1298–1320.
-- **Panel contract:** `src/workers/chatgpt/private-answer-contract.ts` (TTL :27, plaintext :102, guard :170).
-- **Seal:** `private-answer-crypto.ts` (fresh engine key and IV per seal; buckets 1–64 KiB, growing).
-- **Panel:** `src/workers/dashboard/chatgpt/private-answer.ts`
-  - auto-collect on render :226; `readAnswer` :407; `collect` :476–580;
-  - web-source open through the host :590–600; height notifications :875–899.
-- **Relay:** `connect-relay/server/relay.ts` :690–728 (opaque body, 512 B cap); per-address bucket `connect-relay/server/limits.ts:157`.
-- **Model:** `src/workers/chatgpt/private-answer-model.ts`
-  - audit off :171; depth items :249–270; observer :282; guarded call :300–314.
-- **Built-in:** `src/core/analyst-built-in.ts`
-  - `answerPrivately` :495; `createAnalyst` :509; `sufficient` dropped after gap filtering :506–540; `timedModel` :646.
-  - Server `--parallel 1`: `src/workers/source-index/built-in-reasoning/server.ts:131`.
-- **Eligibility check and its sweep residual:** `src/workers/source-index/analyst-answer.ts:2712–2730`.
-- **Transport:** `src/core/consult-transport-zkapi.ts`
-  - Abandon :703–710; lease :1546–1556; running-daemon refusal :1636; ownership check :1726–1735;
-  - completion and settle :1822–1880; late abort discards a reply :1884; caller abort reaches the fetch :1975.
-- **Gate** (branch `claude/consult-outbound-gate`): `src/core/consult-gate.ts:42–64` (known limits); `test/consult-gate-review-3.test.ts:88–89`.
-- **Question as a tool argument:** `src/workers/chatgpt/mcp-surface.ts:305`.
-- **Release plan:** `docs/V0_4_RELEASE.md` (title and Olympus 1.0 section; "Deferred to after 1.0").
-- **Fork:** `~/Code/Claude/zkapi-fork/README.md`, `poc/run-poc.out`, `poc/run-poc.sh:23–25` (auth off, reuse 60 s).
+**Jobs** — `src/workers/chatgpt/private-answer-jobs.ts`:
+
+- `Job` type :270–295; limits :307–316; deadlines :322, :330;
+- `begin` :462, eviction :486; `claim` :514–555; `stillReleasable` :597;
+- queue :763–794; `run` :796; `startClaim` :893, seal and settle :1003–1011;
+- `preparedAnswer` (the old limits) :1222–1258; `httpsUrl` :1265; handler :1298–1320 (reads only `v` and `publicKey`).
+
+**Crypto** — `private-answer-crypto.ts`: bucket padder :70–82; seal :86–92 (fresh engine key per seal).
+
+**Panel** — `src/workers/dashboard/chatgpt/private-answer.ts`:
+
+- auto-collect :226; `readAnswer` :407–425; `collect` :476–580;
+- web-source open :590–607; geometry and handshake :858–918; `max-height:none` :965.
+
+**Copy** — `src/workers/dashboard/vocabulary.ts:1517–1521` (card title).
+
+**Relay** — `connect-relay/server/relay.ts:697–729`; `limits.ts:157–160` (request 512 B; response 8 MiB).
+
+**Model** — `src/workers/chatgpt/private-answer-model.ts`: limits :165–182 (at most 4 items); guarded call :300–314. Production construction: `src/workers/email-source/server.ts:4334` (no limits override).
+
+**Analyst:**
+
+- `src/core/analyst.ts`: schema :229–255 (≤ 6 citations, ≤ 3 gaps), `ANALYST_SCHEMA_MAX_GAPS` :259, `clampAnswer` :1186;
+- `src/core/analyst-built-in.ts`: verdict :506–540.
+
+**Eligibility residual** — `src/workers/source-index/analyst-answer.ts:2712–2730`.
+
+**Transport** — `src/core/consult-transport-zkapi.ts`:
+
+- Abandon :703; lease :1546–1559; ownership `owned()` :1729–1737;
+- policy warm :1788–1803; reservation, then guard :1805–1822; dispatch :1823;
+- late abort :1884; fetch abort :1975.
+
+**Gate** (branch `claude/consult-outbound-gate`): `consult-gate.ts:42–64`; `test/consult-gate-review-3.test.ts:88–89`.
+
+**Question argument** — `src/workers/chatgpt/mcp-surface.ts:305`.
+
+**Contracts** — `docs/CONTRACTS.md:167–195, :306–315`; panel contract `private-answer-contract.ts:101–108`.
+
+**Fork** — `~/Code/Claude/zkapi-fork/` (`README.md`, `poc/run-poc.out`, `poc/run-poc.sh:23–25`).
 
 ## Sources
 
@@ -512,4 +747,3 @@ A rewrite pass, searchable consult records or multi-route orchestration in versi
 - zkAPI daemon privacy boundaries: <https://github.com/ethereum/zkapi/blob/main/zkapi-clientd/docs/PRIVACY.md>
 - Introducing zkAPI, 2026-10-01: <https://blog.ethereum.org/2026/10/01/introducing-zkapi>
 - Vitalik Buterin, self-sovereign LLM setup, 2026-04-02: <https://vitalik.eth.limo/general/2026/04/02/secure_llms.html>
-- Venice privacy modes: <https://docs.venice.ai/overview/privacy>
