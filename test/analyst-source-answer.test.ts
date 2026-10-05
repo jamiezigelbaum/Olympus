@@ -49,7 +49,7 @@ import {
   type AnalystAnswerLanes,
 } from '../src/workers/source-index/analyst-answer.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
-import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
+import { answerToolResult, searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const INTERNAL = 'internal.notes.docs';
@@ -1969,7 +1969,7 @@ describe('analyst-backed source_answer handler', () => {
   // The router decides what a build met before its visibility gate, budget
   // or trim, so a secure contribution that never reaches hydration still
   // counts.
-  test('strict mode holds when a trimmed Personal-corpus hit leaves an unclassified count in the prompt', async () => {
+  test('a trimmed Personal-corpus hit\'s unclassified count stays out of the ordinary prompt; strict mode holds', async () => {
     let upgradeCalls = 0;
     const { analyst, requests } = echoingAnalyst({});
     const result = await createAnalystSourceIndexAnswerHandler({
@@ -1997,12 +1997,14 @@ describe('analyst-backed source_answer handler', () => {
     }).answer({ question: 'Latest labs?', include_secure_local: true, max_results: 1 });
 
     expect(upgradeCalls).toBe(0);
-    expect(requests[0]!.prompt).toMatch(/internal\.other\.docs \(file\) 7 items/);
+    // Unknown row sensitivity: the count is secure-inclusive and the pack is
+    // ordinary, so the count is dropped from it.
+    expect(requests[0]!.prompt).not.toContain('internal.other.docs (file)');
     expectStrictHold(result);
     expect(leakedText(result)).not.toContain('7 more matches');
   });
 
-  test('strict mode holds on a positive count from a Personal corpus whose default tier is secure', async () => {
+  test('a positive count from a Personal corpus whose default tier is secure stays out of the ordinary prompt; strict mode holds', async () => {
     const { analyst, requests } = echoingAnalyst({});
     const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
@@ -2026,7 +2028,7 @@ describe('analyst-backed source_answer handler', () => {
       secureDerivativeDefault: 'approval',
     }).answer({ question: 'Latest labs?', include_secure_local: true });
 
-    expect(requests[0]!.prompt).toMatch(/internal\.other\.docs \(file\) 7 items/);
+    expect(requests[0]!.prompt).not.toContain('internal.other.docs (file)');
     expectStrictHold(result);
     expect(leakedText(result)).not.toContain('7 more matches');
   });
@@ -3522,6 +3524,91 @@ describe('row tiers reach the secure_local context decision', () => {
       expect(raw.withheld).toBe(1);
       const shown = searchToolResult(raw);
       expect(JSON.stringify(shown)).not.toContain('secret-merger');
+    } finally {
+      store.close();
+    }
+  });
+
+  // Secure match counts never reach an ordinary pack. Real store with one S3
+  // and one S4 match; the S4 one never becomes a candidate (the store's own
+  // cut at max_results 1, or the visibility gate), and the ordinary cloud
+  // request must not carry the secure-inclusive "2 items".
+  async function mixedStore() {
+    return tieredStore('file', [
+      { id: 'plain', text: 'garden tomatoes', tier: 'S3' },
+      { id: 'held', text: 'garden tomatoes in the private greenhouse ledger', tier: 'S4' },
+    ]);
+  }
+
+  function mixedLanes(store: LocalConnectorStore, gate?: true): AnalystAnswerLanes {
+    return {
+      registry: buildSourceIndexCorpusRegistry([storeCorpus(store)]),
+      adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, retrievalMode: 'keyword' }) },
+      contentProviders: { [store.corpusId]: createConnectorStoreContentProvider({ store }) },
+      ...(gate ? { visibilityGate: (hits: readonly SourceIndexRoutedSearchHit[]) => hits.filter((hit) => hit.sourceItem.providerItemId !== 'held') } : {}),
+    };
+  }
+
+  for (const variant of ['count-only (store cut)', 'visibility-filtered'] as const) {
+    test(`no secure-inclusive count reaches an ordinary cloud request: ${variant}`, async () => {
+      const store = await mixedStore();
+      try {
+        const cloud = capturingCloud();
+        await createAnalystSourceIndexAnswerHandler({
+          analyst: titleEchoAnalyst('held.md').analyst,
+          cloudAnalyst: cloud.analyst,
+          lanes: () => mixedLanes(store, variant === 'visibility-filtered' ? true : undefined),
+        }).answer({
+          question: 'garden tomatoes',
+          retrieval_mode: 'keyword',
+          ...(variant === 'count-only (store cut)' ? { max_results: 1 } : {}),
+        });
+
+        expect(cloud.bodies).toHaveLength(1);
+        expect(cloud.bodies[0]).toContain('plain.md');
+        expect(cloud.bodies[0]).not.toContain('held.md');
+        expect(cloud.bodies[0]).not.toMatch(/2 items/);
+        expect(cloud.bodies[0]).not.toContain(`${STORE} (file)`);
+      } finally {
+        store.close();
+      }
+    });
+  }
+
+  test('ChatGPT source_answer shape: a mixed S3/S4 corpus cannot surface the secure-inclusive total', async () => {
+    const store = await mixedStore();
+    try {
+      // Repeats any match count its prompt shows, as a model could.
+      const analyst = createAnalyst({
+        async complete(request) {
+          const count = /\((?:file)\) (\d+) items/.exec(request.prompt)?.[1];
+          return {
+            modelId: 'scripted',
+            text: JSON.stringify({
+              answer: `The garden note is on file.${count ? ` There are ${count} matching items.` : ''}`,
+              citations: [{ evidence: 1, claim: 'The garden note is on file.' }],
+              unanswered: [],
+              sufficient: true,
+            }),
+          };
+        },
+      });
+      const result = await createAnalystSourceIndexAnswerHandler({
+        analyst,
+        lanes: () => mixedLanes(store, true),
+      }).answer({
+        question: 'garden tomatoes',
+        retrieval_mode: 'keyword',
+        include_secure_local: false,
+        include_secure_local_content: false,
+      });
+
+      // Nothing secure-derived is in the analyzed pack, so this is truthful.
+      expect(result.audit.answer_synthesis.private_context_used).toBe(false);
+      expect(result.answer).not.toContain('There are 2');
+      const shown = answerToolResult(result);
+      expect(JSON.stringify(shown)).not.toContain('There are 2');
+      expect(JSON.stringify(shown)).not.toContain('held.md');
     } finally {
       store.close();
     }

@@ -182,10 +182,12 @@ describe('a private analyst outage never costs an ordinary answer', () => {
     expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
   });
 
-  test('the ordinary fallback rebuild leaves out an S4 item of a Personal corpus, with its gap', async () => {
+  test('the ordinary fallback rebuild leaves out an S4 item of a Personal corpus, with its gap and count, and releases in strict posture', async () => {
+    for (const posture of ['allow', 'approval'] as const) {
     const MERGER = 'merger-plans.pdf';
     const world = answerWorld('private-cloud-only', {
       analystOverrides: { 'venice-private': failing() },
+      secureDerivativeDefault: posture,
       lanes: () => {
         const base = lanes();
         const hit = (id: string, title: string) => {
@@ -196,7 +198,13 @@ describe('a private analyst outage never costs an ordinary answer', () => {
           ...base,
           adapters: {
             ...base.adapters,
-            [INTERNAL]: () => ({ hits: [hit('note-1', 'note-1.pdf'), hit('merger', MERGER)], latencyMs: 1, rawExposed: false as const }),
+            [INTERNAL]: () => ({
+              hits: [hit('note-1', 'note-1.pdf'), hit('merger', MERGER)],
+              // Two matches, one of them the S4 memo: secure-inclusive.
+              matchCount: { matchedItems: 2, contentMatchedItems: 2, saturated: false, secureMatchedItems: 1 },
+              latencyMs: 1,
+              rawExposed: false as const,
+            }),
           } as SourceIndexRouterAdapterMap,
           contentProviders: {
             ...base.contentProviders,
@@ -223,7 +231,14 @@ describe('a private analyst outage never costs an ordinary answer', () => {
     expect(ordinary).toHaveLength(1);
     expect(ordinary[0]!.candidates.map((candidate) => candidate.provenance.citation?.title)).toEqual(['note-1.pdf']);
     expect(JSON.stringify(ordinary[0]!.coverage)).not.toContain('merger');
+    // The secure-inclusive count never reaches the ordinary pack.
+    expect((ordinary[0]!.coverage.matchCounts ?? []).some((count) => count.corpusId === INTERNAL)).toBe(false);
     expect(JSON.stringify(result)).not.toContain('MERGER-RAW-CHUNK-TEXT');
+    // The rebuild kept nothing secure-derived, so neither posture holds it.
+    expect({ posture, decision: result.opsec.release_decision.decision }).toEqual({ posture, decision: 'allow' });
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
+    expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_derivative_allowed');
+    }
   });
 
   test('the fallback pack is fitted to the answering leg and its counts exclude secure_local', async () => {
@@ -513,7 +528,10 @@ function countedLanes(): ReturnType<typeof lanes> {
   };
   const adapter = (ids: string[]) => () => ({
     hits: ids.map(hit),
-    matchCount: { matchedItems: 40, contentMatchedItems: 40, saturated: false },
+    // Row sensitivity reported (none of these rows is secure), as the
+    // connector store reports it; an unreported count is dropped from an
+    // ordinary pack.
+    matchCount: { matchedItems: 40, contentMatchedItems: 40, saturated: false, secureMatchedItems: 0 },
     latencyMs: 1,
     rawExposed: false as const,
   });

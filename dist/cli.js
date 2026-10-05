@@ -27321,6 +27321,7 @@ async function routeSourceIndexSearch(options) {
         corpusId: corpus.corpusId,
         family: corpus.family,
         trustDomain: corpus.trustDomain,
+        trustTier: corpus.defaultSensitivity.trustTier,
         matchedItems: response.matchCount.matchedItems,
         contentMatchedItems: response.matchCount.contentMatchedItems,
         saturated: response.matchCount.saturated,
@@ -27662,7 +27663,7 @@ async function buildEvidencePackDetailed(input) {
   const namesOnlyCandidateIndexes = [];
   const contentPrivateCandidateIndexes = [];
   let unreadCandidates = 0;
-  let encounteredSecureLocal = routed.encounteredSecureLocal;
+  let encounteredSecureLocal = input.excludeSecureSensitivity ? false : routed.encounteredSecureLocal;
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
   const maxCharsPerCandidate = maxBytesPerCandidate;
@@ -27713,9 +27714,9 @@ async function buildEvidencePackDetailed(input) {
     };
     assertEvidenceCandidateModelEligible(candidate);
     if (isSecureSensitivity(candidate)) {
-      encounteredSecureLocal = true;
       if (input.excludeSecureSensitivity)
         continue;
+      encounteredSecureLocal = true;
     }
     if (content?.namesOnly === true)
       namesOnlyCandidateIndexes.push(candidates.length);
@@ -27795,7 +27796,7 @@ function clipChunksToUtf8Bytes(chunks, maxBytes) {
   return kept;
 }
 function coverageMatchCounts(counts, candidateCorpusIds, packHasSecureLocal) {
-  return (counts ?? []).filter((count) => packHasSecureLocal || count.trustDomain !== "secure_local").map((count) => {
+  return (counts ?? []).filter((count) => packHasSecureLocal || !countIsSecureInclusive(count)).map((count) => {
     const inEvidence = candidateCorpusIds.filter((corpusId) => corpusId === count.corpusId).length;
     return {
       corpusId: count.corpusId,
@@ -27806,6 +27807,9 @@ function coverageMatchCounts(counts, candidateCorpusIds, packHasSecureLocal) {
       inEvidence
     };
   });
+}
+function countIsSecureInclusive(count) {
+  return isSecureSensitivity(count) || count.secureMatchedItems === undefined || count.secureMatchedItems > 0;
 }
 async function corpusReadabilityGapsFor(searchedCorpora, providers) {
   const gaps = await Promise.all([...new Set(searchedCorpora)].map(async (corpusId) => {

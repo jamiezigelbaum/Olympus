@@ -295,7 +295,10 @@ export async function buildEvidencePackDetailed(
   const namesOnlyCandidateIndexes: number[] = [];
   const contentPrivateCandidateIndexes: number[] = [];
   let unreadCandidates = 0;
-  let encounteredSecureLocal = routed.encounteredSecureLocal;
+  // An exclusion rebuild is judged by what it keeps, not by what the router
+  // met: every secure candidate and every secure-inclusive count is left out
+  // below, so only what remains (and a policy denial) can set its flag.
+  let encounteredSecureLocal = input.excludeSecureSensitivity ? false : routed.encounteredSecureLocal;
 
   const hydrationStartedAt = Date.now();
   const maxBytesPerCandidate = evidenceBytesPerCandidate(
@@ -373,8 +376,8 @@ export async function buildEvidencePackDetailed(
     // the entire build rather than misreporting it as an extraction miss.
     assertEvidenceCandidateModelEligible(candidate);
     if (isSecureSensitivity(candidate)) {
-      encounteredSecureLocal = true;
       if (input.excludeSecureSensitivity) continue;
+      encounteredSecureLocal = true;
     }
     if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);
@@ -492,13 +495,23 @@ export function clipChunksToUtf8Bytes(chunks: readonly string[], maxBytes: numbe
 // evidence, because only such a pack is routed to the private analyst lane.
 // A pack with no secure_local candidate may go to an ordinary cloud analyst,
 // and even a count of private matches must not reach it.
+// The count rule, decided once here so every consumer gets it: a count is
+// secure-inclusive when its corpus is secure_local, or its rows include a
+// secure item, or it does not report row sensitivity (secureMatchedItems
+// missing). A pack with a secure candidate goes to the secure pool and keeps
+// every count. Any other pack (an ordinary route, an exclusion rebuild) drops
+// secure-inclusive counts whole rather than restating a remainder: the
+// readable-content split of the secure rows is not carried, so a remainder
+// could not be restated exactly. So a pack carries secure-derived coverage
+// exactly when it holds a secure candidate, which is what `localOnly` and
+// private_context_used read.
 function coverageMatchCounts(
   counts: readonly SourceIndexRoutedMatchCount[] | undefined,
   candidateCorpusIds: readonly string[],
   packHasSecureLocal: boolean,
 ): EvidenceCoverageMatchCount[] {
   return (counts ?? [])
-    .filter((count) => packHasSecureLocal || count.trustDomain !== 'secure_local')
+    .filter((count) => packHasSecureLocal || !countIsSecureInclusive(count))
     .map((count) => {
     const inEvidence = candidateCorpusIds.filter((corpusId) => corpusId === count.corpusId).length;
     return {
@@ -512,6 +525,12 @@ function coverageMatchCounts(
       inEvidence,
     };
   });
+}
+
+function countIsSecureInclusive(count: SourceIndexRoutedMatchCount): boolean {
+  return isSecureSensitivity(count)
+    || count.secureMatchedItems === undefined
+    || count.secureMatchedItems > 0;
 }
 
 async function corpusReadabilityGapsFor(

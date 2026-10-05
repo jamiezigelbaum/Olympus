@@ -117,6 +117,9 @@ export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount
   corpusId: string;
   family: SourceFamily;
   trustDomain: SourceTrustDomain;
+  // The corpus's default tier, so a count from an ordinary-domain corpus
+  // whose default is secure (S4+) is judged secure by isSecureSensitivity.
+  trustTier: SourceTrustTier;
 }
 
 export interface SourceIndexCorpusSearchAdapter {
@@ -371,6 +374,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
         corpusId: corpus.corpusId,
         family: corpus.family,
         trustDomain: corpus.trustDomain,
+        trustTier: corpus.defaultSensitivity.trustTier,
         matchedItems: response.matchCount.matchedItems,
         contentMatchedItems: response.matchCount.contentMatchedItems,
         saturated: response.matchCount.saturated,
