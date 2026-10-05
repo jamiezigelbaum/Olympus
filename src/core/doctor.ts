@@ -5,6 +5,7 @@
 // every check returns statuses and counts only — never tokens, source text,
 // or packets. Each check is isolated, and runDoctor itself never throws.
 
+import { fetchModelEndpoint } from './model-transport.ts';
 import {
   configWithEnvironmentOverrides,
   parseOptionalBooleanEnv,
@@ -524,7 +525,7 @@ async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck>
     const baseUrl = profile.baseUrl!;
     const modelsUrl = `${baseUrl.replace(/\/$/, '')}/models`;
     try {
-      const response = await fetchImpl(modelsUrl, { method: 'GET' });
+      const response = await fetchModelEndpoint(fetchImpl, modelsUrl, { method: 'GET' });
       if (!response.ok) problems.push(`${profileId} at ${modelsUrl} returned HTTP ${response.status}`);
     } catch (error) {
       problems.push(`${profileId} at ${modelsUrl} failed: ${errorDetail(error)}`);
@@ -588,7 +589,7 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
       ? {}
       : {
         hint: lines.some((line) => line.includes('UNRESOLVED SESSION'))
-          ? 'A recovery-only zkAPI session is needed before another consult; it runs from the consult lane (no command yet). Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json.'
+          ? 'A recovery-only zkAPI session is needed before another consult. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json.'
           : 'Fix what the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon.',
       }),
   };

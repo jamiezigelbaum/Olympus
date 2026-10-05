@@ -1,3 +1,4 @@
+import { modelEndpointFetch } from './model-transport.ts';
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -905,7 +906,7 @@ async function validateGeminiApiKey(options: {
   try {
     // Header, never a query parameter: a key in the URL lands in every proxy
     // and access log between here and Google.
-    response = await fetchWithTimeout(options.fetchImpl, url, {
+    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
       method: 'GET',
       headers: { 'x-goog-api-key': options.apiKey, Accept: 'application/json' },
       // The key rides this request: a redirect is refused, never followed.
@@ -936,7 +937,7 @@ async function validatePublicApiKeySource(options: {
       ?? 'https://readwise.io/api/v2/auth/';
     let response: Response;
     try {
-      response = await fetchWithTimeout(options.fetchImpl, url, {
+      response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
         method: 'GET',
         headers: { Authorization: `Token ${options.apiKey}`, Accept: 'application/json' },
       }, options.timeoutMs);
@@ -957,7 +958,7 @@ async function validatePublicApiKeySource(options: {
     ?? 'https://api.venice.ai/api/v1/models';
   let response: Response;
   try {
-    response = await fetchWithTimeout(options.fetchImpl, url, {
+    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
       method: 'GET',
       headers: { Authorization: `Bearer ${options.apiKey}`, Accept: 'application/json' },
       // The key rides this request: a redirect is refused, never followed.
@@ -1081,7 +1082,7 @@ async function validateApiKeySource(options: {
       ?? 'https://readwise.io/api/v2/auth/';
     let response: Response;
     try {
-      response = await fetchWithTimeout(options.fetchImpl, url, {
+      response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
         method: 'GET',
         headers: {
           Authorization: `Token ${options.apiKey}`,
@@ -1110,7 +1111,7 @@ async function validateApiKeySource(options: {
     const url = new URL('/v1/users/me', normalizeNotionBaseUrl(baseUrl)).toString();
     let response: Response;
     try {
-      response = await fetchWithTimeout(options.fetchImpl, url, {
+      response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${options.apiKey}`,
@@ -1135,7 +1136,7 @@ async function validateApiKeySource(options: {
     ?? 'https://api.venice.ai/api/v1/models';
   let response: Response;
   try {
-    response = await fetchWithTimeout(options.fetchImpl, url, {
+    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${options.apiKey}`,

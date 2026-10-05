@@ -45,8 +45,8 @@
 // route; it reads no balance, fee quote or on-chain expiry.
 
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -142,6 +142,7 @@ export type ZkapiConsultErrorCode =
   | 'invalid_response'
   | 'daemon_error'
   | 'transport_failed'
+  | 'teardown_incomplete'
   | 'internal_error';
 
 /**
@@ -339,6 +340,7 @@ const MESSAGES: Record<ZkapiConsultErrorCode, string> = {
   invalid_response: 'The zkAPI response was not a single non-empty chat completion.',
   daemon_error: 'The zkAPI daemon returned an error.',
   transport_failed: 'The request to the zkAPI daemon failed.',
+  teardown_incomplete: 'The session\'s processes could not be confirmed stopped; the next session will not start until they are.',
   internal_error: 'The zkAPI session failed inside Olympus.',
 };
 
@@ -458,7 +460,7 @@ export function confinementStatement(level: ZkapiConfinementLevel): string {
     return 'network confinement allowed only this session\'s Tor and daemon ports';
   }
   if (level === 'non_loopback_blocked') {
-    return 'in this session\'s sandbox probe, non-loopback and resolver connections failed inside the sandbox and succeeded outside it, but loopback is not port-filtered';
+    return 'in this session\'s sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered';
   }
   return 'no network confinement';
 }
@@ -499,7 +501,6 @@ const DARWIN_POLICY: ZkapiConfinementPolicy = { nonLoopback: 'denied', unixSocke
 const SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
-const withTcp = process.argv[2] === 'tcp';
 const loopback = () => new Promise((resolve) => {
   const server = net.createServer((c) => c.end());
   server.listen(0, '127.0.0.1', () => {
@@ -525,8 +526,7 @@ const resolver = () => new Promise((resolve) => {
   s.once('error', () => resolve('failed'));
 });
 (async () => {
-  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver() };
-  if (withTcp) result.tcp = await tcp();
+  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
   process.stdout.write(JSON.stringify(result));
 })();
 `;
@@ -554,14 +554,19 @@ export function defaultZkapiConfinement(): ZkapiConfinement {
       selfTest: async (workDir, env) => {
         const script = join(workDir, 'confinement-self-test.cjs');
         writeFileSync(script, SELF_TEST_SCRIPT, { mode: 0o600 });
-        // Outside: UDP and the resolver socket must work, so a failure inside
-        // is the sandbox's doing and not an offline machine.
+        // The same probes outside are the controls: there the TCP attempt to a
+        // non-routable address must not fail at once, the resolver socket must
+        // connect and the UDP send must be accepted, so a failure inside is the
+        // sandbox's doing and not an offline machine. Bun reports a sandbox
+        // denial under other error names, so denial is inferred from that
+        // difference, not from an error code.
         const outside = runSelfTestProbe([process.execPath, script], env);
         const inside = runSelfTestProbe(
-          ['/usr/bin/sandbox-exec', '-p', darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script, 'tcp'],
+          ['/usr/bin/sandbox-exec', '-p', darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script],
           env,
         );
         return outside?.loopback === 'connected' && outside.udp === 'sent' && outside.resolver === 'connected'
+          && (outside.tcp === 'timeout' || outside.tcp === 'failed_slow')
           && inside?.loopback === 'connected' && inside.udp === 'failed' && inside.resolver === 'failed'
           && inside.tcp === 'failed_fast';
       },
@@ -590,8 +595,12 @@ interface ZkapiState {
   count: number;
   reservedMicroUsd: number;
   lastSession?: ZkapiLastSession;
-  /** Set before dispatch; cleared only on correlated key and settlement evidence. */
-  fence?: { at: string };
+  /**
+   * Per daemon/wallet scope (`zkapiFenceScope`): set before dispatch, cleared
+   * only on correlated key and settlement evidence from a session in the same
+   * scope.
+   */
+  fences?: Record<string, { at: string }>;
   /** Written before any process starts; cleared only once every group is confirmed gone. */
   running?: {
     sessionId: string;
@@ -636,8 +645,36 @@ export function zkapiLastSession(path: string): ZkapiLastSession | undefined {
   return readState(path)?.lastSession;
 }
 
-export function zkapiUnresolvedSession(path: string): boolean {
-  return Boolean(readState(path)?.fence);
+export function zkapiUnresolvedSession(path: string, scope?: string): boolean {
+  const fences = readState(path)?.fences ?? {};
+  return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
+}
+
+/**
+ * The daemon/wallet a lease belongs to, as a stable, non-secret digest: the
+ * daemon executable's real path, the config directory the daemon will use
+ * (from the same environment variables and platform default it reads), and
+ * the API port. Nothing is read from the daemon's config.json.
+ */
+export function zkapiFenceScope(input: {
+  daemonExecutable: string;
+  env: Record<string, string | undefined>;
+  daemonPort: number;
+}): string {
+  let executable = input.daemonExecutable;
+  try {
+    executable = realpathSync(executable);
+  } catch {
+    // keep the configured path
+  }
+  const env = input.env;
+  const home = env.HOME?.trim() || homedir();
+  const configDir = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim()
+    || env.OA_CHAT_CONFIG_DIR?.trim()
+    || (process.platform === 'darwin'
+      ? join(home, 'Library', 'Application Support', 'zkapi-clientd')
+      : join(env.XDG_CONFIG_HOME?.trim() || join(home, '.config'), 'zkapi-clientd'));
+  return createHash('sha256').update(`${executable}\0${configDir}\0${input.daemonPort}`).digest('hex').slice(0, 32);
 }
 
 function updateState(path: string, now: Date, mutate: (state: ZkapiState) => ZkapiState | undefined): ZkapiState {
@@ -653,7 +690,7 @@ function updateState(path: string, now: Date, mutate: (state: ZkapiState) => Zka
         count: 0,
         reservedMicroUsd: 0,
         ...(current?.lastSession ? { lastSession: current.lastSession } : {}),
-        ...(current?.fence ? { fence: current.fence } : {}),
+        ...(current?.fences ? { fences: current.fences } : {}),
         ...(current?.running ? { running: current.running } : {}),
       };
     const next = mutate(base);
@@ -681,6 +718,7 @@ export function reserveZkapiRequest(
   path: string,
   limits: { requestCap?: number; spendCapMicroUsd?: number },
   now: Date,
+  scope = 'default',
 ): { reserved: true } | { reserved: false; reason: 'daily_cap_reached' | 'spend_cap_reached' } {
   let refusal: 'daily_cap_reached' | 'spend_cap_reached' | undefined;
   updateState(path, now, (state) => {
@@ -696,7 +734,7 @@ export function reserveZkapiRequest(
       ...state,
       count: state.count + 1,
       reservedMicroUsd: state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD,
-      fence: { at: now.toISOString() },
+      fences: { ...state.fences, [scope]: { at: now.toISOString() } },
     };
   });
   return refusal ? { reserved: false, reason: refusal } : { reserved: true };
@@ -788,6 +826,10 @@ interface Supervised {
   childExited: boolean;
   /** Set before Olympus stops the group on purpose, so the exit is not a failure. */
   deliberate: boolean;
+  /** The group leader's process instance, taken at spawn. */
+  readonly leader: ProcessInstanceIdentity | undefined;
+  /** Once confirmed gone, the group id is never signalled again. */
+  gone: boolean;
   /** Releases the watchdog to start its child; call only once the group is recorded. */
   go(): void;
 }
@@ -807,6 +849,8 @@ function supervise(
     role,
     child,
     pgid: child.pid ?? -1,
+    leader: child.pid ? processInstanceIdentity(child.pid) : undefined,
+    gone: false,
     leaderExited: false,
     childExited: false,
     deliberate: false,
@@ -886,6 +930,35 @@ async function stopGroup(pgid: number, stillOurs: () => boolean = () => true): P
   const killDeadline = Date.now() + KILL_GRACE_MS;
   while (groupAlive(pgid) && Date.now() < killDeadline) await sleep(POLL_MS);
   return !groupAlive(pgid);
+}
+
+/**
+ * Whether a live session's group is still the one Olympus started: its leader
+ * runs and is the same process instance (boot, start time). The watchdog
+ * leader outlives the rest of its group, so a missing leader means the id can
+ * no longer be proven ours.
+ */
+function activeGroupIsOurs(handle: Supervised): boolean {
+  if (!handle.leader) return false;
+  try {
+    process.kill(handle.pgid, 0);
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'EPERM') return false;
+  }
+  const current = processInstanceIdentity(handle.pgid);
+  if (!current) return false;
+  if (handle.leader.bootId && current.bootId && handle.leader.bootId !== current.bootId) return false;
+  return current.platform === handle.leader.platform
+    && current.mechanism === handle.leader.mechanism
+    && current.startTime === handle.leader.startTime;
+}
+
+/** Stop an owned group at most once, re-proving ownership before every signal. */
+async function stopOwned(handle: Supervised): Promise<boolean> {
+  if (handle.gone) return true;
+  const stopped = await stopGroup(handle.pgid, () => activeGroupIsOurs(handle));
+  if (stopped) handle.gone = true;
+  return stopped;
 }
 
 function currentBootId(): string | undefined {
@@ -1017,7 +1090,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Gives up (false) on abort, deadline or `giveUp`, each checked before the condition. */
+/**
+ * Waits until `condition` holds. The condition is consulted first on every
+ * round, so evidence already received is never discarded because a process
+ * exited or the caller cancelled at the same moment; only then does an abort,
+ * `giveUp` or the deadline end the wait (false).
+ */
 async function waitFor(
   condition: (remainingMs: number) => boolean | Promise<boolean>,
   timeoutMs: number,
@@ -1025,8 +1103,8 @@ async function waitFor(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    if (await condition(Math.max(0, deadline - Date.now()))) return true;
     if (options.signal?.aborted || options.giveUp?.()) return false;
-    if (await condition(Math.max(0, deadline - Date.now()))) return !options.giveUp?.();
     if (Date.now() >= deadline) return false;
     await sleep(Math.min(options.pollMs ?? POLL_MS, Math.max(0, deadline - Date.now())));
   }
@@ -1316,7 +1394,9 @@ export async function zkapiConsultReadiness(
   try {
     usage = zkapiUsageToday(statePath, now);
     lastSession = zkapiLastSession(statePath);
-    unresolvedSession = zkapiUnresolvedSession(statePath);
+    unresolvedSession = daemonExecutable
+      ? zkapiUnresolvedSession(statePath, zkapiFenceScope({ daemonExecutable, env, daemonPort: Number(new URL(options.baseUrl).port || 80) }))
+      : zkapiUnresolvedSession(statePath);
   } catch {
     blockers.push('state_unavailable');
   }
@@ -1457,11 +1537,17 @@ async function runSession(
   if (!daemonExecutable) return fail('daemon_not_found');
   const torExecutable = perConsultTor ? resolveExecutable('tor', settings.torExecutable, env) : undefined;
   if (perConsultTor && !torExecutable) return fail('tor_not_found');
+  const scope = zkapiFenceScope({ daemonExecutable, env, daemonPort });
   try {
+    const fenced = zkapiUnresolvedSession(statePath, scope);
+    // The receipt reflects the ledger from the start, refusals included.
+    if (fenced) {
+      receipt.fence = 'held';
+      receipt.settlement = 'not_confirmed';
+    }
     const stranded = await recoverStrandedGroups(statePath, now());
     if (stranded === 'busy') return fail('busy');
     if (stranded === 'stranded') return fail('stranded_processes');
-    const fenced = zkapiUnresolvedSession(statePath);
     if (fenced && !recovery) return fail('unresolved_session');
     if (!fenced && recovery) return fail('no_unresolved_session');
     const usage = zkapiUsageToday(statePath, now());
@@ -1476,7 +1562,7 @@ async function runSession(
   if (await portAnswers(daemonPort)) return fail('daemon_already_running');
   if (perConsultTor && await portAnswers(settings.torSocksPort)) return fail('tor_port_busy');
 
-  // --- The session. Every exit path below goes through the finally.
+  // --- The session. Every exit path below goes through the cleanup after it.
   const sessionId = randomUUID();
   const workDir = mkdtempSync(join(tmpdir(), 'olympus-zkapi-'));
   chmodSync(workDir, 0o700);
@@ -1485,7 +1571,7 @@ async function runSession(
   const groups: Supervised[] = [];
   let tor: Supervised | undefined;
   let daemon: Supervised | undefined;
-  let result: ZkapiConsultResult | undefined;
+  let result: ZkapiConsultResult = failure('internal_error', 'not_sent', 'not_verified');
   // One signal for the whole session: the caller's cancel, or any owned
   // process exiting when Olympus did not stop it on purpose.
   const sessionAbort = new AbortController();
@@ -1498,6 +1584,7 @@ async function runSession(
     if (!handle.deliberate) sessionAbort.abort();
   };
   const interrupted = (): ZkapiConsultErrorCode => (unexpectedExit() ? 'session_process_exited' : 'aborted');
+  result = await (async (): Promise<ZkapiConsultResult> => {
   try {
     writeFileSync(watchdog, WATCHDOG_SCRIPT, { mode: 0o600 });
     const supervisorInstance = processInstanceIdentity(process.pid);
@@ -1509,7 +1596,7 @@ async function runSession(
     // record names its group.
     const recordAndStart = (handle: Supervised): void => {
       groups.push(handle);
-      const leader = processInstanceIdentity(handle.pgid);
+      const leader = handle.leader;
       updateState(statePath, now(), (state) => ({
         ...state,
         ...(state.running
@@ -1644,7 +1731,7 @@ async function runSession(
 
     let reservation: ReturnType<typeof reserveZkapiRequest>;
     try {
-      reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now());
+      reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), scope);
     } catch {
       return (result = fail('state_unavailable'));
     }
@@ -1690,8 +1777,9 @@ async function runSession(
     if (fenceClears) {
       try {
         updateState(statePath, now(), (state) => {
-          const { fence: _cleared, ...rest } = state;
-          return rest;
+          const { [scope]: _cleared, ...others } = state.fences ?? {};
+          const { fences: _all, ...rest } = state;
+          return Object.keys(others).length > 0 ? { ...rest, fences: others } : rest;
         });
         receipt.fence = 'clear';
       } catch {
@@ -1701,7 +1789,7 @@ async function runSession(
 
     if (perConsultTor && !unexpectedExit()) {
       tor!.deliberate = true;
-      const torStopped = await stopGroup(tor!.pgid);
+      const torStopped = await stopOwned(tor!);
       // Secondary signal only. With Tor gone the model list must fail with the
       // daemon's exact upstream-unavailable shape; a 200 is a bypass.
       const after = torStopped && !daemonGone() && await owned(false)
@@ -1735,41 +1823,45 @@ async function runSession(
     };
     return result;
   } catch {
-    result = fail('internal_error');
-    return result;
-  } finally {
-    // Each cleanup step on its own: one failure never skips the next.
-    signal?.removeEventListener('abort', onCallerAbort);
-    let allStopped = true;
-    for (const group of [...groups].reverse()) {
-      group.deliberate = true;
-      try {
-        if (!await stopGroup(group.pgid)) allStopped = false;
-      } catch {
-        allStopped = false;
-      }
-    }
-    if (allStopped) {
-      try {
-        rmSync(workDir, { recursive: true, force: true });
-      } catch {
-        // a leftover private temp directory holds no secret
-      }
-    }
-    const final = result;
+    return (result = fail('internal_error'));
+  }
+  })();
+  // Cleanup runs after the outcome is known, and can still change it: a
+  // session whose processes cannot be confirmed stopped is not a success.
+  // Each step on its own: one failure never skips the next.
+  signal?.removeEventListener('abort', onCallerAbort);
+  let allStopped = true;
+  for (const group of [...groups].reverse()) {
+    group.deliberate = true;
     try {
-      updateState(statePath, now(), (state) => {
-        const { running, ...rest } = state;
-        return {
-          ...rest,
-          ...(allStopped ? {} : running ? { running } : {}),
-          lastSession: { ...receipt, at: now().toISOString(), result: final?.ok ? 'ok' : final?.error.code ?? 'internal_error' },
-        };
-      });
+      if (!await stopOwned(group)) allStopped = false;
     } catch {
-      // The ledger stays as last written; the next session refuses if it is unreadable.
+      allStopped = false;
     }
   }
+  if (allStopped) {
+    try {
+      rmSync(workDir, { recursive: true, force: true });
+    } catch {
+      // a leftover private temp directory holds no secret
+    }
+  } else {
+    result = fail('teardown_incomplete');
+  }
+  const final = result;
+  try {
+    updateState(statePath, now(), (state) => {
+      const { running, ...rest } = state;
+      return {
+        ...rest,
+        ...(allStopped ? {} : running ? { running } : {}),
+        lastSession: { ...receipt, at: now().toISOString(), result: final.ok ? 'ok' : final.error.code },
+      };
+    });
+  } catch {
+    // The ledger stays as last written; the next session refuses if it is unreadable.
+  }
+  return final;
 }
 
 function adminStatusNetwork(response: ProbeResponse): 'mainnet' | 'sepolia' | undefined {

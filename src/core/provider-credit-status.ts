@@ -1,3 +1,4 @@
+import { fetchModelEndpoint } from './model-transport.ts';
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
@@ -154,7 +155,7 @@ export async function fetchVeniceCreditStatus(
       redirect: 'error',
       signal: controller.signal,
     };
-    const response = await fetchImpl(`${baseUrl}/billing/balance`, requestInit);
+    const response = await fetchModelEndpoint(fetchImpl, `${baseUrl}/billing/balance`, requestInit);
     if (!response.ok) return buildHttpErrorReport(generatedAt, response.status, 'balance');
 
     const body = await response.json() as VeniceBalanceResponse;
@@ -197,7 +198,7 @@ async function fetchBundledCreditUsage(input: {
       url.searchParams.set('limit', String(USAGE_PAGE_LIMIT));
       url.searchParams.set('page', String(page));
       url.searchParams.set('sortOrder', 'desc');
-      const response = await input.fetchImpl(url.toString(), input.requestInit);
+      const response = await fetchModelEndpoint(input.fetchImpl, url.toString(), input.requestInit);
       if (!response.ok) {
         return {
           entries: [],

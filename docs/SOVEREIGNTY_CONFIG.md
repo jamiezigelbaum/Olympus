@@ -504,7 +504,7 @@ loopback address there forwards to the cloud.
     "torSocksPort": 19050,
     "fundingDate": "2026-10-01",
     "depositUsd": 20,
-    "acknowledgements": { "version": 2, "accepted": ["per_consult_cost", "no_default_limit", "deposit_fee", "withdrawal_fee", "note_expiry_30_days", "no_top_up", "operator_risk", "local_files_risk"] }
+    "acknowledgements": { "version": 3, "accepted": ["per_consult_cost", "no_default_limit", "deposit_fee", "withdrawal_fee", "note_expiry_30_days", "no_top_up", "operator_risk", "local_files_risk"] }
   }
 }
 ```
@@ -532,7 +532,7 @@ sequence follows the reference wrapper scripts in `ethereum/zkapi` pull
 request #16.
 
 **The money, plainly.** Turning this on requires accepting eight statements
-(acknowledgement version 2):
+(acknowledgement version 3):
 
 - Each consult authorizes up to the chosen model's per-request allowance,
   currently $1 to $6 depending on the model. Olympus counts every consult at
@@ -542,7 +542,7 @@ request #16.
 - Depositing is an expensive on-chain transaction, paid separately from
   consults; the fee can exceed a small deposit.
 - Withdrawing unspent money is a second expensive on-chain transaction, paid
-  separately, and needs more ETH for its fee.
+  separately, and may require sending additional ETH for its fee.
 - Unused balance not withdrawn within about 30 days becomes claimable in full by the operator.
 - There is no top-up; each deposit is a new note with its own fee and 30-day clock.
 - One operator account can pause deposits and withdrawals while the clock keeps running, and one party ran the proof setup; funds could be frozen or lost.
@@ -607,9 +607,12 @@ on, so deposit the smallest amount the service accepts.
   lease. That earlier lease is then settled under the recovery session's
   network identity, and recovery costs one request. A recovery the daemon
   refuses (for example because the model is unavailable) leaves the fence in
-  place. In this release recovery is a function for the consult lane to call;
-  there is no command for it yet. Olympus waits up to five minutes for
-  settlement, longer than the daemon's own four-minute companion timeout.
+  place. A fence belongs to one daemon and wallet (the daemon executable, its
+  configuration directory and its port); a session for another cannot clear
+  it. Until the consult lane offers recovery, run the developer harness from
+  the Olympus checkout: `bun scripts/zkapi-consult-recover.ts --yes`. Olympus
+  waits up to five minutes for settlement, longer than the daemon's own
+  four-minute companion timeout.
 - One session at a time across every Olympus process. A failed or timed-out
   consult is never resent, on zkAPI or any other route.
 - The model check is membership in the daemon's live model list, not a test
@@ -619,14 +622,24 @@ on, so deposit the smallest amount the service accepts.
 - The balance, fee quotes and the on-chain expiry are not available from the
   daemon without its wallet-management credential, which Olympus will not
   hold. Olympus shows no live fee estimate.
-- Any endpoint that reaches this machine on a zkAPI daemon port (8787, or a
-  configured zkapi profile's port, in any loopback spelling including
-  `localhost` names and IPv4-mapped IPv6) is refused by the shared model
-  transport that every analyst, embedding and vision adapter sends through,
-  and by policy validation for every provider, whatever trust it declares.
+- Any endpoint that reaches this machine on a known zkAPI daemon port is
+  refused by the shared model transport that every analyst, embedding, vision
+  and setup probe sends through, and by policy validation for every provider,
+  whatever trust it declares. Known ports are 8787 and the port of every zkapi
+  profile in your sovereignty policy, which the guard reads itself. Every
+  loopback spelling counts (`localhost` names, all of 127/8, IPv4-mapped IPv6),
+  and a host name on a daemon port is resolved and refused if it points at
+  this machine. **A daemon on a port no policy names cannot be recognized by
+  port**; the protection covers the ports Olympus knows about. If the policy
+  file exists but cannot be read, every local model endpoint is refused until
+  it can.
 - If Olympus crashes mid-session, a watchdog stops the session's processes,
   and the next session cleans up what is left only after proving it belonged
   to the crashed session; anything it cannot prove is reported, not signalled.
+  A session whose processes cannot be confirmed stopped ends as a failure.
+  The watchdog cannot contain a descendant that starts its own session or
+  process group, and it cannot supervise a wallet companion that was already
+  running outside Olympus.
 
 `olympus doctor` reports all of this as the `zkapi_consult_transport` check,
 content-free.

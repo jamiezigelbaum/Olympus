@@ -47,7 +47,7 @@ import {
   renderPdfFirstPageForVision,
 } from './pdf-render.ts';
 import { missingBytesFailure } from './text.ts';
-import { loopbackPort, zkapiDaemonPortSet } from '../../../core/zkapi-consult-settings.ts';
+import { assertNotZkapiDaemonEndpoint } from '../../../core/zkapi-consult-settings.ts';
 
 export const REMOTE_VLM_EXTRACTOR_VERSION = 'venice-v1';
 export const APPROVED_REMOTE_EXTRACTION_HOST = 'api.venice.ai';
@@ -208,10 +208,7 @@ export function requireLocalHttpBaseUrl(value: string | undefined, label: string
  * client is built and again on every request.
  */
 function assertNotZkapiVisionEndpoint(url: string, label: string): void {
-  const port = loopbackPort(url);
-  if (port !== undefined && zkapiDaemonPortSet().has(port)) {
-    throw new Error(`${label} points at the zkAPI daemon port ${port}, which forwards to cloud providers; it is not a local vision backend.`);
-  }
+  assertNotZkapiDaemonEndpoint(url, label);
 }
 
 /**

@@ -41,6 +41,7 @@
  * an admitted blank: the owner already lost trust once by not being told
  * embedding was off, and a confident wrong answer is how that happens twice.
  */
+import { fetchModelEndpoint } from '../../core/model-transport.ts';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -558,7 +559,7 @@ async function fetchBackendModel(input: {
 }): Promise<string | undefined> {
   const url = `${input.baseUrl.replace(/\/+$/, '')}/models`;
   try {
-    const response = await input.fetchImpl(url, {
+    const response = await fetchModelEndpoint(input.fetchImpl, url, {
       method: 'GET',
       signal: AbortSignal.timeout(input.timeoutMs),
     });
