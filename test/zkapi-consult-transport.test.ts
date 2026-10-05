@@ -278,7 +278,6 @@ function settings(overrides: Partial<ZkapiConsultSettings> = {}): ZkapiConsultSe
     torSocksPort: torPort,
     daemonExecutable: join(binDir, 'zkapi-clientd'),
     torExecutable: join(binDir, 'tor'),
-    dailySpendCapUsd: 60,
     timeoutMs: 5_000,
     torBootstrapTimeoutMs: 5_000,
     daemonReadyTimeoutMs: 8_000,
@@ -552,7 +551,7 @@ describe('zkAPI consult transport: verification refusals', () => {
   }, SLOW);
 
   test('owner preconditions refuse before any process starts', async () => {
-    const partial = settings({ acknowledgements: { version: 1, accepted: ['deposit_fee'] } });
+    const partial = settings({ acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: ['deposit_fee'] } });
     expect(await sendZkapiConsult(QUESTION, transport({ settings: partial }))).toMatchObject({ ok: false, error: { code: 'acknowledgements_incomplete' } });
     const { fundingDate: _date, ...noDate } = settings();
     expect(await sendZkapiConsult(QUESTION, transport({ settings: noDate }))).toMatchObject({ ok: false, error: { code: 'funding_date_missing' } });
@@ -759,25 +758,44 @@ describe('zkAPI consult transport: exclusivity, processes, caps', () => {
     expect(completions()).toHaveLength(1);
   }, SLOW);
 
-  test('every request reserves the $6 worst case, whatever the listed allowance, and the caps survive a restart', async () => {
+  test('no limit applies by default: many sequential consults are not refused by any cap', async () => {
     writePlan({ allowance: 1_000_000 });
-    const capped = settings({ dailyRequestCap: 5, dailySpendCapUsd: 13 });
-    expect(await sendZkapiConsult(QUESTION, transport({ settings: capped }))).toMatchObject({ ok: true, receipt: { listedAllowanceUsd: 1, reservedUsd: 6 } });
+    for (let index = 0; index < 11; index += 1) {
+      expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true, receipt: { listedAllowanceUsd: 1, reservedUsd: 6 } });
+    }
+    expect(completions()).toHaveLength(11);
+    // Still recorded for disclosure: each consult counts the $6 worst case.
+    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 11, reservedMicroUsd: 66_000_000 });
+  }, 120_000);
+
+  test('an owner-set money limit refuses at the boundary across a restart, counting the $6 worst case', async () => {
+    writePlan({ allowance: 1_000_000 });
+    const limited = settings({ dailySpendCapUsd: 13 });
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: limited }))).toMatchObject({ ok: true });
     // A fresh options object over the same ledger stands in for a restart.
-    expect(await sendZkapiConsult(QUESTION, { ...transport({ settings: capped }) })).toMatchObject({ ok: true });
-    expect(await sendZkapiConsult(QUESTION, transport({ settings: capped }))).toMatchObject({
+    expect(await sendZkapiConsult(QUESTION, { ...transport({ settings: limited }) })).toMatchObject({ ok: true });
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: limited }))).toMatchObject({
       ok: false,
       error: { code: 'spend_cap_reached', outcome: 'not_sent' },
     });
     expect(completions()).toHaveLength(2);
     expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 2, reservedMicroUsd: 12_000_000 });
-    expect(await sendZkapiConsult(QUESTION, transport({ settings: settings({ dailyRequestCap: 2 }) }))).toMatchObject({
+  }, SLOW);
+
+  test('an owner-set request limit refuses at the boundary, and an ambiguous send counts toward it', async () => {
+    writePlan({ completion: 'slow' });
+    const limited = settings({ dailyRequestCap: 2, timeoutMs: 300 });
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: limited }))).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'unknown' } });
+    writePlan({ completion: 'normal' });
+    expect(await sendZkapiConsult(QUESTION, { ...transport({ settings: limited }) })).toMatchObject({ ok: true });
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: limited }))).toMatchObject({
       ok: false,
-      error: { code: 'daily_cap_reached' },
+      error: { code: 'daily_cap_reached', outcome: 'not_sent' },
     });
-    // A new UTC day starts a new ledger.
-    expect(reserveZkapiRequest(statePath, { requestCap: 2, spendCapMicroUsd: 13_000_000 }, new Date('2026-10-06T00:00:01.000Z')))
-      .toEqual({ reserved: true });
+    expect(completions()).toHaveLength(2);
+    // The ledger is atomic across processes, and a new UTC day starts a new count.
+    expect(reserveZkapiRequest(statePath, { requestCap: 2 }, NOW)).toEqual({ reserved: false, reason: 'daily_cap_reached' });
+    expect(reserveZkapiRequest(statePath, { requestCap: 2 }, new Date('2026-10-06T00:00:01.000Z'))).toEqual({ reserved: true });
   }, SLOW);
 });
 
@@ -837,7 +855,7 @@ function zkapiProfile(overrides: Record<string, unknown> = {}): Record<string, a
     zkapi: {
       tor: 'per_consult',
       fundingDate: '2026-09-30',
-      acknowledgements: { version: 1, accepted: ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id) },
+      acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id) },
     },
     ...overrides,
   };
@@ -865,7 +883,10 @@ describe('sovereignty: zkapi provider', () => {
   test('a consult-only zkapi profile is accepted and parses its settings', () => {
     const profile = engineWith(() => undefined).config.modelProfiles.zk!;
     expect(profile).toMatchObject({ provider: 'zkapi', trust: 'standard_cloud', purpose: 'consult' });
-    expect(profile.zkapi).toMatchObject({ tor: 'per_consult', torSocksPort: 19050, dailyRequestCap: 10, dailySpendCapUsd: 20, timeoutMs: 360_000 });
+    expect(profile.zkapi).toMatchObject({ tor: 'per_consult', torSocksPort: 19050, timeoutMs: 360_000 });
+    // No default limit (owner ruling, 2026-10-05): both are unset unless the owner sets them.
+    expect(profile.zkapi?.dailyRequestCap).toBeUndefined();
+    expect(profile.zkapi?.dailySpendCapUsd).toBeUndefined();
   });
 
   test('is refused in every evidence-carrying role', () => {
@@ -982,7 +1003,6 @@ function doctorDeps(profile: Record<string, unknown> = {}, env: Record<string, s
       torSocksPort: torPort,
       daemonExecutable: join(binDir, 'zkapi-clientd'),
       torExecutable: join(binDir, 'tor'),
-      dailySpendCapUsd: 20,
       ...(profile.zkapi as object | undefined),
     },
   };
@@ -1033,9 +1053,9 @@ describe('doctor: zkapi_consult_transport', () => {
       'confinement on this platform: ',
       'daemon port free, Tor port free',
       'local API key configured',
-      'acknowledgements complete (6/6)',
+      `acknowledgements complete (${ZKAPI_RISK_ACKNOWLEDGEMENTS.length}/${ZKAPI_RISK_ACKNOWLEDGEMENTS.length})`,
       'estimated expiry 2026-10-30 from the confirmed funding date (25 days left, notice none)',
-      'requests today 0/10, worst-case spend reserved $0.00/$20.00 ($6.00 per request)',
+      'requests today 0 (no limit set), worst-case authorized today $0.00 (no limit set; each consult counts up to $6.00)',
       'no unresolved session',
       'balance, fee quotes and on-chain expiry not available from the daemon',
       'no consult run yet',
@@ -1047,7 +1067,7 @@ describe('doctor: zkapi_consult_transport', () => {
 
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
     const after = await zkapiCheck(doctorDeps());
-    expect(after.detail).toContain('requests today 1/10, worst-case spend reserved $6.00/$20.00');
+    expect(after.detail).toContain('requests today 1 (no limit set), worst-case authorized today $6.00 (no limit set;');
     expect(after.detail).toContain('(ok): key reuse verified_off, local auth verified, Tor per_consult, confinement none (self-test not_run), settlement confirmed');
     expect(after.detail).toContain(`route: ${NO_CONFINEMENT_LABEL}`);
   }, SLOW);
@@ -1059,22 +1079,28 @@ describe('doctor: zkapi_consult_transport', () => {
     expect(torOff.detail).toContain('2 days left, notice two_days');
 
     const blocked = await zkapiCheck(doctorDeps(
-      { zkapi: { acknowledgements: { version: 1, accepted: [] }, fundingDate: '2026-09-01', torExecutable: join(binDir, 'none') } },
+      { zkapi: { acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [] }, fundingDate: '2026-09-01', torExecutable: join(binDir, 'none') } },
       { OLYMPUS_ZKAPI_LOCAL_API_KEY: '' },
     ));
     expect(blocked.ok).toBe(false);
-    expect(blocked.detail).toContain('acknowledgements incomplete (0/6)');
+    expect(blocked.detail).toContain(`acknowledgements incomplete (0/${ZKAPI_RISK_ACKNOWLEDGEMENTS.length})`);
     expect(blocked.detail).toContain('estimated expiry PASSED on 2026-10-01; an unwithdrawn note becomes claimable by the operator');
     expect(blocked.detail).toContain('local API key NOT configured');
     expect(blocked.detail).toContain('not ready: acknowledgements_incomplete, note_expired, daemon_api_key_missing, tor_not_found');
 
-    reserveZkapiRequest(statePath, { requestCap: 10, spendCapMicroUsd: 20_000_000 }, NOW);
-    reserveZkapiRequest(statePath, { requestCap: 10, spendCapMicroUsd: 20_000_000 }, NOW);
-    reserveZkapiRequest(statePath, { requestCap: 10, spendCapMicroUsd: 20_000_000 }, NOW);
-    const exhausted = await zkapiCheck(doctorDeps());
+    reserveZkapiRequest(statePath, {}, NOW);
+    reserveZkapiRequest(statePath, {}, NOW);
+    reserveZkapiRequest(statePath, {}, NOW);
+    // Without an owner-set limit, a high count blocks nothing; only the fence does.
+    const unlimited = await zkapiCheck(doctorDeps());
+    expect(unlimited.detail).toContain('requests today 3 (no limit set), worst-case authorized today $18.00 (no limit set;');
+    expect(unlimited.detail).toContain('UNRESOLVED SESSION: run a recovery-only session');
+    expect(unlimited.detail).toContain('not ready: unresolved_session');
+    expect(unlimited.detail).not.toContain('spend_cap_reached');
+    expect(unlimited.detail).not.toContain('daily_cap_reached');
+    const exhausted = await zkapiCheck(doctorDeps({ zkapi: { dailyRequestCap: 5, dailySpendCapUsd: 20 } }));
     expect(exhausted.ok).toBe(false);
-    expect(exhausted.detail).toContain('requests today 3/10, worst-case spend reserved $18.00/$20.00');
-    expect(exhausted.detail).toContain('UNRESOLVED SESSION: run a recovery-only session');
+    expect(exhausted.detail).toContain('requests today 3 (limit 5), worst-case authorized today $18.00 (limit $20.00;');
     expect(exhausted.detail).toContain('not ready: unresolved_session, spend_cap_reached');
 
     const squatter = Bun.serve({ hostname: '127.0.0.1', port: daemonPort, fetch: () => new Response('x') });

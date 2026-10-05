@@ -288,8 +288,9 @@ export interface ZkapiConsultReadiness {
   torPort: 'free' | 'in_use' | 'not_used';
   apiKeyConfigured: boolean;
   money: ZkapiMoneyStatus;
-  requestsToday: { count: number; cap: number };
-  spendToday: { reservedUsd: number; capUsd: number };
+  /** `cap` / `capUsd` absent: no owner-set limit. */
+  requestsToday: { count: number; cap?: number };
+  spendToday: { reservedUsd: number; capUsd?: number };
   unresolvedSession: boolean;
   lastSession?: ZkapiLastSession;
   routeLabel: string;
@@ -326,8 +327,8 @@ const MESSAGES: Record<ZkapiConsultErrorCode, string> = {
   session_process_exited: 'The Tor client or the daemon of this session stopped unexpectedly.',
   policy_unavailable: 'The daemon could not load the model policy in time.',
   model_unavailable: 'The selected model is not in the daemon\'s live model list.',
-  daily_cap_reached: 'The daily zkAPI request cap is reached.',
-  spend_cap_reached: 'The daily worst-case zkAPI spend cap would be exceeded by another request.',
+  daily_cap_reached: 'The daily zkAPI request limit you set is reached.',
+  spend_cap_reached: 'Another request would exceed the daily worst-case zkAPI spend limit you set.',
   state_unavailable: 'The persistent zkAPI session ledger could not be read or written.',
   timeout: 'The zkAPI consult timed out; it may still have been charged.',
   aborted: 'The zkAPI consult was cancelled; it may still have been charged.',
@@ -597,24 +598,32 @@ function updateState(path: string, now: Date, mutate: (state: ZkapiState) => Zka
   }, { acquireTimeoutMs: 5_000 });
 }
 
+/** The owner's optional daily limits; absent means no limit (owner ruling, 2026-10-05). */
+function ownerLimits(settings: ZkapiConsultSettings): { requestCap?: number; spendCapMicroUsd?: number } {
+  return {
+    ...(settings.dailyRequestCap !== undefined ? { requestCap: settings.dailyRequestCap } : {}),
+    ...(settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1_000_000) } : {}),
+  };
+}
+
 /**
- * Reserve one request at the worst-case allowance under a cross-process lease
+ * Record one request at the worst-case allowance under a cross-process lease
  * before the send, and set the unresolved-session fence in the same write.
  * Never handed back: a send whose outcome is unknown, or that failed after the
  * daemon accepted it, may still have been charged.
  */
 export function reserveZkapiRequest(
   path: string,
-  limits: { requestCap: number; spendCapMicroUsd: number },
+  limits: { requestCap?: number; spendCapMicroUsd?: number },
   now: Date,
 ): { reserved: true } | { reserved: false; reason: 'daily_cap_reached' | 'spend_cap_reached' } {
   let refusal: 'daily_cap_reached' | 'spend_cap_reached' | undefined;
   updateState(path, now, (state) => {
-    if (state.count >= limits.requestCap) {
+    if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
       refusal = 'daily_cap_reached';
       return undefined;
     }
-    if (state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limits.spendCapMicroUsd) {
+    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limits.spendCapMicroUsd) {
       refusal = 'spend_cap_reached';
       return undefined;
     }
@@ -1133,8 +1142,9 @@ export async function zkapiConsultReadiness(
     blockers.push('state_unavailable');
   }
   if (unresolvedSession) blockers.push('unresolved_session');
-  if (usage.count >= settings.dailyRequestCap) blockers.push('daily_cap_reached');
-  if (usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > Math.round(settings.dailySpendCapUsd * 1_000_000)) {
+  const limit = ownerLimits(settings);
+  if (limit.requestCap !== undefined && usage.count >= limit.requestCap) blockers.push('daily_cap_reached');
+  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
     blockers.push('spend_cap_reached');
   }
   return {
@@ -1147,8 +1157,11 @@ export async function zkapiConsultReadiness(
     torPort,
     apiKeyConfigured,
     money,
-    requestsToday: { count: usage.count, cap: settings.dailyRequestCap },
-    spendToday: { reservedUsd: usage.reservedMicroUsd / 1_000_000, capUsd: settings.dailySpendCapUsd },
+    requestsToday: { count: usage.count, ...(settings.dailyRequestCap !== undefined ? { cap: settings.dailyRequestCap } : {}) },
+    spendToday: {
+      reservedUsd: usage.reservedMicroUsd / 1_000_000,
+      ...(settings.dailySpendCapUsd !== undefined ? { capUsd: settings.dailySpendCapUsd } : {}),
+    },
     unresolvedSession,
     ...(lastSession ? { lastSession } : {}),
     routeLabel: lastSession
@@ -1273,8 +1286,9 @@ async function runSession(
     if (fenced && !recovery) return fail('unresolved_session');
     if (!fenced && recovery) return fail('no_unresolved_session');
     const usage = zkapiUsageToday(statePath, now());
-    if (usage.count >= settings.dailyRequestCap) return fail('daily_cap_reached');
-    if (usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > Math.round(settings.dailySpendCapUsd * 1_000_000)) {
+    const limit = ownerLimits(settings);
+    if (limit.requestCap !== undefined && usage.count >= limit.requestCap) return fail('daily_cap_reached');
+    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
       return fail('spend_cap_reached');
     }
   } catch {
@@ -1425,10 +1439,7 @@ async function runSession(
 
     let reservation: ReturnType<typeof reserveZkapiRequest>;
     try {
-      reservation = reserveZkapiRequest(statePath, {
-        requestCap: settings.dailyRequestCap,
-        spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1_000_000),
-      }, now());
+      reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now());
     } catch {
       return (result = fail('state_unavailable'));
     }

@@ -611,7 +611,9 @@ function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
         ? 'funding date invalid'
         : 'funding date not recorded';
   const deposit = money.depositAboveSuggestedCeiling ? '; deposit is above the suggested ceiling' : '';
-  const usage = `requests today ${readiness.requestsToday.count}/${readiness.requestsToday.cap}, worst-case spend reserved $${readiness.spendToday.reservedUsd.toFixed(2)}/$${readiness.spendToday.capUsd.toFixed(2)} ($6.00 per request)`;
+  const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : 'no limit set';
+  const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : 'no limit set';
+  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
   const fence = readiness.unresolvedSession
     ? 'UNRESOLVED SESSION: run a recovery-only session before another consult'
     : 'no unresolved session';

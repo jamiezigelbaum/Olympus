@@ -33,9 +33,6 @@ export const ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50;
 const DEFAULTS = {
   tor: 'per_consult' as const,
   torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
-  dailyRequestCap: 10,
-  /** Worst case per request is the model's daemon allowance, $1 to $6 today. */
-  dailySpendCapUsd: 20,
   /** The reference measures 3 to 4.5 minutes per request; never kill a slow call early. */
   timeoutMs: 6 * 60 * 1000,
   /** zkapi-tor-cli.sh gives Tor its ready budget minus 30 s: 240 - 30. */
@@ -50,22 +47,32 @@ const DEFAULTS = {
 export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
 
 /**
- * The six statements of design §Z.3, in plain words. The version moves when the
- * wording or the set changes, which voids every earlier acknowledgement.
+ * The six statements of design §Z.3 plus the per-consult cost and the absence
+ * of a default limit (owner ruling, 2026-10-05), in plain words. The version
+ * moves when the wording or the set changes, which voids every earlier
+ * acknowledgement.
  */
-export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 1;
+export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 2;
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   {
+    id: 'per_consult_cost',
+    statement: 'Each consult authorizes up to the chosen model\'s per-request allowance, currently $1 to $6 depending on the model. Olympus counts every consult at $6, the worst case.',
+  },
+  {
+    id: 'no_default_limit',
+    statement: 'There is no limit on the number of consults or on daily spending unless you set one (dailyRequestCap, dailySpendCapUsd).',
+  },
+  {
     id: 'deposit_fee',
-    statement: 'Depositing is an expensive on-chain transaction. Its fee can be larger than a small deposit.',
+    statement: 'Depositing is an expensive on-chain transaction, paid separately from consults. Its fee can be larger than a small deposit.',
   },
   {
     id: 'withdrawal_fee',
-    statement: 'Getting unspent money back is a second expensive transaction and needs more ETH sent for its fee.',
+    statement: 'Getting unspent money back is a second expensive on-chain transaction, paid separately, and needs more ETH sent for its fee.',
   },
   {
     id: 'note_expiry_30_days',
-    statement: 'A deposit that is not withdrawn within 30 days becomes claimable in full by the operator. Olympus only estimates that date from the funding date you confirm; the real one is set on-chain by the deposit block.',
+    statement: 'Unused balance that is not withdrawn within about 30 days becomes claimable in full by the operator. Olympus only estimates that date from the funding date you confirm; the real one is set on-chain by the deposit block.',
   },
   {
     id: 'no_top_up',
@@ -95,9 +102,10 @@ export interface ZkapiConsultSettings {
   fundingDate?: string;
   depositUsd?: number;
   acknowledgements: { version: number; accepted: string[] };
-  dailyRequestCap: number;
-  /** Daily worst-case spend: each request reserves its model's full allowance. */
-  dailySpendCapUsd: number;
+  /** Optional owner-set daily request limit (UTC day). Unset: no limit. */
+  dailyRequestCap?: number;
+  /** Optional owner-set daily worst-case spend limit; each request counts $6. Unset: no limit. */
+  dailySpendCapUsd?: number;
   timeoutMs: number;
   torBootstrapTimeoutMs: number;
   daemonReadyTimeoutMs: number;
@@ -122,7 +130,7 @@ type IntegerSetting =
 
 const INTEGER_BOUNDS: Record<IntegerSetting, [number, number]> = {
   torSocksPort: [1024, 65535],
-  dailyRequestCap: [1, 100],
+  dailyRequestCap: [1, 1_000_000],
   timeoutMs: [30_000, 30 * 60_000],
   torBootstrapTimeoutMs: [10_000, 10 * 60_000],
   daemonReadyTimeoutMs: [5_000, 10 * 60_000],
@@ -161,8 +169,6 @@ export function parseZkapiConsultSettings(value: unknown, label: string): ZkapiC
     tor: DEFAULTS.tor,
     torSocksPort: DEFAULTS.torSocksPort,
     acknowledgements: parseAcknowledgements(input.acknowledgements, `${label}.acknowledgements`),
-    dailyRequestCap: DEFAULTS.dailyRequestCap,
-    dailySpendCapUsd: DEFAULTS.dailySpendCapUsd,
     timeoutMs: DEFAULTS.timeoutMs,
     torBootstrapTimeoutMs: DEFAULTS.torBootstrapTimeoutMs,
     daemonReadyTimeoutMs: DEFAULTS.daemonReadyTimeoutMs,

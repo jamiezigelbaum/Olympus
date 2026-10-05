@@ -504,9 +504,7 @@ loopback address there forwards to the cloud.
     "torSocksPort": 19050,
     "fundingDate": "2026-10-01",
     "depositUsd": 20,
-    "dailyRequestCap": 10,
-    "dailySpendCapUsd": 20,
-    "acknowledgements": { "version": 1, "accepted": ["deposit_fee", "withdrawal_fee", "note_expiry_30_days", "no_top_up", "operator_risk", "local_files_risk"] }
+    "acknowledgements": { "version": 2, "accepted": ["per_consult_cost", "no_default_limit", "deposit_fee", "withdrawal_fee", "note_expiry_30_days", "no_top_up", "operator_risk", "local_files_risk"] }
   }
 }
 ```
@@ -531,11 +529,19 @@ and stops every process it started. Between consults nothing listens on the
 relay port, so the daemon fails closed. This sequence follows the reference
 wrapper scripts in `ethereum/zkapi` pull request #16.
 
-**The money, plainly.** Turning this on requires accepting six statements:
+**The money, plainly.** Turning this on requires accepting eight statements
+(acknowledgement version 2):
 
-- Depositing is an expensive on-chain transaction; the fee can exceed a small deposit.
-- Withdrawing unspent money is a second expensive transaction and needs more ETH for its fee.
-- A deposit not withdrawn within 30 days becomes claimable in full by the operator.
+- Each consult authorizes up to the chosen model's per-request allowance,
+  currently $1 to $6 depending on the model. Olympus counts every consult at
+  $6, the worst case.
+- There is no limit on the number of consults or on daily spending unless you
+  set one. Ten consults in a day can authorize up to $60.
+- Depositing is an expensive on-chain transaction, paid separately from
+  consults; the fee can exceed a small deposit.
+- Withdrawing unspent money is a second expensive on-chain transaction, paid
+  separately, and needs more ETH for its fee.
+- Unused balance not withdrawn within about 30 days becomes claimable in full by the operator.
 - There is no top-up; each deposit is a new note with its own fee and 30-day clock.
 - One operator account can pause deposits and withdrawals while the clock keeps running, and one party ran the proof setup; funds could be frozen or lost.
 - The balance is controlled by files on this computer; losing them loses the money.
@@ -576,11 +582,15 @@ on, so deposit the smallest amount the service accepts.
   real expiry is set on-chain by the deposit block. Doctor and status show the
   estimated date, days left, and a notice at 10, 5 and 2 days. A recorded note
   past its estimated expiry refuses consults.
-- A daily request cap and a daily worst-case spend cap. The daemon can raise a
-  request's allowance from live policy after it is queued, so every request
-  reserves the highest allowance of the reviewed versions ($6) before it is
-  sent, in a ledger that survives restarts. The default $20 cap therefore
-  allows three consults a day. A request whose outcome is unknown stays counted.
+- **No limit unless you set one.** The daemon can raise a request's allowance
+  from live policy after it is queued, so Olympus records every request at the
+  highest allowance of the reviewed versions ($6) before it is sent, in a
+  ledger that survives restarts, and doctor shows today's count and worst-case
+  total. To limit spending, add either or both to the profile's `zkapi` block:
+  `"dailyRequestCap": 5` (requests per UTC day) or `"dailySpendCapUsd": 30`
+  (worst-case dollars per UTC day; each consult counts $6). A set limit is
+  enforced before the send, atomically across processes; a request whose
+  outcome is unknown still counts toward it.
 - **Unresolved sessions.** Before each send Olympus records a fence, and clears
   it only when the daemon reports that request's key settled. If that is not
   confirmed (a crash, a timeout, a missing log line), no further consult is
