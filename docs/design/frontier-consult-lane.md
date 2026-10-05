@@ -1,6 +1,6 @@
 # Design: frontier consult, anonymous cloud transport (zkAPI), and Venice end-to-end encryption
 
-Status: **proposal, revision 3 (2026-10-05). Not approved for build.** Rewritten to answer the adversarial review in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md). Nothing here changes shipped behavior or the release plan until the owner rules on §10.
+Status: **proposal, revision 4 (2026-10-05). Owner has directed the build of tracks Z and A** (zkAPI private path, Opus builders with independent Codex review); track E awaits its own go-ahead. Rewritten to answer the adversarial review in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md). Nothing here changes shipped behavior or the release plan until the owner rules on §10.
 Risk class: **Critical** for every track: trust routing, a hard invariant, and (track A) the `Analyst` contract.
 
 Terms: Private = S4 = `secure_local`. "Secure analyst" = a secure-pool member (loopback local model or Venice Private/TEE). "Frontier model" = any `standard_cloud` model. "Consult" = one outbound question, written by the secure analyst, that carries no evidence.
@@ -9,9 +9,9 @@ This document now holds three tracks that can ship independently:
 
 | Track | What the user gets | Depends on |
 |---|---|---|
-| **Z. zkAPI transport (experimental)** | Pay for Olympus's ordinary cloud analysis anonymously | Nothing in A or E |
+| **Z. zkAPI transport (experimental)** | The anonymous route for consults: payment and network identity hidden, content written locally | Track A (it is A's private transport) |
 | **E. Venice end-to-end encryption** | A Private answer lane where Venice cannot read the evidence | Nothing in A or Z |
-| **A. Frontier consult** | Frontier help on Private questions through an approved, derived question | P0 fixes; optionally Z as a transport |
+| **A. Frontier consult** | Frontier help on Private questions through an approved, derived question | P0 fixes; Z as its anonymous transport |
 
 ---
 
@@ -20,6 +20,7 @@ This document now holds three tracks that can ship independently:
 - **Tiers are the product.** Users decide what may go to cloud models. Personal content reaching frontier models and cloud embeddings is by design.
 - **Olympus is not trying to be fully decentralized.** The relay and publisher apps are accepted central points.
 - **zkAPI ships as a usable experiment** even with known upstream issues, with clear guards so users do not lose money unknowingly, and plain disclosure of what they pay for. Users are expected to have a crypto wallet. No wallet-abstraction service, no card checkout.
+- **When a user chooses zkAPI, the result must meet the standard of the people who designed it.** Not everything in Olympus needs to be private, but the zkAPI path is for users who want that, so it follows the published three-layer practice (§Z.2) with no shortcuts.
 - **Venice end-to-end encrypted models become a first-class Private option.**
 - **The three shipped-code gaps the review found are being fixed now**, as their own pull requests, independent of this proposal (§3).
 
@@ -56,18 +57,33 @@ zkAPI (Ethereum Foundation with the Open Anonymity Project, mainnet since 2026-0
 - **Who sees what else:** the zkAPI server sees per-session spend and, without Tor, the IP.
 - **Linkability:** by default requests within a 60-second window share a key and are linkable to each other. Spending is sequential. About 70 notes existed at review time, so the anonymity set is small.
 
-### Z.2 What Olympus uses it for
+### Z.2 What Olympus uses it for, and the standard it must meet
 
-A new sovereignty provider kind, `zkapi`, with trust fixed at `standard_cloud`. It is a named type, so it can never be registered as a local model and can never be a secure-pool member, whatever address it listens on.
+**Revision 4 change.** Revision 3 proposed zkAPI as a way to pay anonymously for the ordinary cloud analyst on Public and Personal questions. That is withdrawn. Those requests carry the user's own wording and source documents, so the provider can tell who is asking from the content alone, and hiding the payment adds nothing. The author of the reference practice states that all three layers are required together; anonymous payment over identifying content is the case his design exists to avoid.
 
-- **First use (ships with track Z):** an optional transport for the ordinary cloud analyst, for Public and Personal questions. The user's cloud analysis is paid for without an account.
-- **Later use (track A):** an optional transport for consults.
+zkAPI in Olympus has one use: **the transport for a consult**, where the content was written by a local model to reveal as little as possible.
 
-On timeout or failure Olympus falls back to the user's normal cloud analyst. That fallback carries the same Public/Personal content to the same trust class, so it is not a privacy downgrade; the answer notes that the anonymous transport was not used.
+The reference is the skill file published with the zkAPI Tor client (`tor-remote-research.md`, `ethereum/zkapi` PR #16). Its core rule: *retrieve general rules and raw data from the remote model; apply them locally, where nothing is observed.* Olympus's zkAPI path adopts its rules as requirements:
+
+| Layer | Reference practice | Olympus requirement on the zkAPI path |
+|---|---|---|
+| **Content** | A local model writes every prompt. Never relay private content, never forward the user's words, never send a document. | The writer is a **loopback local model only**. Venice may not write a question that travels by zkAPI. No evidence, no user wording (§A.4). |
+| | Decompose: innocuous facts go as separate requests so they are not linked. | Up to three consults per answer, each sent as a separate request, strictly one at a time. |
+| | Generalize conditionals: ask for the decision rule across several values, apply the user's value locally. | Part of the writer's instructions; pass 2 applies the rule to the evidence locally. |
+| | Generalize quantities to bands; treat a rare place or a version string as an identifier. | Part of the writer's instructions; exact figures from the evidence are refused by the gate. |
+| | Self-check before sending: what would a profiler learn beyond the topic? | The writer's final step, then the mechanical gate, then the owner's approval. |
+| **Payment** | zkAPI | zkAPI, with key reuse set to 0. If reuse is on, Olympus refuses to send. |
+| **Network** | Tor, with a new network identity for every single request. | Tor is required for the path to be labelled anonymous, with a fresh circuit per consult. Without Tor the setting is labelled "payment hidden, network address visible" and each approval says so. |
+| **Failure** | A configured relay failure never falls back to a direct connection. | A zkAPI consult that fails never retries on an identified transport. The baseline answer is released. |
+| **Pace** | Sequential, 3 to 4.5 minutes per request, never kill a slow call. | Consults run on the background-job path (`working` / `job_id`), never on the interactive budget, with one request in flight at a time. |
+
+The writer's instructions are generic and question-agnostic, so the architecture rule against per-question logic stands. They live in a skill, in keeping with the repository's fat-skills approach, and the gate enforces the mechanical subset.
+
+A consult may still go by an ordinary API key if the user prefers; that route is labelled "identified" and makes no anonymity claim.
 
 ### Z.3 The money, plainly
 
-This is what a user must understand before sending anything. The dashboard shows it as a required acknowledgement, with live numbers.
+Consults are few and small, so the model spend is tiny next to the fixed costs below. This is what a user must understand before sending anything. The dashboard shows it as a required acknowledgement, with live numbers.
 
 | Cost or risk | What happens | Observed at review |
 |---|---|---|
@@ -78,29 +94,31 @@ This is what a user must understand before sending anything. The dashboard shows
 | **Operator risk** | One ordinary account can pause deposits and withdrawals while the expiry clock keeps running. The proof system's setup was done by one party. Funds could be frozen or lost. | Vault owner is a single key |
 | **Local risk** | The balance is controlled by files on this computer. Losing them loses the money. | — |
 
-Put together: **a deposit is prepaid credit that is, in practice, not refundable.** Withdrawing a small remainder costs more than it returns, and an unused balance disappears after 30 days. A sensible deposit is an amount the user expects to spend within a month and is willing to lose. With fees around $7, a deposit under about $20 mostly pays fees.
+Put together: **a deposit is prepaid credit that is, in practice, not refundable.** Withdrawing a small remainder costs more than it returns, and an unused balance disappears after 30 days. Because consults cost cents, almost the whole price of this feature is the deposit fee plus whatever expires. The honest summary for the user is: **expect to pay roughly the fee plus your deposit each month you keep this on**, so deposit the smallest amount that clears the service's balance tiers.
 
 ### Z.4 Guards
 
 1. **Experimental label and acknowledgement.** The setting is under advanced model settings, marked experimental. Turning it on requires ticking a short list that states the six rows above in plain words.
 2. **Live fee estimate before funding.** The setup page shows the current estimated deposit fee and warns in red when the fee exceeds 25% of the intended deposit.
-3. **Suggested range and a soft ceiling.** A suggested deposit range (proposed $20–50) and a warning above the ceiling (proposed $100). Olympus cannot enforce an amount the user sends from their own wallet; it can refuse to mark the setup "recommended".
+3. **Suggested amount and a soft ceiling.** A small suggested deposit (proposed $10–20, enough for the balance tier the chosen model needs) and a warning above the ceiling (proposed $50). Olympus cannot enforce an amount the user sends from their own wallet; it can refuse to mark the setup "recommended".
 4. **Expiry clock.** Olympus records the funding date the user confirms and shows the expiry date and days left wherever the balance or transport status appears. It raises a dashboard notice at 10, 5 and 2 days left, saying either "spend it" or "withdraw now, it will cost about $X".
 5. **Olympus never holds the power to move funds.** In the first version Olympus does not use the daemon's management token. Funding and withdrawal happen in the daemon's own interactive tool, run by the user. No agent tool, remote connection, or relay path can reach a wallet action, because Olympus has none.
 6. **The funding address never comes from Olympus's screen.** The user reads it in the daemon's own terminal session. This removes the port-squatting attack in which a rogue local process shows a fake address in the dashboard.
 7. **Daemon identity check.** Before using the endpoint Olympus checks the listening process and the model list, and refuses if something other than the expected daemon is on the port.
 8. **Require a local API key and key-reuse 0.** Olympus configures a daemon API key where supported, so other local processes cannot spend the balance, and checks that the key-reuse window is 0. If reuse is on, the setting shows "requests are linkable" and is not marked anonymous.
-9. **Honest status.** Olympus reports what it verified (endpoint up, synthetic request ok, reuse window) and what the user declared (Tor). It never displays "anonymous" or "unlinkable" as a verified property.
+9. **Honest status.** Olympus reports what it verified (endpoint up, synthetic request ok, reuse window, Tor route where it can check it) and what the user declared. The label is "anonymous route" only when reuse is 0 and Tor is confirmed; otherwise it names what is exposed.
 10. **Spend limits.** A daily request cap on the transport, so a loop or a remote agent cannot drain the balance.
+11. **No silent downgrade.** A failed or timed-out zkAPI consult is never resent another way. The user sees that the consult did not complete.
 
 ### Z.5 Phases
 
 | Phase | Delivers | Done when |
 |---|---|---|
-| **Z1** | `zkapi` provider kind; detect a daemon the user installed and funded themselves; guards 1–10; use as the ordinary cloud analyst transport | A fresh install with a funded daemon answers a Public question through zkAPI; every guard has a test; a non-daemon process on the port is refused; a `zkapi` profile is refused for every Private role |
+| **Z1** | `zkapi` provider kind (consult role only); detect a daemon the user installed and funded themselves; reuse-0 and Tor checks; fresh circuit per request; guards 1–11 | Against a stand-in daemon: every guard has a test; a non-daemon process on the port is refused; a `zkapi` profile is refused for every evidence-carrying role; reuse on refuses; failure never retries elsewhere |
+| **Z1-live** | One real consult through a funded daemon over Tor | The owner funds a daemon; a synthetic question completes end to end; measured latency recorded |
 | **Z2** | Dashboard-driven funding and withdrawal | Only after upstream ships scriptable `fund` / `withdraw` in a release (open as zkapi PR #19) and a separate owner ruling, because this is where Olympus would gain the power to move funds |
 
-Measured before Z1 is called done: real latency through the daemon with reuse 0, with and without Tor. If most answers miss the interactive budget, the setting says so.
+Latency is expected to be minutes per consult (the reference measures 3 to 4.5), which is why consults use the background-job path.
 
 Not yet verified, to settle at the start of Z1: whether the daemon exposes the balance, the note's funding time and the reuse setting to a non-privileged local client, and whether it supports an inference API key. Where it does not, guards 4 and 8 fall back to what the user confirms, and the status says "declared", not "verified".
 
@@ -179,7 +197,7 @@ source_answer
 
 - **The baseline always exists**, so every failure has something real to fall back to.
 - **Consult errors have their own error domain.** They never count against a secure member's health, never trigger route selection, and never cause the pack to be rebuilt.
-- One consult per answer.
+- One consult per answer on an identified transport; up to three, sent separately and one at a time, on the zkAPI route (§Z.2).
 
 ### A.3 Two outputs, two release decisions
 
@@ -255,11 +273,11 @@ On synthetic Private corpora, with thresholds, sample sizes and attacker strengt
 ## 10. Decisions needed from the owner
 
 1. **Track A wording.** May "Private content never reaches an ordinary cloud model" become "…the evidence never does; with consult on, you may approve sending a question derived from it"?
-2. **Track A in `private-cloud-only`:** may Venice be the writer of a question that goes to a second provider?
-3. **Track Z numbers:** suggested deposit range ($20–50) and warning ceiling ($100).
+2. **Track A in `private-cloud-only`:** may Venice be the writer of a question that goes to a second provider on the *identified* route? (On the zkAPI route the answer is already no: local writer only.)
+3. **Track Z numbers:** suggested deposit ($10–20) and warning ceiling ($50).
 4. **Track Z scope:** confirm Z1 as "bring your own funded daemon", with dashboard-driven funding (Z2) waiting for upstream and a separate ruling.
 5. **Track E:** accept that Olympus maintains a pin list of recognised enclave workloads, with refusals when it goes stale.
-6. **Order:** proposed Z1, then E1–E3, then A.
+6. **Order:** A and Z together (building now), then E1–E3.
 
 ## 11. Not proposed
 
@@ -270,6 +288,8 @@ A local model as the user's main agent; Olympus-managed Tor; wallet-abstraction 
 - Review record with evidence: [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md)
 - Vitalik Buterin, self-experiment post, 2026-10-04: <https://x.com/VitalikButerin/status/2106537633056969024>
 - Self-sovereign LLM setup essay, 2026-04-02: <https://vitalik.eth.limo/general/2026/04/02/secure_llms.html>
+- Reference request-construction rules (`tor-remote-research.md`) and Tor client: <https://github.com/ethereum/zkapi/pull/16>
+- zkAPI daemon privacy boundaries: <https://github.com/ethereum/zkapi/blob/main/zkapi-clientd/docs/PRIVACY.md>
 - zkAPI repository, scriptable funding PR, Tor wrapper PR: <https://github.com/ethereum/zkapi>, <https://github.com/ethereum/zkapi/pull/19>, <https://github.com/ethereum/zkapi/pull/16>
 - Introducing zkAPI, 2026-10-01: <https://blog.ethereum.org/2026/10/01/introducing-zkapi>
 - Venice privacy modes: <https://docs.venice.ai/overview/privacy>
