@@ -82403,7 +82403,7 @@ class OpenAICompatibleVlmClient {
     } catch (error2) {
       if (error2 instanceof VlmRouterError)
         throw error2;
-      const kind = vlmRouterErrorKind(error2) ?? "vlm_backend_unavailable";
+      const kind = isModelEndpointRedirectError(error2) ? "model_endpoint_redirect" : vlmRouterErrorKind(error2) ?? "vlm_backend_unavailable";
       throw new VlmRouterError({
         status: 503,
         errorKind: kind,
