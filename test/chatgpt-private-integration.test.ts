@@ -55,6 +55,7 @@ import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.
 import { checkPrivateEvidenceItems, releaseAnalystAnswer, searchPrivateEvidence, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
@@ -435,6 +436,8 @@ describe('claim-time evidence over a real local index', () => {
       cleanup();
     });
     await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    /** The owner's current read scope: an account scope the item is not in narrows it away. */
+    const scope: { accountScope?: string } = {};
     const lanes = () => {
       const stores = fixture.set.openStores();
       return {
@@ -442,7 +445,10 @@ describe('claim-time evidence over a real local index', () => {
           corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain,
         }))),
         adapters: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreCorpusAdapter({ store })])),
-        contentProviders: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreContentProvider({ store })])),
+        contentProviders: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreContentProvider({
+          store,
+          ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
+        })])),
         visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }]),
       };
     };
@@ -454,7 +460,7 @@ describe('claim-time evidence over a real local index', () => {
       guardCalls += 1;
       return checkPrivateEvidenceItems({ lanes, items });
     };
-    return { fixture, privateSearch, eligible, guardCalls: () => guardCalls };
+    return { fixture, privateSearch, eligible, scope, guardCalls: () => guardCalls };
   }
 
   test('a Private item re-tiered to Secret: the live guard refuses it, and no model ever reads it (claim or precompute)', async () => {
@@ -504,6 +510,43 @@ describe('claim-time evidence over a real local index', () => {
     await settledLine(precomputeLines);
     expect(await precomputing.claim(second.jobId!, panel.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
     expect(seen).toEqual([]);
+  });
+
+  test('the owner narrows the read scope: the live guard refuses the item at once', async () => {
+    const lane = await realPrivateLane([
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+    ]);
+    const atSearch = await lane.privateSearch();
+    expect(await lane.eligible(atSearch)).toEqual([true]);
+    lane.scope.accountScope = 'someone-else';
+    expect(await lane.eligible(atSearch)).toEqual([false]);
+    delete lane.scope.accountScope;
+    expect(await lane.eligible(atSearch)).toEqual([true]);
+  });
+
+  test('a current Private copy that holds only the names: not eligible (its content is not served there)', async () => {
+    const lane = await realPrivateLane([
+      { id: 'invoice', name: 'orchard-invoice.txt', text: 'Orchard invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
+    ]);
+    const atSearch = await lane.privateSearch();
+    expect(await lane.eligible(atSearch)).toEqual([true]);
+    // Re-place the item so the Private store's copy is current for the
+    // metadata layer only (not reachable with today's placement map; the
+    // guard must not rely on that).
+    lane.fixture.ledger.recordRoutedPlacement(identityOf('invoice'), {
+      ...classifyItemTiers({ signals: { title: 'orchard-invoice.txt' }, text: 'orchard invoice' }),
+      metadataTier: 'secure',
+      contentTier: 'secure',
+    }, {
+      copies: [
+        { corpusId: CORPORA.secure_local, trustDomain: 'secure_local', layers: 'metadata' },
+        { corpusId: CORPORA.internal, trustDomain: 'internal', layers: 'content' },
+      ],
+      embedHold: false,
+    }, { staleCopiesGone: true });
+    const copies = lane.fixture.ledger.copies(identityOf('invoice'));
+    expect(copies.find((copy) => copy.corpusId === CORPORA.secure_local)).toMatchObject({ layers: 'metadata', state: 'current' });
+    expect(await lane.eligible(atSearch)).toEqual([false]);
   });
 
   test('a deleted Private item: the live guard refuses it at once', async () => {

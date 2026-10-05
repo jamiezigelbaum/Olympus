@@ -11,6 +11,9 @@
 // Each is a regression here. Synthetic fixtures only; no fixed sleeps.
 
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AnswerPrivatelyOptions, PrivateEvidenceItem as BuiltInEvidenceItem } from '../src/core/analyst-built-in.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { SourceModelPolicyDeniedError } from '../src/core/source-model-policy.ts';
@@ -50,17 +53,33 @@ async function until(condition: () => boolean, ms = 10_000): Promise<void> {
  * depth reader's hand-off, each answer-model call) is recorded with whether
  * revocation had already happened when it was submitted.
  */
-function world(options: { gateFirstCall?: 'fail' | 'succeed'; depthRead?: boolean; relevance?: 'stub' | 'embedding'; readItem?: (item: PrivateEvidenceItem) => Promise<readonly string[] | undefined>; precompute?: boolean } = {}) {
+function world(options: {
+  gateFirstCall?: 'fail' | 'succeed';
+  depthRead?: boolean;
+  relevance?: 'stub' | 'embedding';
+  readItem?: (item: PrivateEvidenceItem) => Promise<readonly string[] | undefined>;
+  precompute?: boolean;
+  /** The answer makes a second model call (a retry or audit); this runs between the two. */
+  betweenCalls?: () => void;
+  /** Sources open as this local file. */
+  localPath?: string;
+} = {}) {
   const revoked = new Set<string>();
   /** Corpora whose eligibility lookup fails (a timed-out or unreadable store). */
   const failing = new Set<string>();
   let revokedAt = 0;
   const events: string[] = [];
   const inputs: Array<{ kind: 'embed' | 'depth' | 'prompt'; text: string; afterRevoke: boolean }> = [];
-  const record = (kind: 'embed' | 'depth' | 'prompt', text: string) => inputs.push({ kind, text, afterRevoke: revokedAt > 0 });
+  /** Guard calls and model hand-offs, in order: every hand-off must follow a guard call. */
+  const sequence: string[] = [];
+  const record = (kind: 'embed' | 'depth' | 'prompt', text: string) => {
+    sequence.push(`submit:${kind}`);
+    inputs.push({ kind, text, afterRevoke: revokedAt > 0 });
+  };
   let guardCalls = 0;
   const eligible = async (items: readonly PrivateEvidenceItem[]) => {
     guardCalls += 1;
+    sequence.push('guard');
     return items.map((item) => {
       if (failing.has(String(item.corpusId))) throw new Error('lookup failed');
       return !revoked.has(idOf(item));
@@ -87,7 +106,12 @@ function world(options: { gateFirstCall?: 'fail' | 'succeed'; depthRead?: boolea
     },
   };
   const answer = async (_question: string, items: readonly BuiltInEvidenceItem[], answerOptions: AnswerPrivatelyOptions) => {
-    await answerOptions.model!.complete({ system: 'system', prompt: items.map((item) => `${item.id}: ${item.text}`).join('\n') } as AnalystModelRequest);
+    const prompt = { system: 'system', prompt: items.map((item) => `${item.id}: ${item.text}`).join('\n') } as AnalystModelRequest;
+    await answerOptions.model!.complete(prompt);
+    if (options.betweenCalls) {
+      options.betweenCalls();
+      await answerOptions.model!.complete(prompt);
+    }
     return {
       answer: `answer from ${items.map((item) => item.id).join(',')}`,
       citations: items.map((item) => ({ id: item.id, claim: 'c' })),
@@ -125,8 +149,10 @@ function world(options: { gateFirstCall?: 'fail' | 'succeed'; depthRead?: boolea
     answer: answer as never,
     eligible,
     ...(relevance ? { relevance: relevance as never } : {}),
+    ...(options.localPath ? { sourceLinks: () => ({ localPath: options.localPath }) } : {}),
     ...(options.depthRead ? {
       readItem: async (item: PrivateEvidenceItem) => {
+        sequence.push('submit:depth-read');
         const chunks = await readItem(item);
         for (const chunk of chunks ?? []) record('depth', chunk);
         return chunks;
@@ -134,7 +160,9 @@ function world(options: { gateFirstCall?: 'fail' | 'succeed'; depthRead?: boolea
     } : {}),
   } as never);
   const lines: string[] = [];
+  const opened: string[] = [];
   const jobs = new PrivateAnswerJobs({
+    openFile: async (path: string) => { opened.push(path); },
     model: () => panel,
     installId: () => INSTALL,
     eligible,
@@ -149,6 +177,8 @@ function world(options: { gateFirstCall?: 'fail' | 'succeed'; depthRead?: boolea
     events,
     inputs,
     lines,
+    opened,
+    sequence,
     revoked,
     failing,
     get guardCalls() { return guardCalls; },
@@ -312,8 +342,8 @@ describe('should-fix 5: an incomplete re-check fails closed for what it could no
   });
 });
 
-describe('the guard\'s cost, in guard calls per job', () => {
-  test('a precomputed full answer with relevance and a depth read, claimed once', async () => {
+describe('every hand-off is guarded', () => {
+  test('a precomputed full answer with relevance and a depth read: each model hand-off follows a guard call', async () => {
     const w = world({ relevance: 'stub', depthRead: true });
     const evidence = [lease(), hit('note', 'a note')];
     const { jobId } = w.jobs.begin({ question: 'q', count: 2, evidence, refresh: async () => evidence, detail: 'full' });
@@ -321,8 +351,79 @@ describe('the guard\'s cost, in guard calls per job', () => {
     const key = await generatePanelKeyPair();
     await w.jobs.claim(jobId!, key.publicKey);
     expect((await outcome(w.jobs, jobId!, key, w.lines)).status).toBe('ready');
-    // Dispatch, the document embeddings, the depth read, the answer, its one
-    // model call, and before and after sealing: one batched lookup each.
-    expect(w.guardCalls).toBe(7);
+    // Each hand-off (document embeddings, depth reads, the model call) has a
+    // guard call since the previous hand-off.
+    const submits = w.sequence.filter((entry) => entry.startsWith('submit:'));
+    expect(new Set(submits.map((entry) => entry.split(':')[1]))).toEqual(new Set(['embed', 'depth-read', 'depth', 'prompt']));
+    let guardedSinceLast = false;
+    // One batch (several items embedded or read at once) is one hand-off.
+    const handoffs = w.sequence
+      .filter((entry) => entry !== 'submit:depth')
+      .filter((entry, index, all) => entry === 'guard' || entry !== all[index - 1]);
+    for (const entry of handoffs) {
+      if (entry === 'guard') guardedSinceLast = true;
+      else {
+        expect(`${entry} guarded`).toBe(`${entry} ${guardedSinceLast ? 'guarded' : 'unguarded'}`);
+        guardedSinceLast = false;
+      }
+    }
+    // The answer sealed, then each hand-out of it asks again.
+    const before = w.guardCalls;
+    expect((await w.jobs.claim(jobId!, key.publicKey)).body.status).toBe('ready');
+    expect(w.guardCalls).toBe(before + 1);
+  });
+
+  test('a second model call (a retry or audit) after revocation is refused: no Secret byte, and no answer', async () => {
+    const w = world({ betweenCalls: () => w.revoke('password') });
+    const result = await w.panel.answerPrivately('q', [lease(), password()]).catch((error: Error) => error);
+    expect(w.calls).toBe(1);
+    expect(w.afterRevoke()).not.toContain(SENTINEL);
+    expect(result).toBeInstanceOf(Error);
+  });
+
+  test('a matched item with no readable text is counted only while it is still eligible', async () => {
+    const w = world();
+    const unreadable = { ...hit('scan', ''), chunks: [] };
+    w.revoke('scan');
+    const result = await w.panel.answerPrivately('q', [lease(), unreadable]);
+    expect(result.unanswered ?? []).toEqual([]);
+  });
+});
+
+describe('B-1: a sealed answer is withdrawn on every later hand-out once an item it read is revoked', () => {
+  test('sealed, then revoked: the next poll fails, the sealed bytes are gone, sources no longer open, and it stays failed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-eligibility-'));
+    const file = join(dir, 'lease.txt');
+    writeFileSync(file, 'x');
+    try {
+      const w = world({ localPath: file });
+      const evidence = [lease(), password()];
+      const { jobId } = w.jobs.begin({ question: 'q', count: 2, evidence, refresh: async () => evidence });
+      const key = await generatePanelKeyPair();
+      await w.jobs.claim(jobId!, key.publicKey);
+      await until(() => w.lines.some((line) => line.includes('outcome=sealed')));
+      const ready = await w.jobs.claim(jobId!, key.publicKey);
+      expect(ready.body.status).toBe('ready');
+      const opened = JSON.parse(await openPrivateAnswer(jobId!, key.privateKey, ready.body as unknown as SealedPrivateAnswer)) as { citations: Array<{ open?: { kind: string; token?: string } }> };
+      const token = opened.citations.map((citation) => citation.open).find((open) => open?.kind === 'mac')?.token;
+      expect(token).toBeDefined();
+      expect((await w.jobs.open(jobId!, token!)).status).toBe(204);
+
+      w.revoke('password');
+      const after = await w.jobs.claim(jobId!, key.publicKey);
+      expect(after).toEqual({ status: 200, body: { status: 'failed' } });
+      // The job no longer holds the sealed bytes, the items it read or its open tokens.
+      const held = (w.jobs as unknown as { jobs: Map<string, { outcome?: { kind: string }; sealedItems?: unknown; opens?: unknown }> }).jobs.get(jobId!)!;
+      expect(held.outcome).toEqual({ kind: 'failed' });
+      expect(held.sealedItems).toBeUndefined();
+      expect(held.opens).toBeUndefined();
+      expect((await w.jobs.open(jobId!, token!)).status).toBe(410);
+      expect(w.opened).toHaveLength(1);
+      // Restoring eligibility does not bring a withdrawn answer back.
+      w.revoked.delete('password');
+      expect(await w.jobs.claim(jobId!, key.publicKey)).toEqual({ status: 200, body: { status: 'failed' } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

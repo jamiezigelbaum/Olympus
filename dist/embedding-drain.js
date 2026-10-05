@@ -17066,6 +17066,21 @@ var init_local_index = __esm(() => {
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), () => "content").map((row) => searchRowFromItemRow(row));
     }
+    contentServedNow(localItemId) {
+      const row = this.db.query(`
+      SELECT trust_tier, provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0
+    `).get(localItemId);
+      if (!row || row.trust_tier === "S5")
+        return false;
+      const identity = {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      };
+      return this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+    }
     localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,

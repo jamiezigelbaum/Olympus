@@ -281,6 +281,12 @@ interface Job {
   pollTokens: number;
   pollRefilledAt: number;
   outcome?: { kind: 'sealed'; sealed: SealedPrivateAnswer } | { kind: 'failed' } | undefined;
+  /**
+   * The evidence items the sealed answer read, identities only (no text):
+   * every later hand-out of the sealed bytes, and every source open, asks
+   * the live guard about them first.
+   */
+  sealedItems?: readonly PrivateEvidenceItem[] | undefined;
   claimAbort?: AbortController;
   /**
    * This job's source-open capabilities: token → local file, minted when
@@ -542,6 +548,10 @@ export class PrivateAnswerJobs {
       return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     }
     if (outcome.kind === 'failed') return { status: 200, body: { status: 'failed' } };
+    // Every hand-out of the sealed bytes, not only the first: an item the
+    // answer read that is no longer eligible withdraws it for good.
+    if (!(await this.stillReleasable(job))) return this.jobs.get(jobId) === job ? { status: 200, body: { status: 'failed' } } : gone();
+    if (this.jobs.get(jobId) !== job || job.outcome !== outcome) return job.outcome?.kind === 'failed' ? { status: 200, body: { status: 'failed' } } : gone();
     return { status: 200, body: { status: 'ready', v: 1, ...outcome.sealed } };
   }
 
@@ -560,6 +570,8 @@ export class PrivateAnswerJobs {
     const path = job.opens?.get(token);
     if (!path || !this.options.openFile) return gone();
     if (!this.takeOpen(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: 5 };
+    // The answer's sources open only while every item it read is still eligible.
+    if (!(await this.stillReleasable(job)) || this.jobs.get(jobId) !== job) return gone();
     // The final path as it is now: a regular file, never a symlink swapped in since the token was minted.
     let isFile = false;
     try {
@@ -574,6 +586,23 @@ export class PrivateAnswerJobs {
       return { status: 200, body: { status: 'failed' } };
     }
     return { status: 204, body: { status: 'opened' } };
+  }
+
+  /**
+   * Whether a sealed answer may still be handed out: every item it read
+   * passes the live guard now. If not, the answer is withdrawn for good: the
+   * sealed bytes, the items and the source-open tokens are dropped and the
+   * job is failed.
+   */
+  private async stillReleasable(job: Job): Promise<boolean> {
+    if (job.outcome?.kind !== 'sealed') return false;
+    const ok = await checkPrivateEvidence(this.options.eligible, job.sealedItems ?? []);
+    // (An answer that read no item, such as "nothing was readable", holds no item text.)
+    if (job.sealedItems !== undefined && ok.every(Boolean) && job.outcome?.kind === 'sealed') return true;
+    job.outcome = { kind: 'failed' };
+    job.sealedItems = undefined;
+    job.opens = undefined;
+    return false;
   }
 
   /** Drops expired jobs (cancelling analyses no live job needs) and forgets shared answers past the dedupe window. */
@@ -594,6 +623,7 @@ export class PrivateAnswerJobs {
     job.refresh = undefined;
     job.outcome = undefined;
     job.opens = undefined;
+    job.sealedItems = undefined;
     this.jobs.delete(id);
   }
 
@@ -842,7 +872,11 @@ export class PrivateAnswerJobs {
         this.finish(analysis, 'failed', 'aborted');
         return;
       }
-      analysis.result = { ...preparedAnswer(done.result), usedKeys: usedKeys(evidence, done.used), usedItems: usedItems(evidence, done.used) };
+      analysis.result = {
+        ...preparedAnswer(done.result),
+        usedKeys: usedKeys(evidence, done.used),
+        usedItems: usedItems(evidence, done.used).map(identityOnly),
+      };
       this.finish(analysis, 'done');
     } catch (error) {
       if (!timedOut) this.finish(analysis, 'failed', error instanceof AnalysisStop ? error.reason : 'error');
@@ -924,7 +958,6 @@ export class PrivateAnswerJobs {
       if (analysis.readyAt !== undefined) timing.searchToReadyMs = Math.max(0, analysis.readyAt - job.createdAt);
     };
     const run = async () => {
-      const cached = job.evidence ?? [];
       const refresh = job.refresh;
       const question = job.question ?? '';
       job.evidence = undefined;
@@ -974,6 +1007,7 @@ export class PrivateAnswerJobs {
             if (settled) return;
             timing.precomputed = precomputed;
             timing.waitAtClaimMs = this.now() - claimedAt;
+            job.sealedItems = result.usedItems;
             settle({ kind: 'sealed', sealed });
             return;
           }
@@ -1112,6 +1146,33 @@ function usedKeys(evidence: readonly PrivateEvidenceItem[], used: readonly numbe
     keys.push(key);
   }
   return keys;
+}
+
+/** Text-bearing fields of an evidence item; an identity kept for the guard drops them. */
+const TEXT_FIELDS = new Set(['chunks', 'text', 'excerpt', 'passage', 'passages', 'snippet', 'internalContent', 'content', 'facts']);
+
+/**
+ * An evidence item as the guard needs it, without its text: its corpus,
+ * trust domain, tier fields and store identity (provenance keeps only its
+ * source item and citation title), so an answer kept for the dedupe window
+ * or a sealed job does not hold the items' passages.
+ */
+function identityOnly(item: PrivateEvidenceItem): PrivateEvidenceItem {
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (TEXT_FIELDS.has(key)) continue;
+    if (key === 'provenance') {
+      const provenance = asRecord(value);
+      const citation = asRecord(provenance?.citation);
+      kept.provenance = {
+        ...(provenance?.sourceItem !== undefined ? { sourceItem: provenance.sourceItem } : {}),
+        ...(citation?.title !== undefined ? { citation: { title: citation.title } } : {}),
+      };
+      continue;
+    }
+    kept[key] = value;
+  }
+  return kept;
 }
 
 /** The evidence items the answer read (all of them when the model did not say). */

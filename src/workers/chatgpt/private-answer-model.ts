@@ -204,7 +204,10 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       const full = request?.detail === 'full';
       if (!model) throw new Error('no private answer model');
       const read = privateEvidence(evidence, limits.maxPassageChars);
-      const unreadable = read.unreadable;
+      let unreadable = read.unreadable;
+      const readableHits = new Set(read.sources);
+      /** Matched items with no readable text: only counted, and only while still eligible. */
+      const unreadableHits = evidence.filter((_, index) => !readableHits.has(index));
       const hitOf = (index: number) => evidence[read.sources[index]!]!;
       // The readable items (indexes into read.items) still eligible now, by
       // the live guard. Every model submission below is issued right after
@@ -266,8 +269,13 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       // Readable items there were, but none may be read now: no evidence.
       const hadReadable = read.items.length > 0;
-      // Immediately before the answer: only items still eligible now.
-      picked = await admit(picked);
+      // Immediately before the answer: only items still eligible now (and
+      // only still-eligible unreadable items are counted), in one lookup.
+      {
+        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...unreadableHits]);
+        picked = picked.filter((_, position) => ok[position]);
+        unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
+      }
       if (hadReadable && picked.length === 0) throw new NoPrivateEvidenceError();
       const items = picked.map((index) => deepItems.get(index) ?? read.items[index]!);
       try {

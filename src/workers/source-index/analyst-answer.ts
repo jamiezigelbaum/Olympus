@@ -38,6 +38,7 @@ import {
   hasTemporalIntent,
   type ClassificationCoverageNote,
   type EvidencePackBuildDetail,
+  type LocalContentProvider,
   type LocalContentProviderMap,
   type SecretLocationNote,
   type SelectedEvidenceItem,
@@ -2637,18 +2638,21 @@ export async function searchPrivateEvidence(input: {
 /**
  * Whether each Private evidence item may be read by a model right now: the
  * private answer panel's eligibility guard, asked immediately before every
- * model submission and before an answer is sealed. Per item, from live state
- * only (no search, no cache): the item's corpus is still a registered
- * Private (secure_local) corpus; and its store's content provider still
- * serves its CONTENT under the owner's current read scope, which is the
- * store's own checks read now: the item exists and is not tombstoned, this
- * store's copy is current in the tier ledger (a move to Secrets supersedes
- * it) and holds the content layer, the owner's folder scope and metadata-only
- * rules allow its text, and its stored tier is not S5. Lanes are built per
- * call, so scope and registry are current. Fails closed: an error, a missing
- * corpus or provider, a names-only or content-held-elsewhere answer, or an
- * item without its store identity is not eligible. No query is passed, so
- * no embedding is computed.
+ * model submission and before an answer is sealed or released. Per item, from
+ * live state only (no search, no cache): the item's corpus is still a
+ * registered Private (secure_local) corpus, and its store's content provider
+ * would serve its CONTENT now under the owner's current read scope. For a
+ * connector store that is `contentServable` (connector-store/local-index.ts):
+ * the scope filters, then one item row and one tier-ledger read (the item
+ * exists and is not tombstoned, its stored tier is not S5, and this store's
+ * copy is current WITH the content layer, so a move to Secrets or Personal,
+ * or a copy that serves only names, refuses it); no chunk is loaded. Lanes
+ * are built per call, so scope and registry are current. A provider without
+ * that check is asked for the content itself and must return text. Owner
+ * tier rules are applied by the classification sweep, not here (see
+ * docs/design/chatgpt-plugin.md). Fails closed: an error, a missing corpus or
+ * provider, or an item without its store identity is not eligible. No query
+ * is passed, so no embedding is computed.
  */
 export async function checkPrivateEvidenceItems(input: {
   lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
@@ -2673,10 +2677,15 @@ export async function checkPrivateEvidenceItems(input: {
       const provenance = item.provenance as SourceIndexProvenance | undefined;
       if (!corpusId || !provenance?.sourceItem?.localItemId || item.trustDomain !== 'secure_local') return false;
       if (lanes.registry.get(corpusId)?.trustDomain !== 'secure_local') return false;
-      const provider = lanes.contentProviders[corpusId];
+      const provider = lanes.contentProviders[corpusId] as
+        | (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: 'secure_local' }) => boolean })
+        | undefined;
       if (!provider) return false;
+      if (typeof provider.contentServable === 'function') {
+        return provider.contentServable({ provenance, trustDomain: 'secure_local' }) === true;
+      }
       const content = await provider.fetchLocalContent({ provenance, trustDomain: 'secure_local', maxChars: 1 });
-      if (!content || content.namesOnly || content.contentPrivate) return false;
+      if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0) return false;
       if (content.sensitivity.trustDomain !== 'secure_local') return false;
       assertModelTrustTierAllowed(content.sensitivity.trustTier);
       return true;
