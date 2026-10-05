@@ -4,13 +4,15 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
   CONSULT_VOCABULARY_PACKS,
+  consultVocabularyFileStatus,
   consultVocabularyStatus,
   consultWriterContextFromPack,
   evaluateConsultQuestion,
@@ -18,6 +20,7 @@ import {
   reloadConsultVocabulary,
   type ConsultGateOptions,
 } from '../src/core/consult-gate.ts';
+import { V0_4_PUBLIC_PACKAGE_FILES } from '../src/core/public-surface.ts';
 import { writePack } from '../scripts/build-consult-vocabulary.ts';
 import { readManifest, writeManifest } from '../scripts/install-consult-language-pack.ts';
 
@@ -112,5 +115,66 @@ describe('user-installed language packs', () => {
     writeManifest(dir, manifest);
     const loaded = loadConsultVocabulary(CONSULT_VOCABULARY_PACKS, dir);
     expect(loaded.status.filter((entry) => entry.id === 'en-esdb').map((entry) => entry.origin)).toEqual(['shipped']);
+  });
+});
+
+describe('packaged layout', () => {
+  const REPO = join(import.meta.dir, '..');
+  const VOCABULARY = 'assets/consult/vocabulary';
+  const ALL = { languages: ['en', 'nl', 'fr', 'es', 'pt-PT', 'pt-BR'], domains: { units: true, countries: true, medicines: true, medicineBrands: true } } as const satisfies ConsultGateOptions;
+  const PACKAGE_FILES: readonly string[] = V0_4_PUBLIC_PACKAGE_FILES;
+
+  test('every shipped pack and its licence is a public package file, one by one, with the notices document', () => {
+    const shipped = readdirSync(join(REPO, VOCABULARY)).map((name) => `${VOCABULARY}/${name}`).sort();
+    expect(shipped).toEqual(Object.keys(CONSULT_VOCABULARY_PACKS).flatMap((id) => [`${VOCABULARY}/${id}.LICENSE.txt`, `${VOCABULARY}/${id}.txt.gz`]).sort());
+    expect(PACKAGE_FILES.filter((path) => path.startsWith(`${VOCABULARY}/`)).sort()).toEqual(shipped);
+    expect(PACKAGE_FILES).toContain('docs/THIRD_PARTY_DATA.md');
+  });
+
+  // The gate bundled into dist/ of a package holding only the public package
+  // files finds its packs; without them it refuses every request.
+  function runBundled(withPacks: boolean): { root: string | null; files: Array<{ id: string; state: string }>; verdict: { decision: string; reasons: string[] } } {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-consult-package-'));
+    dirs.push(dir);
+    const packageRoot = join(dir, 'package');
+    if (withPacks) {
+      for (const path of PACKAGE_FILES.filter((entry) => entry.startsWith('assets/consult/'))) {
+        mkdirSync(dirname(join(packageRoot, path)), { recursive: true });
+        copyFileSync(join(REPO, path), join(packageRoot, path));
+      }
+    }
+    const bundle = join(packageRoot, 'dist', 'index.js');
+    const built = spawnSync(process.execPath, ['build', join(REPO, 'src/core/consult-gate.ts'), '--target=node', '--format=esm', `--outfile=${bundle}`], { encoding: 'utf8' });
+    expect(built.status).toBe(0);
+    const probe = join(dir, 'probe.mjs');
+    writeFileSync(probe, [
+      `import * as gate from ${JSON.stringify(bundle)};`,
+      `const context = gate.consultWriterContextFromPack({ question: 'q', builtAt: 'x', candidates: [], coverage: { searchedCorpora: [], skippedCorpora: [], extractionGaps: [] } });`,
+      `console.log(JSON.stringify({ root: gate.consultVocabularyRoot() ?? null, files: gate.consultVocabularyFileStatus(${JSON.stringify(ALL)}, { HOME: ${JSON.stringify(dir)} }), verdict: gate.evaluateConsultQuestion('What is the usual notice period for ending a tenancy?', context) }));`,
+    ].join('\n'));
+    const run = spawnSync(process.execPath, [probe], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: dir } });
+    expect(run.status).toBe(0);
+    return JSON.parse(run.stdout) as ReturnType<typeof runBundled>;
+  }
+
+  test('a dist bundle in a package of the public files finds and verifies every pack', () => {
+    const result = runBundled(true);
+    expect(result.root?.endsWith(join('package'))).toBe(true);
+    expect(result.files.map((entry) => [entry.id, entry.state])).toEqual(
+      Object.keys(CONSULT_VOCABULARY_PACKS).sort().map((id) => [id, 'verified']),
+    );
+    expect(result.verdict).toEqual({ decision: 'pass', reasons: [] });
+  }, 60_000);
+
+  test('the same bundle without the packs refuses with vocabulary_unavailable', () => {
+    const result = runBundled(false);
+    expect(result.root).toBeNull();
+    expect(result.files.every((entry) => entry.state === 'missing')).toBe(true);
+    expect(result.verdict).toEqual({ decision: 'refuse', reasons: ['vocabulary_unavailable'] });
+  }, 60_000);
+
+  test('the doctor status hashes files only and matches the loader', () => {
+    expect(consultVocabularyFileStatus(ALL).map((entry) => entry.state)).toEqual(Object.keys(CONSULT_VOCABULARY_PACKS).map(() => 'verified'));
+    expect(consultVocabularyFileStatus({}).map((entry) => entry.id)).toEqual(['cldr-units', 'en-esdb', 'rx-ingredients']);
   });
 });

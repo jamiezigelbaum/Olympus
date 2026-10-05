@@ -62,6 +62,7 @@ import {
   zkapiConsultReadiness,
   type ZkapiConsultReadiness,
 } from './consult-transport-zkapi.ts';
+import { DEFAULT_CONSULT_LANGUAGES, consultVocabularyFileStatus } from './consult-gate.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -184,6 +185,7 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
     await safeCheck('argus_model_pool', () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck('sovereignty_model_lanes', () => sovereigntyModelLaneCheck(deps)),
     await safeCheck('zkapi_consult_transport', () => zkapiConsultTransportCheck(deps)),
+    await safeCheck('consult_vocabulary', () => consultVocabularyCheck(deps)),
     await safeCheck('email_worker', () => emailWorkerCheck(deps)),
     await safeCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
     await safeCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
@@ -598,6 +600,27 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
           'Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon.',
         ].filter((part): part is string => part !== undefined).join(' '),
       }),
+  };
+}
+
+/**
+ * The consult outbound gate's vocabulary packs, content-free: for the consult
+ * languages (the default until consult settings exist), whether each selected
+ * pack is present and matches its pinned hash. Doctor hashes the compressed
+ * files only; it loads no word list. Informational: nothing calls the gate yet,
+ * so a missing pack is reported but does not fail doctor.
+ */
+async function consultVocabularyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const name = 'consult_vocabulary';
+  const status = consultVocabularyFileStatus({}, deps.env ?? process.env);
+  const verified = status.every((entry) => entry.state === 'verified');
+  return {
+    name,
+    ok: true,
+    detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${DEFAULT_CONSULT_LANGUAGES.join(', ')} (default); ${status.map((entry) => `${entry.id} ${entry.state}`).join(', ')}.`,
+    ...(verified
+      ? {}
+      : { hint: 'A selected vocabulary pack is missing or does not match its pinned hash, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/.' }),
   };
 }
 

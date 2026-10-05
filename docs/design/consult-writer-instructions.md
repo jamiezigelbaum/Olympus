@@ -25,12 +25,22 @@ not for the calling agent. The orchestration pull request moves them to their
 loaded home.
 
 The mechanical subset of these rules is enforced by the outbound gate
-(`src/core/consult-gate.ts`). The gate rejects accidents and crude
-exfiltration. **Passing it does not make a question anonymous, and it is not
-de-identification.** The owner approves every consult, and **owner approval
-does not waive any rule below.** Never use the gate as a test bench: do not
-rephrase a refused question until it passes. A refusal means propose nothing,
-or write a different, more general question from scratch.
+(`src/core/consult-gate.ts`). What the gate guarantees is narrow and exact
+([`frontier-consult-lane.md`](frontier-consult-lane.md), section A.4). It
+refuses runs of four content words shared with what you saw, reordered copies,
+names, figures and identifiers that appear in what you saw, and repeats of a
+recent consult. **It cannot guarantee that a question carries no Private
+information.** Synonym paraphrase, rare combinations of ordinary words, a name
+that is a dictionary word written in lower-case prose, figures re-expressed by
+arithmetic, and covert channels in word choice all pass it. Passing it does not
+make a question anonymous, and it is not de-identification.
+
+Consults are automatic once the owner has set up outside help: no one reads a
+question before it leaves unless the owner has turned on strict mode, and
+**strict-mode approval does not waive any rule below.** The rules are yours to
+keep; the gate is not a substitute for them. Never use the gate as a test
+bench: do not rephrase a refused question until it passes. A refusal means
+propose nothing, or write a different, more general question from scratch.
 
 ---
 
@@ -48,9 +58,11 @@ What you propose is observable:
    a person's identity is often reconstructable from a single sentence that was
    never scrubbed. On an ordinary API route the provider also knows whose
    account is asking, so it needs no re-identification at all.
-2. **It is slow, metered and reviewed.** Every consult waits for the owner's
-   approval and then takes minutes. Treat each one as deliberate, not casual.
-   If your answer is already good enough, propose nothing.
+2. **It is slow, metered and unreviewed.** Every consult costs money and
+   takes minutes, and it is sent as you write it, without the owner reading
+   it first (unless the owner has turned on strict mode). Treat each one as
+   deliberate, not casual. If your answer is already good enough, propose
+   nothing.
 
 The core discipline, stated once: **retrieve general rules and raw data from
 the remote model; apply them locally, where nothing is observed.** The reply
@@ -280,4 +292,5 @@ These show the transformation, not a template to fill.
 
 Either no consult, or a list of up to three sub-questions, each standing alone.
 Never include your reasons, the evidence, or the owner's question alongside
-them; they are shown to the owner exactly as they would be sent.
+them; they are sent exactly as you write them (and, in strict mode, shown to
+the owner first).

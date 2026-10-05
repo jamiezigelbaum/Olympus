@@ -3,8 +3,9 @@
  *
  * A consult is a short request, written by a local writer model that has seen
  * Private evidence, which may then leave the machine. This module is the
- * mechanical check that runs on it before the owner is asked to approve it. It
- * is a pure function over:
+ * mechanical check that runs on it before it is sent (automatically, or after
+ * the owner's approval in strict mode). Nothing calls it on an answer path yet;
+ * the doctor reports its vocabulary packs. It is a pure function over:
  *
  *   - the proposed request: an array of at most CONSULT_GATE_MAX_SUB_QUESTIONS
  *     sub-questions, exactly as they would be sent;
@@ -13,13 +14,19 @@
  *     path, plus any text the writer saw outside the pack, such as a draft
  *     answer);
  *   - limits, which a caller may tighten but never loosen; and
- *   - optionally, recently approved consults (held in memory by the caller).
+ *   - optionally, recently sent consults (held in memory by the caller).
  *
  * It returns `pass` or `refuse` plus content-free reason codes.
  *
- * WHAT THIS IS, PLAINLY: it rejects accidents and crude exfiltration. Passing
- * it is NOT de-identification and does not make a question anonymous, and
- * owner approval does not waive the writer's rules.
+ * WHAT IT GUARANTEES, EXACTLY (design section A.4): it refuses runs of four
+ * content tokens shared with the snapshot, reordered copies, names, figures and
+ * identifiers that appear in the snapshot, and repeats of a recent consult. It
+ * CANNOT guarantee that a question carries no Private information: synonym
+ * paraphrase, rare combinations of ordinary words, a dictionary-word name in
+ * lower-case prose, figures re-expressed by arithmetic and covert channels in
+ * word choice pass it (see the known limits below). Passing it is NOT
+ * de-identification and does not make a question anonymous, and strict-mode
+ * approval does not waive the writer's rules.
  *
  * Two lines of defence. First, a vocabulary allowlist: every word in the
  * request must be in a word pack the owner has configured (ConsultGateOptions:
@@ -258,9 +265,10 @@ export type ConsultGateReason =
   | 'links_recent_consult';
 
 /**
- * `recentApprovedQuestions`: texts of consults the owner approved recently,
- * held in memory by the caller (the consult record is Private data, design
- * A.7) and passed per call. The gate keeps nothing between calls.
+ * `recentApprovedQuestions`: texts of consults sent recently (the name dates
+ * from when every consult was approved first), held in memory by the caller
+ * (the consult record is Private data, design A.7) and passed per call. The
+ * gate keeps nothing between calls.
  */
 export interface ConsultGateHistory {
   readonly recentApprovedQuestions?: readonly string[];
@@ -1079,12 +1087,22 @@ export function reloadConsultVocabulary(): void {
   vocabularyCache.clear();
 }
 
-function readPack(path: string, sha256: string): SortedPack | ConsultVocabularyPackStatus['state'] {
+// The compressed pack file if it exists, is within bounds and matches its pinned hash.
+function verifiedPackFile(path: string, sha256: string): Buffer | Exclude<ConsultVocabularyPackStatus['state'], 'loaded'> {
   try {
     if (!existsSync(path)) return 'missing';
     if (statSync(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES) return 'too_large';
     const gz = readFileSync(path);
-    if (createHash('sha256').update(gz).digest('hex') !== sha256) return 'hash_mismatch';
+    return createHash('sha256').update(gz).digest('hex') === sha256 ? gz : 'hash_mismatch';
+  } catch {
+    return 'unreadable';
+  }
+}
+
+function readPack(path: string, sha256: string): SortedPack | ConsultVocabularyPackStatus['state'] {
+  try {
+    const gz = verifiedPackFile(path, sha256);
+    if (typeof gz === 'string') return gz;
     let bytes: Buffer;
     try {
       bytes = gunzipSync(gz, { maxOutputLength: CONSULT_VOCABULARY_MAX_EXPANDED_BYTES });
@@ -1098,6 +1116,52 @@ function readPack(path: string, sha256: string): SortedPack | ConsultVocabularyP
 }
 
 /**
+ * The directory holding assets/consult/vocabulary: the package root. This
+ * module runs from src/core/ in a checkout and from a bundle in dist/ in a
+ * packaged install, so the nearer parent is tried first and a directory above
+ * the package is never preferred to the package's own.
+ */
+export function consultVocabularyRoot(moduleUrl: string = import.meta.url): string | undefined {
+  const here = dirname(fileURLToPath(moduleUrl));
+  return [join(here, '..'), join(here, '..', '..')].find((candidate) => existsSync(join(candidate, ...VOCABULARY_DIR)));
+}
+
+export interface ConsultVocabularyFileStatus {
+  readonly id: string;
+  readonly origin: 'shipped' | 'user';
+  readonly state: 'verified' | Exclude<ConsultVocabularyPackStatus['state'], 'loaded'>;
+}
+
+/**
+ * For status surfaces (doctor): whether each pack a configuration selects is
+ * present and matches its pinned hash (shipped) or its local manifest hash
+ * (user-installed). It hashes the compressed files only: nothing is
+ * decompressed, cached or admitted, so it costs no memory and changes no
+ * verdict. Content-free: pack ids and states only.
+ */
+export function consultVocabularyFileStatus(
+  options: ConsultGateOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+): readonly ConsultVocabularyFileStatus[] {
+  const selection = consultVocabularySelection(options);
+  const root = consultVocabularyRoot();
+  const status: ConsultVocabularyFileStatus[] = selection.shipped.map((id) => {
+    const result = root ? verifiedPackFile(join(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]!) : 'missing';
+    return { id, origin: 'shipped', state: typeof result === 'string' ? result : 'verified' };
+  });
+  if (selection.user.length > 0) {
+    const userDir = consultUserVocabularyDir(env);
+    const manifest = new Map(userManifestEntries(userDir));
+    for (const id of selection.user) {
+      const sha256 = manifest.get(id);
+      const result = !manifest.has(id) ? 'missing' : sha256 === undefined ? 'hash_mismatch' : verifiedPackFile(join(userDir, `${id}.txt.gz`), sha256);
+      status.push({ id, origin: 'user', state: typeof result === 'string' ? result : 'verified' });
+    }
+  }
+  return status;
+}
+
+/**
  * Load the given shipped packs (every one must verify, or the result is null)
  * and the given user-installed packs from `userDir` (each verified against the
  * local manifest; a failure skips only that pack). Never throws.
@@ -1107,8 +1171,7 @@ export function loadConsultVocabulary(
   userDir: string | null = null,
   userPacks: readonly string[] | 'all' = 'all',
 ): LoadedVocabulary {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const root = [join(here, '..', '..'), join(here, '..')].find((candidate) => existsSync(join(candidate, ...VOCABULARY_DIR)));
+  const root = consultVocabularyRoot();
   const loaded: SortedPack[] = [];
   const status: ConsultVocabularyPackStatus[] = [];
   let complete = root !== undefined;

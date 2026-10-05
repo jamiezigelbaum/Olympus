@@ -162,9 +162,10 @@ function assertCloudEmbeddingApproval(profile, approved) {
     throw new Error("Cloud embeddings require explicit corpus policy approval.");
   }
 }
-var SOURCE_FAMILIES, SOURCE_TRUST_DOMAINS;
+var SOURCE_FAMILIES, SOURCE_TRUST_TIERS, SOURCE_TRUST_DOMAINS;
 var init_types = __esm(() => {
   SOURCE_FAMILIES = ["email", "file", "chat", "calendar", "note", "task", "readwise", "x"];
+  SOURCE_TRUST_TIERS = ["S0", "S1", "S2", "S3", "S4", "S4+", "S5"];
   SOURCE_TRUST_DOMAINS = ["public_safe", "internal", "secure_local"];
 });
 
@@ -12316,7 +12317,7 @@ function asRecord6(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -15185,9 +15186,9 @@ function constantTimeStringEqual(actual, expected) {
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync15, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname16, join as join20 } from "node:path";
-import { homedir as homedir13 } from "node:os";
+import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname17, join as join21 } from "node:path";
+import { homedir as homedir14 } from "node:os";
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -16212,12 +16213,1213 @@ async function zkapiConsultReadiness(options) {
   };
 }
 
+// src/core/consult-gate.ts
+import { createHash as createHash7 } from "node:crypto";
+import { existsSync as existsSync11, readFileSync as readFileSync15, statSync as statSync11 } from "node:fs";
+import { homedir as homedir13 } from "node:os";
+import { dirname as dirname16, join as join20 } from "node:path";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
+init_opsec();
+init_types();
+var CONSULT_GATE_MAX_QUESTION_BYTES = 600;
+var CONSULT_GATE_MAX_QUESTION_TOKENS = 80;
+var CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576;
+var CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000;
+var DEFAULT_CONSULT_GATE_LIMITS = Object.freeze({
+  maxQuestionBytes: CONSULT_GATE_MAX_QUESTION_BYTES,
+  maxQuestionTokens: CONSULT_GATE_MAX_QUESTION_TOKENS,
+  maxWriterContextBytes: CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES,
+  maxWriterContextEntries: CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES
+});
+var PACK_PATH_KINDS = new Map([
+  ["question", "user_question"],
+  ["builtAt", "metadata"],
+  ["candidates[].trustTier", "vocabulary"],
+  ["candidates[].trustDomain", "vocabulary"],
+  ["candidates[].chunks[]", "text"],
+  ["candidates[].tables[].caption", "text"],
+  ["candidates[].tables[].columns[]", "text"],
+  ["candidates[].tables[].rows[][]", "text"],
+  ["candidates[].facts[].claim", "text"],
+  ["candidates[].facts[].factId", "metadata"],
+  ["candidates[].facts[].sensitivity.trustTier", "vocabulary"],
+  ["candidates[].facts[].sensitivity.trustDomain", "vocabulary"],
+  ["candidates[].facts[].confidence", "vocabulary"],
+  ["candidates[].facts[].extractionKind", "vocabulary"],
+  ["candidates[].facts[].releaseSurface", "vocabulary"],
+  ["candidates[].facts[].sourceInstructionFlags[]", "vocabulary"],
+  ["candidates[].score", "metadata"],
+  ["coverage.searchedCorpora[]", "text"],
+  ["coverage.skippedCorpora[].corpusId", "text"],
+  ["coverage.skippedCorpora[].reason", "text"],
+  ["coverage.extractionGaps[]", "text"],
+  ["coverage.matchCounts[].corpusId", "text"],
+  ["coverage.matchCounts[].family", "vocabulary"],
+  ["coverage.matchCounts[].matchedItems", "text"],
+  ["coverage.matchCounts[].contentMatchedItems", "text"],
+  ["coverage.matchCounts[].inEvidence", "text"]
+]);
+var PROVENANCE_PATH_KINDS = new Map([
+  ["sourceItem.family", "vocabulary"],
+  ["sourceItem.accountScope", "account_scope"],
+  ["chunk.sourceItem.family", "vocabulary"],
+  ["chunk.sourceItem.accountScope", "account_scope"],
+  ["chunk.chunkIndex", "metadata"],
+  ["chunk.span.charStart", "metadata"],
+  ["chunk.span.charEnd", "metadata"],
+  ["chunk.span.itemCharStart", "metadata"],
+  ["chunk.span.itemCharEnd", "metadata"],
+  ["chunk.span.chunkChars", "metadata"],
+  ["chunk.span.lane", "vocabulary"],
+  ["citation.authorLabel", "person_identifier"]
+]);
+var MAP_KEYS = new Set(["providerIds", "localIds"]);
+var PRODUCT_DEFAULT_SCOPES = new Set(["personal", "default", "primary"]);
+var SOURCE_INSTRUCTION_FLAGS = [
+  "ignore_previous_instructions",
+  "role_or_policy_override",
+  "credential_exfiltration_request",
+  "external_communication_request",
+  "tool_escalation_request",
+  "general_source_instruction"
+];
+var CLOSED_VALUES = new Map([
+  ["trustTier", SOURCE_TRUST_TIERS],
+  ["trustDomain", SOURCE_TRUST_DOMAINS],
+  ["family", SOURCE_FAMILIES],
+  ["confidence", ["low", "medium", "high"]],
+  ["extractionKind", ["quoted_fact", "paraphrase", "inference", "metadata"]],
+  ["releaseSurface", ["castor_answer", "user_review", "local_only"]],
+  ["sourceInstructionFlags", SOURCE_INSTRUCTION_FLAGS],
+  ["lane", ["keyword", "semantic"]]
+]);
+var EXTENSIBLE_CLOSED_KEYS = new Set(["trustDomain", "family"]);
+var NUMBER_PATHS = new Set([
+  "candidates[].score",
+  "coverage.matchCounts[].matchedItems",
+  "coverage.matchCounts[].contentMatchedItems",
+  "coverage.matchCounts[].inEvidence",
+  "chunk.chunkIndex",
+  "chunk.span.charStart",
+  "chunk.span.charEnd",
+  "chunk.span.itemCharStart",
+  "chunk.span.itemCharEnd",
+  "chunk.span.chunkChars"
+]);
+var BOOLEAN_PATHS = new Set([
+  "candidates[].facts[].sensitivity.localOnly",
+  "candidates[].facts[].sensitivity.cloudEmbeddingEligible",
+  "coverage.matchCounts[].atLeast"
+]);
+var SCHEMA_FIELD_NAMES = new Set([
+  "question",
+  "candidates",
+  "coverage",
+  "builtAt",
+  "provenance",
+  "trustTier",
+  "trustDomain",
+  "chunks",
+  "tables",
+  "facts",
+  "score",
+  "caption",
+  "columns",
+  "rows",
+  "factId",
+  "claim",
+  "sourceProvenance",
+  "sensitivity",
+  "localOnly",
+  "cloudEmbeddingEligible",
+  "confidence",
+  "extractionKind",
+  "sourceInstructionFlags",
+  "releaseSurface",
+  "sourceItem",
+  "chunk",
+  "providerIds",
+  "localIds",
+  "syncRunId",
+  "syncCheckpoint",
+  "citation",
+  "family",
+  "provider",
+  "accountScope",
+  "providerItemId",
+  "providerThreadId",
+  "providerConversationId",
+  "providerFileId",
+  "providerEventId",
+  "localItemId",
+  "sourceVersion",
+  "chunkId",
+  "chunkIndex",
+  "contentHash",
+  "span",
+  "charStart",
+  "charEnd",
+  "itemCharStart",
+  "itemCharEnd",
+  "chunkChars",
+  "lane",
+  "title",
+  "sourceLabel",
+  "conversationLabel",
+  "authorLabel",
+  "uri",
+  "authoredAt",
+  "updatedAt",
+  "searchedCorpora",
+  "skippedCorpora",
+  "corpusId",
+  "reason",
+  "extractionGaps",
+  "matchCounts",
+  "matchedItems",
+  "contentMatchedItems",
+  "atLeast",
+  "inEvidence"
+]);
+var CONSULT_VOCABULARY_PACKS = {
+  "en-esdb": "9d04850bf1b3c1a70ddf4c706c9d69fd99c205de11c822bb5a5f7a8360a5b4cc",
+  "nl-opentaal": "f3868461cc6dc9b758d7d4d11fd443e9f0310f10c5c4c7626cc9c2d523fade80",
+  "fr-grammalecte": "d4aa9fb6947d382025a28ded59bdb8fcb2406dc6dc630be57fa0bc7f72e21582",
+  "es-hunspell": "0950c5880f7c39e48a31ecb15571be88c738acfd14191e32a35743f9ac204510",
+  "pt-br-hunspell": "69411801530ac979cfa60ae1e0463a07b4e4b6c3684d0603408dfb76d4e5f868",
+  "pt-pt-hunspell": "61d7365a29d9c2f15d60dd3033b464c87b459d0b779b0979c62bb17425ebcd4c",
+  "cldr-units": "19c8502b1c09353e3011b8683dede75229984b924218d0dae31f092b89dff177",
+  "cldr-countries": "1e90b040de7bfa69ce6f134021b6adf3c5ac48f578b958fd676a2cb28b577e75",
+  "rx-ingredients": "edaff96cb6251b73387889d1503280a81f7e59693c6f915056bae321777baae2",
+  "rx-brands": "ea5dd90a5131aeee31e1d009b5d975bc792775361e0b9e9a1989e7b427bea2ca"
+};
+var CONSULT_LANGUAGE_PACKS = {
+  en: "en-esdb",
+  nl: "nl-opentaal",
+  fr: "fr-grammalecte",
+  es: "es-hunspell",
+  "pt-PT": "pt-pt-hunspell",
+  "pt-BR": "pt-br-hunspell",
+  de: "de-hunspell",
+  it: "it-hunspell"
+};
+var DEFAULT_CONSULT_DOMAIN_PACKS = Object.freeze({
+  units: true,
+  countries: false,
+  medicines: true,
+  medicineBrands: false
+});
+var DOMAIN_PACK_IDS = {
+  units: "cldr-units",
+  countries: "cldr-countries",
+  medicines: "rx-ingredients",
+  medicineBrands: "rx-brands"
+};
+var DEFAULT_CONSULT_LANGUAGES = Object.freeze(["en"]);
+function consultVocabularySelection(options = {}) {
+  const languages = [...new Set(options.languages && options.languages.length > 0 ? options.languages : DEFAULT_CONSULT_LANGUAGES)];
+  const domains = { ...DEFAULT_CONSULT_DOMAIN_PACKS, ...options.domains };
+  const shipped = [];
+  const user = [];
+  for (const language of languages) {
+    const id = CONSULT_LANGUAGE_PACKS[language];
+    if (!id)
+      continue;
+    (id in CONSULT_VOCABULARY_PACKS ? shipped : user).push(id);
+  }
+  for (const [domain, enabled] of Object.entries(domains)) {
+    if (enabled && DOMAIN_PACK_IDS[domain])
+      shipped.push(DOMAIN_PACK_IDS[domain]);
+  }
+  return { shipped: shipped.sort(), user: user.sort() };
+}
+var VOCABULARY_DIR = ["assets", "consult", "vocabulary"];
+var CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
+var CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
+function consultUserVocabularyDir(env = process.env) {
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join20(env.HOME?.trim() || homedir13(), ".olympus", "consult", "vocabulary");
+}
+var vocabularyCache = new Map;
+function verifiedPackFile(path, sha256) {
+  try {
+    if (!existsSync11(path))
+      return "missing";
+    if (statSync11(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
+      return "too_large";
+    const gz = readFileSync15(path);
+    return createHash7("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+  } catch {
+    return "unreadable";
+  }
+}
+function consultVocabularyRoot(moduleUrl = import.meta.url) {
+  const here = dirname16(fileURLToPath5(moduleUrl));
+  return [join20(here, ".."), join20(here, "..", "..")].find((candidate) => existsSync11(join20(candidate, ...VOCABULARY_DIR)));
+}
+function consultVocabularyFileStatus(options = {}, env = process.env) {
+  const selection = consultVocabularySelection(options);
+  const root = consultVocabularyRoot();
+  const status = selection.shipped.map((id) => {
+    const result = root ? verifiedPackFile(join20(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
+  });
+  if (selection.user.length > 0) {
+    const userDir = consultUserVocabularyDir(env);
+    const manifest = new Map(userManifestEntries(userDir));
+    for (const id of selection.user) {
+      const sha256 = manifest.get(id);
+      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join20(userDir, `${id}.txt.gz`), sha256);
+      status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
+    }
+  }
+  return status;
+}
+function userManifestEntries(userDir) {
+  if (!userDir)
+    return [];
+  try {
+    const path = join20(userDir, "manifest.json");
+    if (!existsSync11(path) || statSync11(path).size > 1024 * 1024)
+      return [];
+    const manifest = JSON.parse(readFileSync15(path, "utf8"));
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
+      return [];
+    const packs = manifest.packs;
+    if (!packs || typeof packs !== "object" || Array.isArray(packs))
+      return [];
+    return Object.entries(packs).filter(([id]) => /^[a-z0-9-]{1,40}$/u.test(id)).map(([id, entry]) => {
+      const sha256 = entry && typeof entry === "object" ? entry.sha256 : undefined;
+      return [id, typeof sha256 === "string" && /^[0-9a-f]{64}$/u.test(sha256) ? sha256 : undefined];
+    });
+  } catch {
+    return [];
+  }
+}
+var FUNCTION_WORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "of",
+  "to",
+  "in",
+  "on",
+  "at",
+  "for",
+  "by",
+  "with",
+  "from",
+  "into",
+  "over",
+  "under",
+  "about",
+  "and",
+  "or",
+  "but",
+  "nor",
+  "if",
+  "then",
+  "than",
+  "so",
+  "as",
+  "not",
+  "no",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "am",
+  "do",
+  "does",
+  "did",
+  "has",
+  "have",
+  "had",
+  "it",
+  "its",
+  "this",
+  "that",
+  "these",
+  "those",
+  "there",
+  "here",
+  "what",
+  "which",
+  "who",
+  "whom",
+  "whose",
+  "how",
+  "when",
+  "where",
+  "why",
+  "can",
+  "could",
+  "should",
+  "would",
+  "will",
+  "shall",
+  "may",
+  "might",
+  "must",
+  "i",
+  "you",
+  "he",
+  "she",
+  "we",
+  "they",
+  "me",
+  "him",
+  "her",
+  "us",
+  "them",
+  "my",
+  "your",
+  "his",
+  "our",
+  "their",
+  "de",
+  "het",
+  "een",
+  "en",
+  "of",
+  "van",
+  "te",
+  "op",
+  "aan",
+  "met",
+  "voor",
+  "naar",
+  "bij",
+  "uit",
+  "om",
+  "over",
+  "dat",
+  "die",
+  "dit",
+  "deze",
+  "wat",
+  "wie",
+  "hoe",
+  "waar",
+  "wanneer",
+  "is",
+  "zijn",
+  "was",
+  "wordt",
+  "worden",
+  "heeft",
+  "hebben",
+  "kan",
+  "moet",
+  "mag",
+  "niet",
+  "geen",
+  "er",
+  "hij",
+  "zij",
+  "ze",
+  "wij",
+  "we",
+  "jij",
+  "u",
+  "mijn",
+  "uw",
+  "hun",
+  "le",
+  "la",
+  "les",
+  "l",
+  "un",
+  "une",
+  "des",
+  "du",
+  "d",
+  "au",
+  "aux",
+  "et",
+  "ou",
+  "mais",
+  "que",
+  "qu",
+  "qui",
+  "quoi",
+  "quel",
+  "quelle",
+  "quels",
+  "quelles",
+  "dans",
+  "sur",
+  "sous",
+  "par",
+  "pour",
+  "avec",
+  "sans",
+  "entre",
+  "ce",
+  "cet",
+  "cette",
+  "ces",
+  "son",
+  "sa",
+  "ses",
+  "leur",
+  "leurs",
+  "il",
+  "elle",
+  "ils",
+  "elles",
+  "on",
+  "se",
+  "s",
+  "ne",
+  "pas",
+  "est",
+  "sont",
+  "a",
+  "ont",
+  "etre",
+  "avoir",
+  "peut",
+  "doit",
+  "comment",
+  "quand",
+  "combien",
+  "y",
+  "en",
+  "t",
+  "c",
+  "el",
+  "los",
+  "las",
+  "un",
+  "una",
+  "unos",
+  "unas",
+  "del",
+  "al",
+  "y",
+  "o",
+  "pero",
+  "que",
+  "cual",
+  "cuales",
+  "quien",
+  "en",
+  "por",
+  "para",
+  "con",
+  "sin",
+  "entre",
+  "sobre",
+  "este",
+  "esta",
+  "estos",
+  "estas",
+  "ese",
+  "esa",
+  "su",
+  "sus",
+  "se",
+  "lo",
+  "le",
+  "les",
+  "es",
+  "son",
+  "ser",
+  "esta",
+  "hay",
+  "puede",
+  "debe",
+  "como",
+  "cuando",
+  "cuanto",
+  "donde",
+  "no",
+  "mas",
+  "o",
+  "os",
+  "as",
+  "um",
+  "uma",
+  "uns",
+  "umas",
+  "do",
+  "da",
+  "dos",
+  "das",
+  "no",
+  "na",
+  "nos",
+  "nas",
+  "ao",
+  "aos",
+  "e",
+  "ou",
+  "mas",
+  "que",
+  "qual",
+  "quais",
+  "quem",
+  "em",
+  "por",
+  "para",
+  "com",
+  "sem",
+  "entre",
+  "sobre",
+  "este",
+  "esta",
+  "esse",
+  "essa",
+  "seu",
+  "sua",
+  "seus",
+  "suas",
+  "se",
+  "ele",
+  "ela",
+  "eles",
+  "elas",
+  "e",
+  "sao",
+  "ser",
+  "tem",
+  "pode",
+  "deve",
+  "como",
+  "quando",
+  "quanto",
+  "onde",
+  "nao",
+  "mais",
+  "um",
+  "der",
+  "die",
+  "das",
+  "den",
+  "dem",
+  "des",
+  "ein",
+  "eine",
+  "einen",
+  "einem",
+  "einer",
+  "eines",
+  "und",
+  "oder",
+  "aber",
+  "dass",
+  "wer",
+  "was",
+  "welche",
+  "welcher",
+  "welches",
+  "wie",
+  "wo",
+  "wann",
+  "in",
+  "im",
+  "an",
+  "am",
+  "auf",
+  "aus",
+  "bei",
+  "mit",
+  "nach",
+  "von",
+  "vom",
+  "zu",
+  "zum",
+  "zur",
+  "fur",
+  "uber",
+  "unter",
+  "zwischen",
+  "ist",
+  "sind",
+  "war",
+  "wird",
+  "werden",
+  "hat",
+  "haben",
+  "kann",
+  "muss",
+  "soll",
+  "nicht",
+  "kein",
+  "keine",
+  "sich",
+  "es",
+  "er",
+  "sie",
+  "wir",
+  "ihr",
+  "ihre",
+  "sein",
+  "seine",
+  "il",
+  "lo",
+  "la",
+  "i",
+  "gli",
+  "le",
+  "un",
+  "uno",
+  "una",
+  "di",
+  "del",
+  "della",
+  "dei",
+  "delle",
+  "a",
+  "al",
+  "alla",
+  "da",
+  "dal",
+  "in",
+  "nel",
+  "nella",
+  "con",
+  "su",
+  "per",
+  "tra",
+  "fra",
+  "e",
+  "o",
+  "ma",
+  "che",
+  "chi",
+  "quale",
+  "quali",
+  "come",
+  "quando",
+  "quanto",
+  "dove",
+  "non",
+  "si",
+  "ci",
+  "suo",
+  "sua",
+  "loro",
+  "questo",
+  "questa",
+  "e",
+  "sono",
+  "essere",
+  "ha",
+  "hanno",
+  "puo",
+  "deve"
+]);
+var NAME_STOPWORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "of",
+  "to",
+  "in",
+  "on",
+  "at",
+  "for",
+  "by",
+  "with",
+  "from",
+  "and",
+  "or",
+  "but",
+  "if",
+  "as",
+  "so",
+  "than",
+  "then",
+  "not",
+  "no",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "do",
+  "does",
+  "did",
+  "has",
+  "have",
+  "had",
+  "it",
+  "its",
+  "this",
+  "that",
+  "these",
+  "those",
+  "there",
+  "here",
+  "what",
+  "which",
+  "who",
+  "how",
+  "when",
+  "where",
+  "why",
+  "i",
+  "you",
+  "he",
+  "she",
+  "we",
+  "they",
+  "my",
+  "your",
+  "our",
+  "their",
+  "his",
+  "her",
+  "dear",
+  "mr",
+  "mrs",
+  "ms",
+  "dr",
+  "january",
+  "february",
+  "march",
+  "april",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday"
+]);
+var NUMBER_WORDS = new Map([
+  ["zero", 0],
+  ["oh", 0],
+  ["one", 1],
+  ["two", 2],
+  ["three", 3],
+  ["four", 4],
+  ["five", 5],
+  ["six", 6],
+  ["seven", 7],
+  ["eight", 8],
+  ["nine", 9],
+  ["ten", 10],
+  ["eleven", 11],
+  ["twelve", 12],
+  ["thirteen", 13],
+  ["fourteen", 14],
+  ["fifteen", 15],
+  ["sixteen", 16],
+  ["seventeen", 17],
+  ["eighteen", 18],
+  ["nineteen", 19],
+  ["twenty", 20],
+  ["thirty", 30],
+  ["forty", 40],
+  ["fifty", 50],
+  ["sixty", 60],
+  ["seventy", 70],
+  ["eighty", 80],
+  ["ninety", 90],
+  ["first", 1],
+  ["second", 2],
+  ["third", 3],
+  ["fourth", 4],
+  ["fifth", 5],
+  ["sixth", 6],
+  ["seventh", 7],
+  ["eighth", 8],
+  ["ninth", 9],
+  ["tenth", 10],
+  ["eleventh", 11],
+  ["twelfth", 12],
+  ["thirteenth", 13],
+  ["fourteenth", 14],
+  ["fifteenth", 15],
+  ["sixteenth", 16],
+  ["seventeenth", 17],
+  ["eighteenth", 18],
+  ["nineteenth", 19],
+  ["twentieth", 20],
+  ["thirtieth", 30],
+  ["un", 1],
+  ["une", 1],
+  ["deux", 2],
+  ["trois", 3],
+  ["quatre", 4],
+  ["cinq", 5],
+  ["sept", 7],
+  ["huit", 8],
+  ["neuf", 9],
+  ["dix", 10],
+  ["onze", 11],
+  ["douze", 12],
+  ["treize", 13],
+  ["quatorze", 14],
+  ["quinze", 15],
+  ["seize", 16],
+  ["vingt", 20],
+  ["vingts", 20],
+  ["trente", 30],
+  ["quarante", 40],
+  ["cinquante", 50],
+  ["soixante", 60],
+  ["premier", 1],
+  ["uno", 1],
+  ["una", 1],
+  ["dos", 2],
+  ["tres", 3],
+  ["cuatro", 4],
+  ["cinco", 5],
+  ["seis", 6],
+  ["siete", 7],
+  ["ocho", 8],
+  ["nueve", 9],
+  ["diez", 10],
+  ["once", 11],
+  ["doce", 12],
+  ["trece", 13],
+  ["catorce", 14],
+  ["quince", 15],
+  ["dieciseis", 16],
+  ["diecisiete", 17],
+  ["dieciocho", 18],
+  ["diecinueve", 19],
+  ["veinte", 20],
+  ["veintiuno", 21],
+  ["veintidos", 22],
+  ["veintitres", 23],
+  ["veinticuatro", 24],
+  ["veinticinco", 25],
+  ["veintiseis", 26],
+  ["veintisiete", 27],
+  ["veintiocho", 28],
+  ["veintinueve", 29],
+  ["treinta", 30],
+  ["cuarenta", 40],
+  ["cincuenta", 50],
+  ["sesenta", 60],
+  ["setenta", 70],
+  ["ochenta", 80],
+  ["noventa", 90],
+  ["doscientos", 200],
+  ["trescientos", 300],
+  ["cuatrocientos", 400],
+  ["quinientos", 500],
+  ["seiscientos", 600],
+  ["setecientos", 700],
+  ["ochocientos", 800],
+  ["novecientos", 900],
+  ["primero", 1],
+  ["um", 1],
+  ["dois", 2],
+  ["duas", 2],
+  ["quatro", 4],
+  ["sete", 7],
+  ["oito", 8],
+  ["nove", 9],
+  ["dez", 10],
+  ["catorze", 14],
+  ["dezesseis", 16],
+  ["dezasseis", 16],
+  ["dezessete", 17],
+  ["dezassete", 17],
+  ["dezoito", 18],
+  ["dezenove", 19],
+  ["dezanove", 19],
+  ["vinte", 20],
+  ["trinta", 30],
+  ["quarenta", 40],
+  ["cinquenta", 50],
+  ["sessenta", 60],
+  ["oitenta", 80],
+  ["duzentos", 200],
+  ["trezentos", 300],
+  ["quatrocentos", 400],
+  ["quinhentos", 500],
+  ["oitocentos", 800],
+  ["primeiro", 1],
+  ["een", 1],
+  ["twee", 2],
+  ["drie", 3],
+  ["vier", 4],
+  ["vijf", 5],
+  ["zes", 6],
+  ["zeven", 7],
+  ["acht", 8],
+  ["negen", 9],
+  ["tien", 10],
+  ["elf", 11],
+  ["twaalf", 12],
+  ["dertien", 13],
+  ["veertien", 14],
+  ["vijftien", 15],
+  ["zestien", 16],
+  ["zeventien", 17],
+  ["achttien", 18],
+  ["negentien", 19],
+  ["twintig", 20],
+  ["dertig", 30],
+  ["veertig", 40],
+  ["vijftig", 50],
+  ["zestig", 60],
+  ["zeventig", 70],
+  ["tachtig", 80],
+  ["negentig", 90],
+  ["eins", 1],
+  ["ein", 1],
+  ["eine", 1],
+  ["zwei", 2],
+  ["drei", 3],
+  ["funf", 5],
+  ["sechs", 6],
+  ["sieben", 7],
+  ["neun", 9],
+  ["zehn", 10],
+  ["zwolf", 12],
+  ["dreizehn", 13],
+  ["vierzehn", 14],
+  ["funfzehn", 15],
+  ["sechzehn", 16],
+  ["siebzehn", 17],
+  ["achtzehn", 18],
+  ["neunzehn", 19],
+  ["zwanzig", 20],
+  ["dreissig", 30],
+  ["vierzig", 40],
+  ["funfzig", 50],
+  ["sechzig", 60],
+  ["siebzig", 70],
+  ["achtzig", 80],
+  ["neunzig", 90],
+  ["erste", 1],
+  ["ersten", 1],
+  ["due", 2],
+  ["tre", 3],
+  ["quattro", 4],
+  ["cinque", 5],
+  ["sei", 6],
+  ["sette", 7],
+  ["otto", 8],
+  ["dieci", 10],
+  ["undici", 11],
+  ["dodici", 12],
+  ["tredici", 13],
+  ["quattordici", 14],
+  ["quindici", 15],
+  ["sedici", 16],
+  ["diciassette", 17],
+  ["diciotto", 18],
+  ["diciannove", 19],
+  ["venti", 20],
+  ["vent", 20],
+  ["trenta", 30],
+  ["trent", 30],
+  ["quaranta", 40],
+  ["quarant", 40],
+  ["cinquanta", 50],
+  ["cinquant", 50],
+  ["sessanta", 60],
+  ["sessant", 60],
+  ["settanta", 70],
+  ["settant", 70],
+  ["ottanta", 80],
+  ["ottant", 80],
+  ["novanta", 90],
+  ["novant", 90],
+  ["primo", 1]
+]);
+var SCALE_WORDS = new Map([
+  ["hundred", 100],
+  ["thousand", 1000],
+  ["million", 1e6],
+  ["billion", 1e9],
+  ["cent", 100],
+  ["cents", 100],
+  ["mille", 1000],
+  ["millions", 1e6],
+  ["milliard", 1e9],
+  ["cien", 100],
+  ["ciento", 100],
+  ["mil", 1000],
+  ["millon", 1e6],
+  ["millones", 1e6],
+  ["cem", 100],
+  ["cento", 100],
+  ["milhao", 1e6],
+  ["milhoes", 1e6],
+  ["honderd", 100],
+  ["duizend", 1000],
+  ["miljoen", 1e6],
+  ["hundert", 100],
+  ["tausend", 1000],
+  ["millionen", 1e6],
+  ["mila", 1000],
+  ["milione", 1e6],
+  ["milioni", 1e6]
+]);
+var NUMBER_CONNECTORS = new Set(["and", "et", "y", "e", "en", "und"]);
+var SCALE_ARTICLES = new Set(["a", "an", "one", "un", "une", "uno", "una", "um", "uma", "een", "ein", "eine"]);
+var DECIMAL_WORDS = new Set(["point", "virgule", "coma", "virgula", "komma"]);
+var NUMBER_PARTS = [...NUMBER_WORDS.keys(), ...SCALE_WORDS.keys(), "en", "und", "e"].sort((a, b) => b.length - a.length);
+var PROSE_PATHS = new Set(["candidates[].chunks[]", "candidates[].facts[].claim", "writerVisible[]"]);
+var SEP = String.fromCharCode(1);
+var MONTH_NAMES = buildMonthNames();
+function buildMonthNames() {
+  const names = new Map;
+  const lists = [
+    ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"],
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"],
+    ["janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre", "novembre", "decembre"],
+    ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
+    ["januar", "februar", "marz", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "dezember"],
+    ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"],
+    ["janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"],
+    ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"]
+  ];
+  for (const list of lists)
+    list.forEach((name, index) => names.set(name, index + 1));
+  names.set("sept", 9);
+  return names;
+}
+var ROMAN_MONTHS = new Map(["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"].map((numeral, index) => [numeral, index + 1]));
+var DATE_JOINERS = new Set(["of", "de", "del", "van", "in", "the", "du", "des", "le", "el", "em", "op", "am", "den", "il", "di", "da", "do"]);
+var UNIT_WORDS = new Set([
+  "%",
+  "percent",
+  "mg",
+  "mcg",
+  "g",
+  "kg",
+  "lb",
+  "lbs",
+  "oz",
+  "ml",
+  "l",
+  "km",
+  "m",
+  "cm",
+  "mm",
+  "mi",
+  "ft",
+  "h",
+  "hr",
+  "hrs",
+  "min",
+  "mins",
+  "s",
+  "sec",
+  "ms",
+  "kb",
+  "mb",
+  "gb",
+  "tb",
+  "kwh",
+  "w",
+  "kw",
+  "eur",
+  "usd",
+  "gbp",
+  "chf",
+  "jpy",
+  "cad",
+  "aud",
+  "euro",
+  "euros",
+  "dollars",
+  "pounds",
+  "k",
+  "bn",
+  "million",
+  "billion",
+  "mmol",
+  "iu",
+  "bpm",
+  "mmhg",
+  "years",
+  "yrs",
+  "months",
+  "weeks",
+  "days",
+  "units",
+  "hours",
+  "minutes",
+  "anos",
+  "ans",
+  "annees",
+  "anni",
+  "jaar",
+  "jahre",
+  "jahren",
+  "meses",
+  "mois",
+  "maanden",
+  "monate",
+  "mesi",
+  "dias",
+  "jours",
+  "dagen",
+  "tage",
+  "giorni",
+  "semanas",
+  "semaines",
+  "weken",
+  "wochen",
+  "settimane",
+  "horas",
+  "heures",
+  "uur",
+  "stunden",
+  "ore",
+  "minutos",
+  "minuten",
+  "minuti",
+  "euro",
+  "dolares",
+  "reais",
+  "real",
+  "libras",
+  "francs",
+  "franken",
+  "kilos",
+  "gramos",
+  "grammes",
+  "gramm",
+  "grammi",
+  "metros",
+  "metres",
+  "meter",
+  "metri",
+  "litros",
+  "litres",
+  "liter",
+  "litri",
+  "procent",
+  "prozent",
+  "percento",
+  "porcento",
+  "pourcent",
+  "$",
+  "€",
+  "£",
+  "¥",
+  "₹"
+]);
+
 // src/core/doctor.ts
 function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir13();
+  const home = env.HOME?.trim() || homedir14();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" ? inspectEngine({ homeDir: home }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync11(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync12(workerServicePaths(process.platform, home).unitPath) : false;
   return {
     ...openclawPath ? { openclawPath } : {},
     engine: { installed: engine.installed, state: engine.state },
@@ -16255,6 +17457,7 @@ async function runDoctor(input) {
     await safeCheck("argus_model_pool", () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck("sovereignty_model_lanes", () => sovereigntyModelLaneCheck(deps)),
     await safeCheck("zkapi_consult_transport", () => zkapiConsultTransportCheck(deps)),
+    await safeCheck("consult_vocabulary", () => consultVocabularyCheck(deps)),
     await safeCheck("email_worker", () => emailWorkerCheck(deps)),
     await safeCheck("worker_credential_lanes", () => workerCredentialLanesCheck(deps)),
     await safeCheck("dropbox_content_extraction_throughput", () => dropboxContentExtractionThroughputCheck(deps)),
@@ -16298,7 +17501,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync11(configPath))
+  if (configPath === undefined || !existsSync12(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -16310,7 +17513,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join20(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join21(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -16550,6 +17753,17 @@ async function zkapiConsultTransportCheck(deps) {
         "Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon."
       ].filter((part) => part !== undefined).join(" ")
     }
+  };
+}
+async function consultVocabularyCheck(deps) {
+  const name = "consult_vocabulary";
+  const status = consultVocabularyFileStatus({}, deps.env ?? process.env);
+  const verified = status.every((entry) => entry.state === "verified");
+  return {
+    name,
+    ok: true,
+    detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${DEFAULT_CONSULT_LANGUAGES.join(", ")} (default); ${status.map((entry) => `${entry.id} ${entry.state}`).join(", ")}.`,
+    ...verified ? {} : { hint: "A selected vocabulary pack is missing or does not match its pinned hash, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." }
   };
 }
 function describeZkapiReadiness(readiness) {
@@ -17264,7 +18478,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join20(dirname16(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join21(dirname17(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -17285,9 +18499,9 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync11(path))
+    if (!existsSync12(path))
       return;
-    const parsed = JSON.parse(readFileSync15(path, "utf8"));
+    const parsed = JSON.parse(readFileSync16(path, "utf8"));
     const record = asRecord15(parsed);
     const sources = asRecord15(record.sources);
     const normalized = {};
@@ -17308,7 +18522,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync9(dirname16(path), { recursive: true });
+  mkdirSync9(dirname17(path), { recursive: true });
   writeFileSync6(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -17522,7 +18736,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync11(join20(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync12(join21(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -19973,7 +21187,7 @@ function sourceWatchRouteFromToolContext(context) {
   const ownerSeed = context.requesterSenderId?.trim() || context.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId = `owner:${createHash7("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId = `owner:${createHash8("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context.deliveryContext?.channel || context.messageChannel)?.trim().toLowerCase();
   const target = context.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

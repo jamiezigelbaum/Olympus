@@ -231,6 +231,7 @@ describe('runDoctor', () => {
       'argus_model_pool',
       'sovereignty_model_lanes',
       'zkapi_consult_transport',
+      'consult_vocabulary',
       'email_worker',
       'worker_credential_lanes',
       'dropbox_content_extraction_throughput',
@@ -238,6 +239,11 @@ describe('runDoctor', () => {
       'source_scheduler_status',
       'source_ingestion_health',
     ]);
+    expect(checkByName(result.checks, 'consult_vocabulary')).toEqual({
+      name: 'consult_vocabulary',
+      ok: true,
+      detail: 'Consult vocabulary (no consult is sent until the consult lane lands): languages en (default); cldr-units verified, en-esdb verified, rx-ingredients verified.',
+    });
     expect(checkByName(result.checks, 'argus_model_pool').detail).toContain('no sovereignty posture configured yet');
     expect(checkByName(result.checks, 'email_worker').detail).toContain('no worker health or credential failures');
     expect(checkByName(result.checks, 'source_index_status').detail)
