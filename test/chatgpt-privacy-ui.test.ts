@@ -655,6 +655,89 @@ describe('saving', () => {
   });
 });
 
+describe('follow-up questions', () => {
+  const Q = W.questions;
+  const OWNER = 'I want my family stuff to stay private';
+  const radio = (host: Host, key: string) => host.doc.querySelector(`input[data-key="privacy:q:${key}"]`) as unknown as HTMLInputElement;
+
+  test('a broad word asks short questions, each choice a labelled Private / Fine to share pair at its default', async () => {
+    const { host } = await openPrivacy({ description: OWNER });
+    const section = host.doc.querySelector('section.questions')!;
+    expect(section.querySelector('h2')!.textContent).toBe(Q.title);
+    expect(section.textContent).toContain(Q.intro);
+    expect(section.querySelector('h3')!.textContent).toBe(Q.topics.family.question);
+    const rows = Array.from(section.querySelectorAll('[role="radiogroup"]'));
+    expect(rows.map((row) => host.doc.getElementById(row.getAttribute('aria-labelledby')!)!.textContent)).toEqual(Object.values(Q.topics.family.options));
+    // Real labels around real radio buttons: keyboard operable as a group.
+    const logistics = rows[3]!;
+    const inputs = Array.from(logistics.querySelectorAll('input')) as unknown as HTMLInputElement[];
+    expect(inputs.map((input) => [input.type, input.closest('label')!.textContent, input.checked])).toEqual([
+      ['radio', Q.private, false], ['radio', Q.share, true]]);
+    expect(radio(host, 'family:medical:private').checked).toBe(true);
+    expectNoJargon(host);
+    expectNamesOnlyInPrivacy(host);
+  });
+
+  test('no broad word, no questions; typing one asks them, keeping the caret in the box', async () => {
+    const { host } = await openPrivacy({ description: 'my divorce' });
+    expect(host.doc.querySelector('section.questions')).toBeNull();
+    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    area.focus();
+    area.value = 'my divorce and my finances';
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    expect(host.doc.querySelector('section.questions h3')!.textContent).toBe(Q.topics.money.question);
+    expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:description');
+  });
+
+  test('a choice writes its sentence into the description, and Save (after the usual confirmation) sends it', async () => {
+    const { host, saves } = await openPrivacy({ description: OWNER });
+    const share = radio(host, 'family:medical:share');
+    share.checked = true;
+    share.dispatchEvent(new host.win.Event('change') as unknown as Event);
+    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const lines = area.value.split('\n');
+    expect(lines[0]).toBe(OWNER);
+    expect(lines[1]).toStartWith('About family: private — Family legal and money papers');
+    expect(lines[1]).toContain('fine to share — Family members\' medical records, School plans and family logistics');
+    expect(radio(host, 'family:medical:share').checked).toBe(true);
+    expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:q:family:medical:share');
+    // Changing it back replaces the sentence instead of adding one.
+    const back = radio(host, 'family:medical:private');
+    back.checked = true;
+    back.dispatchEvent(new host.win.Event('change') as unknown as Event);
+    const refined = (host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value;
+    expect(refined.split('About family:')).toHaveLength(2);
+    // A changed description lowers protection: the owner confirms, as when typing.
+    host.button(W.save).click();
+    expect(host.doc.querySelector('.confirm-box')!.textContent).toContain(W.confirmDescription);
+    expect(host.toolCalls(P.set)).toEqual([]);
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].description).toBe(refined);
+    expect(saves[0].confirmation).toBe('conf1');
+    expectNamesOnlyInPrivacy(host);
+  });
+
+  test('a saved description pre-fills the choices it already answers', async () => {
+    const saved = `${OWNER}\nAbout family: private — Alumni, contact and address lists; fine to share — Family members' medical records.`;
+    const { host } = await openPrivacy({ description: saved });
+    expect(radio(host, 'family:contacts:private').checked).toBe(true);
+    expect(radio(host, 'family:medical:share').checked).toBe(true);
+    // Not named in the sentence: its default.
+    expect(radio(host, 'family:history:share').checked).toBe(true);
+  });
+
+  test('a choice marks the draft changed: Cancel asks before discarding it', async () => {
+    const { host } = await openPrivacy({ description: OWNER });
+    const share = radio(host, 'family:conversations:share');
+    share.checked = true;
+    share.dispatchEvent(new host.win.Event('change') as unknown as Event);
+    host.button(W.cancel).click();
+    expect(host.text()).toContain(W.discardPrompt);
+  });
+});
+
 describe('the dashboard Privacy row', () => {
   test('configured: one row after Sources and before Progress and Models, with an outlined Edit', async () => {
     const dashboard = model({ configured: true, pendingCount: 4, ruleCount: 3 }, {

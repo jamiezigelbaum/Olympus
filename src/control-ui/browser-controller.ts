@@ -870,9 +870,119 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    * serialized into the standalone page and cannot import it.
    */
   function privacyLogicFor(form: HTMLFormElement): PrivacyLogic | undefined {
+    const topicWords = privacyJson<PrivacyLogicConfig['topicWords'] | null>(form.dataset.questions, null);
     return options.privacyLogic
-      ? options.privacyLogic({ mailSourceId: 'gmail.email', folderSources: privacySourceNames(form) })
+      ? options.privacyLogic({
+        mailSourceId: 'gmail.email',
+        folderSources: privacySourceNames(form),
+        ...(topicWords && typeof topicWords === 'object' ? { topicWords } : {}),
+      })
       : undefined;
+  }
+
+  /**
+   * The follow-up questions under the description (pages/privacy.ts
+   * privacyQuestions builds the same markup): asked again when the areas the
+   * description names change, and when a choice rewrites it. `focus` is the
+   * choice to put the caret back on.
+   */
+  function renderPrivacyQuestions(form: HTMLFormElement, focus?: { topic: string; option: string; side: string }): void {
+    const holder = form.querySelector<HTMLElement>('[data-privacy-questions]');
+    const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const logic = privacyLogicFor(form);
+    if (!holder || !field || !logic) return;
+    const words = privacyJson<Record<string, string> | null>(form.dataset.questions, null) || {};
+    const asked = logic.questions(field.value);
+    holder.setAttribute('data-privacy-questions', asked.map((topic) => topic.id).join(','));
+    holder.hidden = asked.length === 0;
+    const children: HTMLElement[] = [];
+    if (asked.length > 0) {
+      const title = document.createElement('div');
+      title.className = 'sect';
+      title.textContent = words.title || '';
+      const intro = document.createElement('p');
+      intro.className = 'pnote';
+      intro.textContent = words.intro || '';
+      children.push(title, intro);
+    }
+    const locked = !canWrite && !csrfToken;
+    for (const topic of asked) {
+      const group = document.createElement('div');
+      group.className = 'pqtopic';
+      const heading = document.createElement('h3');
+      heading.className = 'pqtitle';
+      heading.textContent = topic.question;
+      group.append(heading);
+      for (const option of topic.options) {
+        const id = `privacy-q-${topic.id}-${option.id}`;
+        const row = document.createElement('div');
+        row.className = 'pqopt';
+        row.setAttribute('role', 'radiogroup');
+        row.setAttribute('aria-labelledby', id);
+        const name = document.createElement('span');
+        name.className = 'pqlabel';
+        name.id = id;
+        name.textContent = option.label;
+        const choices = document.createElement('span');
+        choices.className = 'pqchoices';
+        for (const side of ['private', 'share']) {
+          const label = document.createElement('label');
+          label.className = 'pqchoice';
+          const input = document.createElement('input');
+          input.type = 'radio';
+          input.name = id;
+          input.value = side;
+          input.setAttribute('data-privacy-topic', topic.id);
+          input.setAttribute('data-privacy-option', option.id);
+          input.checked = option.side === side;
+          input.defaultChecked = input.checked;
+          if (locked) {
+            input.disabled = true;
+            input.setAttribute('aria-disabled', 'true');
+          }
+          const text = document.createElement('span');
+          text.textContent = side === 'private' ? words.private || '' : words.share || '';
+          label.append(input, text);
+          choices.append(label);
+        }
+        row.append(name, choices);
+        group.append(row);
+      }
+      children.push(group);
+    }
+    holder.replaceChildren(...children);
+    if (focus) {
+      holder.querySelectorAll<HTMLInputElement>('input[data-privacy-topic]').forEach((input) => {
+        if (input.dataset.privacyTopic === focus.topic && input.dataset.privacyOption === focus.option && input.value === focus.side) input.focus();
+      });
+    }
+  }
+
+  /** Typing in the description: the questions follow the areas it names. */
+  function onPrivacyInput(event: Event): void {
+    const field = event.target instanceof HTMLTextAreaElement ? event.target : null;
+    const form = field?.closest<HTMLFormElement>('form[data-privacy-form]');
+    if (!field || !form || field.name !== 'description') return;
+    const holder = form.querySelector<HTMLElement>('[data-privacy-questions]');
+    const logic = privacyLogicFor(form);
+    if (!holder || !logic) return;
+    if (logic.detectTopics(field.value).join(',') !== (holder.getAttribute('data-privacy-questions') || '')) renderPrivacyQuestions(form);
+  }
+
+  /** A choice: that area's sentence in the description is written again, and the draft is changed. */
+  function onPrivacyChange(event: Event): void {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    const form = input?.closest<HTMLFormElement>('form[data-privacy-form]');
+    if (!input || !form || !input.checked || input.dataset.privacyTopic === undefined) return;
+    const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const logic = privacyLogicFor(form);
+    const side = input.value === 'share' ? 'share' : 'private';
+    if (!field || !logic) return;
+    const topic = input.dataset.privacyTopic || '';
+    const option = input.dataset.privacyOption || '';
+    field.value = logic.answerTopic(field.value, topic, option, side);
+    setPrivacyDirty(form);
+    renderPrivacyQuestions(form, { topic, option, side });
   }
 
   function privacyDisplay(form: HTMLFormElement, logic: PrivacyLogic, rule: PrivacyRule): string {
@@ -1324,6 +1434,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       field.defaultValue = description;
       field.value = replayed.description !== null ? replayed.description : description;
     }
+    renderPrivacyQuestions(form);
     setPrivacyDirty(form);
     clearPrivacyPrompts(form);
     void savePrivacy(form);
@@ -1675,6 +1786,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
+  root.addEventListener('input', onPrivacyInput);
+  root.addEventListener('change', onPrivacyChange);
   // Coming back from the approval browser or tab is the moment the exchange
   // may have just landed: one authoritative read, and only while this
   // controller still owes the owner an answer about a start it performed.
@@ -1701,6 +1814,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
+    root.removeEventListener('input', onPrivacyInput);
+    root.removeEventListener('change', onPrivacyChange);
   };
   options.signal.addEventListener('abort', dispose, { once: true });
 

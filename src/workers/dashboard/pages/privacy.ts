@@ -114,11 +114,14 @@ function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPag
     + ` data-revision="${escapeHtml(settings.revision ?? '')}"`
     + ` data-saved-description="${escapeHtml(settings.description)}"`
     + ` data-source-names="${escapeHtml(JSON.stringify(FOLDER_SOURCES))}"`
+    // The follow-up questions' words, so the controller can ask them again as the description changes.
+    + ` data-questions="${escapeHtml(JSON.stringify(W.questions))}"`
     // Saved rules the page cannot show (not in the engine's shape): sent back unchanged.
     + ` data-hidden="${escapeHtml(JSON.stringify(settings.rules.filter((rule) => !LOGIC.validRule(rule))))}">`
     + `<label class="plabel" for="privacy-description">${escapeHtml(W.descriptionLabel)}</label>`
     + `<textarea class="ptext" id="privacy-description" name="description" maxlength="2000" rows="5"`
     + ` placeholder="${escapeHtml(W.descriptionPlaceholder)}"${canEdit ? '' : ' readonly'}>${escapeHtml(settings.description)}</textarea>`
+    + privacyQuestions(settings.description, canEdit)
     + `<div class="sect">${escapeHtml(W.rulesTitle)}</div>`
     + `<div class="srows" data-privacy-rules>${rules}</div>`
     + `<p class="foot pempty" data-privacy-empty${shown.length > 0 ? ' hidden' : ''}>${escapeHtml(W.rulesEmpty)}</p>`
@@ -139,6 +142,34 @@ function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPag
     + `</form></div>`;
 }
 
+/**
+ * The follow-up questions for the broad areas the saved description names
+ * (shared-privacy-logic.ts questions): per choice, a radio pair, Private or
+ * Fine to share, at its default or the answer the description already
+ * carries. The controller asks them again as the description changes and
+ * writes each answer into the description (browser-controller.ts); this is
+ * the same markup it builds.
+ */
+function privacyQuestions(description: string, canEdit: boolean): string {
+  const Q = W.questions;
+  const asked = LOGIC.questions(description);
+  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+  if (asked.length === 0) return `<div class="pquestions" data-privacy-questions="" hidden></div>`;
+  const topics = asked.map((topic) => {
+    const options = topic.options.map((option) => {
+      const id = `privacy-q-${topic.id}-${option.id}`;
+      const choices = (['private', 'share'] as const).map((side) => `<label class="pqchoice"><input type="radio" name="${id}" value="${side}"`
+        + ` data-privacy-topic="${escapeHtml(topic.id)}" data-privacy-option="${escapeHtml(option.id)}"`
+        + `${option.side === side ? ' checked' : ''}${disabled}><span>${escapeHtml(side === 'private' ? Q.private : Q.share)}</span></label>`).join('');
+      return `<div class="pqopt" role="radiogroup" aria-labelledby="${id}"><span class="pqlabel" id="${id}">${escapeHtml(option.label)}</span>`
+        + `<span class="pqchoices">${choices}</span></div>`;
+    }).join('');
+    return `<div class="pqtopic"><h3 class="pqtitle">${escapeHtml(topic.question)}</h3>${options}</div>`;
+  }).join('');
+  return `<div class="pquestions" data-privacy-questions="${escapeHtml(asked.map((topic) => topic.id).join(','))}">`
+    + `<div class="sect">${escapeHtml(Q.title)}</div><p class="pnote">${escapeHtml(Q.intro)}</p>${topics}</div>`;
+}
+
 function senderPanel(): string {
   return `<div class="ppanel" data-privacy-panel="sender" hidden><p class="pnote">${escapeHtml(W.senderIntro)}</p>`
     + `<label class="plabel" for="privacy-sender">${escapeHtml(W.senderLabel)}</label>`
@@ -157,7 +188,7 @@ function connected(view: SourceDashboardViewModel, sourceId: string): boolean {
 }
 
 /** The rules this editor shares with ChatGPT's privacy panel. */
-const LOGIC = privacyLogic({ mailSourceId: MAIL_SOURCE_ID, folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES } });
+const LOGIC = privacyLogic({ mailSourceId: MAIL_SOURCE_ID, folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES }, topicWords: W.questions });
 
 /** A rule's name and what kind of place it is, in the ChatGPT panel's words (shared-privacy-logic.ts). */
 export function privacyRuleWords(rule: PrivacyRuleView): { name: string; kind: string } {

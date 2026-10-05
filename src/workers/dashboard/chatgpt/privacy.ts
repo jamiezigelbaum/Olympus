@@ -99,7 +99,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   const el = kit.el;
   const add = kit.add;
   const fill = kit.fill;
-  const L = makeLogic({ mailSourceId: kit.config.mailSourceId, folderSources: kit.config.folderSources });
+  const L = makeLogic({ mailSourceId: kit.config.mailSourceId, folderSources: kit.config.folderSources, topicWords: W.questions });
 
   let s: Any = null;
   let session = 0;
@@ -546,6 +546,53 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     return add(li, remove);
   }
 
+  /**
+   * The follow-up questions for the broad areas the description names: each
+   * choice is a pair of radio buttons, Private or Fine to share, at its
+   * default or the answer the description already carries. A change rewrites
+   * that area's sentence in the description, so what is saved is visible text
+   * (shared-privacy-logic.ts answerTopic), and marks the draft changed.
+   */
+  function questionsSection(): HTMLElement | null {
+    const Q = W.questions;
+    const asked = L.questions(s.description);
+    if (!asked.length) return null;
+    const section = add(el('section', 'fsection questions'), el('h2', '', Q.title), el('p', 'reason', Q.intro));
+    for (const topic of asked) {
+      const group = add(el('div', 'qtopic'), el('h3', 'qtitle', topic.question));
+      for (const option of topic.options) {
+        const id = 'privacy-q-' + topic.id + '-' + option.id;
+        const row = el('div', 'qopt');
+        row.setAttribute('role', 'radiogroup');
+        row.setAttribute('aria-labelledby', id);
+        const name = el('span', 'qlabel', option.label);
+        name.id = id;
+        const choices = el('span', 'qchoices');
+        for (const side of ['private', 'share'] as const) {
+          const choice = el('label', 'qchoice');
+          const input = el('input') as HTMLInputElement;
+          input.type = 'radio';
+          input.name = id;
+          input.value = side;
+          input.checked = option.side === side;
+          input.disabled = s.saving;
+          input.setAttribute('data-key', 'privacy:q:' + topic.id + ':' + option.id + ':' + side);
+          input.addEventListener('change', () => {
+            if (!input.checked || !s) return;
+            s.description = L.answerTopic(s.description, topic.id, option.id, side);
+            changed();
+            s.saveError = '';
+            kit.render('privacy:q:' + topic.id + ':' + option.id + ':' + side);
+          });
+          add(choices, add(choice, input, el('span', '', side === 'private' ? Q.private : Q.share)));
+        }
+        add(group, add(row, name, choices));
+      }
+      add(section, group);
+    }
+    return section;
+  }
+
   function mainView(page: HTMLElement): void {
     add(page, el('h1', '', W.title));
     add(page, el('p', 'muted intro', W.intro));
@@ -574,16 +621,20 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     area.disabled = s.saving;
     area.setAttribute('data-key', 'privacy:description');
     area.setAttribute('aria-describedby', 'privacy-description-shared');
+    const asked = L.detectTopics(s.description).join(',');
     area.addEventListener('input', () => {
       s.description = area.value;
       const open = s.confirmStep;
       changed();
-      if (open) kit.render('privacy:description');
+      // Redrawn (caret kept) when the step closes or the areas asked about change.
+      if (open || L.detectTopics(s.description).join(',') !== asked) kit.render('privacy:description');
     });
     add(page, add(field, area));
     const shared = el('p', 'reason field-note', W.descriptionShared);
     shared.id = 'privacy-description-shared';
     add(page, shared);
+    const questions = questionsSection();
+    if (questions) add(page, questions);
 
     const rules = add(el('section', 'fsection'), el('h2', '', W.rulesTitle));
     if (s.rules.length) {

@@ -730,7 +730,113 @@ function mountDashboardController(options) {
     return names && typeof names === "object" ? names : {};
   }
   function privacyLogicFor(form) {
-    return options.privacyLogic ? options.privacyLogic({ mailSourceId: "gmail.email", folderSources: privacySourceNames(form) }) : undefined;
+    const topicWords = privacyJson(form.dataset.questions, null);
+    return options.privacyLogic ? options.privacyLogic({
+      mailSourceId: "gmail.email",
+      folderSources: privacySourceNames(form),
+      ...topicWords && typeof topicWords === "object" ? { topicWords } : {}
+    }) : undefined;
+  }
+  function renderPrivacyQuestions(form, focus) {
+    const holder = form.querySelector("[data-privacy-questions]");
+    const field = form.querySelector('textarea[name="description"]');
+    const logic = privacyLogicFor(form);
+    if (!holder || !field || !logic)
+      return;
+    const words = privacyJson(form.dataset.questions, null) || {};
+    const asked = logic.questions(field.value);
+    holder.setAttribute("data-privacy-questions", asked.map((topic) => topic.id).join(","));
+    holder.hidden = asked.length === 0;
+    const children = [];
+    if (asked.length > 0) {
+      const title = document.createElement("div");
+      title.className = "sect";
+      title.textContent = words.title || "";
+      const intro = document.createElement("p");
+      intro.className = "pnote";
+      intro.textContent = words.intro || "";
+      children.push(title, intro);
+    }
+    const locked = !canWrite && !csrfToken;
+    for (const topic of asked) {
+      const group = document.createElement("div");
+      group.className = "pqtopic";
+      const heading = document.createElement("h3");
+      heading.className = "pqtitle";
+      heading.textContent = topic.question;
+      group.append(heading);
+      for (const option of topic.options) {
+        const id = `privacy-q-${topic.id}-${option.id}`;
+        const row = document.createElement("div");
+        row.className = "pqopt";
+        row.setAttribute("role", "radiogroup");
+        row.setAttribute("aria-labelledby", id);
+        const name = document.createElement("span");
+        name.className = "pqlabel";
+        name.id = id;
+        name.textContent = option.label;
+        const choices = document.createElement("span");
+        choices.className = "pqchoices";
+        for (const side of ["private", "share"]) {
+          const label = document.createElement("label");
+          label.className = "pqchoice";
+          const input = document.createElement("input");
+          input.type = "radio";
+          input.name = id;
+          input.value = side;
+          input.setAttribute("data-privacy-topic", topic.id);
+          input.setAttribute("data-privacy-option", option.id);
+          input.checked = option.side === side;
+          input.defaultChecked = input.checked;
+          if (locked) {
+            input.disabled = true;
+            input.setAttribute("aria-disabled", "true");
+          }
+          const text = document.createElement("span");
+          text.textContent = side === "private" ? words.private || "" : words.share || "";
+          label.append(input, text);
+          choices.append(label);
+        }
+        row.append(name, choices);
+        group.append(row);
+      }
+      children.push(group);
+    }
+    holder.replaceChildren(...children);
+    if (focus) {
+      holder.querySelectorAll("input[data-privacy-topic]").forEach((input) => {
+        if (input.dataset.privacyTopic === focus.topic && input.dataset.privacyOption === focus.option && input.value === focus.side)
+          input.focus();
+      });
+    }
+  }
+  function onPrivacyInput(event) {
+    const field = event.target instanceof HTMLTextAreaElement ? event.target : null;
+    const form = field?.closest("form[data-privacy-form]");
+    if (!field || !form || field.name !== "description")
+      return;
+    const holder = form.querySelector("[data-privacy-questions]");
+    const logic = privacyLogicFor(form);
+    if (!holder || !logic)
+      return;
+    if (logic.detectTopics(field.value).join(",") !== (holder.getAttribute("data-privacy-questions") || ""))
+      renderPrivacyQuestions(form);
+  }
+  function onPrivacyChange(event) {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    const form = input?.closest("form[data-privacy-form]");
+    if (!input || !form || !input.checked || input.dataset.privacyTopic === undefined)
+      return;
+    const field = form.querySelector('textarea[name="description"]');
+    const logic = privacyLogicFor(form);
+    const side = input.value === "share" ? "share" : "private";
+    if (!field || !logic)
+      return;
+    const topic = input.dataset.privacyTopic || "";
+    const option = input.dataset.privacyOption || "";
+    field.value = logic.answerTopic(field.value, topic, option, side);
+    setPrivacyDirty(form);
+    renderPrivacyQuestions(form, { topic, option, side });
   }
   function privacyDisplay(form, logic, rule) {
     const names = privacySourceNames(form);
@@ -1165,6 +1271,7 @@ function mountDashboardController(options) {
       field.defaultValue = description;
       field.value = replayed.description !== null ? replayed.description : description;
     }
+    renderPrivacyQuestions(form);
     setPrivacyDirty(form);
     clearPrivacyPrompts(form);
     savePrivacy(form);
@@ -1501,6 +1608,8 @@ function mountDashboardController(options) {
   }
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
+  root.addEventListener("input", onPrivacyInput);
+  root.addEventListener("change", onPrivacyChange);
   const refreshOnReturn = () => {
     if (disposed || options.signal.aborted || !awaitingAuthorizationReturn)
       return;
@@ -1527,6 +1636,8 @@ function mountDashboardController(options) {
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
+    root.removeEventListener("input", onPrivacyInput);
+    root.removeEventListener("change", onPrivacyChange);
   };
   options.signal.addEventListener("abort", dispose, { once: true });
   return {
@@ -3691,6 +3802,16 @@ var DASHBOARD_PRIVACY_CSS = `
 .plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
 .ptext { display: block; width: 100%; min-height: 120px; resize: vertical; background: var(--bg); border: 1px solid var(--field); border-radius: 8px; color: var(--t1); font: inherit; font-size: var(--fs-row); padding: 10px 12px; }
 .ptext:focus-visible, .ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+/* The follow-up questions: one row per choice, its name and a Private / Fine to share radio pair. */
+.pquestions .pnote { margin: 6px 0 0; }
+.pqtopic { margin: 14px 0 0; }
+.pqtitle { font-size: var(--fs-body); font-weight: 600; color: var(--t1); margin: 0 0 4px; }
+.pqopt { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 16px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.pqlabel { flex: 1 1 240px; min-width: 0; color: var(--t1); }
+.pqchoices { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.pqchoice { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; cursor: pointer; color: var(--t1); }
+.pqchoice input { width: 16px; height: 16px; margin: 0; accent-color: var(--link); }
+.pqchoice input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .privacy .sect { margin-top: 24px; }
 .prule.removed .sline { text-decoration: line-through; color: var(--t3); }
 .pempty { margin: 8px 0 0; }
@@ -3825,7 +3946,230 @@ function privacyLogic(config) {
     const value = String(input || "").trim().toLowerCase();
     return EMAIL.test(value) || DOMAIN.test(value) ? value : "";
   }
-  return { validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue };
+  const DESCRIPTION_MAX = 2000;
+  const TOPICS = [
+    { id: "family", words: ["family", "families", "familial"], options: [
+      ["medical", "private"],
+      ["legal_money", "private"],
+      ["conversations", "private"],
+      ["logistics", "share"],
+      ["contacts", "share"],
+      ["history", "share"]
+    ] },
+    { id: "health", words: ["health", "healthcare", "health care", "medical"], options: [
+      ["results", "private"],
+      ["prescriptions", "private"],
+      ["therapy", "private"],
+      ["exports", "private"],
+      ["wellness", "share"],
+      ["guides", "share"],
+      ["product_tests", "share"]
+    ] },
+    { id: "money", words: ["financial", "financials", "finance", "finances", "money", "bank", "banks", "banking"], options: [
+      ["statements", "private"],
+      ["tax", "private"],
+      ["bills", "private"],
+      ["loans", "private"],
+      ["articles", "share"],
+      ["projects", "share"],
+      ["prices", "share"]
+    ] },
+    { id: "work", words: ["work", "job", "jobs", "career", "employment"], options: [
+      ["contracts", "private"],
+      ["hr", "private"],
+      ["projects", "share"],
+      ["meetings", "share"],
+      ["wikis", "share"]
+    ] },
+    { id: "relationships", words: ["relationship", "relationships", "love", "love life", "partner", "partners", "intimate", "intimacy", "dating"], options: [
+      ["journals", "private"],
+      ["conversations", "private"],
+      ["teachings", "share"],
+      ["groups", "share"]
+    ] },
+    { id: "home", words: ["home", "homes", "house", "houses", "property", "properties"], options: [
+      ["deeds", "private"],
+      ["info", "share"],
+      ["plans", "share"]
+    ] }
+  ];
+  const words = config.topicWords;
+  function topicById(id) {
+    return TOPICS.filter((entry) => entry.id === id)[0];
+  }
+  function named(topic, text2) {
+    const alternatives = topic.words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+"));
+    return new RegExp("(^|[^a-z0-9])(" + alternatives.join("|") + ")(?![a-z0-9])", "i").test(text2);
+  }
+  function leadOf(id) {
+    if (!words || !words.topics[id])
+      return "";
+    return words.about.split("{topic}").join(words.topics[id].name);
+  }
+  function lineTopic(line) {
+    const trimmed = line.trim();
+    for (const topic of TOPICS) {
+      const lead = leadOf(topic.id);
+      if (lead && trimmed.indexOf(lead) === 0)
+        return topic.id;
+    }
+    return "";
+  }
+  function detectTopics(description) {
+    const lines = String(description || "").split(`
+`);
+    const answered = lines.map(lineTopic);
+    const own = lines.filter((_line, index) => !answered[index]).join(`
+`);
+    return TOPICS.filter((topic) => named(topic, own) || answered.indexOf(topic.id) >= 0).map((topic) => topic.id);
+  }
+  function holds(segment, label) {
+    let from = 0;
+    for (;; ) {
+      const at = segment.indexOf(label, from);
+      if (at < 0)
+        return false;
+      const before = segment.charAt(at - 1);
+      const after = segment.charAt(at + label.length);
+      if (/\s/.test(before) && (after === "" || /[\s,;.…]/.test(after)))
+        return true;
+      from = at + 1;
+    }
+  }
+  function topicAnswers(description) {
+    const out = {};
+    if (!words)
+      return out;
+    const privatePrefix = words.privateList.split("{list}")[0];
+    const sharePrefix = words.shareList.split("{list}")[0];
+    for (const line of String(description || "").split(`
+`)) {
+      const id = lineTopic(line);
+      const topic = topicById(id);
+      if (!topic || out[id])
+        continue;
+      const body = line.trim().slice(leadOf(id).length);
+      const p = body.indexOf(privatePrefix);
+      const q = body.indexOf(sharePrefix);
+      const privatePart = p < 0 ? "" : body.slice(p + privatePrefix.length, q > p ? q : body.length);
+      const sharePart = q < 0 ? "" : body.slice(q + sharePrefix.length, p > q ? p : body.length);
+      const answer = {};
+      for (const [option, side] of topic.options) {
+        const label = words.topics[id].options[option] || "";
+        answer[option] = label && holds(" " + privatePart, label) ? "private" : label && holds(" " + sharePart, label) ? "share" : side;
+      }
+      out[id] = answer;
+    }
+    return out;
+  }
+  function sentence(id, answer) {
+    const topic = topicById(id);
+    if (!words || !topic || !words.topics[id])
+      return "";
+    const kept = [];
+    const shared = [];
+    for (const [option, side] of topic.options) {
+      const label = words.topics[id].options[option] || "";
+      if (label)
+        ((answer[option] || side) === "private" ? kept : shared).push(label);
+    }
+    const parts = [];
+    if (kept.length)
+      parts.push(words.privateList.split("{list}").join(kept.join(", ")));
+    if (shared.length)
+      parts.push(words.shareList.split("{list}").join(shared.join(", ")));
+    return leadOf(id) + " " + parts.join("; ") + ".";
+  }
+  function refineDescription(description, answers) {
+    const text2 = String(description || "").replace(/\r\n/g, `
+`);
+    if (!words)
+      return text2;
+    const lines = text2.split(`
+`);
+    const generated = [];
+    for (const topic of TOPICS) {
+      const answer = answers[topic.id];
+      const line = answer ? sentence(topic.id, answer) : "";
+      if (!line)
+        continue;
+      const at = lines.map(lineTopic).indexOf(topic.id);
+      if (at >= 0) {
+        lines[at] = line;
+        generated.push(at);
+      } else {
+        while (lines.length && lines[lines.length - 1].trim() === "")
+          lines.pop();
+        lines.push(line);
+        generated.push(lines.length - 1);
+      }
+    }
+    let over = lines.join(`
+`).length - DESCRIPTION_MAX;
+    for (let i = generated.length - 1;over > 0 && i >= 0; i--) {
+      const at = generated[i];
+      const line = lines[at];
+      const room = line.length - over - 1;
+      lines[at] = room > leadOf(lineTopic(line)).length + 1 ? line.slice(0, room).replace(/[\s,;]+$/, "") + "…" : "";
+      over = lines.join(`
+`).length - DESCRIPTION_MAX;
+    }
+    return lines.filter((line, index) => line !== "" || generated.indexOf(index) < 0).join(`
+`);
+  }
+  function questions(description) {
+    if (!words)
+      return [];
+    const saved = topicAnswers(description);
+    const out = [];
+    for (const id of detectTopics(description)) {
+      const topic = topicById(id);
+      const said = words.topics[id];
+      if (!topic || !said)
+        continue;
+      const answer = saved[id];
+      out.push({
+        id,
+        name: said.name,
+        question: said.question,
+        answered: !!answer,
+        options: topic.options.map(([option, side]) => ({
+          id: option,
+          label: said.options[option] || option,
+          side: answer && answer[option] ? answer[option] : side
+        }))
+      });
+    }
+    return out;
+  }
+  function answerTopic(description, topicId, optionId, side) {
+    const question = questions(description).filter((entry) => entry.id === topicId)[0];
+    if (!question || side !== "private" && side !== "share")
+      return description;
+    const answer = {};
+    for (const option of question.options)
+      answer[option.id] = option.id === optionId ? side : option.side;
+    const answers = {};
+    answers[topicId] = answer;
+    return refineDescription(description, answers);
+  }
+  return {
+    validRule,
+    displayOf,
+    viewRule,
+    identity,
+    ruleOut,
+    addTo,
+    lowering,
+    lowers,
+    replay,
+    senderValue,
+    detectTopics,
+    topicAnswers,
+    refineDescription,
+    questions,
+    answerTopic
+  };
 }
 
 // src/control-ui.ts

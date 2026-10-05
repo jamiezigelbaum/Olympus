@@ -9,6 +9,17 @@
  * `privacyLogic` is serialized into both pages (the ChatGPT page inlines it
  * beside its programs; the standalone dashboard beside its controller), so it
  * must stay self-contained: it references nothing outside its own body.
+ *
+ * Follow-up questions (owner request, 2026-10-05): a description that names a
+ * broad area ("my family, health and financial stuff") makes the privacy
+ * model keep too much private. The editors ask a few short questions per
+ * broad area it names, and each answered area becomes one visible sentence
+ * after the owner's own words ("About family: private — …; fine to share —
+ * …."), which the owner can still edit. The catalog's structure (which areas,
+ * how they are spotted, each choice's default) lives here; its words (names,
+ * questions, choices, the sentence) are vocabulary.ts
+ * DASHBOARD_PRIVACY_QUESTIONS_COPY, handed in as `topicWords`. Deterministic:
+ * no model call.
  */
 
 /** Folder sources a private folder can come from, by name. */
@@ -26,12 +37,45 @@ export interface PrivacyRuleLike {
   display?: string;
 }
 
+/** Which side a follow-up choice puts its kind of item on. */
+export type PrivacyTopicSide = 'private' | 'share';
+
+/** Answers per broad area: area id → choice id → side. */
+export type PrivacyTopicAnswers = Record<string, Record<string, PrivacyTopicSide>>;
+
+/**
+ * The words of the follow-up questions (vocabulary.ts
+ * DASHBOARD_PRIVACY_QUESTIONS_COPY): the sentence an answered area becomes,
+ * and per area its name, question and choices by id.
+ */
+export interface PrivacyTopicWords {
+  /** The sentence's start, e.g. "About {topic}:". */
+  about: string;
+  /** The private part, e.g. "private — {list}". */
+  privateList: string;
+  /** The shared part, e.g. "fine to share — {list}". */
+  shareList: string;
+  topics: Record<string, { name: string; question: string; options: Record<string, string> }>;
+}
+
+/** One broad area as an editor asks about it: each choice with its current side. */
+export interface PrivacyTopicQuestion {
+  id: string;
+  name: string;
+  question: string;
+  /** True when the description already carries this area's sentence. */
+  answered: boolean;
+  options: Array<{ id: string; label: string; side: PrivacyTopicSide }>;
+}
+
 /** What the logic needs to know about the editor it serves. */
 export interface PrivacyLogicConfig {
   /** The mail source a sender or label rule belongs to (gmail.email). */
   mailSourceId: string;
   /** Folder sources a folder rule may name, by id (their names are not read here). */
   folderSources: Record<string, string>;
+  /** The follow-up questions' words; without them only detection on plain text works. */
+  topicWords?: PrivacyTopicWords;
 }
 
 /**
@@ -166,7 +210,222 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     return EMAIL.test(value) || DOMAIN.test(value) ? value : '';
   }
 
-  return { validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue };
+  // ---- follow-up questions -------------------------------------------------
+  /** The profile's description limit (privacy-profile.ts PRIVACY_DESCRIPTION_MAX_CHARS). */
+  const DESCRIPTION_MAX = 2000;
+  /**
+   * The broad areas, in the order they are asked: the words that name one
+   * (whole words, any case, with plurals and common variants), and each
+   * choice's default side.
+   */
+  const TOPICS: Array<{ id: string; words: string[]; options: Array<[string, PrivacyTopicSide]> }> = [
+    { id: 'family', words: ['family', 'families', 'familial'], options: [
+      ['medical', 'private'], ['legal_money', 'private'], ['conversations', 'private'],
+      ['logistics', 'share'], ['contacts', 'share'], ['history', 'share']] },
+    { id: 'health', words: ['health', 'healthcare', 'health care', 'medical'], options: [
+      ['results', 'private'], ['prescriptions', 'private'], ['therapy', 'private'], ['exports', 'private'],
+      ['wellness', 'share'], ['guides', 'share'], ['product_tests', 'share']] },
+    { id: 'money', words: ['financial', 'financials', 'finance', 'finances', 'money', 'bank', 'banks', 'banking'], options: [
+      ['statements', 'private'], ['tax', 'private'], ['bills', 'private'], ['loans', 'private'],
+      ['articles', 'share'], ['projects', 'share'], ['prices', 'share']] },
+    { id: 'work', words: ['work', 'job', 'jobs', 'career', 'employment'], options: [
+      ['contracts', 'private'], ['hr', 'private'],
+      ['projects', 'share'], ['meetings', 'share'], ['wikis', 'share']] },
+    { id: 'relationships', words: ['relationship', 'relationships', 'love', 'love life', 'partner', 'partners', 'intimate', 'intimacy', 'dating'], options: [
+      ['journals', 'private'], ['conversations', 'private'],
+      ['teachings', 'share'], ['groups', 'share']] },
+    { id: 'home', words: ['home', 'homes', 'house', 'houses', 'property', 'properties'], options: [
+      ['deeds', 'private'],
+      ['info', 'share'], ['plans', 'share']] },
+  ];
+  const words = config.topicWords;
+
+  function topicById(id: string): { id: string; words: string[]; options: Array<[string, PrivacyTopicSide]> } | undefined {
+    return TOPICS.filter((entry) => entry.id === id)[0];
+  }
+
+  /** A whole-word, any-case match for any of an area's words. */
+  function named(topic: { words: string[] }, text: string): boolean {
+    const alternatives = topic.words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+'));
+    return new RegExp('(^|[^a-z0-9])(' + alternatives.join('|') + ')(?![a-z0-9])', 'i').test(text);
+  }
+
+  /** The start of an area's generated sentence, e.g. "About family:". */
+  function leadOf(id: string): string {
+    if (!words || !words.topics[id]) return '';
+    return words.about.split('{topic}').join(words.topics[id]!.name);
+  }
+
+  /** The area whose generated sentence this line is, or ''. */
+  function lineTopic(line: string): string {
+    const trimmed = line.trim();
+    for (const topic of TOPICS) {
+      const lead = leadOf(topic.id);
+      if (lead && trimmed.indexOf(lead) === 0) return topic.id;
+    }
+    return '';
+  }
+
+  /**
+   * The broad areas the description names, in catalog order: named in the
+   * owner's own words (the generated sentences mention other areas' words,
+   * so they are not read for this), or already answered by a sentence.
+   */
+  function detectTopics(description: string): string[] {
+    const lines = String(description || '').split('\n');
+    const answered = lines.map(lineTopic);
+    const own = lines.filter((_line, index) => !answered[index]).join('\n');
+    return TOPICS.filter((topic) => named(topic, own) || answered.indexOf(topic.id) >= 0).map((topic) => topic.id);
+  }
+
+  /** Whether `label` sits in `segment` as a whole item (`segment` starts with a space). */
+  function holds(segment: string, label: string): boolean {
+    let from = 0;
+    for (;;) {
+      const at = segment.indexOf(label, from);
+      if (at < 0) return false;
+      const before = segment.charAt(at - 1);
+      const after = segment.charAt(at + label.length);
+      if (/\s/.test(before) && (after === '' || /[\s,;.…]/.test(after))) return true;
+      from = at + 1;
+    }
+  }
+
+  /** The answers the description's generated sentences already carry, per area (an unanswered area is absent). */
+  function topicAnswers(description: string): PrivacyTopicAnswers {
+    const out: PrivacyTopicAnswers = {};
+    if (!words) return out;
+    const privatePrefix = words.privateList.split('{list}')[0]!;
+    const sharePrefix = words.shareList.split('{list}')[0]!;
+    for (const line of String(description || '').split('\n')) {
+      const id = lineTopic(line);
+      const topic = topicById(id);
+      if (!topic || out[id]) continue;
+      const body = line.trim().slice(leadOf(id).length);
+      const p = body.indexOf(privatePrefix);
+      const q = body.indexOf(sharePrefix);
+      const privatePart = p < 0 ? '' : body.slice(p + privatePrefix.length, q > p ? q : body.length);
+      const sharePart = q < 0 ? '' : body.slice(q + sharePrefix.length, p > q ? p : body.length);
+      const answer: Record<string, PrivacyTopicSide> = {};
+      for (const [option, side] of topic.options) {
+        const label = words.topics[id]!.options[option] || '';
+        answer[option] = label && holds(' ' + privatePart, label) ? 'private'
+          : label && holds(' ' + sharePart, label) ? 'share' : side;
+      }
+      out[id] = answer;
+    }
+    return out;
+  }
+
+  /** An area's sentence for an answer (a choice it does not name keeps its default). */
+  function sentence(id: string, answer: Record<string, PrivacyTopicSide>): string {
+    const topic = topicById(id);
+    if (!words || !topic || !words.topics[id]) return '';
+    const kept: string[] = [];
+    const shared: string[] = [];
+    for (const [option, side] of topic.options) {
+      const label = words.topics[id]!.options[option] || '';
+      if (label) ((answer[option] || side) === 'private' ? kept : shared).push(label);
+    }
+    const parts: string[] = [];
+    if (kept.length) parts.push(words.privateList.split('{list}').join(kept.join(', ')));
+    if (shared.length) parts.push(words.shareList.split('{list}').join(shared.join(', ')));
+    return leadOf(id) + ' ' + parts.join('; ') + '.';
+  }
+
+  /**
+   * The owner's text with one generated sentence per answered area: an area
+   * answered before has its sentence replaced in place; a new one goes on its
+   * own line at the end. Kept within the description limit by shortening the
+   * generated sentences, never the owner's words.
+   */
+  function refineDescription(description: string, answers: PrivacyTopicAnswers): string {
+    const text = String(description || '').replace(/\r\n/g, '\n');
+    if (!words) return text;
+    const lines = text.split('\n');
+    const generated: number[] = [];
+    for (const topic of TOPICS) {
+      const answer = answers[topic.id];
+      const line = answer ? sentence(topic.id, answer) : '';
+      if (!line) continue;
+      const at = lines.map(lineTopic).indexOf(topic.id);
+      if (at >= 0) {
+        lines[at] = line;
+        generated.push(at);
+      } else {
+        while (lines.length && lines[lines.length - 1]!.trim() === '') lines.pop();
+        lines.push(line);
+        generated.push(lines.length - 1);
+      }
+    }
+    let over = lines.join('\n').length - DESCRIPTION_MAX;
+    for (let i = generated.length - 1; over > 0 && i >= 0; i--) {
+      const at = generated[i]!;
+      const line = lines[at]!;
+      const room = line.length - over - 1;
+      lines[at] = room > leadOf(lineTopic(line)).length + 1 ? line.slice(0, room).replace(/[\s,;]+$/, '') + '…' : '';
+      over = lines.join('\n').length - DESCRIPTION_MAX;
+    }
+    return lines.filter((line, index) => line !== '' || generated.indexOf(index) < 0).join('\n');
+  }
+
+  /** The questions for a description: each area it names, each choice at its saved side or its default. */
+  function questions(description: string): PrivacyTopicQuestion[] {
+    if (!words) return [];
+    const saved = topicAnswers(description);
+    const out: PrivacyTopicQuestion[] = [];
+    for (const id of detectTopics(description)) {
+      const topic = topicById(id);
+      const said = words.topics[id];
+      if (!topic || !said) continue;
+      const answer = saved[id];
+      out.push({
+        id,
+        name: said.name,
+        question: said.question,
+        answered: !!answer,
+        options: topic.options.map(([option, side]) => ({
+          id: option,
+          label: said.options[option] || option,
+          side: answer && answer[option] ? answer[option]! : side,
+        })),
+      });
+    }
+    return out;
+  }
+
+  /** The description after one choice changes: that area's sentence, with every other choice as it stands. */
+  function answerTopic(description: string, topicId: string, optionId: string, side: PrivacyTopicSide): string {
+    const question = questions(description).filter((entry) => entry.id === topicId)[0];
+    if (!question || (side !== 'private' && side !== 'share')) return description;
+    const answer: Record<string, PrivacyTopicSide> = {};
+    for (const option of question.options) answer[option.id] = option.id === optionId ? side : option.side;
+    const answers: PrivacyTopicAnswers = {};
+    answers[topicId] = answer;
+    return refineDescription(description, answers);
+  }
+
+  return {
+    validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
+    detectTopics, topicAnswers, refineDescription, questions, answerTopic,
+  };
 }
 
 export type PrivacyLogic = ReturnType<typeof privacyLogic>;
+
+const NO_RULES: PrivacyLogicConfig = { mailSourceId: '', folderSources: {} };
+
+/** The broad areas a description names, in the order they are asked (area ids). */
+export function detectPrivacyTopics(description: string, words?: PrivacyTopicWords): string[] {
+  return privacyLogic(words ? { ...NO_RULES, topicWords: words } : NO_RULES).detectTopics(description);
+}
+
+/** The owner's text with one generated sentence per answered area, each replacing that area's earlier one. */
+export function refinedPrivacyDescription(description: string, answers: PrivacyTopicAnswers, words: PrivacyTopicWords): string {
+  return privacyLogic({ ...NO_RULES, topicWords: words }).refineDescription(description, answers);
+}
+
+/** The answers a saved description already carries, so an editor can pre-fill its questions. */
+export function privacyTopicAnswers(description: string, words: PrivacyTopicWords): PrivacyTopicAnswers {
+  return privacyLogic({ ...NO_RULES, topicWords: words }).topicAnswers(description);
+}

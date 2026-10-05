@@ -1409,6 +1409,93 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
 } as const;
 
 /**
+ * The follow-up questions both privacy editors ask when the owner's words name
+ * a broad area (shared-privacy-logic.ts holds which areas, how they are
+ * spotted and each choice's default). An answered area becomes one sentence
+ * in the description, built from `about`, `privateList` and `shareList`, and
+ * read back from them: changing these words changes how saved answers read.
+ */
+export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
+  title: 'A few quick questions',
+  intro: 'Your words name some broad areas. Pick what\'s private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.',
+  private: 'Private',
+  share: 'Fine to share',
+  about: 'About {topic}:',
+  privateList: 'private — {list}',
+  shareList: 'fine to share — {list}',
+  topics: {
+    family: {
+      name: 'family',
+      question: 'Which family things are private?',
+      options: {
+        medical: 'Family members\' medical records',
+        legal_money: 'Family legal and money papers (divorce, custody, trusts)',
+        conversations: 'Private family conversations and journals',
+        logistics: 'School plans and family logistics',
+        contacts: 'Alumni, contact and address lists',
+        history: 'Family history and photos',
+      },
+    },
+    health: {
+      name: 'health',
+      question: 'Which health things are private?',
+      options: {
+        results: 'My lab, test and medical results',
+        prescriptions: 'Prescriptions and clinic or visit notes',
+        therapy: 'Therapy sessions',
+        exports: 'Health-data exports',
+        wellness: 'Wellness programs, diets and detox plans',
+        guides: 'Health books, guides and courses',
+        product_tests: 'Product or supplement test reports',
+      },
+    },
+    money: {
+      name: 'money',
+      question: 'Which money things are private?',
+      options: {
+        statements: 'Bank, card, brokerage and crypto statements',
+        tax: 'Tax and payroll papers',
+        bills: 'Invoices, bills and receipts',
+        loans: 'Loans and proof of funds',
+        articles: 'Articles and guides about money',
+        projects: 'Crypto or company project docs',
+        prices: 'Prices and quotes I am researching',
+      },
+    },
+    work: {
+      name: 'work',
+      question: 'Which work things are private?',
+      options: {
+        contracts: 'Contracts, NDAs, offers and salaries',
+        hr: 'HR and legal matters',
+        projects: 'Project notes, specs and plans',
+        meetings: 'Work meeting transcripts',
+        wikis: 'Team wikis and assistant instruction files',
+      },
+    },
+    relationships: {
+      name: 'relationships',
+      question: 'Which relationship things are private?',
+      options: {
+        journals: 'Journals and personal session transcripts',
+        conversations: 'Private conversations',
+        teachings: 'Books and teachings about relationships',
+        groups: 'Group sessions and courses',
+      },
+    },
+    home: {
+      name: 'home',
+      question: 'Which home things are private?',
+      options: {
+        deeds: 'Deeds, purchase contracts and leases',
+        info: 'Property information and certificates',
+        plans: 'Listings, renovation and moving plans',
+      },
+    },
+  },
+} as const;
+
+/**
  * Words for the ChatGPT page's privacy setup (src/workers/dashboard/chatgpt/privacy.ts)
  * and the dashboard's Privacy row. Two tiers are a person's to choose:
  * shared with ChatGPT (the default) and private (answered on the Mac only);
@@ -1426,6 +1513,8 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   descriptionPlaceholder: 'For example: my health and therapy, money and taxes, anything about my kids, my divorce',
   /** Under the description box: the description is saved through ChatGPT, so it sees it. */
   descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
+  /** The follow-up questions under the description, and the sentences they add to it. */
+  questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
   rulesTitle: 'Always private (optional)',
   rulesEmpty: 'No folders, labels or senders yet.',
   /** Under the always-private rules: their names travel through ChatGPT to be listed and saved. */
@@ -1707,6 +1796,7 @@ export const DASHBOARD_LOCAL_PRIVACY_COPY = {
   intro: 'Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.',
   descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
   descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
+  questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
   rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
   rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
   kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,

@@ -21226,7 +21226,7 @@ var init_scheduler_markers = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
-var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -21471,6 +21471,85 @@ var init_vocabulary = __esm(() => {
     mailSummaryPrivate: { one: "{n} sender always private", many: "{n} senders always private" },
     mailSummarySkipSenders: { one: "{n} sender skipped", many: "{n} senders skipped" }
   };
+  DASHBOARD_PRIVACY_QUESTIONS_COPY = {
+    title: "A few quick questions",
+    intro: "Your words name some broad areas. Pick what's private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.",
+    private: "Private",
+    share: "Fine to share",
+    about: "About {topic}:",
+    privateList: "private — {list}",
+    shareList: "fine to share — {list}",
+    topics: {
+      family: {
+        name: "family",
+        question: "Which family things are private?",
+        options: {
+          medical: "Family members' medical records",
+          legal_money: "Family legal and money papers (divorce, custody, trusts)",
+          conversations: "Private family conversations and journals",
+          logistics: "School plans and family logistics",
+          contacts: "Alumni, contact and address lists",
+          history: "Family history and photos"
+        }
+      },
+      health: {
+        name: "health",
+        question: "Which health things are private?",
+        options: {
+          results: "My lab, test and medical results",
+          prescriptions: "Prescriptions and clinic or visit notes",
+          therapy: "Therapy sessions",
+          exports: "Health-data exports",
+          wellness: "Wellness programs, diets and detox plans",
+          guides: "Health books, guides and courses",
+          product_tests: "Product or supplement test reports"
+        }
+      },
+      money: {
+        name: "money",
+        question: "Which money things are private?",
+        options: {
+          statements: "Bank, card, brokerage and crypto statements",
+          tax: "Tax and payroll papers",
+          bills: "Invoices, bills and receipts",
+          loans: "Loans and proof of funds",
+          articles: "Articles and guides about money",
+          projects: "Crypto or company project docs",
+          prices: "Prices and quotes I am researching"
+        }
+      },
+      work: {
+        name: "work",
+        question: "Which work things are private?",
+        options: {
+          contracts: "Contracts, NDAs, offers and salaries",
+          hr: "HR and legal matters",
+          projects: "Project notes, specs and plans",
+          meetings: "Work meeting transcripts",
+          wikis: "Team wikis and assistant instruction files"
+        }
+      },
+      relationships: {
+        name: "relationships",
+        question: "Which relationship things are private?",
+        options: {
+          journals: "Journals and personal session transcripts",
+          conversations: "Private conversations",
+          teachings: "Books and teachings about relationships",
+          groups: "Group sessions and courses"
+        }
+      },
+      home: {
+        name: "home",
+        question: "Which home things are private?",
+        options: {
+          deeds: "Deeds, purchase contracts and leases",
+          info: "Property information and certificates",
+          plans: "Listings, renovation and moving plans"
+        }
+      }
+    }
+  };
   DASHBOARD_CHATGPT_PRIVACY_COPY = {
     back: "Back to Olympus",
     title: "What's private for you?",
@@ -21481,6 +21560,7 @@ var init_vocabulary = __esm(() => {
     descriptionLabel: "In your own words",
     descriptionPlaceholder: "For example: my health and therapy, money and taxes, anything about my kids, my divorce",
     descriptionShared: 'ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.',
+    questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
     rulesTitle: "Always private (optional)",
     rulesEmpty: "No folders, labels or senders yet.",
     namesShared: "Folder and label names and senders you add here are shown to ChatGPT.",
@@ -21628,6 +21708,7 @@ var init_vocabulary = __esm(() => {
     intro: "Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.",
     descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
     descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
+    questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
     rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
     rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
     kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
@@ -21968,7 +22049,230 @@ function privacyLogic(config) {
     const value = String(input || "").trim().toLowerCase();
     return EMAIL.test(value) || DOMAIN.test(value) ? value : "";
   }
-  return { validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue };
+  const DESCRIPTION_MAX = 2000;
+  const TOPICS = [
+    { id: "family", words: ["family", "families", "familial"], options: [
+      ["medical", "private"],
+      ["legal_money", "private"],
+      ["conversations", "private"],
+      ["logistics", "share"],
+      ["contacts", "share"],
+      ["history", "share"]
+    ] },
+    { id: "health", words: ["health", "healthcare", "health care", "medical"], options: [
+      ["results", "private"],
+      ["prescriptions", "private"],
+      ["therapy", "private"],
+      ["exports", "private"],
+      ["wellness", "share"],
+      ["guides", "share"],
+      ["product_tests", "share"]
+    ] },
+    { id: "money", words: ["financial", "financials", "finance", "finances", "money", "bank", "banks", "banking"], options: [
+      ["statements", "private"],
+      ["tax", "private"],
+      ["bills", "private"],
+      ["loans", "private"],
+      ["articles", "share"],
+      ["projects", "share"],
+      ["prices", "share"]
+    ] },
+    { id: "work", words: ["work", "job", "jobs", "career", "employment"], options: [
+      ["contracts", "private"],
+      ["hr", "private"],
+      ["projects", "share"],
+      ["meetings", "share"],
+      ["wikis", "share"]
+    ] },
+    { id: "relationships", words: ["relationship", "relationships", "love", "love life", "partner", "partners", "intimate", "intimacy", "dating"], options: [
+      ["journals", "private"],
+      ["conversations", "private"],
+      ["teachings", "share"],
+      ["groups", "share"]
+    ] },
+    { id: "home", words: ["home", "homes", "house", "houses", "property", "properties"], options: [
+      ["deeds", "private"],
+      ["info", "share"],
+      ["plans", "share"]
+    ] }
+  ];
+  const words = config.topicWords;
+  function topicById(id) {
+    return TOPICS.filter((entry) => entry.id === id)[0];
+  }
+  function named(topic, text2) {
+    const alternatives = topic.words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+"));
+    return new RegExp("(^|[^a-z0-9])(" + alternatives.join("|") + ")(?![a-z0-9])", "i").test(text2);
+  }
+  function leadOf(id) {
+    if (!words || !words.topics[id])
+      return "";
+    return words.about.split("{topic}").join(words.topics[id].name);
+  }
+  function lineTopic(line) {
+    const trimmed = line.trim();
+    for (const topic of TOPICS) {
+      const lead = leadOf(topic.id);
+      if (lead && trimmed.indexOf(lead) === 0)
+        return topic.id;
+    }
+    return "";
+  }
+  function detectTopics(description) {
+    const lines = String(description || "").split(`
+`);
+    const answered = lines.map(lineTopic);
+    const own = lines.filter((_line, index) => !answered[index]).join(`
+`);
+    return TOPICS.filter((topic) => named(topic, own) || answered.indexOf(topic.id) >= 0).map((topic) => topic.id);
+  }
+  function holds(segment, label) {
+    let from = 0;
+    for (;; ) {
+      const at = segment.indexOf(label, from);
+      if (at < 0)
+        return false;
+      const before = segment.charAt(at - 1);
+      const after = segment.charAt(at + label.length);
+      if (/\s/.test(before) && (after === "" || /[\s,;.…]/.test(after)))
+        return true;
+      from = at + 1;
+    }
+  }
+  function topicAnswers(description) {
+    const out = {};
+    if (!words)
+      return out;
+    const privatePrefix = words.privateList.split("{list}")[0];
+    const sharePrefix = words.shareList.split("{list}")[0];
+    for (const line of String(description || "").split(`
+`)) {
+      const id = lineTopic(line);
+      const topic = topicById(id);
+      if (!topic || out[id])
+        continue;
+      const body = line.trim().slice(leadOf(id).length);
+      const p = body.indexOf(privatePrefix);
+      const q = body.indexOf(sharePrefix);
+      const privatePart = p < 0 ? "" : body.slice(p + privatePrefix.length, q > p ? q : body.length);
+      const sharePart = q < 0 ? "" : body.slice(q + sharePrefix.length, p > q ? p : body.length);
+      const answer = {};
+      for (const [option, side] of topic.options) {
+        const label = words.topics[id].options[option] || "";
+        answer[option] = label && holds(" " + privatePart, label) ? "private" : label && holds(" " + sharePart, label) ? "share" : side;
+      }
+      out[id] = answer;
+    }
+    return out;
+  }
+  function sentence(id, answer) {
+    const topic = topicById(id);
+    if (!words || !topic || !words.topics[id])
+      return "";
+    const kept = [];
+    const shared = [];
+    for (const [option, side] of topic.options) {
+      const label = words.topics[id].options[option] || "";
+      if (label)
+        ((answer[option] || side) === "private" ? kept : shared).push(label);
+    }
+    const parts = [];
+    if (kept.length)
+      parts.push(words.privateList.split("{list}").join(kept.join(", ")));
+    if (shared.length)
+      parts.push(words.shareList.split("{list}").join(shared.join(", ")));
+    return leadOf(id) + " " + parts.join("; ") + ".";
+  }
+  function refineDescription(description, answers) {
+    const text2 = String(description || "").replace(/\r\n/g, `
+`);
+    if (!words)
+      return text2;
+    const lines = text2.split(`
+`);
+    const generated = [];
+    for (const topic of TOPICS) {
+      const answer = answers[topic.id];
+      const line = answer ? sentence(topic.id, answer) : "";
+      if (!line)
+        continue;
+      const at = lines.map(lineTopic).indexOf(topic.id);
+      if (at >= 0) {
+        lines[at] = line;
+        generated.push(at);
+      } else {
+        while (lines.length && lines[lines.length - 1].trim() === "")
+          lines.pop();
+        lines.push(line);
+        generated.push(lines.length - 1);
+      }
+    }
+    let over = lines.join(`
+`).length - DESCRIPTION_MAX;
+    for (let i = generated.length - 1;over > 0 && i >= 0; i--) {
+      const at = generated[i];
+      const line = lines[at];
+      const room = line.length - over - 1;
+      lines[at] = room > leadOf(lineTopic(line)).length + 1 ? line.slice(0, room).replace(/[\s,;]+$/, "") + "…" : "";
+      over = lines.join(`
+`).length - DESCRIPTION_MAX;
+    }
+    return lines.filter((line, index) => line !== "" || generated.indexOf(index) < 0).join(`
+`);
+  }
+  function questions(description) {
+    if (!words)
+      return [];
+    const saved = topicAnswers(description);
+    const out = [];
+    for (const id of detectTopics(description)) {
+      const topic = topicById(id);
+      const said = words.topics[id];
+      if (!topic || !said)
+        continue;
+      const answer = saved[id];
+      out.push({
+        id,
+        name: said.name,
+        question: said.question,
+        answered: !!answer,
+        options: topic.options.map(([option, side]) => ({
+          id: option,
+          label: said.options[option] || option,
+          side: answer && answer[option] ? answer[option] : side
+        }))
+      });
+    }
+    return out;
+  }
+  function answerTopic(description, topicId, optionId, side) {
+    const question = questions(description).filter((entry) => entry.id === topicId)[0];
+    if (!question || side !== "private" && side !== "share")
+      return description;
+    const answer = {};
+    for (const option of question.options)
+      answer[option.id] = option.id === optionId ? side : option.side;
+    const answers = {};
+    answers[topicId] = answer;
+    return refineDescription(description, answers);
+  }
+  return {
+    validRule,
+    displayOf,
+    viewRule,
+    identity,
+    ruleOut,
+    addTo,
+    lowering,
+    lowers,
+    replay,
+    senderValue,
+    detectTopics,
+    topicAnswers,
+    refineDescription,
+    questions,
+    answerTopic
+  };
 }
 var PRIVACY_FOLDER_SOURCE_NAMES;
 var init_shared_privacy_logic = __esm(() => {
@@ -23958,7 +24262,7 @@ init_mail_source_scope();
 init_vocabulary();
 init_shared_privacy_logic();
 var MAIL_SOURCE_ID = "gmail.email";
-var LOGIC = privacyLogic({ mailSourceId: MAIL_SOURCE_ID, folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES } });
+var LOGIC = privacyLogic({ mailSourceId: MAIL_SOURCE_ID, folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES }, topicWords: DASHBOARD_LOCAL_PRIVACY_COPY.questions });
 var CLIENT_COPY = {
   remove: DASHBOARD_LOCAL_PRIVACY_COPY.remove,
   removeFor: DASHBOARD_LOCAL_PRIVACY_COPY.removeFor,
