@@ -111,6 +111,18 @@ describe('change risk', () => {
     expect(classifyChange(trustRouting, config).criticalFiles).toEqual([...trustRouting].sort());
   });
 
+  test('the consult outbound gate and the outside-help settings are critical', () => {
+    // The gate is the only check before Private-derived text leaves the Mac,
+    // and the settings decide whether anything is sent at all (design
+    // frontier-consult-lane §A.4, §A.9). Neither name carries a sensitive term.
+    const egress = [
+      'src/core/consult-gate.ts',
+      'src/core/consult-settings.ts',
+      'test/consult-settings.test.ts',
+    ];
+    expect(classifyChange(egress, config).criticalFiles).toEqual([...egress].sort());
+  });
+
   test('remote agent endpoints and the connection store are critical', () => {
     // Every file here decides who outside this machine may call Olympus and
     // what they reach: connection-token auth, the remote routes, the store.

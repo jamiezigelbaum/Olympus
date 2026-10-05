@@ -186,6 +186,7 @@ describe('operations', () => {
       'argus_model_pool',
       'sovereignty_model_lanes',
       'zkapi_consult_transport',
+      'consult_settings',
       'consult_vocabulary',
       'email_worker',
       'worker_credential_lanes',
