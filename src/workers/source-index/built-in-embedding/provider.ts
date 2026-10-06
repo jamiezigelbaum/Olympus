@@ -26,8 +26,14 @@ import {
   type BuiltInEmbeddingStatus,
   type InstalledBuiltInEmbedding,
 } from './assets.ts';
-import { BUILT_IN_EMBEDDING_MODEL, type BuiltInEmbeddingModelSpec } from './manifest.ts';
+import {
+  BUILT_IN_EMBEDDING_MODEL,
+  BUILT_IN_EMBEDDING_MODELS,
+  builtInEmbeddingModel,
+  type BuiltInEmbeddingModelSpec,
+} from './manifest.ts';
 import { onnxRuntimeFromDirectory, type EmbeddingRuntime, type EmbeddingSession } from './runtime.ts';
+import { SentencePieceTokenizer } from './sentencepiece.ts';
 import { WordPieceTokenizer } from './wordpiece.ts';
 
 export const BUILT_IN_EMBEDDING_PROVIDER = 'built-in';
@@ -60,7 +66,17 @@ export interface BuiltInSourceEmbeddingProviderOptions {
 
 interface LoadedModel {
   session: EmbeddingSession;
-  tokenizer: WordPieceTokenizer;
+  tokenizer: WindowTokenizer;
+}
+
+/** A tokenizer as the windowing sees it: content ids, and the special ids around every window. */
+interface WindowTokenizer {
+  tokenize(text: string): number[];
+  /** `[CLS]` or `<bos>`. */
+  startId: number;
+  /** `[SEP]` or `<eos>`. */
+  endId: number;
+  padId: number;
 }
 
 interface Window {
@@ -110,13 +126,17 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       backend: this.backend,
       ...(options.epochId ? { epochOverride: options.epochId } : {}),
     });
+    // Keys a WordPiece model never set are left out, so a model's hash (and
+    // the vectors stored under it) does not move when another model is added.
     this.configHash = createHash('sha256').update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
       revision: this.spec.revision,
       weights: this.spec.model.sha256,
+      ...(this.spec.modelData ? { weightsData: this.spec.modelData.sha256 } : {}),
       vocabulary: this.spec.vocabulary.sha256,
+      ...(this.spec.tokenizer && this.spec.tokenizer !== 'wordpiece' ? { tokenizer: this.spec.tokenizer } : {}),
       dimension: this.dimension,
       maxTokens: this.spec.maxTokens,
       pooling: this.spec.pooling,
@@ -202,8 +222,11 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     }
     try {
       reportBuiltInEmbeddingState(reporterOptions, 'loading');
-      const tokenizer = new WordPieceTokenizer(readFileSync(installed.vocabularyPath, 'utf8'));
-      const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+      const tokenizer = loadTokenizer(this.spec, installed.vocabularyPath);
+      const session = await this.runtimeFactory(installed).createSession(installed.modelPath, {
+        threads: this.threads,
+        output: this.spec.pooling === 'model' ? 'sentence_embedding' : 'last_hidden_state',
+      });
       reportBuiltInEmbeddingState(reporterOptions, 'ready');
       return { session, tokenizer };
     } catch (error) {
@@ -247,15 +270,13 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     const windowTokens = this.spec.maxTokens - 2;
     const windows: Window[] = [];
     inputs.forEach((input, index) => {
-      const prefix = taskType === 'RETRIEVAL_QUERY' ? this.spec.queryPrefix : this.spec.documentPrefix;
-      const text = `${prefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
-      const ids = model.tokenizer.tokenize(text);
+      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
       const maxWindows = taskType === 'RETRIEVAL_QUERY' ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window = 0; window < count; window += 1) {
         windows.push({
           input: index,
-          ids: [model.tokenizer.clsId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.sepId],
+          ids: [model.tokenizer.startId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.endId],
         });
       }
     });
@@ -296,12 +317,17 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
         'This is a local runtime failure; restarting Olympus reloads the model.',
       );
     }
-    const [outRows, outLength, hidden] = output.dims;
-    if (outRows !== rows || outLength !== length || hidden !== this.dimension) {
+    const pooled = this.spec.pooling === 'model';
+    const expected = pooled ? [rows, this.dimension] : [rows, length, this.dimension];
+    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
       throw new OperationError(
         'source_index_error',
-        `The built-in search model returned shape [${output.dims.join(', ')}], expected [${rows}, ${length}, ${this.dimension}].`,
+        `The built-in search model returned shape [${output.dims.join(', ')}], expected [${expected.join(', ')}].`,
       );
+    }
+    const hidden = this.dimension;
+    if (pooled) {
+      return batch.map((_, row) => Float64Array.from(normalize(output.data.subarray(row * hidden, (row + 1) * hidden))));
     }
     return batch.map((window, row) => {
       const vector = new Float64Array(hidden);
@@ -318,6 +344,35 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       return Float64Array.from(normalize(vector));
     });
   }
+}
+
+function loadTokenizer(spec: BuiltInEmbeddingModelSpec, path: string): WindowTokenizer {
+  if (spec.tokenizer === 'sentencepiece') {
+    const tokenizer = new SentencePieceTokenizer(readFileSync(path));
+    return {
+      tokenize: (text) => tokenizer.tokenize(text),
+      startId: tokenizer.bosId,
+      endId: tokenizer.eosId,
+      padId: tokenizer.padId,
+    };
+  }
+  const tokenizer = new WordPieceTokenizer(readFileSync(path, 'utf8'));
+  return {
+    tokenize: (text) => tokenizer.tokenize(text),
+    startId: tokenizer.clsId,
+    endId: tokenizer.sepId,
+    padId: tokenizer.padId,
+  };
+}
+
+/** The text a model reads for one input: its task prefix, then the title and text as the model was trained to see them. */
+function promptText(spec: BuiltInEmbeddingModelSpec, input: SourceEmbeddingInput, taskType: SourceEmbeddingTaskType): string {
+  if (taskType === 'RETRIEVAL_QUERY') return `${spec.queryPrefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
+  if (spec.documentPrefix.includes('{title}')) {
+    const title = input.title?.replace(/\s+/g, ' ').trim() || 'none';
+    return `${spec.documentPrefix.replace('{title}', () => title)}${input.text}`;
+  }
+  return `${spec.documentPrefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
 }
 
 /** Thrown for a query while the model is still downloading; the query lane degrades to keyword search. */
@@ -432,11 +487,12 @@ export function sharedBuiltInSourceEmbeddingProvider(options: {
   modelId: string;
   env?: Record<string, string | undefined>;
 }): BuiltInSourceEmbeddingProvider {
-  if (options.modelId !== BUILT_IN_EMBEDDING_MODEL.modelId) {
+  const model = builtInEmbeddingModel(options.modelId);
+  if (!model) {
     throw new OperationError(
       'config_error',
       `This version of Olympus does not include the built-in embedding model "${options.modelId}".`,
-      `Use model "${BUILT_IN_EMBEDDING_MODEL.modelId}" for the built-in profile, or update Olympus.`,
+      `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(', ')} for the built-in profile, or update Olympus.`,
     );
   }
   const env = options.env ?? process.env;
@@ -444,7 +500,7 @@ export function sharedBuiltInSourceEmbeddingProvider(options: {
   sharedProviders ??= new Map();
   let provider = sharedProviders.get(key);
   if (!provider) {
-    provider = new BuiltInSourceEmbeddingProvider({ env });
+    provider = new BuiltInSourceEmbeddingProvider({ env, model });
     sharedProviders.set(key, provider);
   }
   return provider;

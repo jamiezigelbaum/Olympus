@@ -3963,10 +3963,18 @@ var init_venice_models = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/manifest.ts
-var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, BUILT_IN_EMBEDDING_MODEL;
+function pinnedFile(repository, revision, file) {
+  return {
+    name: file.name,
+    url: `https://huggingface.co/${repository}/resolve/${revision}/${file.path}`,
+    bytes: file.bytes,
+    sha256: file.sha256
+  };
+}
+var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2_PIN, EMBEDDINGGEMMA_2, BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL;
 var init_manifest = __esm(() => {
   ARCTIC_M_BASE = `https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5/resolve/${ARCTIC_M_REVISION}`;
-  BUILT_IN_EMBEDDING_MODEL = {
+  ARCTIC_EMBED_M_V1_5 = {
     modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
     repository: "Snowflake/snowflake-arctic-embed-m-v1.5",
     revision: ARCTIC_M_REVISION,
@@ -3989,6 +3997,30 @@ var init_manifest = __esm(() => {
       sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
     }
   };
+  EMBEDDINGGEMMA_2_PIN = {
+    modelId: "embeddinggemma-2-onnx-UNPINNED",
+    repository: "onnx-community/embeddinggemma-2-ONNX",
+    revision: "UNPINNED",
+    model: { name: "model.onnx", path: "onnx/model.onnx", bytes: 0, sha256: "UNPINNED" },
+    modelData: undefined,
+    vocabulary: { name: "tokenizer.model", path: "tokenizer.model", bytes: 0, sha256: "UNPINNED" }
+  };
+  EMBEDDINGGEMMA_2 = {
+    modelId: EMBEDDINGGEMMA_2_PIN.modelId,
+    repository: EMBEDDINGGEMMA_2_PIN.repository,
+    revision: EMBEDDINGGEMMA_2_PIN.revision,
+    license: "Apache-2.0",
+    dimension: 768,
+    maxTokens: 2048,
+    pooling: "model",
+    tokenizer: "sentencepiece",
+    queryPrefix: "task: search result | query: ",
+    documentPrefix: "title: {title} | text: ",
+    model: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.model),
+    ...EMBEDDINGGEMMA_2_PIN.modelData ? { modelData: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.modelData) } : {},
+    vocabulary: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.vocabulary)
+  };
+  BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL = ARCTIC_EMBED_M_V1_5;
 });
 
 // src/core/sovereignty.ts
@@ -4635,7 +4667,7 @@ var init_sovereignty = __esm(() => {
   init_manifest();
   init_zkapi_consult_settings();
   init_source_model_policy();
-  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
+  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
   SUPPORTED_PROVIDERS = [
     "local-openai-compatible",
     "openclaw-infer",
@@ -9182,6 +9214,12 @@ var init_embedding_identity = __esm(() => {
       modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
       backend: "local",
       dimension: 768
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "embeddinggemma-2-onnx-UNPINNED",
+      backend: "local",
+      dimension: 768
     })
   ];
 });
@@ -9224,7 +9262,7 @@ var init_local_index = __esm(() => {
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
-    [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4]
+    [ARCTIC_EMBED_M_V1_5.modelId, 0.4]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",

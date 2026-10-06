@@ -3456,10 +3456,24 @@ var init_venice_models = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/manifest.ts
-var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, BUILT_IN_EMBEDDING_MODEL, ONNX_RUNTIME_PACK;
+function pinnedFile(repository, revision, file) {
+  return {
+    name: file.name,
+    url: `https://huggingface.co/${repository}/resolve/${revision}/${file.path}`,
+    bytes: file.bytes,
+    sha256: file.sha256
+  };
+}
+function builtInEmbeddingModel(modelId) {
+  return BUILT_IN_EMBEDDING_MODELS.find((model) => model.modelId === modelId);
+}
+function builtInEmbeddingModelFiles(model) {
+  return [model.model, ...model.modelData ? [model.modelData] : [], model.vocabulary];
+}
+var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2_PIN, EMBEDDINGGEMMA_2, BUILT_IN_EMBEDDING_MODEL, BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, BUILT_IN_EMBEDDING_MODELS, ONNX_RUNTIME_PACK;
 var init_manifest = __esm(() => {
   ARCTIC_M_BASE = `https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5/resolve/${ARCTIC_M_REVISION}`;
-  BUILT_IN_EMBEDDING_MODEL = {
+  ARCTIC_EMBED_M_V1_5 = {
     modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
     repository: "Snowflake/snowflake-arctic-embed-m-v1.5",
     revision: ARCTIC_M_REVISION,
@@ -3482,6 +3496,32 @@ var init_manifest = __esm(() => {
       sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
     }
   };
+  EMBEDDINGGEMMA_2_PIN = {
+    modelId: "embeddinggemma-2-onnx-UNPINNED",
+    repository: "onnx-community/embeddinggemma-2-ONNX",
+    revision: "UNPINNED",
+    model: { name: "model.onnx", path: "onnx/model.onnx", bytes: 0, sha256: "UNPINNED" },
+    modelData: undefined,
+    vocabulary: { name: "tokenizer.model", path: "tokenizer.model", bytes: 0, sha256: "UNPINNED" }
+  };
+  EMBEDDINGGEMMA_2 = {
+    modelId: EMBEDDINGGEMMA_2_PIN.modelId,
+    repository: EMBEDDINGGEMMA_2_PIN.repository,
+    revision: EMBEDDINGGEMMA_2_PIN.revision,
+    license: "Apache-2.0",
+    dimension: 768,
+    maxTokens: 2048,
+    pooling: "model",
+    tokenizer: "sentencepiece",
+    queryPrefix: "task: search result | query: ",
+    documentPrefix: "title: {title} | text: ",
+    model: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.model),
+    ...EMBEDDINGGEMMA_2_PIN.modelData ? { modelData: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.modelData) } : {},
+    vocabulary: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.vocabulary)
+  };
+  BUILT_IN_EMBEDDING_MODEL = EMBEDDINGGEMMA_2;
+  BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL = ARCTIC_EMBED_M_V1_5;
+  BUILT_IN_EMBEDDING_MODELS = [EMBEDDINGGEMMA_2, ARCTIC_EMBED_M_V1_5];
   ONNX_RUNTIME_PACK = {
     version: "1.30.0",
     runtime: {
@@ -4485,7 +4525,7 @@ var init_sovereignty = __esm(() => {
   init_manifest();
   init_zkapi_consult_settings();
   init_source_model_policy();
-  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
+  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
   SUPPORTED_PROVIDERS = [
     "local-openai-compatible",
     "openclaw-infer",
@@ -6995,6 +7035,12 @@ var init_embedding_identity = __esm(() => {
     canonicalIdentity({
       provider: "built-in",
       modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
+      backend: "local",
+      dimension: 768
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "embeddinggemma-2-onnx-UNPINNED",
       backend: "local",
       dimension: 768
     })
@@ -13516,7 +13562,7 @@ var init_local_index = __esm(() => {
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
-    [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4]
+    [ARCTIC_EMBED_M_V1_5.modelId, 0.4]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",
@@ -22347,14 +22393,14 @@ function ownerConfigStamp(path) {
   }
 }
 function readOwnerConfigFile(path) {
-  let before;
+  let before2;
   try {
-    before = statSync6(path);
+    before2 = statSync6(path);
   } catch (error) {
     return error.code === "ENOENT" ? { status: "missing" } : { status: "refused", reason: "unreadable", stamp: "unreadable" };
   }
-  const stamp = stampOf(before);
-  if (!before.isFile() || (before.mode & 18) !== 0 || !ownedByThisUser(before)) {
+  const stamp = stampOf(before2);
+  if (!before2.isFile() || (before2.mode & 18) !== 0 || !ownedByThisUser(before2)) {
     return { status: "refused", reason: "unsafe_permissions", stamp };
   }
   let text;
@@ -22369,7 +22415,7 @@ function readOwnerConfigFile(path) {
   } catch {
     return { status: "refused", reason: "torn_read", stamp };
   }
-  if (stampOf(after) !== stamp || Buffer.byteLength(text, "utf8") !== before.size) {
+  if (stampOf(after) !== stamp || Buffer.byteLength(text, "utf8") !== before2.size) {
     return { status: "refused", reason: "torn_read", stamp: stampOf(after) };
   }
   return { status: "ok", text, stamp };
@@ -25098,7 +25144,7 @@ async function installBuiltInEmbedding(options = {}) {
       throw new BuiltInEmbeddingInstallError("unsupported_platform", `The built-in search model does not run on ${platform2}.`);
     }
     ensureDirectory(paths.root);
-    const modelFiles = [model.model, model.vocabulary];
+    const modelFiles = builtInEmbeddingModelFiles(model);
     const runtimePackages = options.skipRuntime ? [] : [runtime.common, runtime.runtime];
     if (installComplete(paths, modelFiles, runtimePackages)) {
       await verifyModelFiles(paths.modelDir, modelFiles, reporter);
@@ -25147,7 +25193,7 @@ function reportBuiltInEmbeddingState(options, state, failure) {
     reporter.set(state, state === "ready" ? "Built-in search model ready" : "Starting the built-in search model", 100);
 }
 function labelFor(file) {
-  return file.name.endsWith(".onnx") ? "Downloading the built-in search model" : "Downloading the model vocabulary";
+  return /\.onnx(_data)?$/.test(file.name) ? "Downloading the built-in search model" : "Downloading the model vocabulary";
 }
 function installComplete(paths, modelFiles, runtimePackages) {
   return modelFiles.every((file) => existsSync9(join17(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
@@ -25494,9 +25540,11 @@ function onnxRuntimeFromDirectory(runtimeDir) {
       };
       process.once("exit", releaseAtExit);
       const wantsTokenTypes = session.inputNames.includes("token_type_ids");
-      const outputName = session.outputNames.includes("last_hidden_state") ? "last_hidden_state" : session.outputNames[0];
-      if (!outputName)
-        throw new Error("The built-in search model has no outputs.");
+      const wanted = options.output ?? "last_hidden_state";
+      const outputName = session.outputNames.includes(wanted) ? wanted : options.output ? undefined : session.outputNames[0];
+      if (!outputName) {
+        throw new Error(`The built-in search model has no ${wanted} output (it has ${session.outputNames.join(", ") || "none"}).`);
+      }
       return {
         async run(batch) {
           const dims = [batch.batchSize, batch.sequenceLength];
@@ -25519,6 +25567,315 @@ function onnxRuntimeFromDirectory(runtimeDir) {
       };
     }
   };
+}
+
+// src/workers/source-index/built-in-embedding/sentencepiece.ts
+var SPACE_SYMBOL = "▁";
+var NORMAL = 1;
+var UNKNOWN = 2;
+var CONTROL = 3;
+var USER_DEFINED = 4;
+var UNUSED = 5;
+var BYTE = 6;
+var MODEL_TYPE_BPE = 2;
+
+class SentencePieceTokenizer {
+  pieces;
+  scores;
+  byteIds;
+  userDefined;
+  bosId;
+  eosId;
+  padId;
+  unkId;
+  constructor(modelBytes) {
+    const model = parseModelProto(modelBytes);
+    const { normalizer } = model;
+    if (model.modelType !== MODEL_TYPE_BPE)
+      throw new Error("SentencePiece model is not a BPE model.");
+    if (!model.byteFallback)
+      throw new Error("SentencePiece model does not use byte fallback.");
+    if (model.treatWhitespaceAsSuffix)
+      throw new Error("SentencePiece model treats whitespace as a suffix.");
+    if (normalizer.name !== "identity" || normalizer.hasCharsmap || normalizer.addDummyPrefix || normalizer.removeExtraWhitespaces || !normalizer.escapeWhitespaces) {
+      throw new Error("SentencePiece model uses a normalizer other than identity with escaped whitespace.");
+    }
+    this.pieces = new Map;
+    this.scores = new Float32Array(model.pieces.length);
+    this.byteIds = new Int32Array(256).fill(-1);
+    this.userDefined = new Map;
+    const reserved = new Map;
+    model.pieces.forEach(({ piece, score, type }, id) => {
+      this.scores[id] = score;
+      if (type === NORMAL || type === USER_DEFINED || type === UNUSED) {
+        if (type === UNUSED)
+          throw new Error("SentencePiece model has unused pieces, which this encoder does not resegment.");
+        if (!this.pieces.has(piece))
+          this.pieces.set(piece, id);
+        if (type === USER_DEFINED && piece.length > 0) {
+          const first = String.fromCodePoint(piece.codePointAt(0));
+          const list = this.userDefined.get(first) ?? [];
+          list.push(piece);
+          this.userDefined.set(first, list);
+        }
+      } else {
+        reserved.set(piece, id);
+        if (type === BYTE) {
+          const match = /^<0x([0-9A-F]{2})>$/.exec(piece);
+          if (!match)
+            throw new Error(`SentencePiece byte piece ${piece} is malformed.`);
+          this.byteIds[Number.parseInt(match[1], 16)] = id;
+        }
+      }
+    });
+    for (const list of this.userDefined.values())
+      list.sort((left, right) => right.length - left.length);
+    if (this.byteIds.includes(-1))
+      throw new Error("SentencePiece model is missing byte pieces.");
+    this.bosId = requirePiece(model, "<bos>", CONTROL);
+    this.eosId = requirePiece(model, "<eos>", CONTROL);
+    this.padId = requirePiece(model, "<pad>", CONTROL);
+    this.unkId = requirePiece(model, "<unk>", UNKNOWN);
+  }
+  tokenize(text) {
+    const symbols = this.initialSymbols(text.replaceAll(" ", SPACE_SYMBOL));
+    if (symbols.length === 0)
+      return [];
+    const agenda = new PairHeap;
+    const consider = (left, right) => {
+      if (left < 0 || right < 0)
+        return;
+      const a = symbols[left];
+      const b = symbols[right];
+      if (a.frozen || b.frozen)
+        return;
+      const merged = a.piece + b.piece;
+      const id = this.pieces.get(merged);
+      if (id === undefined)
+        return;
+      agenda.push({ left, right, score: this.scores[id], length: merged.length });
+    };
+    for (let index = 1;index < symbols.length; index += 1)
+      consider(index - 1, index);
+    for (let top = agenda.pop();top; top = agenda.pop()) {
+      const left = symbols[top.left];
+      const right = symbols[top.right];
+      if (left.piece.length === 0 || right.piece.length === 0 || left.piece.length + right.piece.length !== top.length) {
+        continue;
+      }
+      left.piece += right.piece;
+      left.next = right.next;
+      if (right.next >= 0)
+        symbols[right.next].prev = top.left;
+      right.piece = "";
+      consider(left.prev, top.left);
+      consider(top.left, left.next);
+    }
+    const ids = [];
+    for (let index = 0;index !== -1; index = symbols[index].next) {
+      const piece = symbols[index].piece;
+      const id = this.pieces.get(piece);
+      if (id !== undefined) {
+        ids.push(id);
+      } else {
+        for (const byte of new TextEncoder().encode(piece))
+          ids.push(this.byteIds[byte]);
+      }
+    }
+    return ids;
+  }
+  initialSymbols(normalized) {
+    const symbols = [];
+    let offset = 0;
+    while (offset < normalized.length) {
+      const char = String.fromCodePoint(normalized.codePointAt(offset));
+      const candidates = this.userDefined.get(char);
+      const match = candidates?.find((piece2) => normalized.startsWith(piece2, offset));
+      const piece = match ?? char;
+      symbols.push({ piece, prev: symbols.length - 1, next: symbols.length + 1, frozen: match !== undefined });
+      offset += piece.length;
+    }
+    if (symbols.length > 0)
+      symbols[symbols.length - 1].next = -1;
+    return symbols;
+  }
+}
+
+class PairHeap {
+  items = [];
+  push(pair) {
+    const items = this.items;
+    items.push(pair);
+    let index = items.length - 1;
+    while (index > 0) {
+      const parent = index - 1 >> 1;
+      if (!before(items[index], items[parent]))
+        break;
+      [items[index], items[parent]] = [items[parent], items[index]];
+      index = parent;
+    }
+  }
+  pop() {
+    const items = this.items;
+    const top = items[0];
+    const last = items.pop();
+    if (items.length > 0 && last) {
+      items[0] = last;
+      let index = 0;
+      for (;; ) {
+        const left = index * 2 + 1;
+        const right = left + 1;
+        let best = index;
+        if (left < items.length && before(items[left], items[best]))
+          best = left;
+        if (right < items.length && before(items[right], items[best]))
+          best = right;
+        if (best === index)
+          break;
+        [items[index], items[best]] = [items[best], items[index]];
+        index = best;
+      }
+    }
+    return top;
+  }
+}
+function before(a, b) {
+  return a.score > b.score || a.score === b.score && a.left < b.left;
+}
+function requirePiece(model, piece, type) {
+  const id = model.pieces.findIndex((entry) => entry.piece === piece && entry.type === type);
+  if (id < 0)
+    throw new Error(`SentencePiece model is missing ${piece}.`);
+  return id;
+}
+
+class ProtoReader {
+  bytes;
+  end;
+  offset = 0;
+  view;
+  constructor(bytes, end = bytes.length, start = 0) {
+    this.bytes = bytes;
+    this.end = end;
+    this.offset = start;
+    this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
+  done() {
+    return this.offset >= this.end;
+  }
+  tag() {
+    const tag = this.varint();
+    return { field: Math.floor(tag / 8), wire: tag % 8 };
+  }
+  varint() {
+    let result = 0;
+    let scale = 1;
+    for (let shift = 0;shift < 70; shift += 7) {
+      if (this.offset >= this.end)
+        throw new Error("SentencePiece model is truncated.");
+      const byte = this.bytes[this.offset++];
+      result += (byte & 127) * scale;
+      if ((byte & 128) === 0)
+        return result;
+      scale *= 128;
+    }
+    throw new Error("SentencePiece model has a malformed varint.");
+  }
+  float() {
+    if (this.offset + 4 > this.end)
+      throw new Error("SentencePiece model is truncated.");
+    const value = this.view.getFloat32(this.offset, true);
+    this.offset += 4;
+    return value;
+  }
+  message() {
+    const length = this.varint();
+    const start = this.offset;
+    if (start + length > this.end)
+      throw new Error("SentencePiece model is truncated.");
+    this.offset += length;
+    return new ProtoReader(this.bytes, start + length, start);
+  }
+  string() {
+    const inner = this.message();
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(this.bytes.subarray(inner.offset, inner.end));
+  }
+  skip(wire) {
+    if (wire === 0)
+      this.varint();
+    else if (wire === 1)
+      this.offset += 8;
+    else if (wire === 2)
+      this.message();
+    else if (wire === 5)
+      this.offset += 4;
+    else
+      throw new Error(`SentencePiece model has unsupported wire type ${wire}.`);
+  }
+}
+function parseModelProto(bytes) {
+  const model = {
+    pieces: [],
+    modelType: 1,
+    byteFallback: false,
+    treatWhitespaceAsSuffix: false,
+    normalizer: { name: "", hasCharsmap: false, addDummyPrefix: true, removeExtraWhitespaces: true, escapeWhitespaces: true }
+  };
+  const reader = new ProtoReader(bytes);
+  while (!reader.done()) {
+    const { field, wire } = reader.tag();
+    if (field === 1 && wire === 2) {
+      const entry = { piece: "", score: 0, type: NORMAL };
+      const inner = reader.message();
+      while (!inner.done()) {
+        const tag = inner.tag();
+        if (tag.field === 1 && tag.wire === 2)
+          entry.piece = inner.string();
+        else if (tag.field === 2 && tag.wire === 5)
+          entry.score = inner.float();
+        else if (tag.field === 3 && tag.wire === 0)
+          entry.type = inner.varint();
+        else
+          inner.skip(tag.wire);
+      }
+      model.pieces.push(entry);
+    } else if (field === 2 && wire === 2) {
+      const inner = reader.message();
+      while (!inner.done()) {
+        const tag = inner.tag();
+        if (tag.field === 3 && tag.wire === 0)
+          model.modelType = inner.varint();
+        else if (tag.field === 24 && tag.wire === 0)
+          model.treatWhitespaceAsSuffix = inner.varint() !== 0;
+        else if (tag.field === 35 && tag.wire === 0)
+          model.byteFallback = inner.varint() !== 0;
+        else
+          inner.skip(tag.wire);
+      }
+    } else if (field === 3 && wire === 2) {
+      const inner = reader.message();
+      while (!inner.done()) {
+        const tag = inner.tag();
+        if (tag.field === 1 && tag.wire === 2)
+          model.normalizer.name = inner.string();
+        else if (tag.field === 2 && tag.wire === 2)
+          model.normalizer.hasCharsmap = inner.message().done() === false;
+        else if (tag.field === 3 && tag.wire === 0)
+          model.normalizer.addDummyPrefix = inner.varint() !== 0;
+        else if (tag.field === 4 && tag.wire === 0)
+          model.normalizer.removeExtraWhitespaces = inner.varint() !== 0;
+        else if (tag.field === 5 && tag.wire === 0)
+          model.normalizer.escapeWhitespaces = inner.varint() !== 0;
+        else
+          inner.skip(tag.wire);
+      }
+    } else {
+      reader.skip(wire);
+    }
+  }
+  if (model.pieces.length === 0)
+    throw new Error("SentencePiece model has no pieces.");
+  return model;
 }
 
 // src/workers/source-index/built-in-embedding/wordpiece.ts
@@ -25600,7 +25957,7 @@ function requireToken(vocab, token) {
     throw new Error(`WordPiece vocabulary is missing ${token}.`);
   return id;
 }
-var CONTROL = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}]/u;
+var CONTROL2 = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}]/u;
 var WHITESPACE = /[\s\p{Zs}]/u;
 var COMBINING_MARK = /\p{Mn}/gu;
 var PUNCTUATION = /\p{P}/u;
@@ -25615,7 +25972,7 @@ function normalize(text) {
       cleaned += " ";
       continue;
     }
-    if (CONTROL.test(char))
+    if (CONTROL2.test(char))
       continue;
     if (WHITESPACE.test(char)) {
       cleaned += " ";
@@ -25709,7 +26066,9 @@ class BuiltInSourceEmbeddingProvider {
       repository: this.spec.repository,
       revision: this.spec.revision,
       weights: this.spec.model.sha256,
+      ...this.spec.modelData ? { weightsData: this.spec.modelData.sha256 } : {},
       vocabulary: this.spec.vocabulary.sha256,
+      ...this.spec.tokenizer && this.spec.tokenizer !== "wordpiece" ? { tokenizer: this.spec.tokenizer } : {},
       dimension: this.dimension,
       maxTokens: this.spec.maxTokens,
       pooling: this.spec.pooling,
@@ -25782,8 +26141,11 @@ class BuiltInSourceEmbeddingProvider {
     }
     try {
       reportBuiltInEmbeddingState(reporterOptions, "loading");
-      const tokenizer = new WordPieceTokenizer(readFileSync10(installed.vocabularyPath, "utf8"));
-      const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+      const tokenizer = loadTokenizer(this.spec, installed.vocabularyPath);
+      const session = await this.runtimeFactory(installed).createSession(installed.modelPath, {
+        threads: this.threads,
+        output: this.spec.pooling === "model" ? "sentence_embedding" : "last_hidden_state"
+      });
       reportBuiltInEmbeddingState(reporterOptions, "ready");
       return { session, tokenizer };
     } catch (error) {
@@ -25812,16 +26174,13 @@ class BuiltInSourceEmbeddingProvider {
     const windowTokens = this.spec.maxTokens - 2;
     const windows = [];
     inputs.forEach((input, index) => {
-      const prefix = taskType === "RETRIEVAL_QUERY" ? this.spec.queryPrefix : this.spec.documentPrefix;
-      const text = `${prefix}${input.title ? `${input.title}
-` : ""}${input.text}`;
-      const ids = model.tokenizer.tokenize(text);
+      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
       const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window2 = 0;window2 < count; window2 += 1) {
         windows.push({
           input: index,
-          ids: [model.tokenizer.clsId, ...ids.slice(window2 * windowTokens, (window2 + 1) * windowTokens), model.tokenizer.sepId]
+          ids: [model.tokenizer.startId, ...ids.slice(window2 * windowTokens, (window2 + 1) * windowTokens), model.tokenizer.endId]
         });
       }
     });
@@ -25858,9 +26217,14 @@ class BuiltInSourceEmbeddingProvider {
     } catch (error) {
       throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; restarting Olympus reloads the model.");
     }
-    const [outRows, outLength, hidden] = output.dims;
-    if (outRows !== rows || outLength !== length || hidden !== this.dimension) {
-      throw new OperationError("source_index_error", `The built-in search model returned shape [${output.dims.join(", ")}], expected [${rows}, ${length}, ${this.dimension}].`);
+    const pooled = this.spec.pooling === "model";
+    const expected = pooled ? [rows, this.dimension] : [rows, length, this.dimension];
+    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
+      throw new OperationError("source_index_error", `The built-in search model returned shape [${output.dims.join(", ")}], expected [${expected.join(", ")}].`);
+    }
+    const hidden = this.dimension;
+    if (pooled) {
+      return batch.map((_, row) => Float64Array.from(normalize2(output.data.subarray(row * hidden, (row + 1) * hidden))));
     }
     return batch.map((window2, row) => {
       const vector = new Float64Array(hidden);
@@ -25880,6 +26244,35 @@ class BuiltInSourceEmbeddingProvider {
       return Float64Array.from(normalize2(vector));
     });
   }
+}
+function loadTokenizer(spec, path) {
+  if (spec.tokenizer === "sentencepiece") {
+    const tokenizer2 = new SentencePieceTokenizer(readFileSync10(path));
+    return {
+      tokenize: (text) => tokenizer2.tokenize(text),
+      startId: tokenizer2.bosId,
+      endId: tokenizer2.eosId,
+      padId: tokenizer2.padId
+    };
+  }
+  const tokenizer = new WordPieceTokenizer(readFileSync10(path, "utf8"));
+  return {
+    tokenize: (text) => tokenizer.tokenize(text),
+    startId: tokenizer.clsId,
+    endId: tokenizer.sepId,
+    padId: tokenizer.padId
+  };
+}
+function promptText(spec, input, taskType) {
+  if (taskType === "RETRIEVAL_QUERY")
+    return `${spec.queryPrefix}${input.title ? `${input.title}
+` : ""}${input.text}`;
+  if (spec.documentPrefix.includes("{title}")) {
+    const title = input.title?.replace(/\s+/g, " ").trim() || "none";
+    return `${spec.documentPrefix.replace("{title}", () => title)}${input.text}`;
+  }
+  return `${spec.documentPrefix}${input.title ? `${input.title}
+` : ""}${input.text}`;
 }
 
 class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
@@ -25940,15 +26333,16 @@ function resolveThreads(explicit, env) {
 }
 var sharedProviders;
 function sharedBuiltInSourceEmbeddingProvider(options) {
-  if (options.modelId !== BUILT_IN_EMBEDDING_MODEL.modelId) {
-    throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use model "${BUILT_IN_EMBEDDING_MODEL.modelId}" for the built-in profile, or update Olympus.`);
+  const model = builtInEmbeddingModel(options.modelId);
+  if (!model) {
+    throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(", ")} for the built-in profile, or update Olympus.`);
   }
   const env = options.env ?? process.env;
   const key = `${builtInEmbeddingPaths(env).root}\x00${options.modelId}`;
   sharedProviders ??= new Map;
   let provider = sharedProviders.get(key);
   if (!provider) {
-    provider = new BuiltInSourceEmbeddingProvider({ env });
+    provider = new BuiltInSourceEmbeddingProvider({ env, model });
     sharedProviders.set(key, provider);
   }
   return provider;
@@ -28644,7 +29038,7 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
   }
   if (provider === "built-in") {
     return sharedBuiltInSourceEmbeddingProvider({
-      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_MODEL.modelId,
+      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId,
       env
     });
   }

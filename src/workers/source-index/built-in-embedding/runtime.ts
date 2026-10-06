@@ -15,7 +15,7 @@ export interface EmbeddingBatch {
 }
 
 export interface EmbeddingSessionOutput {
-  /** Row-major `[batch, sequence, hidden]` last hidden state. */
+  /** Row-major: `[batch, sequence, hidden]` for `last_hidden_state`, `[batch, hidden]` for `sentence_embedding`. */
   data: Float32Array;
   dims: readonly number[];
 }
@@ -25,8 +25,14 @@ export interface EmbeddingSession {
   release?(): Promise<void>;
 }
 
+export interface EmbeddingSessionOptions {
+  threads: number;
+  /** The graph output to read; absent, `last_hidden_state` (or the only output). */
+  output?: 'last_hidden_state' | 'sentence_embedding';
+}
+
 export interface EmbeddingRuntime {
-  createSession(modelPath: string, options: { threads: number }): Promise<EmbeddingSession>;
+  createSession(modelPath: string, options: EmbeddingSessionOptions): Promise<EmbeddingSession>;
 }
 
 interface OrtTensor {
@@ -70,10 +76,13 @@ export function onnxRuntimeFromDirectory(runtimeDir: string): EmbeddingRuntime {
       const releaseAtExit = () => { void session.release().catch(() => undefined); };
       process.once('exit', releaseAtExit);
       const wantsTokenTypes = session.inputNames.includes('token_type_ids');
-      const outputName = session.outputNames.includes('last_hidden_state')
-        ? 'last_hidden_state'
-        : session.outputNames[0];
-      if (!outputName) throw new Error('The built-in search model has no outputs.');
+      const wanted = options.output ?? 'last_hidden_state';
+      const outputName = session.outputNames.includes(wanted)
+        ? wanted
+        : options.output ? undefined : session.outputNames[0];
+      if (!outputName) {
+        throw new Error(`The built-in search model has no ${wanted} output (it has ${session.outputNames.join(', ') || 'none'}).`);
+      }
       return {
         async run(batch) {
           const dims = [batch.batchSize, batch.sequenceLength];

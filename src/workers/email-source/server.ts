@@ -268,7 +268,7 @@ import {
   sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
 import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
-import { BUILT_IN_EMBEDDING_MODEL } from '../source-index/built-in-embedding/manifest.ts';
+import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
   createGoogleDriveConnectorStoreSchedulerSource,
@@ -536,7 +536,7 @@ export function createSourceIndexEmbeddingProviderFromEnv(
   }
   if (provider === 'built-in') {
     return sharedBuiltInSourceEmbeddingProvider({
-      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_MODEL.modelId,
+      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId,
       env,
     });
   }
@@ -4509,8 +4509,11 @@ export async function main(): Promise<void> {
   };
   const chatgptEmbeddingState = () => {
     const builtIn = (['public_safe', 'internal', 'secure_local'] as const)
-      .some((domain) => sovereigntyEngine.resolveEmbeddingProfile(domain)?.profile.provider === 'built-in');
-    return builtIn ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env)) : undefined;
+      .map((domain) => sovereigntyEngine.resolveEmbeddingProfile(domain)?.profile)
+      .find((profile) => profile?.provider === 'built-in');
+    // The configured model's install, which is not the new-install default on an older install.
+    const model = builtIn?.model ? builtInEmbeddingModel(builtIn.model) : undefined;
+    return model ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env, model)) : undefined;
   };
 
   const server = Bun.serve({

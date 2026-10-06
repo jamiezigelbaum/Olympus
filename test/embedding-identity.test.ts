@@ -62,6 +62,13 @@ describe('embedding identity canon', () => {
       dimension: 768,
       epochId: BUILT_IN_EPOCH,
     });
+    expect(canonicalEmbeddingIdentityForModel('embeddinggemma-2-onnx-UNPINNED')).toEqual({
+      provider: 'built-in',
+      modelId: 'embeddinggemma-2-onnx-UNPINNED',
+      backend: 'local',
+      dimension: 768,
+      epochId: 'local:built-in:embeddinggemma-2-onnx-UNPINNED:768',
+    });
     expect(canonicalEmbeddingDimension('secure-local-qwen3-embed')).toBe(2560);
     expect(canonicalEmbeddingDimension('unknown-model')).toBeUndefined();
     expect(canonicalEmbeddingIdentityForModel('unknown-model')).toBeUndefined();

@@ -22,6 +22,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   BUILT_IN_EMBEDDING_MODEL,
+  builtInEmbeddingModelFiles,
   ONNX_RUNTIME_PACK,
   type BuiltInEmbeddingModelSpec,
   type OnnxRuntimePackSpec,
@@ -175,7 +176,7 @@ export async function installBuiltInEmbedding(
     }
     ensureDirectory(paths.root);
 
-    const modelFiles = [model.model, model.vocabulary];
+    const modelFiles = builtInEmbeddingModelFiles(model);
     const runtimePackages = options.skipRuntime ? [] : [runtime.common, runtime.runtime];
     if (installComplete(paths, modelFiles, runtimePackages)) {
       await verifyModelFiles(paths.modelDir, modelFiles, reporter);
@@ -236,7 +237,7 @@ export function reportBuiltInEmbeddingState(
 }
 
 function labelFor(file: PinnedDownload): string {
-  return file.name.endsWith('.onnx') ? 'Downloading the built-in search model' : 'Downloading the model vocabulary';
+  return /\.onnx(_data)?$/.test(file.name) ? 'Downloading the built-in search model' : 'Downloading the model vocabulary';
 }
 
 function installComplete(

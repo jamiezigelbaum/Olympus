@@ -4,7 +4,7 @@
     "built-in-embedding": {
       "provider": "built-in",
       "trust": "local",
-      "model": "arctic-embed-m-v1.5-int8-e58a8f7",
+      "model": "embeddinggemma-2-onnx-UNPINNED",
       "purpose": "embedding"
     },
     "venice-private": {

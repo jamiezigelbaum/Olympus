@@ -63,11 +63,11 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 
 ### Built-in embeddings
 
-New installs (setup from 2026-10-01) embed every tier with the **built-in
-model**: Snowflake Arctic Embed M v1.5 (Apache-2.0), int8, 768 dimensions,
+New installs (setup from 2026-10-06) embed every tier with the **built-in
+model**: Google's EmbeddingGemma 2 (Apache-2.0), text encoder, 768 dimensions,
 running in-process on ONNX Runtime. It needs no account, no key and no extra
-app, and nothing leaves the computer. On first use Olympus downloads the model
-(110 MB) and the runtime for this platform (114 MB) once into
+app, and nothing leaves the computer. On first use Olympus downloads the model,
+its tokenizer and the runtime for this platform (114 MB) once into
 `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models/built-in-embedding`
 (override with `OLYMPUS_BUILT_IN_EMBEDDING_DIR`); every file is pinned by size
 and checksum and re-verified before it loads. While it downloads, questions
@@ -81,10 +81,18 @@ The profile is:
 "built-in-embedding": {
   "provider": "built-in",
   "trust": "local",
-  "model": "arctic-embed-m-v1.5-int8-e58a8f7",
+  "model": "embeddinggemma-2-onnx-UNPINNED",
   "purpose": "embedding"
 }
 ```
+
+Installs set up between 2026-10-01 and 2026-10-06 embed with the previous
+built-in model, Snowflake Arctic Embed M v1.5 (`arctic-embed-m-v1.5-int8-e58a8f7`,
+110 MB). Olympus keeps running it for them; moving such an install to
+EmbeddingGemma 2 is the re-embed described below. The same holds for an
+install configured only by environment: `OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER=built-in`
+with no `OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL` keeps running Arctic, so an
+upgrade never re-embeds on its own; name the EmbeddingGemma 2 model id to move.
 
 Gemini, a local OpenAI-compatible embedding server, and Venice Private
 embeddings stay available as opt-in profiles. Switching an existing corpus to

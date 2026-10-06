@@ -52,9 +52,9 @@ The preset prerequisites are:
 | `no-sensitive` — Don't ingest Private data | Nothing. Private content is unavailable to answering. |
 
 Every preset makes content searchable with the built-in embedding model: a
-small model that runs inside Olympus, downloads once (about 225 MB, checksum
-pinned) on first use, needs no account or key, and sends nothing off the
-computer. Gemini, a local embedding server, or a Venice Private embedding
+small model (Google's EmbeddingGemma 2) that runs inside Olympus, downloads
+once (checksum pinned) on first use, needs no account or key, and sends
+nothing off the computer. Gemini, a local embedding server, or a Venice Private embedding
 model remain opt-in choices; see
 [SOVEREIGNTY_CONFIG.md](SOVEREIGNTY_CONFIG.md#built-in-embeddings).
 

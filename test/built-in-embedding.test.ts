@@ -1,9 +1,11 @@
 /**
- * The built-in embedding model (owner decision 2026-10-01): the zero-setup
- * default for new installs. These tests run with a stub runtime and a stub
- * download server; `OLYMPUS_BUILT_IN_EMBEDDING_REAL_TEST=1` additionally runs
- * the real model (downloads ~225 MB once into OLYMPUS_BUILT_IN_EMBEDDING_DIR
- * or a temporary directory).
+ * The built-in embedding model: the zero-setup default for new installs
+ * (Arctic Embed M v1.5 from 2026-10-01, EmbeddingGemma 2 from 2026-10-06).
+ * These tests run with a stub runtime and a stub download server;
+ * `OLYMPUS_BUILT_IN_EMBEDDING_REAL_TEST=1` additionally runs the real default
+ * model (downloads it once into OLYMPUS_BUILT_IN_EMBEDDING_DIR or a temporary
+ * directory), and `OLYMPUS_GEMMA_TOKENIZER_MODEL=<path to tokenizer.model>`
+ * checks the SentencePiece tokenizer against the reference library's output.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
@@ -18,8 +20,13 @@ import {
   readBuiltInEmbeddingStatus,
   type BuiltInEmbeddingStatus,
 } from '../src/workers/source-index/built-in-embedding/assets.ts';
+import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
 import {
+  ARCTIC_EMBED_M_V1_5,
   BUILT_IN_EMBEDDING_MODEL,
+  BUILT_IN_EMBEDDING_MODELS,
+  builtInEmbeddingModelFiles,
+  EMBEDDINGGEMMA_2,
   ONNX_RUNTIME_PACK,
   type BuiltInEmbeddingModelSpec,
   type OnnxRuntimePackSpec,
@@ -31,7 +38,8 @@ import {
   builtInEmbeddingDashboardState,
   sharedBuiltInSourceEmbeddingProvider,
 } from '../src/workers/source-index/built-in-embedding/provider.ts';
-import type { EmbeddingBatch, EmbeddingRuntime } from '../src/workers/source-index/built-in-embedding/runtime.ts';
+import type { EmbeddingBatch, EmbeddingRuntime, EmbeddingSessionOptions } from '../src/workers/source-index/built-in-embedding/runtime.ts';
+import { SentencePieceTokenizer } from '../src/workers/source-index/built-in-embedding/sentencepiece.ts';
 import { readTarGz } from '../src/workers/source-index/built-in-embedding/tar.ts';
 import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embedding/wordpiece.ts';
 import { canonicalEmbeddingIdentityForModel } from '../src/workers/source-index/embedding-identity.ts';
@@ -47,7 +55,8 @@ import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 
-const BUILT_IN_EPOCH = 'local:built-in:arctic-embed-m-v1.5-int8-e58a8f7:768';
+const BUILT_IN_EPOCH = 'local:built-in:embeddinggemma-2-onnx-UNPINNED:768';
+const ARCTIC_EPOCH = 'local:built-in:arctic-embed-m-v1.5-int8-e58a8f7:768';
 
 const VOCAB = [
   '[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]',
@@ -142,7 +151,7 @@ function servedAssets(options: { corruptModel?: boolean; status?: number } = {})
   ]);
   const requests: string[] = [];
   const model: BuiltInEmbeddingModelSpec = {
-    ...BUILT_IN_EMBEDDING_MODEL,
+    ...ARCTIC_EMBED_M_V1_5,
     modelId: 'test-built-in-model',
     dimension: 4,
     maxTokens: 8,
@@ -495,7 +504,14 @@ describe('built-in embedding as the new-install default', () => {
     const secure = createSourceIndexEmbeddingProviderFromSovereignty(engine, 'secure_local', env);
     expect(internal).toBeInstanceOf(BuiltInSourceEmbeddingProvider);
     expect(secure).toBe(internal);
-    expect(createSourceIndexEmbeddingProviderFromEnv({ ...env, OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'built-in' })).toBe(internal);
+    expect(createSourceIndexEmbeddingProviderFromEnv({
+      ...env,
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'built-in',
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL: BUILT_IN_EMBEDDING_MODEL.modelId,
+    })).toBe(internal);
+    // Naming no model keeps the model that setting has always meant: an upgrade never re-embeds on its own.
+    expect(createSourceIndexEmbeddingProviderFromEnv({ ...env, OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'built-in' })?.modelId)
+      .toBe(ARCTIC_EMBED_M_V1_5.modelId);
     expect(() => sharedBuiltInSourceEmbeddingProvider({ modelId: 'some-future-model', env })).toThrow('does not include');
   });
 
@@ -529,6 +545,255 @@ describe('built-in embedding as the new-install default', () => {
       ...base,
       routes: { ...base.routes, internal: { pool: { members: ['built-in-embedding'] } } },
     })).toThrow('as an analyst');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SentencePiece (EmbeddingGemma 2's tokenizer)
+
+/** A tiny SentencePiece BPE `tokenizer.model`, built field by field. */
+function sentencePieceModel(options: {
+  pieces: Array<[piece: string, score: number, type?: number]>;
+  modelType?: number;
+  normalizer?: string;
+  addDummyPrefix?: boolean;
+}): Uint8Array<ArrayBuffer> {
+  const varint = (value: number): number[] => {
+    const out: number[] = [];
+    let rest = value;
+    while (rest >= 0x80) {
+      out.push((rest % 0x80) | 0x80);
+      rest = Math.floor(rest / 0x80);
+    }
+    out.push(rest);
+    return out;
+  };
+  const bytesField = (field: number, bytes: number[]) => [...varint(field * 8 + 2), ...varint(bytes.length), ...bytes];
+  const varintField = (field: number, value: number) => [...varint(field * 8), ...varint(value)];
+  const floatField = (field: number, value: number) => {
+    const buffer = new DataView(new ArrayBuffer(4));
+    buffer.setFloat32(0, value, true);
+    return [...varint(field * 8 + 5), ...new Uint8Array(buffer.buffer)];
+  };
+  const text = (value: string) => [...new TextEncoder().encode(value)];
+  const special: Array<[string, number, number]> = [['<pad>', 0, 3], ['<eos>', 0, 3], ['<bos>', 0, 3], ['<unk>', 0, 2]];
+  const bytePieces: Array<[string, number, number]> = Array.from({ length: 256 }, (_, byte) =>
+    [`<0x${byte.toString(16).toUpperCase().padStart(2, '0')}>`, 0, 6]);
+  const out: number[] = [];
+  for (const [piece, score, type = 1] of [...special, ...bytePieces, ...options.pieces]) {
+    out.push(...bytesField(1, [...bytesField(1, text(piece)), ...floatField(2, score), ...varintField(3, type)]));
+  }
+  out.push(...bytesField(2, [...varintField(3, options.modelType ?? 2), ...varintField(35, 1)]));
+  out.push(...bytesField(3, [
+    ...bytesField(1, text(options.normalizer ?? 'identity')),
+    ...varintField(3, options.addDummyPrefix ? 1 : 0),
+    ...varintField(4, 0),
+  ]));
+  return new Uint8Array(out);
+}
+
+/** Ids 0..259 are special and byte pieces; these follow, in order. */
+const SP_PIECES: Array<[string, number, number?]> = [
+  ['h', -1], ['e', -2], ['l', -3], ['o', -4], ['▁', -5], ['w', -6], ['r', -7], ['d', -8],
+  ['he', -10], ['ll', -11], ['hell', -12], ['hello', -13], ['▁w', -14], ['or', -9], ['▁wor', -15], ['▁world', -16],
+  ['ld', -17], ['<keep>', 0, 4], ['ab', -20], ['bc', -20], ['a', -21], ['b', -22], ['c', -23],
+];
+const sp = (piece: string) => 260 + SP_PIECES.findIndex(([entry]) => entry === piece);
+
+describe('SentencePiece tokenizer', () => {
+  const tokenizer = new SentencePieceTokenizer(sentencePieceModel({ pieces: SP_PIECES }));
+
+  test('merges the highest-scoring pair first and escapes spaces as ▁', () => {
+    expect([tokenizer.padId, tokenizer.eosId, tokenizer.bosId, tokenizer.unkId]).toEqual([0, 1, 2, 3]);
+    expect(tokenizer.tokenize('hello world')).toEqual([sp('hello'), sp('▁world')]);
+    expect(tokenizer.tokenize('')).toEqual([]);
+  });
+
+  test('breaks a tie between equal scores toward the leftmost pair', () => {
+    expect(tokenizer.tokenize('abc')).toEqual([sp('ab'), sp('c')]);
+  });
+
+  test('keeps a user-defined piece whole and never merges across it', () => {
+    expect(tokenizer.tokenize('he<keep>llo')).toEqual([sp('he'), sp('<keep>'), sp('ll'), sp('o')]);
+  });
+
+  test('falls back to UTF-8 byte pieces for characters outside the vocabulary', () => {
+    // "é" is 0xC3 0xA9; byte pieces are ids 4 + byte.
+    expect(tokenizer.tokenize('hé')).toEqual([sp('h'), 4 + 0xc3, 4 + 0xa9]);
+  });
+
+  test('refuses a model this encoder would encode differently', () => {
+    expect(() => new SentencePieceTokenizer(sentencePieceModel({ pieces: SP_PIECES, modelType: 1 }))).toThrow('not a BPE model');
+    expect(() => new SentencePieceTokenizer(sentencePieceModel({ pieces: SP_PIECES, normalizer: 'nmt_nfkc' }))).toThrow('normalizer');
+    expect(() => new SentencePieceTokenizer(sentencePieceModel({ pieces: SP_PIECES, addDummyPrefix: true }))).toThrow('normalizer');
+  });
+
+  const gemmaTokenizerPath = process.env.OLYMPUS_GEMMA_TOKENIZER_MODEL?.trim();
+  (gemmaTokenizerPath ? test : test.skip)('matches the reference library on the Gemma tokenizer (opt-in)', () => {
+    const golden = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'gemma-tokenizer-golden.json'), 'utf8')) as {
+      sha256: string;
+      cases: Array<{ text: string; ids: number[] }>;
+    };
+    const bytes = readFileSync(gemmaTokenizerPath!);
+    expect(sha256(bytes)).toBe(golden.sha256);
+    const gemma = new SentencePieceTokenizer(bytes);
+    for (const { text, ids } of golden.cases) expect({ text, ids: gemma.tokenize(text) }).toEqual({ text, ids });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A SentencePiece model whose graph pools for itself (EmbeddingGemma 2's shape)
+
+/** A stand-in pooled model: `[sum of ids, id count, first content id, 1]` per row. */
+function pooledStubRuntime(log: EmbeddingBatch[], sessions: EmbeddingSessionOptions[], dims?: (rows: number) => number[]): EmbeddingRuntime {
+  return {
+    async createSession(_path, options) {
+      sessions.push(options);
+      return {
+        async run(batch) {
+          log.push(batch);
+          const data = new Float32Array(batch.batchSize * 4);
+          rows(batch).forEach((ids, row) => data.set([ids.reduce((sum, id) => sum + id, 0), ids.length, ids[1] ?? 0, 1], row * 4));
+          return { data, dims: dims ? dims(batch.batchSize) : [batch.batchSize, 4] };
+        },
+      };
+    },
+  };
+}
+
+function pooledStubProvider(dims?: (rows: number) => number[]) {
+  const tokenizerBytes = sentencePieceModel({ pieces: [...SP_PIECES, ['t', -30], ['i', -31], [':', -32], ['n', -33], ['x', -34]] });
+  const modelBytes = new TextEncoder().encode('fake onnx graph');
+  const dataBytes = new TextEncoder().encode('fake onnx weights '.repeat(100));
+  const bodies = new Map<string, Uint8Array<ArrayBuffer>>([
+    ['https://models.test/model.onnx', modelBytes],
+    ['https://models.test/model.onnx_data', dataBytes],
+    ['https://models.test/tokenizer.model', tokenizerBytes],
+  ]);
+  const requests: string[] = [];
+  const model: BuiltInEmbeddingModelSpec = {
+    ...EMBEDDINGGEMMA_2,
+    modelId: 'test-pooled-model',
+    dimension: 4,
+    maxTokens: 8,
+    queryPrefix: 'q: ',
+    model: { name: 'model.onnx', url: 'https://models.test/model.onnx', bytes: modelBytes.length, sha256: sha256(modelBytes) },
+    modelData: { name: 'model.onnx_data', url: 'https://models.test/model.onnx_data', bytes: dataBytes.length, sha256: sha256(dataBytes) },
+    vocabulary: { name: 'tokenizer.model', url: 'https://models.test/tokenizer.model', bytes: tokenizerBytes.length, sha256: sha256(tokenizerBytes) },
+  };
+  const fetchImpl = (async (input: string | URL | Request) => {
+    requests.push(String(input));
+    const body = bodies.get(String(input));
+    return body ? new Response(body) : new Response('missing', { status: 404 });
+  }) as typeof fetch;
+  const batches: EmbeddingBatch[] = [];
+  const sessions: EmbeddingSessionOptions[] = [];
+  const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+  const provider = new BuiltInSourceEmbeddingProvider({
+    env,
+    model,
+    runtime: () => pooledStubRuntime(batches, sessions, dims),
+    installerOptions: { fetchImpl, skipRuntime: true },
+  });
+  const tokenizer = new SentencePieceTokenizer(tokenizerBytes);
+  return { provider, batches, sessions, requests, env, model, tokenizer };
+}
+
+describe('built-in embedding with a SentencePiece, self-pooling model', () => {
+  test('installs the graph, its external weights and the tokenizer side by side', async () => {
+    const { provider, requests, env, model } = pooledStubProvider();
+    await provider.prepare();
+    expect(requests.sort()).toEqual([
+      'https://models.test/model.onnx',
+      'https://models.test/model.onnx_data',
+      'https://models.test/tokenizer.model',
+    ]);
+    expect(builtInEmbeddingModelFiles(model).map((file) => file.name)).toEqual(['model.onnx', 'model.onnx_data', 'tokenizer.model']);
+    const modelDir = join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, model.modelId);
+    expect(readdirSync(modelDir).sort()).toEqual(['model.onnx', 'model.onnx_data', 'tokenizer.model']);
+  });
+
+  test('wraps every window in <bos>/<eos> and reads the pooled sentence_embedding output', async () => {
+    const { provider, batches, sessions, tokenizer } = pooledStubProvider();
+    // 'title: none | text: ' is 20 tokens before the content: 4 windows of 6.
+    const [vector] = await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    expect(sessions).toEqual([{ threads: provider.threads, output: 'sentence_embedding' }]);
+    const windows = batches.flatMap((batch) => rows(batch));
+    expect(windows.every((ids) => ids[0] === tokenizer.bosId && ids.at(-1) === tokenizer.eosId && ids.length <= 8)).toBe(true);
+    expect(windows.flatMap((ids) => ids.slice(1, -1))).toEqual(tokenizer.tokenize('title: none | text: hello'));
+    expect(Math.hypot(...vector!)).toBeCloseTo(1, 6);
+  });
+
+  test('puts a document title into the model\'s prompt, and a query behind its task prefix', async () => {
+    const { provider, batches, tokenizer } = pooledStubProvider();
+    await provider.embed([{ text: 'hello', title: 'world\n  hello' }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    expect(batches.flatMap((batch) => rows(batch)).flatMap((ids) => ids.slice(1, -1)))
+      .toEqual(tokenizer.tokenize('title: world hello | text: hello'));
+    batches.length = 0;
+    await provider.embed([{ text: 'hello world' }], { taskType: 'RETRIEVAL_QUERY' });
+    const [ids] = batches.flatMap((batch) => rows(batch));
+    expect(ids).toEqual([tokenizer.bosId, ...tokenizer.tokenize('q: hello world').slice(0, 6), tokenizer.eosId]);
+  });
+
+  test('refuses a pooled output of the wrong shape', async () => {
+    const { provider } = pooledStubProvider((count) => [count, 8]);
+    await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' })).rejects.toThrow(/returned shape \[\d+, 8\], expected \[\d+, 4\]/);
+  });
+});
+
+describe('the built-in model registry', () => {
+  test('EmbeddingGemma 2 is the new-install default and Arctic stays loadable', () => {
+    expect(BUILT_IN_EMBEDDING_MODEL).toBe(EMBEDDINGGEMMA_2);
+    expect(BUILT_IN_EMBEDDING_MODELS.map((model) => model.modelId)).toEqual([EMBEDDINGGEMMA_2.modelId, ARCTIC_EMBED_M_V1_5.modelId]);
+    expect(new Set(BUILT_IN_EMBEDDING_MODELS.map((model) => model.modelId)).size).toBe(BUILT_IN_EMBEDDING_MODELS.length);
+    for (const model of BUILT_IN_EMBEDDING_MODELS) {
+      expect(canonicalEmbeddingIdentityForModel(model.modelId)?.dimension).toBe(model.dimension);
+    }
+  });
+
+  test('Arctic keeps the identity its stored vectors were written under', () => {
+    const provider = new BuiltInSourceEmbeddingProvider({ env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() }, model: ARCTIC_EMBED_M_V1_5 });
+    expect(provider.epochId).toBe(ARCTIC_EPOCH);
+    // Frozen from the build before EmbeddingGemma 2 was added: a change here re-embeds every Arctic install.
+    expect(provider.configHash).toBe('1a42a3ee2296bb1f5572df71ab1361647e77d5f87c7b7b5351c606c79f0449f0');
+  });
+
+  test('an install that embedded with Arctic keeps embedding with Arctic', () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    for (const preset of SOVEREIGNTY_PRESETS) {
+      const config = loadSovereigntyPreset(preset);
+      const [id] = Object.entries(config.modelProfiles).find(([, profile]) => profile.provider === 'built-in')!;
+      const arcticEra: SovereigntyConfig = {
+        ...config,
+        modelProfiles: { ...config.modelProfiles, [id]: { ...config.modelProfiles[id]!, model: ARCTIC_EMBED_M_V1_5.modelId } },
+      };
+      const provider = createSourceIndexEmbeddingProviderFromSovereignty(createSovereigntyEngine(arcticEra), 'internal', env);
+      expect(provider?.modelId).toBe(ARCTIC_EMBED_M_V1_5.modelId);
+      expect(provider?.epochId).toBe(ARCTIC_EPOCH);
+    }
+  });
+
+  // Ship gates. These fail until EmbeddingGemma 2 is pinned
+  // (`bun scripts/pin-built-in-embedding.ts --write`) and its relevance bar
+  // is calibrated on a real corpus: the default must never ship half-done.
+  test('every built-in model is pinned to an exact revision, size and digest', () => {
+    for (const model of BUILT_IN_EMBEDDING_MODELS) {
+      expect({ model: model.modelId, revision: /^[0-9a-f]{40}$/.test(model.revision) }).toEqual({ model: model.modelId, revision: true });
+      expect(model.modelId).not.toContain('UNPINNED');
+      for (const file of builtInEmbeddingModelFiles(model)) {
+        expect({ file: file.url, pinned: /^[0-9a-f]{64}$/.test(file.sha256) && file.bytes > 0 })
+          .toEqual({ file: file.url, pinned: true });
+        expect(file.url).toContain(`/resolve/${model.revision}/`);
+      }
+    }
+  });
+
+  test('every built-in model has a relevance bar calibrated for its vector lane', () => {
+    for (const model of BUILT_IN_EMBEDDING_MODELS) {
+      const bar = calibratedSemanticRelevanceBar(model.modelId);
+      expect({ model: model.modelId, calibrated: bar !== undefined && bar > 0 && bar < 1 })
+        .toEqual({ model: model.modelId, calibrated: true });
+    }
   });
 });
 
