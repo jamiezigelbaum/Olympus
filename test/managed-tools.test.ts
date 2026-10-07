@@ -596,6 +596,24 @@ describe('discovery refuses what it did not verify', () => {
     expect(managedToolExecutable('zkapi-clientd', f.host)).toBeUndefined();
   });
 
+  test('a group-writable folder holding links to protected files inside the version folder reads as not installed (the links could be retargeted)', async () => {
+    const f = setup();
+    await installManagedTools(f.options);
+    const zkDir = join(f.root, 'zkapi-clientd', '0.1.6');
+    const proof = join(zkDir, 'share', 'zkapi-clientd', 'proof-setup');
+    const kept = join(zkDir, 'kept');
+    mkdirSync(kept, { mode: 0o700 });
+    for (const name of readdirSync(proof)) {
+      writeFileSync(join(kept, name), readFileSync(join(proof, name)), { mode: 0o600 });
+      rmSync(join(proof, name));
+      symlinkSync(join(kept, name), join(proof, name));
+    }
+    // Links to protected files inside the version folder, in a private folder: trusted.
+    expect(managedToolExecutable('zkapi-clientd', f.host)).toBeDefined();
+    chmodSync(proof, 0o770);
+    expect(managedToolExecutable('zkapi-clientd', f.host)).toBeUndefined();
+  });
+
   test('the consult transport prefers the managed install over PATH; an explicit path is only that path', () => {
     const home = tempDir();
     const platformKey = managedToolsPlatform();

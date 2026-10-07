@@ -56125,7 +56125,7 @@ function managedToolExecutable(tool, host = {}) {
   try {
     const realDir = realpathSync2(versionDir);
     for (const required3 of new Set([...asset.required, asset.executable])) {
-      if (!trustedInside(realDir, join48(versionDir, required3), uid))
+      if (!trustedInside(realDir, join48(versionDir, required3), uid, versionDir))
         return;
     }
     const real = realpathSync2(join48(versionDir, asset.executable));
@@ -56135,7 +56135,22 @@ function managedToolExecutable(tool, host = {}) {
     return;
   }
 }
-function trustedInside(realDir, path, uid) {
+function trustedInside(realDir, path, uid, versionDir) {
+  if (versionDir) {
+    const parts = path.slice(versionDir.length + 1).split(sep6);
+    for (let index = 1;index <= parts.length; index += 1) {
+      let stats;
+      try {
+        stats = lstatSync13(join48(versionDir, ...parts.slice(0, index)));
+      } catch {
+        return false;
+      }
+      if (uid !== undefined && stats.uid !== uid && stats.uid !== 0)
+        return false;
+      if (!stats.isSymbolicLink() && (stats.mode & 18) !== 0)
+        return false;
+    }
+  }
   let real;
   try {
     real = realpathSync2(path);

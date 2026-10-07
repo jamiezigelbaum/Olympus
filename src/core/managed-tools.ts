@@ -293,7 +293,7 @@ export function managedToolExecutable(tool: ManagedToolName, host: ManagedToolsH
     // between there and it must be this user's alone. One missing or exposed
     // file reads as not installed, and the next install replaces the folder.
     for (const required of new Set([...asset.required, asset.executable])) {
-      if (!trustedInside(realDir, join(versionDir, required), uid)) return undefined;
+      if (!trustedInside(realDir, join(versionDir, required), uid, versionDir)) return undefined;
     }
     const real = realpathSync(join(versionDir, asset.executable));
     accessSync(real, constants.X_OK);
@@ -304,7 +304,24 @@ export function managedToolExecutable(tool: ManagedToolName, host: ManagedToolsH
 }
 
 /** `path` resolves inside `realDir`; the file and each folder from `realDir` down to it are privately owned. */
-function trustedInside(realDir: string, path: string, uid: number | undefined): boolean {
+function trustedInside(realDir: string, path: string, uid: number | undefined, versionDir?: string): boolean {
+  // The path as written, first: every folder from the version folder down and
+  // every link on the way (lstat, not followed) must be this user's or root's,
+  // and no folder writable by others, or someone else could retarget a link.
+  if (versionDir) {
+    const parts = path.slice(versionDir.length + 1).split(sep);
+    for (let index = 1; index <= parts.length; index += 1) {
+      let stats;
+      try {
+        stats = lstatSync(join(versionDir, ...parts.slice(0, index)));
+      } catch {
+        return false;
+      }
+      if (uid !== undefined && stats.uid !== uid && stats.uid !== 0) return false;
+      // A link's own mode means nothing on Linux (always 0777); its folder's mode guards it.
+      if (!stats.isSymbolicLink() && (stats.mode & 0o022) !== 0) return false;
+    }
+  }
   let real: string;
   try {
     real = realpathSync(path);
