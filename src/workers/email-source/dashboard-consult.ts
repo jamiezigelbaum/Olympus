@@ -196,14 +196,23 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   // transport's own fallback resolver: PATH, then the standard install
   // folders (~/.local/bin, Homebrew, /usr/local/bin) under its owner and
   // permission check, so "your system" means a program a consult would run.
-  const toolsState = options.toolsState ?? ((): DashboardOutsideHelpTools['tools'] => managedToolsState({ env }).map((entry) => {
-    const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
-    return {
-      tool: entry.tool,
-      label: entry.label,
-      source: entry.installed ? 'olympus' : system ? 'system' : entry.offered ? 'missing' : 'not_offered',
-    };
-  }));
+  // The same order the transport resolves in (resolveZkapiExecutable): a path
+  // set in the route wins and is only that path; then Olympus's install; then PATH and the fallback folders.
+  const toolsState = options.toolsState ?? ((): DashboardOutsideHelpTools['tools'] => {
+    const settings = transport()?.settings;
+    return managedToolsState({ env }).map((entry) => {
+      const explicit = entry.tool === 'tor' ? settings?.torExecutable : settings?.daemonExecutable;
+      if (explicit) {
+        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? 'configured' : 'configured_missing', path: explicit };
+      }
+      const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
+      return {
+        tool: entry.tool,
+        label: entry.label,
+        source: entry.installed ? 'olympus' : system ? 'system' : entry.offered ? 'missing' : 'not_offered',
+      };
+    });
+  });
   let policy = options.sovereignty.config;
   let restartPending = false;
 

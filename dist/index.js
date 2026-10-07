@@ -16457,16 +16457,31 @@ function managedToolExecutable(tool, host = {}) {
     return;
   try {
     const realDir = realpathSync(versionDir);
+    for (const required of new Set([...asset.required, asset.executable])) {
+      if (!trustedInside(realDir, join20(versionDir, required), uid))
+        return;
+    }
     const real = realpathSync(join20(versionDir, asset.executable));
-    if (!within(realDir, real))
-      return;
-    if (!privatelyOwned(real, uid, "file"))
-      return;
     accessSync3(real, constants2.X_OK);
     return real;
   } catch {
     return;
   }
+}
+function trustedInside(realDir, path, uid) {
+  let real;
+  try {
+    real = realpathSync(path);
+  } catch {
+    return false;
+  }
+  if (!within(realDir, real) || !privatelyOwned(real, uid, "file"))
+    return false;
+  for (let dir = dirname16(real);dir !== realDir; dir = dirname16(dir)) {
+    if (!within(realDir, dir) || !privatelyOwned(dir, uid, "dir"))
+      return false;
+  }
+  return true;
 }
 
 // src/core/consult-transport-zkapi.ts

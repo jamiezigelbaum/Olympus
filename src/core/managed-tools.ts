@@ -49,7 +49,7 @@ import { open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, posix, sep } from 'node:path';
 import { gunzip } from 'node:zlib';
-import { FileLeaseBusyError, withFileLease } from './file-lease.ts';
+import { FileLeaseBusyError, FileLeaseLostError, withFileLease, type FileLease } from './file-lease.ts';
 
 // ---------------------------------------------------------------------------
 // Pins
@@ -288,14 +288,34 @@ export function managedToolExecutable(tool: ManagedToolName, host: ManagedToolsH
   if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256) return undefined;
   try {
     const realDir = realpathSync(versionDir);
+    // Every file the program needs to run, not only the one Olympus starts:
+    // each must resolve inside the version folder, and it and every folder
+    // between there and it must be this user's alone. One missing or exposed
+    // file reads as not installed, and the next install replaces the folder.
+    for (const required of new Set([...asset.required, asset.executable])) {
+      if (!trustedInside(realDir, join(versionDir, required), uid)) return undefined;
+    }
     const real = realpathSync(join(versionDir, asset.executable));
-    if (!within(realDir, real)) return undefined;
-    if (!privatelyOwned(real, uid, 'file')) return undefined;
     accessSync(real, constants.X_OK);
     return real;
   } catch {
     return undefined;
   }
+}
+
+/** `path` resolves inside `realDir`; the file and each folder from `realDir` down to it are privately owned. */
+function trustedInside(realDir: string, path: string, uid: number | undefined): boolean {
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch {
+    return false;
+  }
+  if (!within(realDir, real) || !privatelyOwned(real, uid, 'file')) return false;
+  for (let dir = dirname(real); dir !== realDir; dir = dirname(dir)) {
+    if (!within(realDir, dir) || !privatelyOwned(dir, uid, 'dir')) return false;
+  }
+  return true;
 }
 
 export type ManagedToolSource = 'olympus' | 'system' | 'missing' | 'not_offered';
@@ -341,6 +361,7 @@ export type ManagedToolsErrorCode =
   | 'archive_incomplete'
   | 'will_not_run'
   | 'signing_failed'
+  | 'lease_lost'
   | 'install_failed';
 
 export class ManagedToolsError extends Error {
@@ -512,7 +533,16 @@ export async function installManagedTools(options: ManagedToolsInstallOptions = 
     return await withFileLease(join(root, 'install'), async (lease) => {
       const results: ManagedToolResult[] = [];
       for (const tool of tools) {
-        results.push(await installOne(tool, pins[tool], platformKey, root, uid, options, (write) => lease.commit(write)));
+        try {
+          results.push(await installOne(tool, pins[tool], platformKey, root, uid, options, lease));
+        } catch (error) {
+          if (!(error instanceof FileLeaseLostError)) throw error;
+          // Another install took the lease over: stop at once, touch nothing more.
+          for (const rest of tools.slice(results.length)) {
+            results.push({ tool: rest, version: pins[rest].version, outcome: 'failed', code: 'lease_lost', message: 'Another install took over, so this one stopped without changing anything more.' });
+          }
+          break;
+        }
       }
       return { ok: results.every((result) => result.outcome !== 'failed'), root, tools: results };
     }, { acquireTimeoutMs: 500, staleAfterMs: 60_000 });
@@ -531,8 +561,11 @@ async function installOne(
   root: string,
   uid: number | undefined,
   options: ManagedToolsInstallOptions,
-  commit: <T>(write: () => Promise<T>) => Promise<T>,
+  lease: FileLease,
 ): Promise<ManagedToolResult> {
+  // Every change to the shared tools folder runs under lease.commit (which
+  // proves ownership first); each step also checks the lease is still ours.
+  const commit = <T>(write: () => Promise<T>): Promise<T> => lease.commit(write);
   const asset = pin.assets[platformKey];
   if (!asset) {
     return { tool, version: pin.version, outcome: 'not_offered', message: `${pin.label} publishes no build for this computer.` };
@@ -546,11 +579,13 @@ async function installOne(
   const download = join(toolDir, `.download-${id}`);
   const staging = join(toolDir, `.staging-${id}`);
   try {
-    ensureOwnedDirectory(toolDir, uid, `The ${pin.label} folder`);
-    // Leftovers of an interrupted install (the lease is ours, so nobody else is using them).
-    for (const entry of readdirSync(toolDir)) {
-      if (/^\.(download|staging|old)-/.test(entry)) rmSync(join(toolDir, entry), { recursive: true, force: true });
-    }
+    await commit(async () => {
+      ensureOwnedDirectory(toolDir, uid, `The ${pin.label} folder`);
+      // Leftovers of an interrupted install (the lease is ours, so nobody else is using them).
+      for (const entry of readdirSync(toolDir)) {
+        if (/^\.(download|staging|old)-/.test(entry)) rmSync(join(toolDir, entry), { recursive: true, force: true });
+      }
+    });
     options.onProgress?.({ tool, phase: 'downloading', receivedBytes: 0, totalBytes: asset.bytes });
     const sha256 = await downloadTo(download, asset, options, (receivedBytes) => options.onProgress?.({ tool, phase: 'downloading', receivedBytes, totalBytes: asset.bytes }), tool, pin.label);
     options.onProgress?.({ tool, phase: 'checking' });
@@ -558,6 +593,7 @@ async function installOne(
       throw new ManagedToolsError('hash_mismatch', `The ${pin.label} download did not match its pinned fingerprint, so nothing was installed.`, tool);
     }
     options.onProgress?.({ tool, phase: 'installing' });
+    await lease.assertOwned();
     mkdirSync(staging, { mode: 0o700 });
     await extractVerifiedArchive(download, staging, asset, tool);
     rmSync(download, { force: true });
@@ -605,8 +641,13 @@ async function installOne(
     if (!executable) throw new ManagedToolsError('install_failed', `${pin.label} was installed but could not be found afterwards.`, tool);
     return { tool, version: pin.version, outcome: 'installed', executable };
   } catch (error) {
+    // Our own uniquely named scratch files: safe to remove without the lease
+    // (no concurrent attempt can share the id), so a lost lease still leaves
+    // nothing behind. The lease itself gates only the shared, enumerable
+    // state: the leftover sweep above and the version-folder rename below.
     rmSync(download, { force: true });
     rmSync(staging, { recursive: true, force: true });
+    if (error instanceof FileLeaseLostError) throw error;
     const failure = error instanceof ManagedToolsError
       ? error
       : new ManagedToolsError('install_failed', `${pin.label} could not be installed: ${(error as Error).message}`, tool);
@@ -862,7 +903,11 @@ async function extractVerifiedArchive(archivePath: string, staging: string, asse
     const launcher = [
       '#!/bin/sh',
       '# Written by Olympus: runs the bundled Tor with its own libraries.',
-      'here=$(dirname "$0")/..',
+      '# No external command: the folder comes from $0 by parameter expansion.',
+      'case "$0" in',
+      '  */*) here="${0%/*}/.." ;;',
+      '  *) echo "olympus tor launcher: run it by its path (with a /), not a bare PATH lookup" >&2; exit 127 ;;',
+      'esac',
       `LD_LIBRARY_PATH="$here/${asset.launcher.libraryDir}" exec "$here/${asset.launcher.target}" "$@"`,
       '',
     ].join('\n');

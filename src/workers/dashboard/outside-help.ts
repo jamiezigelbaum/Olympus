@@ -18,6 +18,7 @@ import { DASHBOARD_OUTSIDE_HELP_COPY as W } from './vocabulary.ts';
 import { fill } from './source-rows.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
+  DASHBOARD_OUTSIDE_HELP_TOOLS_COPY,
   outsideHelpToolsNeedAttention,
   renderOutsideHelpTools,
   renderOutsideHelpToolsFix,
@@ -307,8 +308,15 @@ function renderProblems(status: DashboardOutsideHelpStatus, canEdit: boolean): s
     items.push(`<li><span>${escapeHtml(W.routeUnknown)}</span></li>`);
   } else {
     for (const code of route.readiness.blockers) {
-      if (status.tools && TOOL_BLOCKERS.has(code)) continue;
-      items.push(`<li><span>${escapeHtml(outsideHelpBlockerWords(code))}</span></li>`);
+      const tool = TOOL_BLOCKERS.get(code);
+      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
+      // Missing and installable: the parts' own To fix line (below) says it, with its button.
+      if (entry?.source === 'missing') continue;
+      // A path set in the route: the button cannot fix it, so it is said plainly.
+      const words = entry?.source === 'configured_missing'
+        ? fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? '' })
+        : outsideHelpBlockerWords(code);
+      items.push(`<li${entry ? ` data-outside-blocker="${escapeHtml(code)}"` : ''}><span>${escapeHtml(words)}</span></li>`);
     }
   }
   // Missing programs: one line with the install button (or its progress).
@@ -325,7 +333,7 @@ function renderSection(input: { id: string; title: string; summary: string; open
 }
 
 /** The not-installed blockers the parts' own "To fix" line (outside-help-tools.ts) stands in for. */
-const TOOL_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'tor_not_found']);
+const TOOL_BLOCKERS: ReadonlyMap<string, 'zkapi-clientd' | 'tor'> = new Map([['daemon_not_found', 'zkapi-clientd'], ['tor_not_found', 'tor']]);
 
 function renderSetupSteps(secretRef: string, needed: boolean, tools = ''): string {
   const steps = W.steps.map((step) => fill(step, { secretRef }));

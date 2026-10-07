@@ -143,10 +143,23 @@ upstream installer does. Linux Tor gets a small Olympus-written launcher,
 
 Discovery (`managedToolExecutable`, used by `resolveZkapiExecutable` in the
 consult transport for both the readiness probe and the real session): the
-manifest must match the pin; the executable's real path must sit inside the
-version folder; that file and every folder from the Olympus folder down must
-belong to the user and be writable by no one else. An explicit executable path
-in the route's settings still wins and is only that path.
+manifest must match the pin; the folders from the Olympus folder down to the
+version folder must belong to the user and be writable by no one else; and
+every file the program needs to run (the started executable, plus the real
+`tor/tor` and its bundled libraries, or `zkapi-walletd` and the
+`share/zkapi-clientd` proof files) must resolve inside the version folder,
+with that file and every folder between it and the version folder owned by the
+user and writable by no one else. One missing or exposed file reads as not
+installed, and the next install replaces the folder. An explicit executable
+path in the route's settings still wins and is only that path; the card
+reports it as such, and a configured path that is missing stays a To fix
+line the install button does not claim to fix.
+
+The Linux Tor launcher runs no external command: it takes its folder from
+`$0` by parameter expansion (`${0%/*}`) and refuses a `$0` with no slash.
+Leftover cleanup and the version-folder rename run under `lease.commit`; the
+install checks the lease before extracting and stops the whole batch
+(`lease_lost`) the moment another install has taken it over.
 
 ### The dashboard
 

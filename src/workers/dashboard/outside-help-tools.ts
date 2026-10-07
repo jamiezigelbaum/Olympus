@@ -17,7 +17,10 @@ import { fill } from './source-rows.ts';
 export interface DashboardOutsideHelpTool {
   readonly tool: ManagedToolName;
   readonly label: string;
-  readonly source: ManagedToolSource;
+  /** `configured`/`configured_missing`: the route names a path, which is the only one used; the install button cannot fix it. */
+  readonly source: ManagedToolSource | 'configured' | 'configured_missing';
+  /** The path set in the route, for the two `configured` sources. */
+  readonly path?: string;
 }
 
 export type DashboardOutsideHelpInstall =
@@ -42,7 +45,10 @@ export const DASHBOARD_OUTSIDE_HELP_TOOLS_COPY = {
     system: 'Installed (your system)',
     missing: 'Not installed',
     not_offered: 'No download for this computer; install it yourself',
+    configured: 'Set in your zkAPI route ({path})',
+    configured_missing: 'Not found at {path}, the path set in your zkAPI route',
   },
+  configuredMissing: 'The {tool} program at {path} (set in your zkAPI route) was not found. Install it there, or remove that path from the route to use the one Olympus installs.',
   line: '{tool}: {state}',
   install: 'Install Tor and zkAPI',
   retry: 'Try again',
@@ -104,7 +110,7 @@ export function renderOutsideHelpTools(tools: DashboardOutsideHelpTools | undefi
   if (!tools) return '';
   const install = tools.install;
   const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml(entry.tool)}" data-outside-tool-source="${escapeHtml(entry.source)}">`
-    + `${escapeHtml(fill(C.line, { tool: entry.label, state: C.source[entry.source] }))}</li>`).join('');
+    + `${escapeHtml(fill(C.line, { tool: entry.label, state: fill(C.source[entry.source], { path: entry.path ?? '' }) }))}</li>`).join('');
   const missing = tools.tools.some((entry) => entry.source === 'missing');
   const parts: string[] = [
     `<p class="pnote"><strong>${escapeHtml(C.title)}</strong></p>`,

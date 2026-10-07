@@ -11,7 +11,7 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
@@ -33,6 +33,7 @@ import {
 } from '../src/core/managed-tools.ts';
 import { V0_4_PUBLIC_CLI_COMMANDS, V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import { DASHBOARD_OUTSIDE_HELP_PATHS, renderOutsideHelpCard } from '../src/workers/dashboard/outside-help.ts';
+import type { DashboardOutsideHelpReadiness } from '../src/workers/dashboard/outside-help.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
   renderOutsideHelpTools,
@@ -42,7 +43,7 @@ import {
 } from '../src/workers/dashboard/outside-help-tools.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { createDashboardConsultAdapter, dashboardInstallView } from '../src/workers/email-source/dashboard-consult.ts';
-import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import { DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 
@@ -276,6 +277,22 @@ describe('installing', () => {
     const dir = join(f.root, 'tor', '15.0.24');
     const launcher = readFileSync(join(dir, 'bin', 'tor'), 'utf8');
     expect(launcher).toContain('LD_LIBRARY_PATH="$here/tor" exec "$here/tor/tor" "$@"');
+    // No external command (PATH is kept in sessions): the folder comes from
+    // $0 by shell parameter expansion, with a guard when it carries no slash.
+    expect(launcher).not.toMatch(/\bdirname\b/);
+    expect(launcher).toContain('here="${0%/*}/.."');
+    // The launcher script text is the behavior here (it execs the real, fake
+    // "tor" binary, which is not a runnable program in this fixture); so the
+    // guard is driven directly through sh's own `-c script $0 [args]` form,
+    // which sets $0 to the given value without any PATH search or directory
+    // change (`exec -a`, used instead, is a bash extension dash lacks).
+    const withSlash = Bun.spawnSync(['/bin/sh', '-c', launcher, join(dir, 'bin', 'tor'), '--help']);
+    expect(new TextDecoder().decode(withSlash.stderr)).not.toContain('run it by its path');
+    const relative = Bun.spawnSync(['/bin/sh', '-c', launcher, './tor', '--help']);
+    expect(new TextDecoder().decode(relative.stderr)).not.toContain('run it by its path');
+    const bareArg0 = Bun.spawnSync(['/bin/sh', '-c', launcher, 'tor', '--help']);
+    expect(new TextDecoder().decode(bareArg0.stderr)).toContain('run it by its path');
+    expect(bareArg0.exitCode).toBe(127);
     expect(statSync(join(dir, 'bin', 'tor')).mode & 0o777).toBe(0o700);
     expect(existsSync(join(dir, 'debug'))).toBe(false);
     expect(managedToolExecutable('tor', { ...f.host, pins })).toBe(join(realRoot(f.root), 'tor', '15.0.24', 'bin', 'tor'));
@@ -479,7 +496,30 @@ describe('installing', () => {
     }
   });
 
-  test('the background job: start returns at once, a second start while running is refused, and the state reads the outcome', async () => {
+  test('a lease takeover mid-install aborts at once, before any shared path is touched again, and the rest of the batch is reported lease_lost', async () => {
+    const f = setup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slowFetch = (async (input: string | URL | Request) => {
+      await gate;
+      return servingFetch({ 'https://fixture.test/tor.tar.gz': f.tor, 'https://fixture.test/zkapi.tar.gz': f.zkapi })(input);
+    }) as typeof fetch;
+    const run = installManagedTools({ ...f.options, fetchImpl: slowFetch });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Another holder takes the lease over mid-download (the install lock's own format).
+    writeFileSync(join(f.root, 'install.lock'), JSON.stringify({ version: 1, token: 'another-holder', pid: process.pid, acquiredAt: new Date().toISOString() }), { mode: 0o600 });
+    release();
+    const result = await run;
+    expect(result.ok).toBe(false);
+    expect(result.tools.every((tool) => tool.code === 'lease_lost')).toBe(true);
+    // Nothing was installed or left behind under either tool.
+    expect(existsSync(join(f.root, 'tor', '15.0.24'))).toBe(false);
+    expect(existsSync(join(f.root, 'zkapi-clientd', '0.1.6'))).toBe(false);
+    expect(leftovers(join(f.root, 'tor'))).toEqual([]);
+    expect(leftovers(join(f.root, 'zkapi-clientd'))).toEqual([]);
+  });
+
+    test('the background job: start returns at once, a second start while running is refused, and the state reads the outcome', async () => {
     const f = setup();
     const job = createManagedToolsJob(f.options);
     expect(job.progress()).toEqual({ state: 'idle' });
@@ -527,6 +567,35 @@ describe('discovery refuses what it did not verify', () => {
     expect(managedToolExecutable('zkapi-clientd', f.host)).toBeUndefined();
   });
 
+  test('discovery requires every file the program needs, not only the one it starts: missing, exposed or escaping, each reads as not installed, and a reinstall repairs it', async () => {
+    const f = setup();
+    await installManagedTools(f.options);
+    const zkDir = join(f.root, 'zkapi-clientd', '0.1.6');
+    expect(managedToolExecutable('zkapi-clientd', f.host)).toBeDefined();
+    // Missing: a required proof file removed.
+    const pk = join(zkDir, 'share', 'zkapi-clientd', 'proof-setup', 'withdrawal.pk');
+    const saved = readFileSync(pk);
+    rmSync(pk);
+    expect(managedToolExecutable('zkapi-clientd', f.host)).toBeUndefined();
+    // A reinstall (the good folder fails discovery, so it is not "already installed") repairs it.
+    const repaired = await installManagedTools(f.options);
+    expect(repaired.tools.find((t) => t.tool === 'zkapi-clientd')!.outcome).toBe('installed');
+    expect(managedToolExecutable('zkapi-clientd', f.host)).toBeDefined();
+    writeFileSync(pk, saved);
+    // Exposed: a directory between the version folder and a required file, group-writable.
+    const proofDir = join(zkDir, 'share', 'zkapi-clientd', 'proof-setup');
+    chmodSync(proofDir, 0o770);
+    expect(managedToolExecutable('zkapi-clientd', f.host)).toBeUndefined();
+    chmodSync(proofDir, 0o700);
+    expect(managedToolExecutable('zkapi-clientd', f.host)).toBeDefined();
+    // Escaping: a required file replaced by a symlink to something outside the version folder.
+    const outside = join(f.home, 'outside.pk');
+    writeFileSync(outside, 'pk', { mode: 0o600 });
+    rmSync(pk);
+    symlinkSync(outside, pk);
+    expect(managedToolExecutable('zkapi-clientd', f.host)).toBeUndefined();
+  });
+
   test('the consult transport prefers the managed install over PATH; an explicit path is only that path', () => {
     const home = tempDir();
     const platformKey = managedToolsPlatform();
@@ -540,6 +609,12 @@ describe('discovery refuses what it did not verify', () => {
     mkdirSync(join(versionDir, 'bin'), { recursive: true, mode: 0o700 });
     for (let dir = versionDir; dir !== join(home); dir = join(dir, '..')) chmodSync(dir, 0o700);
     writeFileSync(join(versionDir, 'bin', 'zkapi-clientd'), '#!/bin/sh\necho "zkapi-clientd 0.1.6"\n', { mode: 0o700 });
+    // Discovery now checks every file the daemon needs, not only the one it starts.
+    for (const required of asset.required) {
+      if (required === 'bin/zkapi-clientd') continue;
+      mkdirSync(join(versionDir, dirname(required)), { recursive: true, mode: 0o700 });
+      writeFileSync(join(versionDir, required), 'x', { mode: 0o600 });
+    }
     writeFileSync(join(versionDir, 'olympus-tool.json'), JSON.stringify({
       schema: 1, tool: 'zkapi-clientd', version: '0.1.6', platform: platformKey, asset: 'x', sha256: asset.sha256, installedAt: '2026-10-07T00:00:00.000Z',
     }), { mode: 0o600 });
@@ -626,10 +701,34 @@ describe('the install route', () => {
     });
     expect(existsSync(join(home, '.olympus'))).toBe(false);
   });
+
+  test("the default tools status uses the route's effective resolution: an explicit path wins (found or not), over the managed install and PATH", async () => {
+    const home = tempDir();
+    const config = structuredClone(loadSovereigntyPreset('local-first')) as SovereigntyConfig;
+    (config.modelProfiles as Record<string, unknown>)['zkapi-consult'] = {
+      provider: 'zkapi', trust: 'standard_cloud', purpose: 'consult', baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini',
+      secretRef: 'env:OLYMPUS_ZKAPI_API_KEY',
+      zkapi: { fundingDate: '2026-10-01', acknowledgements: { version: 0, accepted: [] }, daemonExecutable: join(home, 'bin', 'zkapi-clientd'), torExecutable: '/nowhere/tor' },
+    };
+    mkdirSync(join(home, 'bin'), { recursive: true });
+    writeFileSync(join(home, 'bin', 'zkapi-clientd'), '#!/bin/sh\n', { mode: 0o755 });
+    const adapter = createDashboardConsultAdapter({
+      sovereignty: { config, source: 'preset' },
+      secretPresent: () => false,
+      recoverSession: async () => { throw new Error('not used'); },
+      requestReload: () => { throw new Error('not used'); },
+      env: { HOME: home },
+    });
+    const status = await adapter.status();
+    expect(status.tools!.tools).toEqual([
+      { tool: 'tor', label: 'Tor', source: 'configured_missing', path: '/nowhere/tor' },
+      { tool: 'zkapi-clientd', label: 'zkAPI', source: 'configured', path: join(home, 'bin', 'zkapi-clientd') },
+    ]);
+  });
 });
 
 describe('the card section', () => {
-  const tools = (install: DashboardOutsideHelpTools['install'], sources: Array<'olympus' | 'system' | 'missing' | 'not_offered'> = ['missing', 'missing']): DashboardOutsideHelpTools => ({
+  const tools = (install: DashboardOutsideHelpTools['install'], sources: Array<DashboardOutsideHelpTools['tools'][number]['source']> = ['missing', 'missing']): DashboardOutsideHelpTools => ({
     tools: [{ tool: 'tor', label: 'Tor', source: sources[0]! }, { tool: 'zkapi-clientd', label: 'zkAPI', source: sources[1]! }],
     install,
   });
@@ -695,5 +794,34 @@ describe('the card section', () => {
     expect(setup).toBeLessThan(card.indexOf('data-outside-steps'));
     expect(card.match(/<script>/g)!.length).toBe(2);
     expect(card).not.toContain('Install zkapi-clientd (version');
+  });
+
+  test('on the card: a configured-path blocker (not installable) stays, and an installable blocker is replaced by the parts\' To fix line', () => {
+    const mixed = tools({ state: 'idle' }, ['configured_missing', 'missing']);
+    const mixedWithPath = { ...mixed, tools: [{ ...mixed.tools[0]!, path: '/nowhere/tor' }, mixed.tools[1]!] };
+    const readiness: DashboardOutsideHelpReadiness = {
+      ready: false, blockers: ['tor_not_found', 'daemon_not_found'], daemonFound: false, torMode: 'per_consult', torFound: false, apiKeyConfigured: true,
+      expiry: { state: 'unknown' }, requestsToday: { count: 0 }, spendToday: { reservedUsd: 0 }, fences: [], routeLabel: 'x',
+    };
+    const card = renderOutsideHelpCard({
+      settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false },
+      route: {
+        state: 'configured', profileId: 'zkapi-consult', model: 'x', policyWritable: true, secretRef: 'env:X',
+        acknowledgements: { version: 0, accepted: [], complete: false }, readiness,
+      },
+      languages: [],
+      restartPending: false,
+      tools: mixedWithPath,
+    }, { csrfToken: 'csrf-3', localSession: true });
+    const start = card.indexOf('data-outside-blockers');
+    const toFix = card.slice(start, card.indexOf('</ul>', start));
+    // The configured, not-found Tor path: the install button cannot fix it, so To
+    // fix says it plainly, with the path, not the generic not-installed wording.
+    expect(toFix).toContain('/nowhere/tor');
+    expect(toFix).toContain('was not found');
+    expect(toFix).not.toContain('The program that hides your network address is not installed');
+    // The installable zkAPI blocker is dropped there in favor of the parts' own To fix line.
+    expect(toFix).not.toContain('The zkAPI app is not installed on this Mac. See Set up zkAPI.');
+    expect(toFix).toContain('zkAPI is not installed on this Mac.');
   });
 });

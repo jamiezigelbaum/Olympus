@@ -56124,16 +56124,31 @@ function managedToolExecutable(tool, host = {}) {
     return;
   try {
     const realDir = realpathSync2(versionDir);
+    for (const required3 of new Set([...asset.required, asset.executable])) {
+      if (!trustedInside(realDir, join48(versionDir, required3), uid))
+        return;
+    }
     const real = realpathSync2(join48(versionDir, asset.executable));
-    if (!within(realDir, real))
-      return;
-    if (!privatelyOwned(real, uid, "file"))
-      return;
     accessSync3(real, constants3.X_OK);
     return real;
   } catch {
     return;
   }
+}
+function trustedInside(realDir, path, uid) {
+  let real;
+  try {
+    real = realpathSync2(path);
+  } catch {
+    return false;
+  }
+  if (!within(realDir, real) || !privatelyOwned(real, uid, "file"))
+    return false;
+  for (let dir = dirname35(real);dir !== realDir; dir = dirname35(dir)) {
+    if (!within(realDir, dir) || !privatelyOwned(dir, uid, "dir"))
+      return false;
+  }
+  return true;
 }
 function managedToolsState(host = {}) {
   const platformKey = managedToolsPlatform(host.platform, host.arch);
@@ -56233,7 +56248,16 @@ async function installManagedTools(options = {}) {
     return await withFileLease(join48(root, "install"), async (lease) => {
       const results = [];
       for (const tool of tools) {
-        results.push(await installOne(tool, pins[tool], platformKey, root, uid, options, (write) => lease.commit(write)));
+        try {
+          results.push(await installOne(tool, pins[tool], platformKey, root, uid, options, lease));
+        } catch (error) {
+          if (!(error instanceof FileLeaseLostError))
+            throw error;
+          for (const rest of tools.slice(results.length)) {
+            results.push({ tool: rest, version: pins[rest].version, outcome: "failed", code: "lease_lost", message: "Another install took over, so this one stopped without changing anything more." });
+          }
+          break;
+        }
       }
       return { ok: results.every((result) => result.outcome !== "failed"), root, tools: results };
     }, { acquireTimeoutMs: 500, staleAfterMs: 60000 });
@@ -56244,7 +56268,8 @@ async function installManagedTools(options = {}) {
     throw error;
   }
 }
-async function installOne(tool, pin, platformKey, root, uid, options, commit) {
+async function installOne(tool, pin, platformKey, root, uid, options, lease) {
+  const commit = (write) => lease.commit(write);
   const asset = pin.assets[platformKey];
   if (!asset) {
     return { tool, version: pin.version, outcome: "not_offered", message: `${pin.label} publishes no build for this computer.` };
@@ -56259,11 +56284,13 @@ async function installOne(tool, pin, platformKey, root, uid, options, commit) {
   const download = join48(toolDir, `.download-${id}`);
   const staging = join48(toolDir, `.staging-${id}`);
   try {
-    ensureOwnedDirectory(toolDir, uid, `The ${pin.label} folder`);
-    for (const entry of readdirSync5(toolDir)) {
-      if (/^\.(download|staging|old)-/.test(entry))
-        rmSync9(join48(toolDir, entry), { recursive: true, force: true });
-    }
+    await commit(async () => {
+      ensureOwnedDirectory(toolDir, uid, `The ${pin.label} folder`);
+      for (const entry of readdirSync5(toolDir)) {
+        if (/^\.(download|staging|old)-/.test(entry))
+          rmSync9(join48(toolDir, entry), { recursive: true, force: true });
+      }
+    });
     options.onProgress?.({ tool, phase: "downloading", receivedBytes: 0, totalBytes: asset.bytes });
     const sha2563 = await downloadTo(download, asset, options, (receivedBytes) => options.onProgress?.({ tool, phase: "downloading", receivedBytes, totalBytes: asset.bytes }), tool, pin.label);
     options.onProgress?.({ tool, phase: "checking" });
@@ -56271,6 +56298,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, commit) {
       throw new ManagedToolsError("hash_mismatch", `The ${pin.label} download did not match its pinned fingerprint, so nothing was installed.`, tool);
     }
     options.onProgress?.({ tool, phase: "installing" });
+    await lease.assertOwned();
     mkdirSync25(staging, { mode: 448 });
     await extractVerifiedArchive(download, staging, asset, tool);
     rmSync9(download, { force: true });
@@ -56324,6 +56352,8 @@ async function installOne(tool, pin, platformKey, root, uid, options, commit) {
   } catch (error) {
     rmSync9(download, { force: true });
     rmSync9(staging, { recursive: true, force: true });
+    if (error instanceof FileLeaseLostError)
+      throw error;
     const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("install_failed", `${pin.label} could not be installed: ${error.message}`, tool);
     return { tool, version: pin.version, outcome: "failed", code: failure.code, message: failure.message };
   }
@@ -56575,7 +56605,11 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     const launcher = [
       "#!/bin/sh",
       "# Written by Olympus: runs the bundled Tor with its own libraries.",
-      'here=$(dirname "$0")/..',
+      "# No external command: the folder comes from $0 by parameter expansion.",
+      'case "$0" in',
+      '  */*) here="${0%/*}/.." ;;',
+      '  *) echo "olympus tor launcher: run it by its path (with a /), not a bare PATH lookup" >&2; exit 127 ;;',
+      "esac",
       `LD_LIBRARY_PATH="$here/${asset.launcher.libraryDir}" exec "$here/${asset.launcher.target}" "$@"`,
       ""
     ].join(`
@@ -103064,7 +103098,7 @@ function renderOutsideHelpTools(tools, input) {
   if (!tools)
     return "";
   const install = tools.install;
-  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml2(entry.tool)}" data-outside-tool-source="${escapeHtml2(entry.source)}">` + `${escapeHtml2(fill(C.line, { tool: entry.label, state: C.source[entry.source] }))}</li>`).join("");
+  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml2(entry.tool)}" data-outside-tool-source="${escapeHtml2(entry.source)}">` + `${escapeHtml2(fill(C.line, { tool: entry.label, state: fill(C.source[entry.source], { path: entry.path ?? "" }) }))}</li>`).join("");
   const missing = tools.tools.some((entry) => entry.source === "missing");
   const parts = [
     `<p class="pnote"><strong>${escapeHtml2(C.title)}</strong></p>`,
@@ -103172,8 +103206,11 @@ var init_outside_help_tools = __esm(() => {
       olympus: "Installed (Olympus)",
       system: "Installed (your system)",
       missing: "Not installed",
-      not_offered: "No download for this computer; install it yourself"
+      not_offered: "No download for this computer; install it yourself",
+      configured: "Set in your zkAPI route ({path})",
+      configured_missing: "Not found at {path}, the path set in your zkAPI route"
     },
+    configuredMissing: "The {tool} program at {path} (set in your zkAPI route) was not found. Install it there, or remove that path from the route to use the one Olympus installs.",
     line: "{tool}: {state}",
     install: "Install Tor and zkAPI",
     retry: "Try again",
@@ -103313,9 +103350,12 @@ function renderProblems(status, canEdit) {
     items.push(`<li><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown)}</span></li>`);
   } else {
     for (const code of route.readiness.blockers) {
-      if (status.tools && TOOL_BLOCKERS.has(code))
+      const tool = TOOL_BLOCKERS.get(code);
+      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
+      if (entry?.source === "missing")
         continue;
-      items.push(`<li><span>${escapeHtml2(outsideHelpBlockerWords(code))}</span></li>`);
+      const words = entry?.source === "configured_missing" ? fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? "" }) : outsideHelpBlockerWords(code);
+      items.push(`<li${entry ? ` data-outside-blocker="${escapeHtml2(code)}"` : ""}><span>${escapeHtml2(words)}</span></li>`);
     }
   }
   const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
@@ -103561,7 +103601,7 @@ var init_outside_help = __esm(() => {
   MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   LIMIT_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid", "note_expired", "daily_cap_reached", "spend_cap_reached"]);
   SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on"]);
-  TOOL_BLOCKERS = new Set(["daemon_not_found", "tor_not_found"]);
+  TOOL_BLOCKERS = new Map([["daemon_not_found", "zkapi-clientd"], ["tor_not_found", "tor"]]);
 });
 
 // src/workers/dashboard/pages/setup.ts
@@ -126760,14 +126800,21 @@ function createDashboardConsultAdapter(options) {
   const location = options.settingsLocation ?? { env };
   const readiness = options.readiness ?? zkapiConsultReadiness;
   const toolsJob = options.toolsJob ?? createManagedToolsJob({ env });
-  const toolsState = options.toolsState ?? (() => managedToolsState({ env }).map((entry) => {
-    const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
-    return {
-      tool: entry.tool,
-      label: entry.label,
-      source: entry.installed ? "olympus" : system ? "system" : entry.offered ? "missing" : "not_offered"
-    };
-  }));
+  const toolsState = options.toolsState ?? (() => {
+    const settings = transport()?.settings;
+    return managedToolsState({ env }).map((entry) => {
+      const explicit = entry.tool === "tor" ? settings?.torExecutable : settings?.daemonExecutable;
+      if (explicit) {
+        return { tool: entry.tool, label: entry.label, source: resolveExecutable(entry.tool, explicit, env) ? "configured" : "configured_missing", path: explicit };
+      }
+      const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
+      return {
+        tool: entry.tool,
+        label: entry.label,
+        source: entry.installed ? "olympus" : system ? "system" : entry.offered ? "missing" : "not_offered"
+      };
+    });
+  });
   let policy = options.sovereignty.config;
   let restartPending = false;
   const zkapiProfile = () => {
