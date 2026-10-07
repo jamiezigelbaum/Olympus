@@ -1640,6 +1640,22 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   openedOnMac: 'Opened on your Mac',
   openFailed: 'Couldn\'t open it on your Mac',
   unanswered: 'Not found in your private items: {list}',
+  /** The answer was withdrawn on the Mac after it was shown (an item is no longer Private-eligible). */
+  withdrawn: 'This private answer is no longer available from your Mac.',
+  /**
+   * The outside block's own container (design docs/design/frontier-consult-lane.md
+   * §A.6): its application-owned attribution, pinned while the text scrolls.
+   */
+  outsideTitle: 'Outside background — not from your documents',
+  outsideNote: 'General information from an outside model. It did not read your documents and has not been checked.',
+  /** The container is always present; these lines fill it before, without, or while waiting for an outside reply. */
+  outsideIdle: 'Nothing added from outside.',
+  outsidePending: 'Looking up general background…',
+  outsidePaused: 'Outside help is paused.',
+  /** The collapsed disclosure that shows the question Olympus sent. */
+  outsideAsked: 'What Olympus asked',
+  /** The application-owned footer when the reply was shortened. */
+  outsideShortened: 'Shortened by Olympus.',
 } as const;
 
 /**
