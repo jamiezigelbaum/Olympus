@@ -302,3 +302,15 @@ The findings below were accepted when raised and are now **out of scope by rulin
 | P9 (clocks and liveness) | Whole: server-owned `firstDeliveredAt`, `followUntil`, dispatch window, 75 s activity | None |
 
 Unchanged: outside-container rules (separate card, pinned attribution, plain text, no clickable links, truncation), the gate, the payload contract and padder, and the content-sealing bar. The residual is stated in one paragraph in §A.5.5. M1 (ten live consults, 2026-10-07) and the two speed-measure priorities are recorded in §A.8.
+
+## J. Revision 10 (2026-10-07): merged stages and anchor decisions
+
+No review round. C2 (#160), C4a (#158, reduced scope) and C4b (#161) merged. Dispositions:
+
+| Item | Disposition |
+|---|---|
+| Quiet-machine B2 rerun | Moved from a C4b merge gate to a **C5 release gate** (anchor, 2026-10-07): C4b is inert until C5 writes an enabled `consult.json`; holding a green PR risked worker-file conflicts. The enable path does not ship until it passes. Section H's condition is superseded. |
+| Memory rule | Decided: skip at `critical` pressure or under 20% free after the footprint; `warn` allowed. Residual recorded in §A.7. |
+| Vocabulary finding | Default packs lack "Celsius"/"Fahrenheit" (`unknown_word`). C5 adds a measured false-refusal check and unit-pack widening if material. |
+| Capitalised-word post-check | Dropped; the gate's `unknown_word` covers implied places. |
+| C5 enable flow | One "send" incl. fee buffer with a gas warning; key-reuse window 0; `--require-api-key` with a secret reference; eight acknowledgements. |
