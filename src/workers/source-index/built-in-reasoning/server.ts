@@ -129,6 +129,12 @@ export function llamaServerArguments(launch: LlamaServerLaunch, port: number, to
     '--api-key-file', tokenFile,
     '--ctx-size', String(launch.contextTokens),
     '--parallel', '1',
+    // Small prompt batches make an abandoned call stop reading its prompt
+    // within about 0.2 s instead of up to a whole 2,048-token batch (5-6 s),
+    // with no measured cost to ordinary answers. See
+    // docs/design/consult-m0-measurement.md.
+    '--batch-size', '64',
+    '--ubatch-size', '64',
     '--threads', String(launch.threads),
     '--threads-batch', String(launch.threads),
     '--n-gpu-layers', launch.gpu ? '999' : '0',
