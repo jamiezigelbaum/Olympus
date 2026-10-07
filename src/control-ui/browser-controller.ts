@@ -983,6 +983,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const shown = shownPrivacyQuestions.get(holder) ?? logic.questionsKey(field.defaultValue);
     // Redrawn when an area or an answer changes (a sentence edited by hand), or a too-long note clears.
     if (logic.questionsKey(field.value) !== shown || holder.querySelector('[data-privacy-questions-message]')) renderPrivacyQuestions(form);
+    syncPrivacySave(form);
   }
 
   /** A choice: that area's sentence in the description is written again, and the draft is changed. */
@@ -1051,12 +1052,30 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     return privacyKept(form).map((rule) => logic.ruleOut(rule)).concat(Array.isArray(hidden) ? hidden : []);
   }
 
+  /**
+   * Save is active only when there is something to save: a changed rule list
+   * or description, or questions whose shown choices are not yet written in it.
+   */
+  function syncPrivacySave(form: HTMLFormElement): void {
+    const button = form.querySelector<HTMLButtonElement>('button[data-privacy-save]');
+    const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const logic = privacyLogicFor(form);
+    if (!button || !logic || (!canWrite && !csrfToken)) return;
+    const value = field ? field.value : '';
+    const changes = form.dataset.dirty === 'true' || (field !== null && value !== field.defaultValue)
+      || logic.withShownAnswers(value) !== value;
+    button.disabled = !changes;
+    if (changes) button.removeAttribute('aria-disabled');
+    else button.setAttribute('aria-disabled', 'true');
+  }
+
   function setPrivacyDirty(form: HTMLFormElement): void {
     form.dataset.dirty = 'true';
     // Any change closes an open confirmation step: what it named may no longer be true.
     form.querySelectorAll('[data-privacy-confirm]').forEach((node) => node.remove());
     const empty = form.querySelector<HTMLElement>('[data-privacy-empty]');
     if (empty) empty.hidden = privacyKept(form).length > 0;
+    syncPrivacySave(form);
   }
 
   /** One rule as a row, the shape the page renders: a saved one keeps exactly what the engine sent. */
@@ -1478,6 +1497,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (pendingForms.has(form) || form.dataset.server) return;
+    // Nothing to save (Save is inactive): an Enter in a field does not save either.
+    if (form.querySelector<HTMLButtonElement>('button[data-privacy-save]')?.disabled) return;
     // The questions' choices as shown, defaults included, become their sentences before anything is decided.
     const shownField = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
     const shown = shownField ? logic.withShownAnswers(shownField.value) : '';
@@ -1532,6 +1553,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         : {};
       form.dataset.server = JSON.stringify(current);
       form.dataset.dirty = 'true';
+      syncPrivacySave(form);
       say(form, '');
       showPrivacyConflict(form, logic, current);
       return;

@@ -336,6 +336,35 @@ export interface Extractor {
   readonly approvedRemoteDestination?: ExtractionApprovedRemoteDestination;
   accepts(mimeType: string | undefined, name?: string): boolean;
   extract(input: ExtractorInput): Promise<ExtractorOutput>;
+  /**
+   * Optional: how this lane names items it had to leave unread for want of
+   * a reader, so the runner can read each of them once more when the reader
+   * becomes available. Absent means the lane never leaves items unread.
+   */
+  readonly reread?: ExtractorRereadPolicy;
+}
+
+/**
+ * Items a lane settled unread because its reader was missing (not because
+ * of the file): `metadata_only` jobs whose derivation carries one of
+ * `unreadWarnings`, and `failed_terminal` jobs whose last error kind is one
+ * of `unreadTerminalErrorKinds`. The runner asks `prepare()` only when such
+ * jobs exist; `ready` requeues each of them once.
+ */
+export interface ExtractorRereadPolicy {
+  readonly unreadWarnings: readonly string[];
+  readonly unreadTerminalErrorKinds: readonly string[];
+  /**
+   * Warnings that mean "the reader was not ready yet" (as opposed to "there
+   * was no reader"). A job carrying one is read again whenever the reader is
+   * ready, without spending its once-ever requeue: it was never read.
+   */
+  readonly notReadyWarnings?: readonly string[];
+  /**
+   * Synchronous and cheap. May start getting the reader ready in the
+   * background (a first-use download); answers whether it is ready now.
+   */
+  prepare(): 'ready' | 'pending' | 'unavailable';
 }
 
 export interface ExtractorRegistry {
@@ -437,7 +466,33 @@ export interface ExtractorRegistryConfig {
     command?: string;
     timeoutMs?: number;
     maxTranscriptChars?: number;
+    /**
+     * The on-device transcription engine, constructed by the wiring layer.
+     * Used only when no command is configured: an owner's command wins.
+     */
+    builtIn?: BuiltInTranscriptionEngine;
   };
+}
+
+/**
+ * The built-in transcriber as the registry sees it: a transcriber that can
+ * say whether it is ready, start getting ready, and stop its server.
+ * `transcribe` rejects with the engine's pending or unavailable errors (see
+ * extractors/built-in-transcriber.ts) rather than burning a retry.
+ */
+export interface BuiltInTranscriptionEngine {
+  transcribe(input: { inputPath: string; mimeType?: string; deadlineAt?: number }): Promise<{
+    text: string;
+    language?: string;
+    warnings?: readonly string[];
+  }>;
+  prepare(): 'ready' | 'pending' | 'unavailable';
+  stop(): Promise<void>;
+  /**
+   * Calls `listener` each time an install finishes and the engine becomes
+   * ready, so the wiring layer can wake the work that waited for it.
+   */
+  onReady?(listener: () => void): void;
 }
 
 // --- Seam 3: the sink ------------------------------------------------------

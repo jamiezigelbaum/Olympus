@@ -58,7 +58,8 @@ describe('the Privacy editor page', () => {
     // Save is the page's one filled button.
     const body = html.slice(html.indexOf('data-privacy-editor'), html.indexOf('<script'));
     expect(body.split('btn primary').length - 1).toBe(1);
-    expect(body).toContain('<button type="submit" class="btn primary">Save</button>');
+    // Active: the description names areas whose shown choices are not yet written into it.
+    expect(body).toContain('<button type="submit" class="btn primary" data-privacy-save>Save</button>');
     expect(html).not.toContain('Public');
   });
 
@@ -432,7 +433,12 @@ describe('the Privacy editor in the browser', () => {
   test('a description-only change asks to confirm', async () => {
     const sent: OlympusDashboardControlParams[] = [];
     const { root, click, submit, abort } = mount(async (params) => { sent.push(params); return ok(); });
-    (root.querySelector('textarea[name="description"]') as HTMLTextAreaElement).value = 'My divorce and my lawyer';
+    const save = root.querySelector('button[data-privacy-save]') as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    const field = root.querySelector('textarea[name="description"]') as HTMLTextAreaElement;
+    field.value = 'My divorce and my lawyer';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(save.disabled).toBe(false);
     await submit();
     expect(sent).toEqual([]);
     expect(root.querySelector('[data-privacy-confirm]')!.textContent)

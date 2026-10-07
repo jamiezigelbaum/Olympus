@@ -27,7 +27,19 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
-import type { Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
+import type {
+  BuiltInTranscriptionEngine,
+  Extractor,
+  ExtractorInput,
+  ExtractorOutput,
+  ExtractorRereadPolicy,
+} from '../types.ts';
+import {
+  AudioUndecodableError,
+  TranscriberPendingError,
+  TranscriberUnavailableError,
+  transcriptionDeadlineFromLease,
+} from './built-in-transcriber.ts';
 import { boundText, buildDerivation, normalizeMimeType } from './bounded-text.ts';
 import {
   ExtractionCommandError,
@@ -46,6 +58,17 @@ export const MAX_TRANSCRIPT_CHARS = 200_000;
  * the counterpart of the text lane's `ocr_required`.
  */
 export const TRANSCRIPTION_REQUIRED_WARNING = 'transcription_required';
+/**
+ * Terminal kind an older build stamped on audio it could not read for want
+ * of a transcription command. Such jobs are read once more when a reader is
+ * available, like `transcription_required`.
+ */
+export const LEGACY_TRANSCRIBER_NOT_CONFIGURED_KIND = 'transcriber_not_configured';
+/**
+ * Second warning on audio settled while the built-in model was still being
+ * set up: it was never read, so reading it again costs no requeue budget.
+ */
+export const TRANSCRIBER_SETTING_UP_WARNING = 'transcriber_setting_up';
 
 const TEMP_DIR_PREFIX = 'olympus-transcribe-';
 
@@ -156,11 +179,17 @@ export const TRANSCRIPTION_AUDIO_EXTENSIONS: readonly string[] = [
 export interface TranscriberInput {
   inputPath: string;
   mimeType?: string;
+  /**
+   * Epoch milliseconds by which the work must end (the job's lease, less a
+   * margin). A transcriber that can stop early returns what it has.
+   */
+  deadlineAt?: number;
 }
 
 export interface TranscriberResult {
   text: string;
   language?: string;
+  warnings?: readonly string[];
 }
 
 /**
@@ -274,6 +303,11 @@ export interface TranscriptionExtractorOptions {
   transcriber?: Transcriber;
   commandRunner?: ExtractionCommandRunner;
   tempDirPrefix?: string;
+  /**
+   * The on-device engine, used only when neither `transcriber` nor `command`
+   * is given: an owner-configured command always wins.
+   */
+  builtIn?: BuiltInTranscriptionEngine;
 }
 
 export function createTranscriptionExtractor(
@@ -290,16 +324,27 @@ export function createTranscriptionExtractor(
       ...(options.commandRunner !== undefined ? { commandRunner: options.commandRunner } : {}),
     })
     : undefined);
+  // Engine selection, mirroring the OCR lane: the owner's command first, then
+  // the built-in engine, then nothing (audio settles as a named gap). The
+  // built-in engine's unavailability is remembered, never a job failure.
+  let builtIn = transcriber ? undefined : options.builtIn;
+  const reread: ExtractorRereadPolicy | undefined = transcriber
+    ? rereadPolicy(() => 'ready')
+    : builtIn
+      ? rereadPolicy(() => builtIn?.prepare() ?? 'unavailable')
+      : undefined;
   return {
     kind,
     version,
     needsBytes: true,
     egress: 'local',
+    ...(reread ? { reread } : {}),
     accepts(mimeType, name) {
       return transcriptionLaneAccepts(mimeType, name);
     },
     async extract(input: ExtractorInput): Promise<ExtractorOutput> {
-      if (!transcriber) return transcriptionRequiredOutput(input, maxTranscriptChars);
+      const engine: Transcriber | undefined = transcriber ?? builtIn;
+      if (!engine) return transcriptionRequiredOutput(input, maxTranscriptChars, 'not_set_up');
       const bytes = input.bytes;
       if (!bytes && !input.localPath) return missingBytesFailure();
       const mimeType = normalizeMimeType(input.mimeType ?? input.ref.mimeType);
@@ -311,8 +356,10 @@ export function createTranscriptionExtractor(
           inputPath = join(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile(inputPath, bytes!);
         }
-        const transcribed = await transcriber.transcribe({
+        const deadlineAt = transcriptionDeadlineFromLease(input.job.leaseExpiresAt);
+        const transcribed = await engine.transcribe({
           inputPath,
+          ...(deadlineAt !== undefined ? { deadlineAt } : {}),
           ...(mimeType ? { mimeType } : {}),
         });
         // The cap is applied by `boundText` and nowhere else. Slicing first
@@ -345,9 +392,33 @@ export function createTranscriptionExtractor(
                 }
               : {}),
           }],
-          ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
+          ...(bounded.warnings.length > 0 || transcribed.warnings?.length
+            ? { warnings: [...bounded.warnings, ...(transcribed.warnings ?? [])] }
+            : {}),
         };
       } catch (error) {
+        if (error instanceof TranscriberPendingError) {
+          // The model is downloading: not this file's fault, so no retry is
+          // spent. The runner reads it again once the engine is ready.
+          return transcriptionRequiredOutput(input, maxTranscriptChars, 'setting_up');
+        }
+        if (error instanceof TranscriberUnavailableError) {
+          builtIn = undefined;
+          console.error(`Built-in transcription is unavailable on this host: ${error.message}`);
+          return transcriptionRequiredOutput(input, maxTranscriptChars, 'not_set_up');
+        }
+        if (error instanceof AudioUndecodableError) {
+          return { status: 'failed_terminal', errorKind: 'transcribe_audio_undecodable' };
+        }
+        if (!transcriber) {
+          // The built-in engine failed to start or answer: transient.
+          return {
+            status: 'failed_retryable',
+            errorKind: error instanceof Error && error.name === 'TimeoutError'
+              ? 'transcriber_timeout'
+              : 'transcriber_failed',
+          };
+        }
         if (error instanceof TranscriptionTerminalError) {
           return { status: 'failed_terminal', errorKind: error.errorKind };
         }
@@ -375,28 +446,38 @@ export function createTranscriptionExtractor(
 }
 
 /**
- * Audio on a host with no transcription set up. This is the owner's choice of
- * setup, not a failure of the file: on-device transcription is not built in
- * (it needs a speech-recognition permission a background process cannot ask
- * for), so the item stays findable by name and says plainly that reading it
- * needs a transcription command. It used to fail "retryably" until the retry
- * budget ran out and then read as a broken file.
+ * Audio left unread because no reader is available yet: no transcription is
+ * set up on this host (no command, and the built-in engine is off or cannot
+ * run here), or the built-in model is still being set up. Neither is a
+ * failure of the file, so the item stays findable by name, says plainly why
+ * it has no transcript, and spends no retry. It used to fail "retryably"
+ * until the retry budget ran out and then read as a broken file. The runner
+ * reads it once more when a reader becomes ready (`reread`).
  */
-function transcriptionRequiredOutput(input: ExtractorInput, maxBoundedTextChars: number): ExtractorOutput {
+function transcriptionRequiredOutput(
+  input: ExtractorInput,
+  maxBoundedTextChars: number,
+  why: 'not_set_up' | 'setting_up',
+): ExtractorOutput {
   const mimeType = normalizeMimeType(input.mimeType ?? input.ref.mimeType);
   const sizeBytes = input.sizeBytes ?? input.bytes?.byteLength;
+  const warnings = why === 'setting_up'
+    ? [TRANSCRIPTION_REQUIRED_WARNING, TRANSCRIBER_SETTING_UP_WARNING]
+    : [TRANSCRIPTION_REQUIRED_WARNING];
   const descriptor = boundText([
     'Audio file',
     mimeType ? `MIME type: ${mimeType}` : undefined,
     sizeBytes !== undefined && Number.isFinite(sizeBytes) ? `Size bytes: ${sizeBytes}` : undefined,
-    'No transcript has been made: transcription is not set up on this computer.',
+    why === 'setting_up'
+      ? 'No transcript yet: the built-in transcription model is still being set up; this file is read again when it is ready.'
+      : 'No transcript has been made: transcription is not set up on this computer.',
   ].filter((value): value is string => Boolean(value)).join('\n'), maxBoundedTextChars);
   const derivation = buildDerivation({
     artifact: 'media_descriptor',
     structural: { kind: 'media', label: 'audio without transcript' },
     bounded: descriptor,
     confidence: 0.3,
-    warnings: [TRANSCRIPTION_REQUIRED_WARNING],
+    warnings,
   });
   return {
     status: 'metadata_only',
@@ -408,7 +489,16 @@ function transcriptionRequiredOutput(input: ExtractorInput, maxBoundedTextChars:
         ...(sizeBytes !== undefined && Number.isFinite(sizeBytes) ? { sizeBytes } : {}),
       },
     }],
-    warnings: [TRANSCRIPTION_REQUIRED_WARNING],
+    warnings,
+  };
+}
+
+function rereadPolicy(prepare: () => 'ready' | 'pending' | 'unavailable'): ExtractorRereadPolicy {
+  return {
+    unreadWarnings: [TRANSCRIPTION_REQUIRED_WARNING],
+    unreadTerminalErrorKinds: [LEGACY_TRANSCRIBER_NOT_CONFIGURED_KIND],
+    notReadyWarnings: [TRANSCRIBER_SETTING_UP_WARNING],
+    prepare,
   };
 }
 

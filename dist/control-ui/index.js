@@ -833,6 +833,7 @@ function mountDashboardController(options) {
     const shown = shownPrivacyQuestions.get(holder) ?? logic.questionsKey(field.defaultValue);
     if (logic.questionsKey(field.value) !== shown || holder.querySelector("[data-privacy-questions-message]"))
       renderPrivacyQuestions(form);
+    syncPrivacySave(form);
   }
   function onPrivacyChange(event) {
     const input = event.target instanceof HTMLInputElement ? event.target : null;
@@ -895,12 +896,27 @@ function mountDashboardController(options) {
     const hidden = privacyJson(form.dataset.hidden, []);
     return privacyKept(form).map((rule) => logic.ruleOut(rule)).concat(Array.isArray(hidden) ? hidden : []);
   }
+  function syncPrivacySave(form) {
+    const button = form.querySelector("button[data-privacy-save]");
+    const field = form.querySelector('textarea[name="description"]');
+    const logic = privacyLogicFor(form);
+    if (!button || !logic || !canWrite && !csrfToken)
+      return;
+    const value = field ? field.value : "";
+    const changes = form.dataset.dirty === "true" || field !== null && value !== field.defaultValue || logic.withShownAnswers(value) !== value;
+    button.disabled = !changes;
+    if (changes)
+      button.removeAttribute("aria-disabled");
+    else
+      button.setAttribute("aria-disabled", "true");
+  }
   function setPrivacyDirty(form) {
     form.dataset.dirty = "true";
     form.querySelectorAll("[data-privacy-confirm]").forEach((node) => node.remove());
     const empty = form.querySelector("[data-privacy-empty]");
     if (empty)
       empty.hidden = privacyKept(form).length > 0;
+    syncPrivacySave(form);
   }
   function privacyRow(form, logic, rule) {
     const view2 = rule;
@@ -1305,6 +1321,8 @@ function mountDashboardController(options) {
     }
     if (pendingForms.has(form) || form.dataset.server)
       return;
+    if (form.querySelector("button[data-privacy-save]")?.disabled)
+      return;
     const shownField = form.querySelector('textarea[name="description"]');
     const shown = shownField ? logic.withShownAnswers(shownField.value) : "";
     if (shownField && shown !== shownField.value) {
@@ -1354,6 +1372,7 @@ function mountDashboardController(options) {
       const current = result.body.settings && typeof result.body.settings === "object" ? result.body.settings : {};
       form.dataset.server = JSON.stringify(current);
       form.dataset.dirty = "true";
+      syncPrivacySave(form);
       say(form, "");
       showPrivacyConflict(form, logic, current);
       return;

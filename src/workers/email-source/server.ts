@@ -70,6 +70,7 @@ import {
   workerAuthTokenFromEnv,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
+import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscriptionAtBoot } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
   answerPrivately,
   builtInAnalystEnabled,
@@ -2686,9 +2687,13 @@ export async function main(): Promise<void> {
       },
     },
     extractors: {
+      // An owner-configured command wins; otherwise audio is read by the
+      // built-in on-device transcriber where it runs (Apple silicon by default).
       ...(process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
         ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } }
-        : {}),
+        : sharedBuiltInTranscriber(process.env)
+          ? { transcription: { builtIn: sharedBuiltInTranscriber(process.env)! } }
+          : {}),
       ...(fileExtractionPdfTextCommand !== undefined || fileExtractionPdfTextTimeoutMs !== undefined
         || fileExtractionMaxBoundedTextChars !== undefined
         ? {
@@ -3839,6 +3844,15 @@ export async function main(): Promise<void> {
         : {}),
     })
     : undefined;
+  // Built-in transcription installs only when the chosen sources contain
+  // audio (each approved extraction lane checks at scheduler start, and each
+  // plan pass after a sync), and once ready wakes every extraction task so
+  // unread audio is read within seconds.
+  wireBuiltInTranscriptionAtBoot({
+    env: process.env,
+    engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
+    ...(sourceScheduler ? { wake: () => { sourceScheduler.wakeTasksOfKind('extract'); } } : {}),
+  });
   // Content-free latency ledger: on by default so the next "why was that answer
   // slow?" is answerable from the host. Only wired when the answer path exists.
   const sourceAnswerLatencyLogPath = sourceAnswer
@@ -4811,6 +4825,8 @@ export async function main(): Promise<void> {
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
     stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
+    // The built-in transcriber's server, if this process started one.
+    stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();
