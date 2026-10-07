@@ -44,6 +44,7 @@
  *   pt-pt-hunspell   unpacked npm dictionary-pt-pt 2.0.0
  *   de-hunspell      unpacked npm dictionary-de 3.0.0 (user-installed only, GPL)
  *   it-hunspell      unpacked npm dictionary-it 2.0.0 (user-installed only, GPL)
+ *   olympus-terms    scripts/data/consult-olympus-terms.txt (Olympus-authored; no upstream source)
  *   cldr-units       unpacked npm cldr-units-full 48.2.0
  *   cldr-countries   unpacked npm cldr-localenames-full 48.2.0
  *   rx-ingredients   RXNCONSO.RRF of RxNorm Current Prescribable Content (IN, PIN)
@@ -263,6 +264,18 @@ export function buildPack(
       source: `npm ${packageVersion(sources[0]!)}, expanded with its own affix rules (one level, no compounds) by scripts/build-consult-vocabulary.ts`,
       licence: licence.startsWith('MPL') ? `${licence}. This file is Covered Software under the MPL; its source form is the upstream package named above plus scripts/build-consult-vocabulary.ts.` : licence,
     }, expandHunspell(sources[0]!, pack === 'de-hunspell', exclude));
+  }
+  if (pack === 'olympus-terms') {
+    const words = new Set<string>();
+    for (const line of readFileSync(sources[0]!, 'utf8').split('\n')) {
+      if (!line.trim() || line.startsWith('#')) continue;
+      for (const word of vocabularyWords(line)) words.add(word);
+    }
+    return writePack(outDir, {
+      id: pack,
+      source: 'Olympus-authored list of general terms (units, file formats, protocols, device and network terms, a few stable general proper terms): scripts/data/consult-olympus-terms.txt',
+      licence: `Olympus-authored, no third-party data; see ${pack}.LICENSE.txt`,
+    }, words);
   }
   if (pack === 'cldr-units' || pack === 'cldr-countries') {
     const dir = sources[0]!;

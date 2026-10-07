@@ -238,7 +238,7 @@ describe('the gate fixtures behave as the tests assume', () => {
     expect(evaluateConsultRequest([COPIED_QUESTION], context, {}, {}, { languages: ['en'] }).decision).toBe('refuse');
   });
 
-  test('the implied-place case (M0 round 2): "Portugal", never written in a Lisbon answer, is refused by the gate with the default options; unit words pass', () => {
+  test('the implied-place case (M0 round 2): "Portugal", never written in a Lisbon answer, is still refused by the gate with the default options (snapshot name rule); unit words pass', () => {
     const lisbon = privateEvidencePack('What should I prepare for the Lisbon trip?', [
       { id: 'itinerary', text: 'Three days in Lisbon: the flight lands in the morning and the hotel is near the river.' },
     ]);
@@ -246,18 +246,21 @@ describe('the gate fixtures behave as the tests assume', () => {
       writerVisibleTexts: ['What should I prepare for the Lisbon trip?', 'Your itinerary covers three days in Lisbon with a morning flight and a hotel near the river.', 'Entry and passport rules for the trip are not stated.'],
     });
     const defaults = consultGateOptionsFromSettings(DEFAULT_CONSULT_SETTINGS);
-    expect(defaults.domains).toMatchObject({ countries: false });
+    expect(defaults.domains).toMatchObject({ countries: true, technical: true });
+    // Countries are admitted by default (owner decision 2026-10-07), so the
+    // vocabulary no longer refuses "Portugal"; the snapshot name rule does,
+    // because the documents hold it. Turned off, the vocabulary refuses too.
     const portugal = evaluateConsultRequest(['What entry rules apply to visitors arriving in Portugal?'], context, {}, {}, defaults);
     expect(portugal.decision).toBe('refuse');
-    expect(portugal.reasons).toContain('unknown_word');
+    expect(portugal.reasons).toContain('snapshot_name');
+    expect(portugal.reasons).not.toContain('unknown_word');
+    const noCountries = evaluateConsultRequest(['What entry rules apply to visitors arriving in Portugal?'], context, {}, {}, { ...defaults, domains: { ...defaults.domains, countries: false } });
+    expect(noCountries.reasons).toContain('unknown_word');
     expect(evaluateConsultRequest(['What passport validity do most countries require from visitors?'], context, {}, {}, defaults)).toEqual({ decision: 'pass', reasons: [] });
-    // Pinned finding (C4b review round 1): the default vocabulary (en-esdb +
-    // cldr-units + rx-ingredients) does not admit the temperature scale
-    // names, so these generic unit questions are refused as unknown words
-    // today, capitalised or not. A vocabulary change (stage C1 territory)
-    // would flip this test, which is the point of pinning it.
+    // The temperature scale names (C4b review round 1 found them refused) are
+    // in the olympus-terms pack since 2026-10-07, capitalised or not.
     for (const question of ['How are Celsius and Fahrenheit readings converted in practice?', 'How are celsius and fahrenheit readings converted in practice?']) {
-      expect({ question, verdict: evaluateConsultRequest([question], context, {}, {}, defaults) }).toEqual({ question, verdict: { decision: 'refuse', reasons: ['unknown_word'] } });
+      expect({ question, verdict: evaluateConsultRequest([question], context, {}, {}, defaults) }).toEqual({ question, verdict: { decision: 'pass', reasons: [] } });
     }
     expect(evaluateConsultRequest(['How are temperature scales usually converted in practice?'], context, {}, {}, defaults)).toEqual({ decision: 'pass', reasons: [] });
   });

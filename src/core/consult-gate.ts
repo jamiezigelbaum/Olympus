@@ -641,7 +641,13 @@ function evaluateCheckedRequest(
     if (secretLabelsInText(question).length > 0 || secretLabelsInText(nfkc).length > 0) reasons.add('secret_detected');
     if (hasIdentifierShape(nfkc)) reasons.add('identifier_shape');
     if (hasTechnicalFingerprint(nfkc)) reasons.add('technical_fingerprint');
-    if (hasUnknownWord(nfkc, vocabulary)) reasons.add('unknown_word');
+    if (hasUnknownWord(nfkc, vocabulary)) {
+      reasons.add('unknown_word');
+      // A language the owner asked for whose pack is not installed (German,
+      // Italian) makes every word of that language unknown; say so rather than
+      // looking like an ordinary vocabulary refusal.
+      if (requestedPackNotLoaded(options ?? {})) reasons.add('vocabulary_unavailable');
+    }
     let count = 0;
     forEachToken(foldText(nfkc), () => { count += 1; });
     if (count === 0) reasons.add('question_empty');
@@ -897,6 +903,7 @@ export const CONSULT_VOCABULARY_PACKS: Readonly<Record<string, string>> = {
   'pt-pt-hunspell': '61d7365a29d9c2f15d60dd3033b464c87b459d0b779b0979c62bb17425ebcd4c',
   'cldr-units': '19c8502b1c09353e3011b8683dede75229984b924218d0dae31f092b89dff177',
   'cldr-countries': '1e90b040de7bfa69ce6f134021b6adf3c5ac48f578b958fd676a2cb28b577e75',
+  'olympus-terms': 'c64fd85082c07305dcb52165b3e0fa666d5bef2ce845573997e55b23718aa3c1',
   'rx-ingredients': 'edaff96cb6251b73387889d1503280a81f7e59693c6f915056bae321777baae2',
   'rx-brands': 'ea5dd90a5131aeee31e1d009b5d975bc792775361e0b9e9a1989e7b427bea2ca',
 };
@@ -923,9 +930,19 @@ export type ConsultLanguage = 'en' | 'nl' | 'fr' | 'es' | 'pt-PT' | 'pt-BR' | 'd
  *   units           CLDR unit names in seven languages. Default on: unit words
  *                   are what a bounded quantitative question needs, and the
  *                   sample admits no personal name through them.
- *   countries       CLDR country and macro-region names. Default off: a
- *                   country name is a location disclosure and several are
- *                   given names (Jordan, Georgia, Chad); the owner can enable it.
+ *   countries       CLDR country and macro-region names. Default on
+ *                   (owner decision 2026-10-07, from the false-refusal
+ *                   measurement): a country name narrows where the owner is or
+ *                   travels, and several are given names (Jordan, Georgia,
+ *                   Chad), but the snapshot name rules still refuse any name
+ *                   the documents hold, and cities stay refused. The owner can
+ *                   turn it off.
+ *   technical       Olympus-authored general terms (olympus-terms): units the
+ *                   CLDR pack drops (Celsius, Fahrenheit), file formats,
+ *                   protocols, device and network terms, and a few stable
+ *                   general proper terms (Roth, Mediterranean, Montessori,
+ *                   Schengen). Default on. No person, organisation, brand or
+ *                   place smaller than a country.
  *   medicines       single-word RxNorm ingredient names. Default on: generic
  *                   drug names are needed for questions about medicines and the
  *                   measured sample admits none of its names through them.
@@ -935,13 +952,15 @@ export type ConsultLanguage = 'en' | 'nl' | 'fr' | 'es' | 'pt-PT' | 'pt-BR' | 'd
 export interface ConsultDomainPacks {
   readonly units: boolean;
   readonly countries: boolean;
+  readonly technical: boolean;
   readonly medicines: boolean;
   readonly medicineBrands: boolean;
 }
 
 export const DEFAULT_CONSULT_DOMAIN_PACKS: ConsultDomainPacks = Object.freeze({
   units: true,
-  countries: false,
+  countries: true,
+  technical: true,
   medicines: true,
   medicineBrands: false,
 });
@@ -949,6 +968,7 @@ export const DEFAULT_CONSULT_DOMAIN_PACKS: ConsultDomainPacks = Object.freeze({
 const DOMAIN_PACK_IDS: Readonly<Record<keyof ConsultDomainPacks, string>> = {
   units: 'cldr-units',
   countries: 'cldr-countries',
+  technical: 'olympus-terms',
   medicines: 'rx-ingredients',
   medicineBrands: 'rx-brands',
 };
@@ -1108,6 +1128,12 @@ function consultVocabulary(options: ConsultGateOptions): ConsultVocabulary | nul
     vocabularyCache.set(key, loaded);
   }
   return loaded.vocabulary;
+}
+
+// True when a user-installed pack the configuration requests is not loaded.
+function requestedPackNotLoaded(options: ConsultGateOptions): boolean {
+  if (evaluationVocabulary) return false;
+  return (vocabularyCache.get(selectionKey(options))?.status ?? []).some((entry) => entry.origin === 'user' && entry.state !== 'loaded');
 }
 
 // Which packs a configuration loads, and their state. For status surfaces (doctor).

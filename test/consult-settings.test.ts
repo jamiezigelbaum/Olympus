@@ -63,7 +63,7 @@ const VALID = {
   revision: 3,
   enabled: true,
   languages: ['en', 'pt-BR'],
-  domains: { units: true, countries: false, medicines: true, medicineBrands: false },
+  domains: { units: true, countries: false, technical: true, medicines: true, medicineBrands: false },
   strict: false,
 };
 
@@ -125,7 +125,7 @@ describe('parseConsultSettings', () => {
 });
 
 describe('parseConsultSettingsText rejects duplicate keys before the schema', () => {
-  const body = (inner: string) => `{"v":1,"revision":3,${inner},"languages":["en"],"domains":{"units":true,"countries":false,"medicines":true,"medicineBrands":false},"strict":false}`;
+  const body = (inner: string) => `{"v":1,"revision":3,${inner},"languages":["en"],"domains":{"units":true,"countries":false,"technical":true,"medicines":true,"medicineBrands":false},"strict":false}`;
 
   test('a well-formed document is valid', () => {
     expect(parseConsultSettingsText(body('"enabled":true')).state).toBe('valid');
@@ -139,7 +139,7 @@ describe('parseConsultSettingsText rejects duplicate keys before the schema', ()
     expect(parseConsultSettingsText(body('"enabled":false,"\\u0065nabled":true'))).toMatchObject({ reason: 'duplicate_key' });
   });
   test('a duplicate inside domains is refused', () => {
-    const text = '{"v":1,"revision":3,"enabled":true,"languages":["en"],"domains":{"units":true,"units":false,"countries":false,"medicines":true,"medicineBrands":false},"strict":false}';
+    const text = '{"v":1,"revision":3,"enabled":true,"languages":["en"],"domains":{"units":true,"units":false,"countries":false,"technical":true,"medicines":true,"medicineBrands":false},"strict":false}';
     expect(parseConsultSettingsText(text)).toMatchObject({ reason: 'duplicate_key' });
   });
   test('the same key in different objects, and key-like strings in values, are not duplicates', () => {

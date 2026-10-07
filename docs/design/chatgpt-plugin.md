@@ -876,8 +876,9 @@ for the snapshot metadata); no product path writes that file until C5.
   skipped (no estimate stands in); reply schema `{"questions": null | [1–3]}`.
   The rule against naming what the answer only implies (M0 round 2:
   "Portugal" from a Lisbon itinerary) is in the prompt; mechanically, the
-  gate refuses a country name under the default options (countries pack
-  off, `unknown_word`).
+  gate refuses a country name only if the owner turned the countries pack
+  off (it is on by default since 2026-10-07; the snapshot name rules still
+  refuse a name the documents hold).
 - **Gate, session, dispatch.** The session opens (lease, Tor, daemon, policy
   warm) while the writer runs. The gate compares the questions against the
   snapshot pack plus the question, answer and gaps; a refusal is silent.
