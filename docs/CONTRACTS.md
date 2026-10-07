@@ -316,6 +316,28 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-07 (no version change) — **AD-1, the outside block is panel
+  presentation, not an `Analyst` change** (design
+  `docs/design/frontier-consult-lane.md` §A.11, owner-accepted 2026-10-07;
+  stage C4a). The ChatGPT private answer panel's first answer comes from
+  `Analyst.analyze` exactly as before. A later "outside block" (a bounded
+  reply from an outside model to a question written on-device) is carried
+  beside that answer, inside the panel's sealed envelope
+  (`private-answer-contract.ts` `PrivateAnswerEnvelopeV1.outside`), and
+  rendered in its own container under the first-answer card. The reviewer
+  accepted this within a bounded interpretation that holds only while all
+  four conditions hold:
+  1. the outside block never becomes a corrected document answer;
+  2. it never clears or edits the first answer's gaps (`unanswered`);
+  3. it never gains document citations;
+  4. it never feeds future reasoning, retrieval or storage.
+  Any departure is a semantic change and enters the contract-change process
+  above (version and fingerprint, compatibility note, contract tests,
+  held-out eval, critical review). None of the three contract types is
+  reachable from the envelope, so the fingerprint is unchanged
+  (`bun run contracts:check`); no stored data migrates. The panel protocol's
+  own compatibility record (AD-2) lives in `private-answer-contract.ts` and
+  `docs/design/chatgpt-plugin.md`, "Follow-up collection".
 - 2026-10-03 (no version change): the legacy sensitivity map is retired
   (owner decision). The privacy profile (`olympus_privacy_get` /
   `olympus_privacy_set`, `privacy-profile.ts`, which writes always-Private

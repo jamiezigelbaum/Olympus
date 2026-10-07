@@ -111,6 +111,11 @@ waits for a calendar slot.
 - **Hosted agents beyond ChatGPT** (Claude, Grok, Muse) stay out of scope.
 - **Authenticating the Mac's key to the panel.** A compromised relay could
   swap keys (a residual risk stated in the design); accepted for 1.0.
+- **Outside help on the private answer panel** (frontier consult over
+  zkAPI; design `docs/design/frontier-consult-lane.md`, owner decisions of
+  2026-10-07). Not in 1.0; a candidate for the release after. Its build
+  stages land behind the internal settings mechanism (no public enable
+  path): C1 gate and packs, C3 settings, C4a the panel collection protocol.
 
 ## Outcome (0.4, OpenClaw)
 
