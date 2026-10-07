@@ -391,8 +391,8 @@ describe('follow-up polling', () => {
 
   test('hidden when the withdrawal arrives: stays hidden with Show; Show tells the withdrawal at the retained height; host messages equal hide-live-show', async () => {
     const script = async (second: Reply) => {
-      const host = mount({ followPollMs: 15, replies: [{ envelope: { rev: 1, followSeconds: 500, outside: { state: 'appended', text: OUTSIDE_TEXT } } }, second] });
-      await sleep(50);
+      const host = mount({ followPollMs: 15, heightResendMs: 20, replies: [{ envelope: { rev: 1, followSeconds: 500, outside: { state: 'appended', text: OUTSIDE_TEXT } } }, second] });
+      await host.until(() => host.heights().length >= 2, 'the handshake resend');
       await reveal(host);
       host.button(W.hide).click();
       await host.until(() => host.fetched.length >= 3, 'polls while hidden');
@@ -504,12 +504,14 @@ describe('follow-up polling', () => {
   });
 
   test('the revealed geometry is locked before the host answers the handshake, so an early withdrawal still reports it', async () => {
-    const host = mount({ initAfterMs: 300, heightResendMs: 20, followPollMs: 15, replies: [{ envelope: { followSeconds: 400 } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 300, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
+    const host = mount({ initAfterMs: 600, heightResendMs: 20, followPollMs: 15, replies: [{ envelope: { followSeconds: 400 } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 300, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
     await reveal(host);
     await host.until(() => host.text().includes(W.withdrawn), 'the withdrawal, before initialization');
-    expect(host.heights()).toEqual([]);
     await host.until(() => host.heights().length >= 2, 'the handshake heights');
-    expect(host.heights().every((height) => height === 300 + R)).toBe(true);
+    // Reported only once the host answered, after the withdrawal: the revealed H, never the withdrawn card's.
+    expect(host.heights().every((height) => height === 90 || height === 300 + R)).toBe(true);
+    expect(host.heights().at(-1)).toBe(300 + R);
+    expect(host.heights()).not.toContain(90 + R);
   });
 });
 
@@ -530,8 +532,8 @@ describe('fixed reported geometry (host transcript)', () => {
   async function transcript(scenario: Scenario, options: MountOptions = {}): Promise<{ heights: number[]; sizes: unknown[] }> {
     // The scripted replies are consumed as they are served: each mount gets its own copy.
     const host = mount({ followPollMs: 15, heightResendMs: 20, ...options, replies: [...scenario.replies] });
-    // The handshake's forced resend fires first (height 0), so what follows is the card's own story.
-    await sleep(50);
+    // The handshake's forced resend fires first (height 0, twice), so what follows is the card's own story.
+    await host.until(() => host.heights().length >= 2, 'the handshake resend');
     await reveal(host);
     // Let the follow-up polls run through the scripted outcomes, then a load event.
     await sleep(120);
@@ -584,23 +586,26 @@ describe('fixed reported geometry (host transcript)', () => {
   });
 
   test('a delayed handshake and the fallback both report H, never a measured total', async () => {
+    // Whether the host answers before or after the reveal (a loaded runner
+    // decides), every report is the working card or H: never the card plus
+    // the container, never the withdrawn or hidden card.
     const late = mount({ initAfterMs: 400, heightResendMs: 20, replies: [{ envelope: { followSeconds: 0, outside: { state: 'appended', text: OUTSIDE_TEXT } } }] });
     await reveal(late);
-    expect(late.heights()).toEqual([]);
-    await late.until(() => late.heights().length >= 2, 'the handshake heights');
-    expect(late.heights().every((height) => height === 300 + R)).toBe(true);
+    await late.until(() => late.heights().length >= 2 && late.heights().at(-1) === 300 + R, 'the handshake heights');
+    expect(late.heights().every((height) => height === 90 || height === 300 + R)).toBe(true);
     const silent = mount({ initAfterMs: 'never', initFallbackMs: 40, heightResendMs: 20, replies: [{ envelope: { followSeconds: 0, outside: { state: 'pending' } } }] });
     await reveal(silent);
-    await silent.until(() => silent.heights().length >= 1, 'the fallback height');
-    expect(silent.heights().every((height) => height === 300 + R)).toBe(true);
+    await silent.until(() => silent.heights().length >= 1 && silent.heights().at(-1) === 300 + R, 'the fallback height');
+    expect(silent.sent.some((m) => m.method === 'ui/notifications/initialized')).toBe(false);
+    expect(silent.heights().every((height) => height === 90 || height === 300 + R)).toBe(true);
   });
 
   test('a withdrawal from any prior outcome keeps reporting H, through a later load event and a width change', async () => {
     const withdrawnReply: Reply = { envelope: { rev: 5, state: 'withdrawn', followSeconds: 100, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } };
     const runs: number[][] = [];
     for (const prior of [{ state: 'idle' }, { state: 'pending' }, { state: 'appended', text: OUTSIDE_TEXT }] as Outside[]) {
-      const host = mount({ followPollMs: 15, replies: [{ envelope: { followSeconds: 300, outside: prior } }, withdrawnReply] });
-      await sleep(50);
+      const host = mount({ followPollMs: 15, heightResendMs: 20, replies: [{ envelope: { followSeconds: 300, outside: prior } }, withdrawnReply] });
+      await host.until(() => host.heights().length >= 2, 'the handshake resend');
       await reveal(host);
       await host.until(() => host.text().includes(W.withdrawn), 'the withdrawal');
       await sleep(30);

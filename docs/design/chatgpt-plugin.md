@@ -728,9 +728,9 @@ relay), `busy` (503), and `opened` (204, no body, `/open` only).
 
 ### Follow-up collection (added 2026-10-07, stage C4a; AD-2)
 
-The panel protocol's compatibility record, AD-2 of
-[`frontier-consult-lane.md`](frontier-consult-lane.md) §A.11 (owner-accepted
-2026-10-07). The authoritative text is the header of
+The panel protocol's compatibility record, AD-2 of the design
+`docs/design/frontier-consult-lane.md` §A.11 (revision 8, on its proposal
+branch until the lane ships; owner-accepted 2026-10-07). The authoritative text is the header of
 `src/workers/chatgpt/private-answer-contract.ts`; this is the narrative.
 **No consult is written or sent yet** (that is stage C4b); this stage lands
 the protocol the consult will ride on, and the limits it needs.
