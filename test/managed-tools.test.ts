@@ -32,12 +32,15 @@ import {
   type ManagedToolVersionCheck,
 } from '../src/core/managed-tools.ts';
 import { V0_4_PUBLIC_CLI_COMMANDS, V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
-import { DASHBOARD_OUTSIDE_HELP_PATHS } from '../src/workers/dashboard/outside-help.ts';
+import { DASHBOARD_OUTSIDE_HELP_PATHS, renderOutsideHelpCard } from '../src/workers/dashboard/outside-help.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
   renderOutsideHelpTools,
+  renderOutsideHelpToolsFix,
+  renderOutsideHelpToolsScript,
   type DashboardOutsideHelpTools,
 } from '../src/workers/dashboard/outside-help-tools.ts';
+import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { createDashboardConsultAdapter, dashboardInstallView } from '../src/workers/email-source/dashboard-consult.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
@@ -631,44 +634,66 @@ describe('the card section', () => {
     install,
   });
 
-  test('not installed: two plain lines and one button that posts with the CSRF token', () => {
-    const html = renderOutsideHelpTools(tools({ state: 'idle' }), { canEdit: true, csrfToken: 'csrf-1' });
+  test('not installed: two plain lines and one button; the script posts with the CSRF token', () => {
+    const html = renderOutsideHelpTools(tools({ state: 'idle' }), { canEdit: true });
     expect(html).toContain('data-install-state="idle"');
     expect(html).toContain('Tor: Not installed');
     expect(html).toContain('zkAPI: Not installed');
     expect(html).toContain('>Install Tor and zkAPI</button>');
-    expect(html).toContain('csrf-1');
-    expect(html).toContain(DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH);
-    const script = /<script>([\s\S]*)<\/script>/.exec(html)![1]!;
-    expect(() => new Function(script)).not.toThrow();
+    const script = renderOutsideHelpToolsScript(tools({ state: 'idle' }), { canEdit: true, csrfToken: 'csrf-1' });
+    expect(script).toContain('csrf-1');
+    expect(script).toContain(DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH);
+    expect(() => new Function(/<script>([\s\S]*)<\/script>/.exec(script)![1]!)).not.toThrow();
   });
 
   test('read-only: the button is disabled and there is no script', () => {
-    const html = renderOutsideHelpTools(tools({ state: 'idle' }), { canEdit: false });
-    expect(html).toContain('disabled aria-disabled="true"');
-    expect(html).not.toContain('<script>');
+    expect(renderOutsideHelpTools(tools({ state: 'idle' }), { canEdit: false })).toContain('disabled aria-disabled="true"');
+    expect(renderOutsideHelpToolsScript(tools({ state: 'idle' }), { canEdit: false })).toBe('');
   });
 
   test('progress: Downloading Tor… with a percent, then Checking…, and no button while it runs', () => {
-    const downloading = renderOutsideHelpTools(tools({ state: 'running', tool: 'Tor', phase: 'downloading', percent: 40 }), { canEdit: true, csrfToken: 'c' });
+    const downloading = renderOutsideHelpTools(tools({ state: 'running', tool: 'Tor', phase: 'downloading', percent: 40 }), { canEdit: true });
     expect(downloading).toContain('data-install-state="running"');
     expect(downloading).toContain('Downloading Tor… 40%');
     expect(downloading).not.toContain('<button');
-    expect(renderOutsideHelpTools(tools({ state: 'running', tool: 'zkAPI', phase: 'checking' }), { canEdit: true, csrfToken: 'c' })).toContain('Checking zkAPI…');
+    expect(renderOutsideHelpTools(tools({ state: 'running', tool: 'zkAPI', phase: 'checking' }), { canEdit: true })).toContain('Checking zkAPI…');
   });
 
-  test('installed: where each came from, Installed, and no button', () => {
-    const html = renderOutsideHelpTools(tools({ state: 'done' }, ['olympus', 'system']), { canEdit: true, csrfToken: 'c' });
+  test('installed: where each came from, Installed, no button, and nothing to fix', () => {
+    const done = tools({ state: 'done' }, ['olympus', 'system']);
+    const html = renderOutsideHelpTools(done, { canEdit: true });
     expect(html).toContain('Tor: Installed (Olympus)');
     expect(html).toContain('zkAPI: Installed (your system)');
     expect(html).toContain('data-outside-install-done');
     expect(html).not.toContain('<button');
+    expect(renderOutsideHelpToolsFix(done, { canEdit: true })).toBe('');
   });
 
-  test('failure: the plain reason and Try again', () => {
-    const html = renderOutsideHelpTools(tools({ state: 'failed', code: 'hash_mismatch', message: 'The Tor download did not match its pinned fingerprint, so nothing was installed.' }), { canEdit: true, csrfToken: 'c' });
-    expect(html).toContain('data-outside-install-failed="hash_mismatch"');
-    expect(html).toContain('Not installed. The Tor download did not match its pinned fingerprint');
-    expect(html).toContain('>Try again</button>');
+  test('failure: the plain reason and Try again, in both places', () => {
+    const failed = tools({ state: 'failed', code: 'hash_mismatch', message: 'The Tor download did not match its pinned fingerprint, so nothing was installed.' });
+    for (const html of [renderOutsideHelpTools(failed, { canEdit: true }), renderOutsideHelpToolsFix(failed, { canEdit: true })]) {
+      expect(html).toContain('data-outside-install-failed="hash_mismatch"');
+      expect(html).toContain('Not installed. The Tor download did not match its pinned fingerprint');
+      expect(html).toContain('>Try again</button>');
+    }
+  });
+
+  test('on the card: missing parts are one "To fix" line with the button (replacing the two not-found blockers), and step 1 of an open Set up zkAPI', () => {
+    const missing = tools({ state: 'idle' }, ['missing', 'olympus']);
+    const card = renderOutsideHelpCard({
+      settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false },
+      route: { state: 'not_configured', policyWritable: true },
+      languages: [],
+      restartPending: false,
+      tools: missing,
+    }, { csrfToken: 'csrf-2', localSession: true });
+    const fix = card.indexOf('data-outside-tools="fix"');
+    const setup = card.indexOf('data-outside-tools="setup"');
+    expect(fix).toBeGreaterThan(card.indexOf('data-outside-blockers'));
+    expect(card.slice(fix, fix + 400)).toContain('Tor is not installed on this Mac.');
+    expect(setup).toBeGreaterThan(card.indexOf('data-outside-section="steps" open'));
+    expect(setup).toBeLessThan(card.indexOf('data-outside-steps'));
+    expect(card.match(/<script>/g)!.length).toBe(2);
+    expect(card).not.toContain('Install zkapi-clientd (version');
   });
 });

@@ -16,7 +16,14 @@ import { ZKAPI_RISK_ACKNOWLEDGEMENTS } from '../../core/zkapi-consult-settings.t
 import { escapeHtml, escapeScriptJson } from './components.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from './vocabulary.ts';
 import { fill } from './source-rows.ts';
-import { DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, renderOutsideHelpTools, type DashboardOutsideHelpTools } from './outside-help-tools.ts';
+import {
+  DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
+  outsideHelpToolsNeedAttention,
+  renderOutsideHelpTools,
+  renderOutsideHelpToolsFix,
+  renderOutsideHelpToolsScript,
+  type DashboardOutsideHelpTools,
+} from './outside-help-tools.ts';
 
 /** One word for Setup's row. */
 export interface DashboardOutsideHelpSummary {
@@ -173,7 +180,6 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const parts: string[] = [];
   parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
   parts.push(`<p class="ohlabel">${escapeHtml(W.experimental)}</p>`);
-  parts.push(renderOutsideHelpTools(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) }));
   parts.push(`<p class="pintro">${escapeHtml(W.intro)}</p>`);
   parts.push(`<p class="pnote" data-outside-privacy>${escapeHtml(W.privacy)}</p>`);
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
@@ -208,7 +214,11 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   if (route.state === 'configured' && route.readiness && route.readiness.fences.length > 0) more.push(renderFence(route.readiness, canEdit));
   more.push(renderLanguages(status, canEdit));
   if (route.state === 'configured') more.push(renderLimits(route, blockers, canEdit));
-  more.push(renderSetupSteps(route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, route.state === 'not_configured' || blockers.some((code) => SETUP_BLOCKERS.has(code))));
+  more.push(renderSetupSteps(
+    route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`,
+    route.state === 'not_configured' || blockers.some((code) => SETUP_BLOCKERS.has(code)) || outsideHelpToolsNeedAttention(status.tools),
+    renderOutsideHelpTools(status.tools, { canEdit }),
+  ));
   if (route.state === 'configured') more.push(renderDetails(route));
   if (on) more.push(renderSection({ id: 'disclosure', title: W.disclosureMore, summary: '', open: false, body: `<div data-outside-disclosure-more>${shortList}${fullList}</div>` }));
   parts.push(`<div class="ohmore">${more.join('')}</div>`);
@@ -219,7 +229,8 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
     copy: { saving: W.saving, failed: W.saveFailed, restarting: W.restarting, on: W.state.on, off: W.state.off },
   };
   const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config)}</script>` : '';
-  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}`;
+  const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) });
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
 }
 
 function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: DashboardOutsideHelpSummary, canEdit: boolean): string {
@@ -295,8 +306,14 @@ function renderProblems(status: DashboardOutsideHelpStatus, canEdit: boolean): s
   } else if (route.readinessUnavailable || !route.readiness) {
     items.push(`<li><span>${escapeHtml(W.routeUnknown)}</span></li>`);
   } else {
-    for (const code of route.readiness.blockers) items.push(`<li><span>${escapeHtml(outsideHelpBlockerWords(code))}</span></li>`);
+    for (const code of route.readiness.blockers) {
+      if (status.tools && TOOL_BLOCKERS.has(code)) continue;
+      items.push(`<li><span>${escapeHtml(outsideHelpBlockerWords(code))}</span></li>`);
+    }
   }
+  // Missing programs: one line with the install button (or its progress).
+  const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
+  if (tools) items.unshift(tools);
   if (items.length === 0) return '';
   return `<div class="sect attn">${escapeHtml(W.problemsTitle)}</div><ul class="ohfix" data-outside-blockers>${items.join('')}</ul>`;
 }
@@ -307,7 +324,10 @@ function renderSection(input: { id: string; title: string; summary: string; open
     + `<div class="ohsect-body">${input.body}</div></details>`;
 }
 
-function renderSetupSteps(secretRef: string, needed: boolean): string {
+/** The not-installed blockers the parts' own "To fix" line (outside-help-tools.ts) stands in for. */
+const TOOL_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'tor_not_found']);
+
+function renderSetupSteps(secretRef: string, needed: boolean, tools = ''): string {
   const steps = W.steps.map((step) => fill(step, { secretRef }));
   return renderSection({
     id: 'steps',
@@ -315,7 +335,7 @@ function renderSetupSteps(secretRef: string, needed: boolean): string {
     summary: '',
     open: needed,
     attn: needed,
-    body: `<div data-outside-steps><p class="pnote">${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>`,
+    body: `${tools}<div data-outside-steps><p class="pnote">${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>`,
   });
 }
 

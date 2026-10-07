@@ -2002,9 +2002,9 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   },
   blockerOther: 'Not ready yet ({code}).',
   stepsTitle: 'Set up zkAPI',
-  stepsIntro: 'In Terminal, in this order. This is the order that worked live.',
+  stepsIntro: 'Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.',
   steps: [
-    'Install zkapi-clientd (version 0.1.5 or 0.1.6) and Tor.',
+    'Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). If you installed them yourself, zkapi-clientd must be version 0.1.5 or 0.1.6.',
     'Run: zkapi-clientd config --usd N. Send ONE transfer in total: the deposit plus the fee buffer the tool shows. Gas prices move, so the buffer can fall short; a shortfall means another transfer.',
     'Wait until the tool prints "Private inference balance activated".',
     'Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050',

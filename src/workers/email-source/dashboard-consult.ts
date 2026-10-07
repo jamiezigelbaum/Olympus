@@ -193,7 +193,9 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   const readiness = options.readiness ?? zkapiConsultReadiness;
   const toolsJob = options.toolsJob ?? createManagedToolsJob({ env });
   // Olympus's own verified install first (what the transport runs), else the
-  // same PATH search the transport falls back to.
+  // transport's own fallback resolver: PATH, then the standard install
+  // folders (~/.local/bin, Homebrew, /usr/local/bin) under its owner and
+  // permission check, so "your system" means a program a consult would run.
   const toolsState = options.toolsState ?? ((): DashboardOutsideHelpTools['tools'] => managedToolsState({ env }).map((entry) => {
     const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
     return {
