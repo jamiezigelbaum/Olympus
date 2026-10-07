@@ -64,8 +64,10 @@
  * (512-byte request cap, 8 MiB response cap).
  *
  * What is and is not hidden (owner ruling 2026-10-07, version one): the
- * content is sealed to the panel's key, so ChatGPT and the relay never see
- * what was asked outside or what came back. They may infer that outside
+ * content is sealed to the panel's key, so, under the trust assumptions in
+ * docs/design/chatgpt-plugin.md "Who can read the answer" (a relay that does
+ * not swap keys; the panel's HTML served unaltered), ChatGPT and the relay
+ * do not see what was asked outside or what came back. They may infer that outside
  * help ran on a question (response timing, the panel's size changes, how
  * long it keeps polling). That inference is accepted for version one.
  */

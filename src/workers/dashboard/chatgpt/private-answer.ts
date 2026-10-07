@@ -159,7 +159,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   type Source = { name: string; open: Open | null };
   type Outside = { state: string; text: string; cut: boolean; question: string };
   // `follow`: a follow-up envelope (the plaintext carried an outside block):
-  // the reserved container, the geometry rule and the polling apply.
+  // the outside container and the follow-up polling apply.
   type Answer = { text: string; sources: Source[]; unanswered: string[]; follow: boolean; rev: number; followSeconds: number; outside: Outside };
   type Opened = { kind: 'answer'; answer: Answer } | { kind: 'withdrawn'; rev: number; followSeconds: number };
   // Follow-up collection for the current job: the polling deadline and the

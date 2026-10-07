@@ -33,14 +33,11 @@ import {
   PRIVATE_ANSWER_PAD_BUCKETS,
   fromBase64Url,
   generatePanelKeyPair,
-  importPanelPublicKey,
   openPrivateAnswer,
-  padPrivateAnswerPlaintext,
-  sealPrivateAnswer,
   type SealedPrivateAnswer,
 } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler, type ClaimResponse } from '../src/workers/chatgpt/private-answer-jobs.ts';
-import { PRIVATE_ANSWER_ENVELOPE_BYTES, padPrivateAnswerEnvelope, serializePrivateAnswerEnvelope, utf8Bytes } from '../src/workers/chatgpt/private-answer-payload.ts';
+import { PRIVATE_ANSWER_ENVELOPE_BYTES, utf8Bytes } from '../src/workers/chatgpt/private-answer-payload.ts';
 
 const ALL_ELIGIBLE = async (items: readonly unknown[]) => items.map(() => true);
 const INSTALL = 'f'.repeat(32);
@@ -510,10 +507,10 @@ describe('overlapping first collections commit one delivery window', () => {
 });
 
 describe('what a job retains', () => {
-  type LiveJob = { question?: string; outcome?: { kind: string; answer?: unknown }; outside: unknown; opens?: unknown; sealedItems?: unknown; guardItems?: unknown; evidence?: unknown; refresh?: unknown };
+  type LiveJob = { question?: string; outcome?: { kind: string; answer?: unknown }; outside: unknown; opens?: unknown; sealedItems?: unknown; evidence?: unknown; refresh?: unknown };
   const live = (h: Harness, id: string) => (h.jobs as unknown as { jobs: Map<string, LiveJob> }).jobs.get(id)!;
 
-  test('the question leaves the job once the claim has read it; a withdrawal clears everything but the item identities', async () => {
+  test('the question leaves the job once the claim has read it; a withdrawal clears everything', async () => {
     const h = harness();
     const jobId = begin(h);
     expect(live(h, jobId).question).toBe('When does the lease end?');

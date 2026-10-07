@@ -804,8 +804,11 @@ the protocol the consult will ride on, and the limits it needs.
   stays hidden, and Show then says the answer was withdrawn. The frame is
   as tall as its content, as today.
 - **What is and is not hidden (owner ruling 2026-10-07, version one).** The
-  content is sealed to the panel's key: ChatGPT and the relay never see the
-  first answer, what was asked outside or what came back. They may infer
+  content is sealed to the panel's key: under the assumptions already
+  stated below ("Who can read the answer": an uncompromised relay that does
+  not swap keys, and the panel's HTML served unaltered), ChatGPT and the
+  relay do not see the first answer, what was asked outside or what came
+  back. They may infer
   that outside help ran on a question, from response timing, from the
   panel's size changes and from how long it keeps polling, never what was
   asked or answered. This is accepted for version one; no response-time
