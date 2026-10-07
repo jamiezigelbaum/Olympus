@@ -11,11 +11,14 @@
 // `{"id":N,"vectors":"<base64 float32 little-endian>","dimension":D}` (one
 // vector per text or item; an item with an image is embedded as text and
 // picture together; `"failed":[i,...]` names items whose picture could not be
-// read, their vectors left as zeros) or `{"id":N,"error":"..."}`, with
-// `"native":true` when LiteRT-LM itself failed.
+// read and `"unsupported":[i,...]` items sent a picture to an engine started
+// without its encoder, their vectors left as zeros) or
+// `{"id":N,"error":"..."}`, with `"native":true` when LiteRT-LM itself failed
+// (including pictures failing while a known-good picture fails too).
 
 import { dlopen, FFIType, ptr, toArrayBuffer, type Pointer } from 'bun:ffi';
 import { closeSync, fstatSync, mkdirSync, openSync, readSync } from 'node:fs';
+import { EngineFaultError, KNOWN_GOOD_JPEG_BASE64, embedIsolatingPictures } from './litert-isolation.ts';
 import { isAbsolute } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -146,16 +149,13 @@ function embedBatch(
   engine: Pointer,
   options: Pointer,
   items: readonly EmbedItem[],
-): { vectors: Float32Array; dimension: number; failed: number[] } {
+): { vectors: Float32Array; dimension: number; failed: number[]; unsupported: number[] } {
   const failed = new Set<number>();
+  const unsupported = items.flatMap((item, index) => (item.image && item.unsupported ? [index] : []));
   // Read every picture before any native input exists; an unreadable file
   // fails its own item only.
   const images = items.map((item, index) => {
-    if (!item.image) return undefined;
-    if (item.unsupported) {
-      failed.add(index);
-      return undefined;
-    }
+    if (!item.image || item.unsupported) return undefined;
     try {
       return readImage(item.image);
     } catch {
@@ -170,29 +170,15 @@ function embedBatch(
     dimension = out.dimension;
     indexes.forEach((index, row) => results.set(index, out.vectors.subarray(row * out.dimension, (row + 1) * out.dimension)));
   };
-  const live = items.map((_, index) => index).filter((index) => !failed.has(index));
-  if (live.length > 0) {
-    try {
-      run(live);
-    } catch (error) {
-      if (!(error instanceof NativeError) || !live.some((index) => images[index])) throw error;
-      // A picture can fail a whole batch. Text alone again (a failure there is
-      // the engine's), then each picture alone, keeping the ones that work.
-      const textOnly = live.filter((index) => !images[index]);
-      if (textOnly.length > 0) run(textOnly);
-      for (const index of live.filter((candidate) => images[candidate])) {
-        try {
-          run([index]);
-        } catch (itemError) {
-          if (!(itemError instanceof NativeError)) throw itemError;
-          failed.add(index);
-        }
-      }
-    }
-  }
+  const live = items.map((_, index) => index).filter((index) => !failed.has(index) && !unsupported.includes(index));
+  const pictureFailures = embedIsolatingPictures(live, (index) => images[index] !== undefined, run, () => {
+    const probe = Buffer.from(KNOWN_GOOD_JPEG_BASE64, 'base64');
+    embedRaw(lib, engine, options, [{ text: 'probe', image: 'known-good' }], [probe]);
+  });
+  for (const index of pictureFailures) failed.add(index);
   const vectors = new Float32Array(dimension * items.length);
   for (const [index, vector] of results) vectors.set(vector, index * dimension);
-  return { vectors, dimension, failed: [...failed].sort((left, right) => left - right) };
+  return { vectors, dimension, failed: [...failed].sort((left, right) => left - right), unsupported };
 }
 
 function embedRaw(
@@ -260,7 +246,7 @@ function keepAlive(...values: unknown[]): void {
 }
 
 /** A failure inside LiteRT-LM itself, as opposed to a bad request: the parent replaces this helper. */
-class NativeError extends Error {}
+class NativeError extends EngineFaultError {}
 
 function send(message: unknown): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -314,12 +300,13 @@ function main(): void {
     try {
       const request = JSON.parse(line) as { id: number; texts?: unknown; items?: unknown };
       id = request.id;
-      const { vectors, dimension, failed } = embedBatch(lib, engine, options, requestItems(request, vision));
+      const { vectors, dimension, failed, unsupported } = embedBatch(lib, engine, options, requestItems(request, vision));
       send({
         id,
         dimension,
         vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString('base64'),
         ...(failed.length > 0 ? { failed } : {}),
+        ...(unsupported.length > 0 ? { unsupported } : {}),
       });
     } catch (error) {
       send({ id, error: error instanceof Error ? error.message : String(error), ...(error instanceof NativeError ? { native: true } : {}) });

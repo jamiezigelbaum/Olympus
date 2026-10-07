@@ -241,6 +241,15 @@ export function createFileExtractionRuntime(
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
     }
     const view = tierSet ? tieredExtractionView(tierSet) : undefined;
+    // A plain (untiered) store that is not Private holds no picture content;
+    // what an earlier build stored there is removed once (the names stay).
+    if (!tierSet && store.trustDomain !== 'secure_local') {
+      try {
+        store.stripImageContentOutsidePrivate();
+      } catch {
+        // Tried again at the next start.
+      }
+    }
     corpora.push({
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,

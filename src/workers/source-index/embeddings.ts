@@ -65,18 +65,26 @@ export interface SourceEmbeddingProvider {
 
 /**
  * Some inputs of a batch could not be embedded (a picture the image encoder
- * could not read) while the rest could. The embed lane records those inputs
- * as failed and embeds the others; it is never a fault of the engine.
+ * could not read, or pictures sent while the encoder is not running) while
+ * the rest could. The embed lane embeds the others; it is never a fault of
+ * the engine.
  */
 export class SourceEmbeddingInputsFailedError extends Error {
   readonly failedIndexes: readonly number[];
   readonly reason: string;
+  /**
+   * `failed`: these inputs' pictures could not be read. `held`: the pictures
+   * are fine but cannot be read right now (the image encoder is not running),
+   * so they wait and nothing is recorded against them.
+   */
+  readonly disposition: 'failed' | 'held';
 
-  constructor(failedIndexes: readonly number[], reason: string) {
+  constructor(failedIndexes: readonly number[], reason: string, disposition: 'failed' | 'held' = 'failed') {
     super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
     this.name = 'SourceEmbeddingInputsFailedError';
     this.failedIndexes = failedIndexes;
     this.reason = reason;
+    this.disposition = disposition;
   }
 }
 

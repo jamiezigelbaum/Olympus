@@ -13,15 +13,20 @@
 // swept after a day.
 //
 // Every path this module reads, marks or deletes must be one it could have
-// written: inside the cache directory and named `<sha256>.jpg`. A path from a
-// database row is checked before it is touched.
+// written: a file named `<sha256>.jpg` directly inside a directory named
+// `media-cache` or `olympus-media`. The check is structural, not against the
+// caller's own configured directory, so a drain or a CLI started with a
+// different environment agrees with the worker that wrote the row. A path
+// from a database row is checked before it is touched.
 
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
   mkdirSync,
+  lstatSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   rmdirSync,
@@ -76,14 +81,40 @@ function isSha256(value: string): boolean {
   return true;
 }
 
+const MEDIA_CACHE_DIR_NAMES: ReadonlySet<string> = new Set(['media-cache', 'olympus-media']);
+
 /**
- * Whether `path` is the cache file for `sha256`: inside `dir`, named
- * `<sha256>.jpg`, nothing else. Rows can be copied between stores, so a path
- * is never trusted because a database holds it.
+ * Whether `path` is a cache file for `sha256`: absolute and normalized, named
+ * `<sha256>.jpg`, directly inside a `media-cache` or `olympus-media`
+ * directory, and (when it exists) a regular file, not a link. Rows can be
+ * copied between stores, so a path is never trusted because a database holds
+ * it. With `dir`, it must also sit in exactly that directory.
  */
-export function isMediaCachePath(path: string, sha256: string, dir: string = mediaCacheDir()): boolean {
-  if (!isAbsolute(path) || !isSha256(sha256)) return false;
-  return resolve(path) === join(resolve(dir), `${sha256}.jpg`);
+export function isMediaCachePath(path: string, sha256: string, dir?: string): boolean {
+  if (!isAbsolute(path) || !isSha256(sha256) || resolve(path) !== path) return false;
+  if (basename(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename(dirname(path)))) return false;
+  if (dir !== undefined && dirname(path) !== resolve(dir)) return false;
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile()) return false;
+  } catch {
+    // Absent is fine: a caller checks existence itself.
+  }
+  return true;
+}
+
+/**
+ * The name a holder (a store's database path) is recorded under: its real
+ * path, so a store opened through a link or a relative path is the same
+ * holder.
+ */
+export function mediaHolderName(holder: string): string {
+  if (holder.startsWith('staging:') || holder.startsWith('memory:')) return holder;
+  try {
+    return realpathSync(holder);
+  } catch {
+    return resolve(holder);
+  }
 }
 
 /**
@@ -204,7 +235,7 @@ function refsDir(path: string): string {
 }
 
 function holderName(holder: string): string {
-  const digest = createHash('sha256').update(holder).digest('hex').slice(0, 32);
+  const digest = createHash('sha256').update(mediaHolderName(holder)).digest('hex').slice(0, 32);
   return holder.startsWith('staging:') ? `staging-${digest}` : digest;
 }
 

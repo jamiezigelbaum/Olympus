@@ -19,6 +19,21 @@ export type LiteRtDevice = 'gpu' | 'cpu';
  */
 export type LiteRtEmbedItem = string | { text: string; image?: string };
 
+/**
+ * Pictures were sent to a helper running without its image encoder (it may
+ * have been restarted without it). Nothing about the pictures is wrong: the
+ * caller holds them until the encoder runs again.
+ */
+export class LiteRtImagesUnavailableError extends Error {
+  readonly indexes: readonly number[];
+
+  constructor(indexes: readonly number[]) {
+    super('The built-in search model is running without its image encoder.');
+    this.name = 'LiteRtImagesUnavailableError';
+    this.indexes = indexes;
+  }
+}
+
 export interface LiteRtEmbedder {
   /** Where the helper runs the model now. */
   readonly device: LiteRtDevice;
@@ -144,7 +159,7 @@ class HelperProcess {
         helper.stderr = (helper.stderr + chunk.toString('utf8')).slice(-4_000);
       });
       createInterface({ input: child.stdout }).on('line', (line) => {
-        let message: { ready?: boolean; device?: LiteRtDevice; vision?: boolean; fatal?: string; id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[] };
+        let message: { ready?: boolean; device?: LiteRtDevice; vision?: boolean; fatal?: string; id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] };
         try {
           message = JSON.parse(line);
         } catch {
@@ -211,11 +226,15 @@ class HelperProcess {
     });
   }
 
-  private settle(message: { id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[] }): void {
+  private settle(message: { id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] }): void {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
     if (!pending || message.id === undefined) return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
+    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
+      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
+      return;
+    }
     const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
     if (!message.error && failed.size === pending.count) {
       // Every item's picture failed: nothing to decode, nothing wrong with the engine.
@@ -283,6 +302,10 @@ export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promi
         if (helper.device === 'gpu') device = 'cpu';
         helper = await HelperProcess.start(options, device);
       }
+      // Checked against the helper that will run this batch, which a restart
+      // may have brought back without its image encoder.
+      const pictures = items.flatMap((item, index) => (typeof item !== 'string' && item.image ? [index] : []));
+      if (pictures.length > 0 && !helper.vision) throw new LiteRtImagesUnavailableError(pictures);
       return helper.embed(items);
     },
     async release() {

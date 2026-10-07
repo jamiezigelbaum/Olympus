@@ -10,7 +10,7 @@ import { availableParallelism } from 'node:os';
 import { dirname, join } from 'node:path';
 import { OperationError } from '../../../core/operation-error.ts';
 import { resolveEmbeddingEpoch } from '../embedding-identity.ts';
-import { isMediaCachePath, mediaCacheDir } from '../../../core/media-cache.ts';
+import { isMediaCachePath } from '../../../core/media-cache.ts';
 import {
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
@@ -36,7 +36,13 @@ import {
   LITERT_RUNTIME_PACK,
   type BuiltInEmbeddingModelSpec,
 } from './manifest.ts';
-import { startLiteRtEmbedder, type LiteRtEmbedder, type LiteRtEmbedderOptions, type LiteRtEmbedItem } from './litert-runtime.ts';
+import {
+  LiteRtImagesUnavailableError,
+  startLiteRtEmbedder,
+  type LiteRtEmbedder,
+  type LiteRtEmbedderOptions,
+  type LiteRtEmbedItem,
+} from './litert-runtime.ts';
 import { onnxRuntimeFromDirectory, type EmbeddingRuntime, type EmbeddingSession } from './runtime.ts';
 import { WordPieceTokenizer } from './wordpiece.ts';
 
@@ -360,7 +366,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     const prompts: LiteRtEmbedItem[] = inputs.map((input, index) => {
       const text = promptText(this.spec, input, taskType);
       if (taskType !== 'RETRIEVAL_DOCUMENT' || !this.spec.vision || !input.image) return text;
-      if (!isMediaCachePath(input.image.path, input.image.sha256, this.mediaCacheDir())) refused.add(index);
+      if (!isMediaCachePath(input.image.path, input.image.sha256)) refused.add(index);
       return { text, image: input.image.path };
     });
     const out: number[][] = [];
@@ -372,6 +378,14 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       try {
         vectors = await this.withSlot(taskType, () => embedder.embed(batch));
       } catch (error) {
+        if (error instanceof LiteRtImagesUnavailableError) {
+          // Held, not failed: the pictures wait for the encoder to run again.
+          throw new SourceEmbeddingInputsFailedError(
+            error.indexes.map((index) => offset + index),
+            'image_encoder_unavailable',
+            'held',
+          );
+        }
         throw new OperationError(
           'source_index_error',
           `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`,
@@ -397,13 +411,6 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     return out;
   }
 
-  private mediaCacheDir(): string | undefined {
-    try {
-      return mediaCacheDir(this.env);
-    } catch {
-      return undefined;
-    }
-  }
 
   private async forward(model: OnnxModel, batch: Window[]): Promise<Float64Array[]> {
     const rows = batch.length;
