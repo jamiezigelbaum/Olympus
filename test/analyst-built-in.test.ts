@@ -172,6 +172,8 @@ Bun.serve({ hostname: '127.0.0.1', port: Number(at('--port')), fetch(request) {
     expect(value('--threads')).toBe('4');
     expect(value('--prio')).toBe('-1');
     expect(value('--parallel')).toBe('1');
+    expect(value('--batch-size')).toBe('64');
+    expect(value('--ubatch-size')).toBe('64');
     expect(value('--n-gpu-layers')).toBe('999');
     expect(args).toContain('--no-webui');
     const cpuArgs = llamaServerArguments({ ...launch, gpu: false }, 1, 't');
