@@ -4,6 +4,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   DEFAULT_QUESTIONS,
+  loadQuestions,
   median,
   parseTimingArgs,
   percentile,
@@ -191,5 +192,31 @@ describe('zkapi consult timing runner', () => {
       now: () => 7,
     });
     expect(refused).toMatchObject({ result: { ok: false, error: { code: 'busy' } }, toReplyMs: null, toFinishedMs: 0 });
+    // A send refused before it touched the session cancels it, waits for teardown and reports the refusal.
+    const calls2: string[] = [];
+    let finish!: (value: ZkapiConsultResult) => void;
+    const idle: ZkapiConsultSession = {
+      state: 'ready',
+      send: async () => ({ kind: 'failed', error: { code: 'invalid_question', message: 'invalid', outcome: 'not_sent', networkIdentity: 'not_verified' } }),
+      cancel: () => {
+        calls2.push('cancel');
+        finish({ ok: false, error: { code: 'aborted', message: 'aborted', outcome: 'not_sent', networkIdentity: 'not_verified' } });
+      },
+      finished: new Promise<ZkapiConsultResult>((resolve) => { finish = resolve; }),
+    };
+    const refusedSend = await sessionConsult('', { baseUrl: 'http://127.0.0.1:1/v1', model: 'm', settings: parseZkapiConsultSettings({}, 'test') }, {
+      open: async () => ({ ok: true as const, session: idle }),
+      now: () => 3,
+    });
+    expect(calls2).toEqual(['cancel']);
+    expect(refusedSend).toMatchObject({ result: { ok: false, error: { code: 'invalid_question' } }, toReplyMs: null });
+  });
+
+  test('question sets are validated at load: empty, oversize and control characters are refused', () => {
+    expect(loadQuestions(undefined, () => '')).toEqual([...DEFAULT_QUESTIONS]);
+    expect(loadQuestions('q.txt', () => 'one\ntwo\n')).toEqual(['one', 'two']);
+    expect(() => loadQuestions('q.json', () => JSON.stringify(['ok', 'x'.repeat(9000)]))).toThrow(/Question 2/);
+    expect(() => loadQuestions('q.json', () => JSON.stringify(['a\u0000b']))).toThrow(/Question 1/);
+    expect(() => loadQuestions('q.json', () => '[]')).toThrow(/non-empty/);
   });
 });

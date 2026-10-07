@@ -24,6 +24,7 @@ import {
   defaultZkapiStatePath,
   formatZkapiStageTable,
   openZkapiConsultSession,
+  validZkapiConsultQuestion,
   ZKAPI_STAGE_LABELS,
   zkapiConsultReadiness,
   type ZkapiConsultReadiness,
@@ -127,6 +128,13 @@ export async function sessionConsult(
   const opened = await deps.open(options);
   if (!opened.ok) return { result: opened, toReplyMs: null, toFinishedMs: deps.now() - started };
   const reply = await opened.session.send(question);
+  if (reply.kind === 'failed' && opened.session.state === 'ready') {
+    // The send was refused before it touched the session (an invalid
+    // question): cancel, wait for teardown, and report the refusal.
+    opened.session.cancel();
+    await opened.session.finished;
+    return { result: { ok: false, error: reply.error }, toReplyMs: null, toFinishedMs: deps.now() - started };
+  }
   const toReplyMs = reply.kind === 'reply' ? deps.now() - started : null;
   const result = await opened.session.finished;
   return { result, toReplyMs, toFinishedMs: deps.now() - started };
@@ -352,6 +360,10 @@ export function loadQuestions(path: string | undefined, readText: (path: string)
     : text.split('\n').map((line) => line.trim()).filter(Boolean);
   if (!Array.isArray(list) || list.length === 0 || list.some((item) => typeof item !== 'string' || !item.trim())) {
     throw new Error('The question set must be a non-empty list of non-empty strings (JSON array, or one question per line).');
+  }
+  const invalid = (list as string[]).findIndex((item) => !validZkapiConsultQuestion(item));
+  if (invalid >= 0) {
+    throw new Error(`Question ${invalid + 1} is not a valid consult question (at most 8 KiB, no control characters other than tab or newline).`);
   }
   return list as string[];
 }

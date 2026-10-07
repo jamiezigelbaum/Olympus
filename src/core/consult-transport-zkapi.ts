@@ -1628,7 +1628,16 @@ export interface ZkapiOpenControl {
   signal?: AbortSignal | undefined;
   /** How long `open` may take to reach `ready`; past it the session is refused with `timeout`, nothing reserved. */
   deadlineMs?: number | undefined;
+  /**
+   * How long a ready session waits for `send` before it cancels itself and
+   * tears down (`timeout`, nothing reserved). Defaults to
+   * `ZKAPI_SESSION_READY_TIMEOUT_MS`; bounds the lease and the warm processes.
+   */
+  readyTimeoutMs?: number | undefined;
 }
+
+/** A ready session that nobody sends on ends itself after this long. */
+export const ZKAPI_SESSION_READY_TIMEOUT_MS = 120_000;
 
 export interface ZkapiSendControl {
   /** Cancels before dispatch; after dispatch only stops the caller's wait for the reply. */
@@ -1707,6 +1716,7 @@ type CancelReason = 'cancel' | 'deadline';
 interface SessionBridge {
   state: ZkapiConsultSessionState;
   readonly openSignal: AbortSignal | undefined;
+  readonly readyTimeoutMs: number;
   /** A cancellation asked for before the machine registered its handler. */
   cancelRequested: CancelReason | undefined;
   /** Registered by the machine. Before dispatch it aborts the session; after dispatch it detaches the caller. */
@@ -1805,6 +1815,7 @@ async function openSession(
   const bridge: SessionBridge = {
     state: 'opening',
     openSignal: control.signal,
+    readyTimeoutMs: control.readyTimeoutMs ?? ZKAPI_SESSION_READY_TIMEOUT_MS,
     cancelRequested: undefined,
     cancel: undefined,
     ready: deferred<void>(),
@@ -2192,34 +2203,59 @@ async function runSession(
     timings = withTiming(timings, 'warmTotalMs', durationMs(startedAt, lastSampleAt));
     bridge.state = 'ready';
     bridge.ready.resolve();
-    const dispatch = await Promise.race([
-      bridge.dispatch.promise,
-      new Promise<undefined>((resolve) => {
-        if (sessionSignal.aborted) resolve(undefined);
-        else sessionSignal.addEventListener('abort', () => resolve(undefined), { once: true });
-      }),
-    ]);
+    const aborted = new Promise<undefined>((resolve) => {
+      if (sessionSignal.aborted) resolve(undefined);
+      else sessionSignal.addEventListener('abort', () => resolve(undefined), { once: true });
+    });
+    // A ready session nobody sends on ends itself: the lease and the warm
+    // processes are not held open indefinitely.
+    const readyTimer = setTimeout(() => cancelBeforeDispatch('deadline'), bridge.readyTimeoutMs);
+    const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
+    clearTimeout(readyTimer);
     if (!dispatch || sessionSignal.aborted) return (result = fail(interrupted()));
 
     // --- Dispatch. Step 1: the transport's awaited checks. Step 2: the
-    // caller's final authorization. Step 3: the reservation, the fence and the
-    // start of the fetch, with no await between them.
+    // caller's final authorization, raced against cancellation and the send
+    // deadline. Step 3: the reservation, the fence and the start of the
+    // fetch, with no await between them. The request is prepared before any
+    // of it, so nothing after the reservation can fail before the fetch is
+    // invoked except the deadline check, which rolls the reservation back.
     stage('reservationMs');
+    const prepared = prepareCompletionRequest(dispatch.question, options, origin);
     sendSignal = dispatch.signal;
     sendSignal?.addEventListener('abort', onCallerAbort, { once: true });
     if (sendSignal?.aborted) cancelBeforeDispatch('cancel');
+    // The deadline is absolute and monotonic: checked after authorization and
+    // again immediately before the fetch, whatever the timer did.
+    const deadlineAt = dispatch.deadlineMs !== undefined ? performance.now() + dispatch.deadlineMs : undefined;
+    const pastDeadline = (): boolean => deadlineAt !== undefined && performance.now() >= deadlineAt;
     if (dispatch.deadlineMs !== undefined) sendDeadline = setTimeout(() => cancelBeforeDispatch('deadline'), dispatch.deadlineMs);
     problem = await guard();
     if (problem) return (result = fail(problem));
     let authorized = true;
     if (dispatch.authorize) {
+      // A hung authorization never holds the session: cancellation and the
+      // deadline win the race; a late answer or rejection is consumed and
+      // never dispatches.
+      let pending: Promise<boolean>;
       try {
-        authorized = await dispatch.authorize(sessionSignal);
+        pending = Promise.resolve(dispatch.authorize(sessionSignal));
       } catch {
         return (result = fail('internal_error'));
       }
+      const settled = await Promise.race([
+        pending.then((value) => ({ ok: true as const, value }), () => ({ ok: false as const })),
+        aborted.then(() => undefined),
+      ]);
+      if (settled === undefined) {
+        pending.catch(() => undefined);
+        return (result = fail(interrupted()));
+      }
+      if (!settled.ok) return (result = fail('internal_error'));
+      authorized = settled.value;
     }
     if (sessionSignal.aborted) return (result = fail(interrupted()));
+    if (pastDeadline()) return (result = fail('timeout'));
     if (!authorized) return (result = fail('authorization_refused'));
     if (anyExited()) return (result = fail('session_process_exited'));
     clearTimeout(sendDeadline);
@@ -2238,27 +2274,28 @@ async function runSession(
     if (!reservation.reserved) return (result = fail(reservation.reason));
     receipt.reservedUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD / 1_000_000;
     receipt.fence = 'held';
-    const requestsBefore = new Set(facts.requests.keys());
-    sent.dispatched = true;
-    bridge.state = 'dispatched';
-    // From here the caller's signals only end its wait for the reply.
-    detachCaller = () => bridge.reply.resolve({ kind: 'failed', error: failure('aborted', 'unknown', identity(), { receipt: pendingSnapshot() }).error });
-    const completion = await sendCompletion(dispatch.question, options, origin, sessionSignal, stage);
-
-    if (!completion.ok && completion.error.outcome === 'not_sent') {
-      // Proven never to have left the process (the fetch threw before it
-      // returned a promise): the reservation, the count and the fence roll
-      // back, and the session records a lifecycle receipt.
+    if (pastDeadline()) {
+      // The reservation itself consumed the remaining time. The fetch is
+      // provably not invoked yet, so this is the one rollback: reservation,
+      // count and fence return to what they were, recorded as a lifecycle
+      // receipt. If the ledger cannot be written the reservation stands.
       try {
         releaseZkapiReservation(statePath, scope, fences[scope], now());
         delete receipt.reservedUsd;
         receipt.fence = fenced || fencedElsewhere ? 'held' : 'clear';
-        sent.dispatched = false;
       } catch {
-        // The ledger could not be written: the reservation stands and the fence stays held.
+        // stays reserved and held
       }
-      return (result = fail(completion.error.code));
+      return (result = fail('timeout'));
     }
+    const requestsBefore = new Set(facts.requests.keys());
+    sent.dispatched = true;
+    bridge.state = 'dispatched';
+    // From here the caller's signals only end its wait for the reply, and
+    // every failure of the fetch, however it fails, is an unknown dispatch:
+    // the fence clears only on settlement evidence.
+    detachCaller = () => bridge.reply.resolve({ kind: 'failed', error: failure('aborted', 'unknown', identity(), { receipt: pendingSnapshot() }).error });
+    const completion = await sendCompletion(prepared, options, sessionSignal, stage);
 
     // --- Replied: hand the completion over before settlement.
     if (completion.ok) timings = withTiming(timings, 'replyHandedOverAtMs', durationMs(startedAt, lastSampleAt));
@@ -2418,10 +2455,11 @@ async function runSession(
 }
 
 /**
- * Undo one reservation made moments ago under the session lease, for a
- * request proven never to have left the process. The fence returns to what it
- * was before the reservation: absent for a consult, the earlier record for a
- * recovery session. Never applied to a request that may have been sent.
+ * Undo one reservation made moments ago under the session lease, only while
+ * the fetch is provably not yet invoked (the dispatch deadline passed during
+ * the reservation). The fence returns to what it was before the reservation:
+ * absent for a consult, the earlier record for a recovery session. Never
+ * applied once `fetchImpl` has been called, however it failed.
  */
 function releaseZkapiReservation(path: string, scope: string, earlierFence: ZkapiFence | undefined, now: Date): void {
   updateState(path, now, (state) => {
@@ -2477,10 +2515,39 @@ type CompletionResult =
   | { ok: true; text: string; providerVerification?: 'verified' | 'verifier-unavailable'; elapsedMs: number }
   | { ok: false; error: { code: ZkapiConsultErrorCode; outcome: ZkapiConsultOutcome; daemonCode?: ZkapiDaemonErrorCode; httpStatus?: number } };
 
+interface PreparedCompletionRequest {
+  url: string;
+  init: Omit<RequestInit, 'signal'>;
+}
+
+/**
+ * The fixed request body, built in full before the reservation so that
+ * nothing between the reservation and the fetch can fail. The only inputs
+ * are the question and the model id.
+ */
+function prepareCompletionRequest(question: string, options: ZkapiConsultTransportOptions, origin: string): PreparedCompletionRequest {
+  return {
+    url: `${origin}/v1/chat/completions`,
+    init: {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${options.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: options.model,
+        messages: [{ role: 'user', content: question }],
+        stream: false,
+      }),
+    },
+  };
+}
+
 async function sendCompletion(
-  question: string,
+  prepared: PreparedCompletionRequest,
   options: ZkapiConsultTransportOptions,
-  origin: string,
   signal: AbortSignal | undefined,
   stage: (key: keyof ZkapiStageTimings | undefined) => void,
 ): Promise<CompletionResult> {
@@ -2501,29 +2568,10 @@ async function sendCompletion(
   try {
     let response: Response;
     stage('dispatchToFirstByteMs');
-    let pending: Promise<Response>;
     try {
-      // A fetch that throws before returning a promise never left the process.
-      pending = Promise.resolve(fetchImpl(`${origin}/v1/chat/completions`, {
-        method: 'POST',
-        redirect: 'error',
-        signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Authorization: `Bearer ${options.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: options.model,
-          messages: [{ role: 'user', content: question }],
-          stream: false,
-        }),
-      }));
-    } catch {
-      return bad('transport_failed', 'not_sent');
-    }
-    try {
-      response = await pending;
+      // Once fetchImpl is invoked, any exception, synchronous or not, is an
+      // unknown dispatch: an injected fetch may have sent before throwing.
+      response = await fetchImpl(prepared.url, { ...prepared.init, signal: controller.signal });
     } catch (error) {
       if (timedOut) return bad('timeout', 'unknown');
       if (controller.signal.aborted) return bad('aborted', 'unknown');
@@ -2566,6 +2614,11 @@ async function sendCompletion(
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
   }
+}
+
+/** Whether a string may be sent as a consult question: non-empty, at most 8 KiB, plain text. */
+export function validZkapiConsultQuestion(question: string): boolean {
+  return typeof question === 'string' && validQuestion(question);
 }
 
 function validQuestion(question: string): boolean {

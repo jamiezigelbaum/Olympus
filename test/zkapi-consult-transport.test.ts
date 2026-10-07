@@ -1578,39 +1578,163 @@ describe('zkAPI consult transport: one-shot session', () => {
     await expectProcessesGone();
   }, 90_000);
 
-  test('a fetch that throws before it returns a promise rolls the reservation, count and fence back', async () => {
+  test('once fetchImpl is invoked every exception is an unknown dispatch: a call-through-then-throw keeps the fence', async () => {
+    // An injected fetch may send the request and then throw synchronously.
+    const callThroughThenThrow = ((input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith('/v1/chat/completions')) {
+        void fetch(input, init).catch(() => undefined);
+        throw new Error('threw after sending');
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    writePlan({ settleDelayMs: 300 });
+    const session = await openReady({ fetchImpl: callThroughThenThrow });
+    expect(await session.send(QUESTION)).toMatchObject({ kind: 'failed', error: { code: 'transport_failed', outcome: 'unknown', receipt: { settlement: 'pending', fence: 'held', reservedUsd: 6 } } });
+    const result = await session.finished;
+    // The daemon did see the request; its settlement evidence is what clears the fence, never a rollback.
+    while (completions().length === 0) await Bun.sleep(20);
+    expect(result).toMatchObject({ ok: false, error: { code: 'transport_failed', outcome: 'unknown', receipt: { reservedUsd: 6 } } });
+    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 6_000_000 });
+    expect(ledger().lastSession).toMatchObject({ result: 'transport_failed', reservedUsd: 6 });
+    // A fetch that throws without sending is indistinguishable from the above and is treated the same.
     const throwingFetch = ((input: string | URL | Request, init?: RequestInit) => {
       if (String(input).endsWith('/v1/chat/completions')) throw new Error('never left the process');
       return fetch(input, init);
     }) as typeof fetch;
-    const session = await openReady({ fetchImpl: throwingFetch });
-    expect(await session.send(QUESTION)).toMatchObject({ kind: 'failed', error: { code: 'transport_failed', outcome: 'not_sent', receipt: { fence: 'clear' } } });
-    expect(await session.finished).toMatchObject({ ok: false, error: { code: 'transport_failed', outcome: 'not_sent', receipt: { fence: 'clear', settlement: 'no_lease' } } });
+    writePlan({ settleDelayMs: 30 });
+    if (zkapiUnresolvedSession(statePath)) expect(await recoverZkapiSession(transport())).toMatchObject({ ok: true, receipt: { fence: 'clear' } });
+    const countBefore = zkapiUsageToday(statePath, NOW).count;
+    expect(await sendZkapiConsult(QUESTION, transport({ fetchImpl: throwingFetch }))).toMatchObject({
+      ok: false,
+      error: { code: 'transport_failed', outcome: 'unknown', receipt: { settlement: 'not_confirmed', fence: 'held', reservedUsd: 6 } },
+    });
+    expect(zkapiUsageToday(statePath, NOW).count).toBe(countBefore + 1);
+    expect(zkapiUnresolvedSession(statePath)).toBe(true);
+  }, 90_000);
+
+  test('a hung authorization never holds the session: cancel and the send deadline win, a late answer never dispatches', async () => {
+    const never = (): Promise<boolean> => new Promise(() => undefined);
+    const cancelled = await openReady();
+    const pendingCancel = cancelled.send(QUESTION, { authorize: never });
+    await Bun.sleep(150);
+    expect(cancelled.state).toBe('authorizing');
+    cancelled.cancel();
+    expect(await pendingCancel).toMatchObject({ kind: 'failed', error: { code: 'aborted', outcome: 'not_sent' } });
+    expect(await cancelled.finished).toMatchObject({ ok: false, error: { code: 'aborted', outcome: 'not_sent' } });
+    expectNothingReserved();
+    const timed = await openReady();
+    expect(await timed.send(QUESTION, { deadlineMs: 200, authorize: never })).toMatchObject({ kind: 'failed', error: { code: 'timeout', outcome: 'not_sent' } });
+    expectNothingReserved();
+    // A late approval, and a late rejection, after the race was lost change nothing.
+    let approve!: (value: boolean) => void;
+    let rejectLate!: (error: Error) => void;
+    const late = await openReady();
+    const pendingLate = late.send(QUESTION, { authorize: () => new Promise<boolean>((resolve, reject) => { approve = resolve; rejectLate = reject; }) });
+    await Bun.sleep(100);
+    late.cancel();
+    expect(await pendingLate).toMatchObject({ kind: 'failed', error: { code: 'aborted', outcome: 'not_sent' } });
+    await late.finished;
+    approve(true);
+    const rejecting = await openReady();
+    const pendingReject = rejecting.send(QUESTION, { authorize: () => new Promise<boolean>((_resolve, reject) => { rejectLate = reject; }) });
+    await Bun.sleep(100);
+    rejecting.cancel();
+    expect(await pendingReject).toMatchObject({ kind: 'failed', error: { code: 'aborted' } });
+    await rejecting.finished;
+    rejectLate(new Error('too late'));
+    await Bun.sleep(50);
+    expect(completions()).toEqual([]);
+    expectNothingReserved();
+    await expectProcessesGone();
+  }, 90_000);
+
+  test('the dispatch deadline is absolute: a synchronous overrun is caught after authorization and again before the fetch', async () => {
+    const busyWait = (ms: number): void => {
+      const until = performance.now() + ms;
+      while (performance.now() < until) { /* hold the event loop */ }
+    };
+    // A synchronous authorization that overruns the deadline: no timer could
+    // fire, so only the absolute check refuses it. Nothing reserved.
+    const overrun = await openReady();
+    expect(await overrun.send(QUESTION, { deadlineMs: 100, authorize: () => { busyWait(300); return true; } }))
+      .toMatchObject({ kind: 'failed', error: { code: 'timeout', outcome: 'not_sent' } });
+    expect(await overrun.finished).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'not_sent' } });
+    expectNothingReserved();
+    // The reservation itself consumes the remaining time: the fetch is
+    // provably not invoked, so the reservation, count and fence roll back.
+    let reserving = false;
+    const slowLedger = transport({
+      now: () => {
+        if (reserving) {
+          reserving = false;
+          busyWait(400);
+        }
+        return NOW;
+      },
+    });
+    const opened = await openZkapiConsultSession(slowLedger);
+    if (!opened.ok) throw new Error(opened.error.code);
+    expect(await opened.session.send(QUESTION, { deadlineMs: 200, authorize: () => { reserving = true; return true; } }))
+      .toMatchObject({ kind: 'failed', error: { code: 'timeout', outcome: 'not_sent', receipt: { fence: 'clear' } } });
+    expect(await opened.session.finished).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'not_sent', receipt: { fence: 'clear' } } });
+    expect(ledger().lastSession).toMatchObject({ result: 'timeout', fence: 'clear' });
+    expect(ledger().lastSession.reservedUsd).toBeUndefined();
     expectNothingReserved();
     expect(completions()).toEqual([]);
-    expect(ledger().lastSession).toMatchObject({ result: 'transport_failed', fence: 'clear' });
-    expect(ledger().lastSession.reservedUsd).toBeUndefined();
-    // A recovery session's rollback restores the earlier fence record untouched.
-    writePlan({ noSettlement: true });
-    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true, receipt: { fence: 'held' } });
-    const before = zkapiOutstandingFences(statePath);
-    writePlan({ noSettlement: false });
-    expect(await recoverZkapiSession(transport({ fetchImpl: throwingFetch }))).toMatchObject({
-      ok: false,
-      error: { code: 'transport_failed', outcome: 'not_sent', receipt: { recovery: true, fence: 'held', settlement: 'not_confirmed' } },
-    });
-    expect(zkapiOutstandingFences(statePath)).toEqual(before);
-    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 6_000_000 });
-    // An asynchronous failure is never rolled back: the dispatch is uncertain.
-    const rejectingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      if (String(input).endsWith('/v1/chat/completions')) throw new Error('uncertain');
-      return fetch(input, init);
-    }) as typeof fetch;
-    expect(await recoverZkapiSession(transport({ fetchImpl: rejectingFetch }))).toMatchObject({
-      ok: false,
-      error: { code: 'transport_failed', outcome: 'unknown', receipt: { fence: 'held' } },
-    });
-    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 2, reservedMicroUsd: 12_000_000 });
+    await expectProcessesGone();
+  }, 90_000);
+
+  test('a ready session nobody sends on ends itself after the ready timeout, nothing reserved', async () => {
+    const opened = await openZkapiConsultSession(transport(), { readyTimeoutMs: 400 });
+    if (!opened.ok) throw new Error(opened.error.code);
+    expect(opened.session.state).toBe('ready');
+    expect(await opened.session.finished).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'not_sent' } });
+    expect(opened.session.state).toBe('cancelled');
+    expectNothingReserved();
+    await expectProcessesGone();
+    expect(await opened.session.send(QUESTION)).toMatchObject({ kind: 'failed', error: { code: 'session_spent' } });
+    // The lease is free again.
+    const next = await openReady();
+    next.cancel();
+    await next.finished;
+  }, SLOW);
+
+  test('a supervisor killed between the early reply and settlement leaves the running record and the fence; reopening is refused until recovery', async () => {
+    writePlan({ settleDelayMs: 20_000 });
+    const { now: _now, confinement: _confinement, ...plain } = transport();
+    const script = `
+      const { openZkapiConsultSession } = await import(${JSON.stringify(TRANSPORT_MODULE)});
+      const options = JSON.parse(process.argv[1]);
+      options.now = () => new Date(${JSON.stringify(NOW.toISOString())});
+      options.confinement = { level: 'none', limit: 'none', wrap: (argv) => [...argv], selfTest: async () => false };
+      const opened = await openZkapiConsultSession(options);
+      if (!opened.ok) { console.log('open-failed ' + opened.error.code); process.exit(1); }
+      const reply = await opened.session.send(${JSON.stringify(QUESTION)});
+      console.log('reply ' + reply.kind);
+      await opened.session.finished;
+    `;
+    const child = spawn(process.execPath, ['-e', script, JSON.stringify(plain)], { stdio: ['ignore', 'pipe', 'ignore'] });
+    try {
+      const line = await new Promise<string>((resolve) => child.stdout!.on('data', (chunk) => resolve(String(chunk).trim())));
+      expect(line).toBe('reply reply');
+      child.kill('SIGKILL');
+      while (alive(child.pid!)) await Bun.sleep(20);
+      // The ledger still names the session and the fence is held: the money is still fenced.
+      expect(ledger().running).toBeDefined();
+      expect(zkapiUnresolvedSession(statePath)).toBe(true);
+      expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 6_000_000 });
+      // The watchdogs follow their supervisor; once they are gone an ordinary
+      // reopen clears the stale record but is refused by the fence.
+      const deadline = Date.now() + 15_000;
+      while ((!await portFree(daemonPort) || !await portFree(torPort)) && Date.now() < deadline) await Bun.sleep(100);
+      expect(await openZkapiConsultSession(transport())).toMatchObject({ ok: false, error: { code: 'unresolved_session', outcome: 'not_sent', receipt: { fence: 'held' } } });
+      expect(ledger().running).toBeUndefined();
+      writePlan({ settleDelayMs: 30 });
+      expect(await recoverZkapiSession(transport())).toMatchObject({ ok: true, receipt: { recovery: true, settlement: 'confirmed', fence: 'clear' } });
+      expect(zkapiUnresolvedSession(statePath)).toBe(false);
+    } finally {
+      child.kill('SIGKILL');
+    }
   }, 90_000);
 
   test('a completion failure is handed over before settlement too, and finished carries the settled receipt', async () => {
