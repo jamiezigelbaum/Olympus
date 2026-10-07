@@ -1478,6 +1478,14 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (pendingForms.has(form) || form.dataset.server) return;
+    // The questions' choices as shown, defaults included, become their sentences before anything is decided.
+    const shownField = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
+    const shown = shownField ? logic.withShownAnswers(shownField.value) : '';
+    if (shownField && shown !== shownField.value) {
+      shownField.value = shown;
+      setPrivacyDirty(form);
+      renderPrivacyQuestions(form);
+    }
     const lowering = privacyLowering(form, logic);
     const lowers = lowering.removed.length > 0 || lowering.description;
     if (lowers && !confirmed) {

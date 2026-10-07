@@ -93432,6 +93432,13 @@ function mountDashboardController(options) {
     }
     if (pendingForms.has(form) || form.dataset.server)
       return;
+    const shownField = form.querySelector('textarea[name="description"]');
+    const shown = shownField ? logic.withShownAnswers(shownField.value) : "";
+    if (shownField && shown !== shownField.value) {
+      shownField.value = shown;
+      setPrivacyDirty(form);
+      renderPrivacyQuestions(form);
+    }
     const lowering = privacyLowering(form, logic);
     const lowers = lowering.removed.length > 0 || lowering.description;
     if (lowers && !confirmed) {
@@ -95827,6 +95834,16 @@ function privacyLogic(config2) {
       return { description, fits: false };
     return { description: refineDescription(description, answers), fits: true };
   }
+  function withShownAnswers(description) {
+    const answers = {};
+    for (const question of questions(description)) {
+      const answer = {};
+      for (const option of question.options)
+        answer[option.id] = option.side;
+      answers[question.id] = answer;
+    }
+    return refineDescription(description, answers);
+  }
   function questionsKey(description) {
     return JSON.stringify(questions(description));
   }
@@ -95847,7 +95864,8 @@ function privacyLogic(config2) {
     fitsAnswers,
     questions,
     questionsKey,
-    answerTopic
+    answerTopic,
+    withShownAnswers
   };
 }
 var PRIVACY_FOLDER_SOURCE_NAMES;
@@ -115923,6 +115941,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   function save() {
     if (!s || !s.loaded || s.saving || s.server)
       return;
+    const shown = L.withShownAnswers(s.description);
+    if (shown !== s.description) {
+      s.description = shown;
+      changed();
+    }
     if (lowers()) {
       s.confirmStep = true;
       s.saveError = "";
