@@ -23,12 +23,18 @@ export interface EmbeddingSessionOutput {
 export interface EmbeddingSession {
   run(batch: EmbeddingBatch): Promise<EmbeddingSessionOutput>;
   release?(): Promise<void>;
+  /** Where the session runs now; a GPU session that fails moves itself to the CPU. */
+  readonly device?: EmbeddingDevice;
 }
+
+export type EmbeddingDevice = 'gpu' | 'cpu';
 
 export interface EmbeddingSessionOptions {
   threads: number;
   /** The graph output to read; absent, `last_hidden_state` (or the first output). */
   output?: 'last_hidden_state' | 'sentence_embedding';
+  /** Try the GPU first, falling back to the CPU; absent or `cpu`, the CPU only. */
+  device?: EmbeddingDevice;
 }
 
 export interface EmbeddingRuntime {
@@ -70,62 +76,101 @@ export function onnxRuntimeFromDirectory(runtimeDir: string): EmbeddingRuntime {
     async createSession(modelPath, options) {
       const requireFromPack = createRequire(join(runtimeDir, 'olympus-runtime.json'));
       const ort = requireFromPack('onnxruntime-node') as OrtModule;
-      const session = await ort.InferenceSession.create(modelPath, {
-        executionProviders: ['cpu'],
-        intraOpNumThreads: options.threads,
-        interOpNumThreads: 1,
-        executionMode: 'sequential',
-        graphOptimizationLevel: 'all',
-        // The arena keeps the peak of the largest batch forever; without it
-        // memory returns to the system between batches.
-        enableCpuMemArena: false,
-      });
-      // Free the native session before the process exits: tearing ONNX
-      // Runtime's thread pool down from static destructors after inference
-      // has crashed Bun at exit.
-      const releaseAtExit = () => { void session.release().catch(() => undefined); };
-      process.once('exit', releaseAtExit);
-      const wantsTokenTypes = session.inputNames.includes('token_type_ids');
-      // A multimodal graph (EmbeddingGemma 2) also requires its image, video
-      // and audio feature inputs; text embeds with each of them empty.
-      const emptyFeatures = session.inputNames
-        .filter((name) => !['input_ids', 'attention_mask', 'token_type_ids'].includes(name))
-        .map((name) => {
-          const width = session.inputMetadata?.find((input) => input.name === name)?.shape?.[1];
-          if (!name.endsWith('_features') || typeof width !== 'number') {
-            throw new Error(`The built-in search model needs an input this runtime cannot feed: ${name}.`);
-          }
-          return [name, new ort.Tensor('float32', new Float32Array(0), [0, width])] as const;
-        });
-      // The per-token output goes by several names (Arctic's graph calls it
-      // `token_embeddings`); a pooled output must be the one asked for.
-      const pooled = options.output === 'sentence_embedding';
-      const outputName = pooled
-        ? session.outputNames.find((name) => name === 'sentence_embedding')
-        : session.outputNames.includes('last_hidden_state') ? 'last_hidden_state' : session.outputNames[0];
-      if (!outputName) {
-        throw new Error(`The built-in search model has no ${pooled ? 'sentence_embedding' : ''} output (it has ${session.outputNames.join(', ') || 'none'}).`);
+      if (options.device !== 'gpu') return openSession(ort, modelPath, options, 'cpu');
+      let current: OpenSession;
+      try {
+        current = await openSession(ort, modelPath, options, 'gpu');
+      } catch {
+        // No WebGPU here (Linux arm64 ships none; a headless or GPU-less
+        // machine has no adapter): the CPU runs the same graph.
+        return openSession(ort, modelPath, options, 'cpu');
       }
       return {
+        get device() { return current.device; },
         async run(batch) {
-          const dims = [batch.batchSize, batch.sequenceLength];
-          const feeds: Record<string, OrtTensor> = {
-            input_ids: new ort.Tensor('int64', batch.inputIds, dims),
-            attention_mask: new ort.Tensor('int64', batch.attentionMask, dims),
-          };
-          if (wantsTokenTypes) feeds.token_type_ids = new ort.Tensor('int64', batch.tokenTypeIds, dims);
-          for (const [name, tensor] of emptyFeatures) feeds[name] = tensor;
-          const output = (await session.run(feeds))[outputName];
-          if (!output || !(output.data instanceof Float32Array)) {
-            throw new Error('The built-in search model returned an unexpected output.');
+          try {
+            return await current.run(batch);
+          } catch (error) {
+            if (current.device !== 'gpu') throw error;
+            // A GPU that fails mid-run (device lost, a kernel this GPU cannot
+            // run) is not retried: this session stays on the CPU from here.
+            const failed = current;
+            current = await openSession(ort, modelPath, options, 'cpu');
+            await failed.release().catch(() => undefined);
+            return current.run(batch);
           }
-          return { data: output.data, dims: output.dims };
         },
-        release: () => {
-          process.removeListener('exit', releaseAtExit);
-          return session.release();
-        },
+        release: () => current.release(),
       };
+    },
+  };
+}
+
+type OpenSession = EmbeddingSession & { device: EmbeddingDevice; release(): Promise<void> };
+
+async function openSession(
+  ort: OrtModule,
+  modelPath: string,
+  options: EmbeddingSessionOptions,
+  device: EmbeddingDevice,
+): Promise<OpenSession> {
+  const session = await ort.InferenceSession.create(modelPath, {
+    executionProviders: device === 'gpu' ? ['webgpu', 'cpu'] : ['cpu'],
+    // Errors only: the GPU provider warns on every load that shape ops stay on the CPU.
+    logSeverityLevel: 3,
+    intraOpNumThreads: options.threads,
+    interOpNumThreads: 1,
+    executionMode: 'sequential',
+    graphOptimizationLevel: 'all',
+    // The arena keeps the peak of the largest batch forever; without it
+    // memory returns to the system between batches.
+    enableCpuMemArena: false,
+  });
+  // Free the native session before the process exits: tearing ONNX
+  // Runtime's thread pool down from static destructors after inference
+  // has crashed Bun at exit.
+  const releaseAtExit = () => { void session.release().catch(() => undefined); };
+  process.once('exit', releaseAtExit);
+  const wantsTokenTypes = session.inputNames.includes('token_type_ids');
+  // A multimodal graph (EmbeddingGemma 2) also requires its image, video
+  // and audio feature inputs; text embeds with each of them empty.
+  const emptyFeatures = session.inputNames
+    .filter((name) => !['input_ids', 'attention_mask', 'token_type_ids'].includes(name))
+    .map((name) => {
+      const width = session.inputMetadata?.find((input) => input.name === name)?.shape?.[1];
+      if (!name.endsWith('_features') || typeof width !== 'number') {
+        throw new Error(`The built-in search model needs an input this runtime cannot feed: ${name}.`);
+      }
+      return [name, new ort.Tensor('float32', new Float32Array(0), [0, width])] as const;
+    });
+  // The per-token output goes by several names (Arctic's graph calls it
+  // `token_embeddings`); a pooled output must be the one asked for.
+  const pooled = options.output === 'sentence_embedding';
+  const outputName = pooled
+    ? session.outputNames.find((name) => name === 'sentence_embedding')
+    : session.outputNames.includes('last_hidden_state') ? 'last_hidden_state' : session.outputNames[0];
+  if (!outputName) {
+    throw new Error(`The built-in search model has no ${pooled ? 'sentence_embedding' : ''} output (it has ${session.outputNames.join(', ') || 'none'}).`);
+  }
+  return {
+    device,
+    async run(batch) {
+      const dims = [batch.batchSize, batch.sequenceLength];
+      const feeds: Record<string, OrtTensor> = {
+        input_ids: new ort.Tensor('int64', batch.inputIds, dims),
+        attention_mask: new ort.Tensor('int64', batch.attentionMask, dims),
+      };
+      if (wantsTokenTypes) feeds.token_type_ids = new ort.Tensor('int64', batch.tokenTypeIds, dims);
+      for (const [name, tensor] of emptyFeatures) feeds[name] = tensor;
+      const output = (await session.run(feeds))[outputName];
+      if (!output || !(output.data instanceof Float32Array)) {
+        throw new Error('The built-in search model returned an unexpected output.');
+      }
+      return { data: output.data, dims: output.dims };
+    },
+    release: () => {
+      process.removeListener('exit', releaseAtExit);
+      return session.release();
     },
   };
 }

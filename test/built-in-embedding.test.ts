@@ -666,7 +666,7 @@ function pooledStubRuntime(log: EmbeddingBatch[], sessions: EmbeddingSessionOpti
   };
 }
 
-function pooledStubProvider(dims?: (rows: number) => number[]) {
+function pooledStubProvider(dims?: (rows: number) => number[], extraEnv: Record<string, string> = {}) {
   const tokenizerBytes = sentencePieceModel({ pieces: [...SP_PIECES, ['t', -30], ['i', -31], [':', -32], ['n', -33], ['x', -34]] });
   const modelBytes = new TextEncoder().encode('fake onnx graph');
   const dataBytes = new TextEncoder().encode('fake onnx weights '.repeat(100));
@@ -693,7 +693,7 @@ function pooledStubProvider(dims?: (rows: number) => number[]) {
   }) as typeof fetch;
   const batches: EmbeddingBatch[] = [];
   const sessions: EmbeddingSessionOptions[] = [];
-  const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+  const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir(), ...extraEnv };
   const provider = new BuiltInSourceEmbeddingProvider({
     env,
     model,
@@ -722,7 +722,7 @@ describe('built-in embedding with a SentencePiece, self-pooling model', () => {
     const { provider, batches, sessions, tokenizer } = pooledStubProvider();
     // 'title: none | text: ' is 20 tokens before the content: 4 windows of 6.
     const [vector] = await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' });
-    expect(sessions).toEqual([{ threads: provider.threads, output: 'sentence_embedding' }]);
+    expect(sessions).toEqual([{ threads: provider.threads, output: 'sentence_embedding', device: 'gpu' }]);
     const windows = batches.flatMap((batch) => rows(batch));
     expect(windows.every((ids) => ids[0] === tokenizer.bosId && ids.at(-1) === tokenizer.eosId && ids.length <= 8)).toBe(true);
     expect(windows.flatMap((ids) => ids.slice(1, -1))).toEqual(tokenizer.tokenize('title: none | text: hello'));
@@ -750,23 +750,32 @@ describe('built-in embedding with a SentencePiece, self-pooling model', () => {
  * A runtime pack whose `onnxruntime-node` is a stand-in with the given graph
  * signature: it records the feeds of each run and returns zeros for the output.
  */
-function fakeOrtPack(graph: { inputs: Array<{ name: string; shape: Array<number | string> }>; outputs: string[] }): string {
+function fakeOrtPack(
+  graph: { inputs: Array<{ name: string; shape: Array<number | string> }>; outputs: string[] },
+  failures: { createOnGpu?: boolean; runOnGpu?: boolean } = {},
+): string {
   const dir = temporaryDir();
   const module = join(dir, 'node_modules', 'onnxruntime-node');
   mkdirSync(module, { recursive: true });
   writeFileSync(join(module, 'index.js'), `
     const graph = ${JSON.stringify(graph)};
+    const failures = ${JSON.stringify(failures)};
+    globalThis.fakeOrtCreates = [];
     class Tensor { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }
     globalThis.fakeOrtFeeds = [];
     module.exports = {
       Tensor,
       InferenceSession: {
-        async create() {
+        async create(path, options) {
+          const gpu = options.executionProviders.includes('webgpu');
+          globalThis.fakeOrtCreates.push(options.executionProviders);
+          if (gpu && failures.createOnGpu) throw new Error('no WebGPU adapter');
           return {
             inputNames: graph.inputs.map((input) => input.name),
             inputMetadata: graph.inputs.map((input) => ({ name: input.name, isTensor: true, shape: input.shape })),
             outputNames: graph.outputs,
             async run(feeds) {
+              if (gpu && failures.runOnGpu) throw new Error('GPU device lost');
               globalThis.fakeOrtFeeds.push(Object.fromEntries(Object.entries(feeds).map(([name, tensor]) => [name, { type: tensor.type, dims: tensor.dims }])));
               const [rows] = feeds.input_ids.dims;
               return Object.fromEntries(graph.outputs.map((name) => [name, new Tensor('float32', new Float32Array(rows * 4), [rows, 4])]));
@@ -817,12 +826,57 @@ describe('the ONNX Runtime seam', () => {
     expect(fed.token_type_ids).toBeUndefined();
   });
 
+  const creates = () => (globalThis as unknown as { fakeOrtCreates: string[][] }).fakeOrtCreates;
+  const textGraph = { inputs: [{ name: 'input_ids', shape: ['b', 's'] }, { name: 'attention_mask', shape: ['b', 's'] }], outputs: ['sentence_embedding'] };
+
+  test('a GPU model runs on WebGPU; a CPU model never asks for it', async () => {
+    const gpu = await onnxRuntimeFromDirectory(fakeOrtPack(textGraph)).createSession('model.onnx', { threads: 1, output: 'sentence_embedding', device: 'gpu' });
+    expect(gpu.device).toBe('gpu');
+    expect(creates()).toEqual([['webgpu', 'cpu']]);
+    const cpu = await onnxRuntimeFromDirectory(fakeOrtPack(textGraph)).createSession('model.onnx', { threads: 1, output: 'sentence_embedding' });
+    expect(cpu.device).toBe('cpu');
+    expect(creates()).toEqual([['cpu']]);
+  });
+
+  test('without a usable GPU the same graph runs on the CPU', async () => {
+    const session = await onnxRuntimeFromDirectory(fakeOrtPack(textGraph, { createOnGpu: true }))
+      .createSession('model.onnx', { threads: 1, output: 'sentence_embedding', device: 'gpu' });
+    expect(session.device).toBe('cpu');
+    expect(creates()).toEqual([['webgpu', 'cpu'], ['cpu']]);
+    expect((await session.run(batch)).dims).toEqual([1, 4]);
+  });
+
+  test('a GPU that fails mid-run moves the session to the CPU for good', async () => {
+    const session = await onnxRuntimeFromDirectory(fakeOrtPack(textGraph, { runOnGpu: true }))
+      .createSession('model.onnx', { threads: 1, output: 'sentence_embedding', device: 'gpu' });
+    expect(session.device).toBe('gpu');
+    expect((await session.run(batch)).dims).toEqual([1, 4]);
+    expect(session.device).toBe('cpu');
+    await session.run(batch);
+    expect(creates()).toEqual([['webgpu', 'cpu'], ['cpu']]);
+  });
+
   test('refuses a graph input it cannot feed, and a missing pooled output', async () => {
     const extra = fakeOrtPack({ inputs: [{ name: 'input_ids', shape: ['b', 's'] }, { name: 'position_ids', shape: ['b', 's'] }], outputs: ['last_hidden_state'] });
     await expect(onnxRuntimeFromDirectory(extra).createSession('model.onnx', { threads: 1 })).rejects.toThrow('cannot feed: position_ids');
     const perToken = fakeOrtPack({ inputs: [{ name: 'input_ids', shape: ['b', 's'] }], outputs: ['last_hidden_state'] });
     await expect(onnxRuntimeFromDirectory(perToken).createSession('model.onnx', { threads: 1, output: 'sentence_embedding' }))
       .rejects.toThrow('no sentence_embedding output');
+  });
+});
+
+describe('the built-in model\'s device', () => {
+  test('only a model measured to match on the GPU asks for it, and the owner can keep it on the CPU', async () => {
+    const { provider, sessions } = pooledStubProvider();
+    await provider.prepare();
+    expect(sessions.at(-1)?.device).toBe('gpu');
+    expect(EMBEDDINGGEMMA_2.gpu).toBe(true);
+    expect(ARCTIC_EMBED_M_V1_5.gpu).toBeUndefined();
+    const forced = pooledStubProvider(undefined, { OLYMPUS_BUILT_IN_EMBEDDING_DEVICE: 'cpu' });
+    await forced.provider.prepare();
+    expect(forced.sessions.at(-1)?.device).toBe('cpu');
+    expect(() => pooledStubProvider(undefined, { OLYMPUS_BUILT_IN_EMBEDDING_DEVICE: 'metal' }))
+      .toThrow('must be "auto" or "cpu"');
   });
 });
 

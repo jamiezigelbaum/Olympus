@@ -4016,6 +4016,7 @@ var init_manifest = __esm(() => {
     maxTokens: 2048,
     pooling: "model",
     tokenizer: "sentencepiece",
+    gpu: true,
     queryPrefix: "task: search result | query: ",
     documentPrefix: "title: {title} | text: ",
     model: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.model),

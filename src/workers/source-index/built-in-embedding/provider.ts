@@ -38,11 +38,15 @@ import { WordPieceTokenizer } from './wordpiece.ts';
 
 export const BUILT_IN_EMBEDDING_PROVIDER = 'built-in';
 export const BUILT_IN_EMBEDDING_THREADS_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_THREADS';
+/** `cpu` keeps a GPU-capable model on the CPU. */
+export const BUILT_IN_EMBEDDING_DEVICE_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_DEVICE';
 
 /** A document longer than one model window is read as up to this many windows. */
 const MAX_WINDOWS_PER_DOCUMENT = 8;
 /**
  * Padded tokens per forward pass; bounds peak memory independent of input.
+ * It also keeps a GPU pass under the ~2,700-token batch past which some
+ * WebGPU kernels exceed the GPU's dispatch limit.
  * Measured on an M3 (arctic-m int8, 4 threads): 8,192 tokens peaked near
  * 1.5 GB RSS, 2,048 near 0.7 GB, at the same throughput.
  */
@@ -93,6 +97,8 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   backend: 'local';
   /** Forward passes this process may run in parallel. */
   readonly threads: number;
+  /** Where the model is asked to run; a GPU without WebGPU support falls back to the CPU. */
+  readonly device: 'gpu' | 'cpu';
 
   private spec: BuiltInEmbeddingModelSpec;
   private env: Record<string, string | undefined>;
@@ -115,6 +121,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     this.modelId = this.spec.modelId;
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
+    this.device = resolveDevice(this.spec, this.env);
     this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
@@ -226,6 +233,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       const session = await this.runtimeFactory(installed).createSession(installed.modelPath, {
         threads: this.threads,
         ...(this.spec.pooling === 'model' ? { output: 'sentence_embedding' as const } : {}),
+        device: this.device,
       });
       reportBuiltInEmbeddingState(reporterOptions, 'ready');
       return { session, tokenizer };
@@ -454,6 +462,14 @@ function normalize(vector: ArrayLike<number>): number[] {
   const out = new Array<number>(vector.length);
   for (let index = 0; index < vector.length; index += 1) out[index] = norm > 0 ? vector[index]! / norm : 0;
   return out;
+}
+
+function resolveDevice(spec: BuiltInEmbeddingModelSpec, env: Record<string, string | undefined>): 'gpu' | 'cpu' {
+  const configured = env[BUILT_IN_EMBEDDING_DEVICE_ENV]?.trim().toLowerCase();
+  if (configured && configured !== 'cpu' && configured !== 'auto') {
+    throw new OperationError('config_error', `${BUILT_IN_EMBEDDING_DEVICE_ENV} must be "auto" or "cpu".`);
+  }
+  return spec.gpu && configured !== 'cpu' ? 'gpu' : 'cpu';
 }
 
 function resolveThreads(explicit: number | undefined, env: Record<string, string | undefined>): number {

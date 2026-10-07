@@ -34,6 +34,13 @@ export interface BuiltInEmbeddingModelSpec {
   pooling: 'cls' | 'mean' | 'model';
   queryPrefix: string;
   /**
+   * The model runs on the GPU (ONNX Runtime's WebGPU provider) where the
+   * platform has one. Set only for a model whose GPU vectors were measured to
+   * match its CPU vectors, since stored vectors and its relevance bar assume
+   * one or the other; anything else runs on the CPU.
+   */
+  gpu?: boolean;
+  /**
    * Put before a document's text. A prefix containing `{title}` carries the
    * title itself (`none` when there is none); otherwise a title is its own
    * first line after the prefix.
@@ -147,6 +154,9 @@ export const EMBEDDINGGEMMA_2: BuiltInEmbeddingModelSpec = {
   maxTokens: 2_048,
   pooling: 'model',
   tokenizer: 'sentencepiece',
+  // 2026-10-07, M3: WebGPU vectors match CPU ones (cosine 1.0000) at 2.4x the
+  // speed and half the memory. Arctic's do not (0.994), so it stays on CPU.
+  gpu: true,
   queryPrefix: 'task: search result | query: ',
   documentPrefix: 'title: {title} | text: ',
   model: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.model),

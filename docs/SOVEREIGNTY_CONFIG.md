@@ -73,8 +73,12 @@ encoder is 314 MB, the runtime 114 MB) once into
 (override with `OLYMPUS_BUILT_IN_EMBEDDING_DIR`); every file is pinned by size
 and checksum and re-verified before it loads. While it downloads, questions
 fall back to keyword search. It uses at most half the CPU cores, capped at
-four (`OLYMPUS_BUILT_IN_EMBEDDING_THREADS` overrides). Supported: macOS on
-Apple silicon, Linux x64 and arm64.
+four (`OLYMPUS_BUILT_IN_EMBEDDING_THREADS` overrides). EmbeddingGemma 2 runs
+on the GPU where ONNX Runtime has WebGPU for the platform (macOS on Apple
+silicon, Linux x64), with the same vectors as on the CPU at about 2.5x the
+speed and half the memory; without a usable GPU it runs on the CPU, and
+`OLYMPUS_BUILT_IN_EMBEDDING_DEVICE=cpu` keeps it there. Arctic always runs on
+the CPU. Supported: macOS on Apple silicon, Linux x64 and arm64.
 
 The profile is:
 
