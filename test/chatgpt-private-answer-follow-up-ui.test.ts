@@ -93,10 +93,11 @@ function envelopeOf(partial: EnvelopeOverride): PrivateAnswerEnvelopeV1 {
 }
 
 /** A minimal IndexedDB (structured clone into a map), shared between mounts to prove re-mounts. */
-function fakeIndexedDb() {
+function fakeIndexedDb(): { open(name: string): any; stores: Map<string, Map<string, any>> } {
   const stores = new Map<string, Map<string, any>>();
   const later = (fn: () => void) => setTimeout(fn, 0);
   return {
+    stores,
     open(name: string) {
       const req: any = {};
       later(() => {
@@ -134,8 +135,9 @@ function fakeIndexedDb() {
 
 interface MountOptions {
   replies?: Reply[];
-  /** The first-answer card's measured height (A) and width. */
+  /** The revealed first-answer card's measured height (A), the closed card's (working, hidden, withdrawn), and the width. */
   cardHeight?: number;
+  closedHeight?: number;
   width?: number;
   initAfterMs?: number | 'never';
   initFallbackMs?: number;
@@ -210,8 +212,10 @@ function mount(options: MountOptions = {}): Host {
   // Geometry: the first-answer card measures A; the outside container, if anyone measured it, something else entirely.
   const proto = (win as any).HTMLElement.prototype;
   const cardHeight = options.cardHeight ?? 300;
+  const closedHeight = options.closedHeight ?? 90;
   const width = options.width ?? 600;
-  Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: any) { return this.classList?.contains('card') ? cardHeight : this.classList?.contains('outside') ? 999 : 0; } });
+  // Distinct heights for the revealed card (`card open`) and every closed card, so a report of the wrong one shows.
+  Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: any) { return this.classList?.contains('card') ? (this.classList.contains('open') ? cardHeight : closedHeight) : this.classList?.contains('outside') ? 999 : 0; } });
   Object.defineProperty(proto, 'offsetWidth', { configurable: true, get(this: any) { return this.classList?.contains('card') ? width : 0; } });
   new Function('window', 'document', script)(win, win.document);
   const panel = () => win.document.getElementById('panel')!;
@@ -380,8 +384,38 @@ describe('follow-up polling', () => {
     for (const call of host.fetched) expect(call.body).toEqual({ v: 1, publicKey: key, cap: 2 });
     // The host was told nothing new: every height is still the revealed one.
     await sleep(30);
-    expect(host.heights().filter((height) => height !== 0 && height !== 300).every((height) => height === revealedHeight)).toBe(true);
+    expect(host.heights().filter((height) => height !== 0 && height !== 90).every((height) => height === revealedHeight)).toBe(true);
+    expect(host.heights()).not.toContain(90 + R);
     expect(host.heights().at(-1)).toBe(revealedHeight);
+  });
+
+  test('hidden when the withdrawal arrives: stays hidden with Show; Show tells the withdrawal at the retained height; host messages equal hide-live-show', async () => {
+    const script = async (second: Reply) => {
+      const host = mount({ followPollMs: 15, replies: [{ envelope: { rev: 1, followSeconds: 500, outside: { state: 'appended', text: OUTSIDE_TEXT } } }, second] });
+      await sleep(50);
+      await reveal(host);
+      host.button(W.hide).click();
+      await host.until(() => host.fetched.length >= 3, 'polls while hidden');
+      await sleep(30);
+      expect(host.doc.querySelector('.card .sub')?.textContent).toBe(W.hidden);
+      expect(host.buttons().map((b) => b.textContent)).toEqual([W.show]);
+      host.button(W.show).click();
+      await sleep(30);
+      return host;
+    };
+    const live = await script({ envelope: { rev: 1, followSeconds: 400, outside: { state: 'appended', text: OUTSIDE_TEXT } } });
+    const withdrawn = await script({ envelope: { rev: 2, state: 'withdrawn', followSeconds: 400, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } });
+    expect(live.text()).toContain(ANSWER);
+    expect(withdrawn.text()).toContain(W.withdrawn);
+    for (const gone of [ANSWER, OUTSIDE_TEXT, 'Orchard', 'monthly rent']) expect(withdrawn.text()).not.toContain(gone);
+    expect(withdrawn.buttons()).toHaveLength(0);
+    expect(withdrawn.outside()).not.toBeNull();
+    // No reacquisition: the same key, polls only.
+    expect(new Set(withdrawn.fetched.map((call) => call.body.publicKey)).size).toBe(1);
+    expect(withdrawn.heights()).toEqual(live.heights());
+    expect(withdrawn.sizes()).toEqual(live.sizes());
+    expect(withdrawn.sent.map((m) => m.method)).toEqual(live.sent.map((m) => m.method));
+    expect(withdrawn.heights().at(-1)).toBe(300 + R);
   });
 
   test('a withdrawal in the first response is the same sentence, keeps the window, and reports the same rule', async () => {
@@ -391,7 +425,8 @@ describe('follow-up polling', () => {
     expect(host.buttons()).toHaveLength(0);
     await host.until(() => host.fetched.length >= 3, 'polls after a withdrawn first response');
     await sleep(20);
-    expect(host.heights().at(-1)).toBe(Math.min(300 + R, CAP));
+    // Never shown here and no record: the rule over the withdrawn (closed) card, settled once.
+    expect(host.heights().at(-1)).toBe(Math.min(90 + R, CAP));
     expect(host.outside()).not.toBeNull();
   });
 
@@ -444,13 +479,37 @@ describe('follow-up polling', () => {
     await after.close();
     hosts.pop();
 
-    // Reopened after a withdrawal, inside the window: the sentence, the same polling, the same rule.
+    // Reopened after a withdrawal, inside the window, at the same width: the
+    // sentence, the same polling, and the height the revealed answer had
+    // (kept beside the key), not the withdrawn card's.
     const withdrawn = mount({ idb, claim, followPollMs: 15, replies: [{ envelope: { rev: 3, state: 'withdrawn', followSeconds: 200, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
     withdrawn.push(ready());
     await withdrawn.until(() => withdrawn.text().includes(W.withdrawn), 'the withdrawn sentence');
     expect(withdrawn.fetched[0]!.body.publicKey).toBe(first.fetched[0]!.body.publicKey);
     await withdrawn.until(() => withdrawn.fetched.length >= 3, 'polling continues after a withdrawn reopen');
     expect(withdrawn.heights().at(-1)).toBe(Math.min(300 + R, CAP));
+    expect(withdrawn.heights()).not.toContain(90 + R);
+    const record = idb.stores.get('keys')!.get(JOB)!;
+    expect(Object.keys(record).sort()).toEqual(['createdAt', 'geometry', 'privateKey', 'publicKey']);
+    expect(record.geometry).toEqual({ width: 600, height: 300 + R });
+    await withdrawn.close();
+    hosts.pop();
+
+    // At another width the record does not apply: the rule over the withdrawn card, settled once (the acknowledged residual).
+    const narrow = mount({ idb, claim, width: 420, followPollMs: 15, replies: [{ envelope: { rev: 3, state: 'withdrawn', followSeconds: 200, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
+    narrow.push(ready());
+    await narrow.until(() => narrow.text().includes(W.withdrawn), 'the withdrawn sentence');
+    await sleep(30);
+    expect(narrow.heights().at(-1)).toBe(90 + R);
+  });
+
+  test('the revealed geometry is locked before the host answers the handshake, so an early withdrawal still reports it', async () => {
+    const host = mount({ initAfterMs: 300, heightResendMs: 20, followPollMs: 15, replies: [{ envelope: { followSeconds: 400 } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 300, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
+    await reveal(host);
+    await host.until(() => host.text().includes(W.withdrawn), 'the withdrawal, before initialization');
+    expect(host.heights()).toEqual([]);
+    await host.until(() => host.heights().length >= 2, 'the handshake heights');
+    expect(host.heights().every((height) => height === 300 + R)).toBe(true);
   });
 });
 
@@ -486,9 +545,9 @@ describe('fixed reported geometry (host transcript)', () => {
       const H = Math.min(cardHeight + R, CAP);
       const baseline = await transcript(outcomes[0]!, { cardHeight, width });
       expect(baseline.heights).toContain(H);
-      // Working card (A), then revealed (H), whatever follows: never a measured total, never a change on withdrawal.
-      expect(baseline.heights.every((height) => height === 0 || height === cardHeight || height === H)).toBe(true);
-      expect(baseline.sizes.every((size: any) => size.height === 0 || size.height === cardHeight || size.height === H)).toBe(true);
+      // Working card (closed), then revealed (H), whatever follows: never a measured total, never a change on withdrawal.
+      expect(baseline.heights.every((height) => height === 0 || height === 90 || height === H)).toBe(true);
+      expect(baseline.sizes.every((size: any) => size.height === 0 || size.height === 90 || size.height === H)).toBe(true);
       expect(baseline.sizes.filter((size: any) => size.height === H).every((size: any) => size.width === width)).toBe(true);
       for (const scenario of outcomes.slice(1)) {
         const other = await transcript(scenario, { cardHeight, width });
@@ -553,8 +612,7 @@ describe('fixed reported geometry (host transcript)', () => {
       await sleep(20);
       runs.push(host.heights());
       expect(host.heights().at(-1)).toBe(300 + R);
-      expect(host.heights()).not.toContain(60);
-      expect(host.heights()).not.toContain(60 + R);
+      for (const wrong of [60, 60 + R, 90 + R]) expect(host.heights()).not.toContain(wrong);
     }
     expect(runs[1]).toEqual(runs[0]);
     expect(runs[2]).toEqual(runs[0]);

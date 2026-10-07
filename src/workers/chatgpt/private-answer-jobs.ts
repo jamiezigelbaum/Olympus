@@ -101,6 +101,7 @@ import {
   type PrivateAnswerWireStatus,
 } from '../../../connect-relay/shared/private-answer.ts';
 import {
+  PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS,
   PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS,
   PRIVATE_ANSWER_JOB_TTL_MS,
   PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS,
@@ -214,6 +215,8 @@ export interface PrivateAnswerJobsOptions {
   outsideHelpTtlMs?: number;
   /** The follow-up window from first delivery (default PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS), capped by the job's expiry. */
   followUpWindowMs?: number;
+  /** A phase-2 response takes at least this long, wall clock (default PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS). */
+  followUpFloorMs?: number;
 }
 
 /** One claim's stage costs, logged once it settles. No id, question, evidence or answer. */
@@ -497,6 +500,7 @@ export class PrivateAnswerJobs {
   private readonly openRateGlobal: { capacity: number; refillPerSecond: number };
   private readonly outsideHelpTtlMs: number;
   private readonly followUpWindowMs: number;
+  private readonly followUpFloorMs: number;
   /** A deadline's background reset, bounded by resetTimeoutMs; the next analysis waits for it. */
   private resetting: Promise<void> | undefined;
   private readonly options: PrivateAnswerJobsOptions;
@@ -527,6 +531,7 @@ export class PrivateAnswerJobs {
     this.openRefilledAt = this.now();
     this.outsideHelpTtlMs = options.outsideHelpTtlMs ?? PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS;
     this.followUpWindowMs = options.followUpWindowMs ?? PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS;
+    this.followUpFloorMs = options.followUpFloorMs ?? PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS;
   }
 
   get size(): number {
@@ -653,7 +658,7 @@ export class PrivateAnswerJobs {
     }
     if (outcome.kind === 'failed') return { status: 200, body: { status: 'failed' } };
     // Phase 2: from first delivery, one response shape for every state.
-    if (outcome.kind === 'retained' || outcome.kind === 'withdrawn') return this.followUpResponse(job, panel.key);
+    if (outcome.kind === 'retained' || outcome.kind === 'withdrawn') return this.floored(this.followUpResponse(job, panel.key));
     // Every hand-out of the sealed bytes, not only the first: an item the
     // answer read that is no longer eligible withdraws it for good.
     if (!(await this.stillReleasable(job))) return this.jobs.get(jobId) === job ? { status: 200, body: { status: 'failed' } } : gone();
@@ -686,14 +691,18 @@ export class PrivateAnswerJobs {
    */
   private async followUpResponse(job: Job, panelKey: CryptoKey): Promise<ClaimResponse> {
     const at = this.now();
-    // The window the envelope reports, fixed at the first successful delivery.
-    const followUntil = job.followUntil ?? Math.min(at + this.followUpWindowMs, job.expiresAt);
     for (let attempt = 0; ; attempt += 1) {
       await this.guardFollowUp(job);
       if (this.jobs.get(job.id) !== job) return gone();
       if (attempt >= FOLLOW_UP_SEAL_ATTEMPTS) this.withdraw(job);
       const rev = job.rev;
       const kind = job.outcome?.kind;
+      // The window the envelope reports: the committed one, or this request's
+      // proposal when none is committed yet. Overlapping first collections
+      // each propose their own; the first successful seal commits, and a
+      // later one sealed over a different proposal is sealed again over the
+      // committed window, so every envelope reports the same deadline.
+      const followUntil = job.followUntil ?? Math.min(at + this.followUpWindowMs, job.expiresAt);
       const plaintext = this.envelopeFor(job, followUntil);
       if (plaintext === undefined) return gone();
       const sealed = await sealPrivateAnswer(job.id, panelKey, plaintext);
@@ -701,15 +710,32 @@ export class PrivateAnswerJobs {
       await this.guardFollowUp(job);
       if (this.jobs.get(job.id) !== job) return gone();
       if (job.rev !== rev || job.outcome?.kind !== kind) continue;
+      if (job.followUntil !== undefined && job.followUntil !== followUntil) continue;
       if (job.firstDeliveredAt === undefined) {
         // First delivery: the transition into phase 2, and the one moment the
         // follow-up window is fixed. A remount later never moves it.
         job.firstDeliveredAt = at;
         job.followUntil = followUntil;
       }
-      job.lastCollectedAt = at;
+      // The most recent collection by the claiming key; never earlier than one already recorded.
+      job.lastCollectedAt = Math.max(job.lastCollectedAt ?? 0, at);
       return { status: 200, body: { status: 'ready', v: 1, ...sealed } };
     }
+  }
+
+  /** Holds a phase-2 response until the floor has elapsed (wall clock, never the test clock). */
+  private async floored(response: Promise<ClaimResponse>): Promise<ClaimResponse> {
+    if (this.followUpFloorMs <= 0) return response;
+    const started = Date.now();
+    const result = await response;
+    const left = this.followUpFloorMs - (Date.now() - started);
+    if (left > 0) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, left);
+        (timer as { unref?: () => void }).unref?.();
+      });
+    }
+    return result;
   }
 
   /**
@@ -807,6 +833,9 @@ export class PrivateAnswerJobs {
     const check = this.outsideWritable(jobId, expectedRev);
     if (!check.ok) return check;
     const job = check.job;
+    // Idempotent: writing the state the block already has moves nothing, so
+    // a writer repeating itself cannot drive the re-seal loop.
+    if (job.outside.state === state) return { ok: true, rev: job.rev };
     job.outside = { state };
     job.rev += 1;
     return { ok: true, rev: job.rev };
@@ -1508,13 +1537,27 @@ const IDENTITY_FIELDS = [
   'corpusId', 'trustDomain', 'trust_domain', 'trustTier', 'trust_tier',
   'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier',
 ] as const;
+/** The source-item identifiers the guard (`localItemId`) and the claim-time match (`privateEvidenceKey`) read; nothing else of it is kept. */
+const SOURCE_ITEM_FIELDS = ['family', 'provider', 'accountScope', 'providerItemId', 'localItemId'] as const;
+
+/** The identifier fields of a source item, or undefined when it carries none. */
+function sourceItemIdentity(value: unknown): Record<string, string> | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const kept: Record<string, string> = {};
+  for (const key of SOURCE_ITEM_FIELDS) {
+    const field = record[key];
+    if (typeof field === 'string') kept[key] = field;
+  }
+  return Object.keys(kept).length > 0 ? kept : undefined;
+}
 
 /**
  * An evidence item as the guard needs it, without its text: an allowlist of
- * its corpus, trust domain and tier fields and its store identity (the
- * source item, top-level or under provenance, and the citation title), so an
- * answer kept for the dedupe window or a sealed job holds no passages,
- * tables or any text field added later.
+ * its corpus, trust domain and tier fields and its store identifiers (the
+ * source item's family, provider, account scope and ids, top-level or under
+ * provenance), so an answer kept for the dedupe window or a sealed job holds
+ * no passages, tables, titles or any field added later.
  */
 export function privateEvidenceIdentity(item: PrivateEvidenceItem): PrivateEvidenceItem {
   const kept: Record<string, unknown> = {};
@@ -1522,16 +1565,11 @@ export function privateEvidenceIdentity(item: PrivateEvidenceItem): PrivateEvide
     const value = item[key];
     if (typeof value === 'string') kept[key] = value;
   }
-  const sourceItem = asRecord(item.sourceItem);
+  const sourceItem = sourceItemIdentity(item.sourceItem);
   if (sourceItem) kept.sourceItem = sourceItem;
   const provenance = asRecord(item.provenance);
-  const citation = asRecord(provenance?.citation);
-  if (provenance) {
-    kept.provenance = {
-      ...(asRecord(provenance.sourceItem) ? { sourceItem: provenance.sourceItem } : {}),
-      ...(typeof citation?.title === 'string' ? { citation: { title: citation.title } } : {}),
-    };
-  }
+  const provenanceItem = sourceItemIdentity(provenance?.sourceItem);
+  if (provenanceItem) kept.provenance = { sourceItem: provenanceItem };
   return kept;
 }
 

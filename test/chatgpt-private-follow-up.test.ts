@@ -22,6 +22,7 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, type ConsultJobPolicy } from '../src/core/consult-settings.ts';
 import {
+  PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS,
   PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS,
   PRIVATE_ANSWER_JOB_TTL_MS,
   PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS,
@@ -81,6 +82,8 @@ function harness(policy: ConsultJobPolicy | (() => ConsultJobPolicy) | 'none' = 
     log: () => {},
     audit: () => {},
     claimHoldMs: 0,
+    // The response floor is measured by the timing tests; the others run unfloored.
+    followUpFloorMs: 0,
     ...(policy === 'none' ? {} : { consultPolicy: typeof policy === 'function' ? policy : () => policy }),
     openFile: async (path) => { opened.push(path); },
     ...extra,
@@ -428,6 +431,102 @@ describe('race rules around the seal (design §A.5.3)', () => {
   });
 });
 
+describe('overlapping first collections commit one delivery window', () => {
+  /** A guard whose calls can be held: `hold(n)` blocks the n-th call until released. */
+  function gated(h: Harness) {
+    const held = new Map<number, () => void>();
+    const waiting = new Map<number, Promise<void>>();
+    const counter = { calls: 0 };
+    const hold = (n: number) => { waiting.set(n, new Promise<void>((resolve) => held.set(n, resolve))); };
+    const release = (n: number) => { held.get(n)?.(); };
+    (h.jobs as unknown as { options: { eligible: (items: readonly unknown[]) => Promise<boolean[]> } }).options.eligible = async (items) => {
+      counter.calls += 1;
+      await waiting.get(counter.calls);
+      return items.map(() => !h.eligible.refuse);
+    };
+    const until = async (n: number) => { while (counter.calls < n) await Bun.sleep(1); };
+    return { hold, release, until, counter };
+  }
+
+  async function prepared(): Promise<{ h: Harness; jobId: string; panel: Awaited<ReturnType<typeof generatePanelKeyPair>> }> {
+    const h = harness();
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    await h.jobs.claim(jobId, panel.publicKey, 2);
+    await settled(h.jobs);
+    return { h, jobId, panel };
+  }
+
+  test('B completes first: A, sealed over its own proposal, is sealed again over the committed window', async () => {
+    const { h, jobId, panel } = await prepared();
+    const g = gated(h);
+    const t1 = h.clock.now;
+    g.hold(2);
+    const a = h.jobs.claim(jobId, panel.publicKey, 2);
+    await g.until(2);
+    // A has sealed over t1 + 20 min and is held at its post-seal check; B starts five seconds later and finishes.
+    h.clock.now += 5_000;
+    const t2 = h.clock.now;
+    const b = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(h.jobs.outsideSeam(jobId)).toMatchObject({ firstDeliveredAt: t2, followUntil: t2 + PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, lastCollectedAt: t2 });
+    g.release(2);
+    const aEnvelope = await envelope(jobId, panel, await a);
+    expect(aEnvelope.parsed.followSeconds).toBe(b.parsed.followSeconds);
+    expect(aEnvelope.parsed.followSeconds).toBe(1_200);
+    // A sealed twice (its first ciphertext was over the wrong window): six guard calls in all.
+    expect(g.counter.calls).toBe(6);
+    expect(h.jobs.outsideSeam(jobId)).toMatchObject({ firstDeliveredAt: t2, followUntil: t2 + PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, lastCollectedAt: t2 });
+    expect(t1).toBeLessThan(t2);
+  });
+
+  test('A completes first: B, sealed over its own proposal, is sealed again over the committed window; lastCollectedAt never moves back', async () => {
+    const { h, jobId, panel } = await prepared();
+    const g = gated(h);
+    const t1 = h.clock.now;
+    g.hold(2);
+    const a = h.jobs.claim(jobId, panel.publicKey, 2);
+    await g.until(2);
+    h.clock.now += 5_000;
+    const t2 = h.clock.now;
+    g.hold(4);
+    const b = h.jobs.claim(jobId, panel.publicKey, 2);
+    await g.until(4);
+    // Both sealed over their own proposals; A is released first and commits t1's window.
+    g.release(2);
+    const aEnvelope = await envelope(jobId, panel, await a);
+    expect(h.jobs.outsideSeam(jobId)).toMatchObject({ firstDeliveredAt: t1, followUntil: t1 + PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, lastCollectedAt: t1 });
+    g.release(4);
+    const bEnvelope = await envelope(jobId, panel, await b);
+    // Both report the committed deadline (t1 + 20 min): A from t1, B five seconds later.
+    expect(aEnvelope.parsed.followSeconds).toBe(1_200);
+    expect(bEnvelope.parsed.followSeconds).toBe(1_195);
+    expect(g.counter.calls).toBe(6);
+    expect(h.jobs.outsideSeam(jobId)).toMatchObject({ firstDeliveredAt: t1, followUntil: t1 + PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, lastCollectedAt: t2 });
+    // An earlier-started request finishing later never moves the last collection back.
+    h.clock.now = t1;
+    await h.jobs.claim(jobId, panel.publicKey, 2);
+    expect(h.jobs.outsideSeam(jobId)!.lastCollectedAt).toBe(t2);
+  });
+
+  test('markOutside is idempotent: the same state again moves no revision and cannot drive the re-seal loop', async () => {
+    const { h, jobId, panel } = await prepared();
+    await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(h.jobs.markOutside(jobId, 1, 'pending')).toEqual({ ok: true, rev: 2 });
+    for (let i = 0; i < 20; i += 1) expect(h.jobs.markOutside(jobId, 2, 'pending')).toEqual({ ok: true, rev: 2 });
+    // A writer repeating itself at every guard call: the response still arrives, at revision 2, not withdrawn.
+    const counter = { calls: 0 };
+    (h.jobs as unknown as { options: { eligible: (items: readonly unknown[]) => Promise<boolean[]> } }).options.eligible = async (items) => {
+      counter.calls += 1;
+      h.jobs.markOutside(jobId, 2, 'pending');
+      return items.map(() => true);
+    };
+    const { parsed } = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(parsed).toMatchObject({ rev: 2, state: 'answer', outside: { state: 'pending' } });
+    expect(counter.calls).toBe(2);
+    expect(h.jobs.markOutside(jobId, 2, 'idle')).toEqual({ ok: true, rev: 3 });
+  });
+});
+
 describe('what a job retains', () => {
   type LiveJob = { question?: string; outcome?: { kind: string; answer?: unknown }; outside: unknown; opens?: unknown; sealedItems?: unknown; guardItems?: unknown; evidence?: unknown; refresh?: unknown };
   const live = (h: Harness, id: string) => (h.jobs as unknown as { jobs: Map<string, LiveJob> }).jobs.get(id)!;
@@ -579,50 +678,74 @@ describe('expiry and eviction are independent of outcomes', () => {
 });
 
 describe('timing (design §A.5.4, measured)', () => {
-  /**
-   * Phase-2 responses across outcomes go through one code path (guard, serialize,
-   * pad to 36,864 bytes, seal). This compares their latency distributions:
-   * interleaved samples per outcome, medians compared against the idle
-   * baseline. Tolerance: the larger of 2 ms and 50% of the idle median,
-   * which covers the measured run-to-run noise of WebCrypto on a loaded
-   * machine while catching an outcome-shaped branch (a skipped seal or an
-   * extra guard call costs well over that). If a future change fails this,
-   * the design says to add a fixed response-time floor and record it.
-   */
-  // `control` is a second idle job: the A/A noise floor of the measurement itself.
-  const OUTCOMES = ['idle', 'control', 'pending', 'appended', 'paused', 'withdrawn'] as const;
+  const OUTCOMES = ['idle', 'control', 'pending', 'appended', 'paused', 'withdrawn_early', 'withdrawn_fallback'] as const;
+  type Outcome = typeof OUTCOMES[number];
+  const heavy = (units: number) => '日本語テキスト"\\😀'.repeat(units).slice(0, units);
 
   /**
-   * Five jobs, one per outcome, with the heaviest payloads the contract
-   * allows (a full answer, four citations, four gaps, a maximal outside
-   * block), measured with the given guard: interleaved rounds so drift
-   * affects every outcome alike, medians compared against the idle one.
+   * A guard shaped like the live one (`checkPrivateEvidenceItems`): a
+   * refused item answers `false` from an early return (no corpus, no
+   * provider, no row, a Secret tier) or from the content fallback (a store
+   * read, modelled as `fallbackMs` of waiting, then `false`); an eligible
+   * item answers `true` from the synchronous `contentServable` check.
    */
-  async function measure(label: string, guard: (items: readonly unknown[]) => Promise<readonly boolean[]>): Promise<Record<string, number>> {
-    const heavy = (units: number) => '日本語テキスト"\\😀'.repeat(units).slice(0, units);
-    const model = readyModel({
+  function productionShaped(refused: Map<string, 'early' | 'fallback'>, fallbackMs: number) {
+    return (items: readonly unknown[]): Promise<boolean[]> => Promise.all(items.map(async (item) => {
+      const id = String((item as { sourceItem?: { localItemId?: string } }).sourceItem?.localItemId ?? '');
+      const how = refused.get(id);
+      if (how === 'early') return false;
+      if (how === 'fallback') {
+        await Bun.sleep(fallbackMs);
+        return false;
+      }
+      return true;
+    }));
+  }
+
+  function heavyModel(): PrivateAnswerModel {
+    return readyModel({
       answerPrivately: async () => ({
         answer: heavy(2_700),
         citations: Array.from({ length: 4 }, (_, index) => ({ title: heavy(300), source: heavy(300), date: heavy(32), url: `https://example.com/${'p'.repeat(2_000 + index)}` })),
         unanswered: Array.from({ length: 4 }, () => heavy(300)),
       }),
     });
-    // The test clock never advances, so the claim bucket never refills: give it room for every sample.
-    const h = harness(ON, { maxJobs: 50, claimRate: { capacity: 10_000, refillPerSecond: 0 }, model: () => model });
-    const refusing = { now: false };
-    (h.jobs as unknown as { options: { eligible: typeof guard } }).options.eligible = async (items) => (refusing.now ? items.map(() => false) : guard(items));
+  }
+
+  let nextItem = 0;
+  /** A job over its own item identity, so the guard can refuse it alone. */
+  function beginOwn(h: Harness): { id: string; item: string } {
+    nextItem += 1;
+    const item = `item-${nextItem}`;
+    const evidence = [{ title: 'SENTINEL_TIMING', trust_domain: 'secure_local', sourceItem: { provider: 'fixture', family: 'file', accountScope: 'personal', localItemId: item } }];
+    return { id: h.jobs.begin({ question: `q ${item}`, count: 1, evidence, refresh: async () => evidence }).jobId!, item };
+  }
+
+  const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
+
+  /**
+   * One job per outcome with the heaviest payloads the contract allows,
+   * sampled in interleaved rounds (drift affects every outcome alike).
+   * `withdrawn_early` and `withdrawn_fallback` stay refused throughout, by
+   * the two production refusal shapes. Then the transition request itself,
+   * on fresh jobs: the request in which the guard first refuses, the job is
+   * withdrawn and the envelope sealed again, for each refusal shape.
+   */
+  async function measure(label: string, fallbackMs: number, floorMs: number): Promise<Record<string, number>> {
+    const refused = new Map<string, 'early' | 'fallback'>();
+    const model = heavyModel();
+    const h = harness(ON, { maxJobs: 200, claimRate: { capacity: 100_000, refillPerSecond: 0 }, model: () => model, followUpFloorMs: floorMs });
+    (h.jobs as unknown as { options: { eligible: (items: readonly unknown[]) => Promise<boolean[]> } }).options.eligible = productionShaped(refused, fallbackMs);
     const panel = await generatePanelKeyPair();
-    const jobs = new Map<string, string>();
+    const jobs = new Map<Outcome, string>();
     for (const outcome of OUTCOMES) {
-      const id = begin(h);
+      const { id, item } = beginOwn(h);
       await envelope(id, panel, await deliver(h, id, panel));
       if (outcome === 'pending' || outcome === 'paused') h.jobs.markOutside(id, 1, outcome);
       if (outcome === 'appended') h.jobs.appendOutsideBlock(id, 1, { text: Array.from({ length: 60 }, () => heavy(400)).join('\n'), question: heavy(2_000), route: heavy(200) });
-      if (outcome === 'withdrawn') {
-        refusing.now = true;
-        await h.jobs.claim(id, panel.publicKey, 2);
-        refusing.now = false;
-      }
+      if (outcome === 'withdrawn_early') refused.set(item, 'early');
+      if (outcome === 'withdrawn_fallback') refused.set(item, 'fallback');
+      if (outcome.startsWith('withdrawn')) expect((await envelope(id, panel, await h.jobs.claim(id, panel.publicKey, 2))).parsed.state).toBe('withdrawn');
       jobs.set(outcome, id);
     }
     const samples = new Map<string, number[]>(OUTCOMES.map((outcome) => [outcome, []]));
@@ -635,34 +758,62 @@ describe('timing (design §A.5.4, measured)', () => {
         if (round >= 5) samples.get(outcome)!.push(elapsed);
       }
     }
-    const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
-    const medians = Object.fromEntries(OUTCOMES.map((outcome) => [outcome, median(samples.get(outcome)!)]));
+    // Transition requests: fresh delivered jobs, refused just before the request that withdraws them.
+    for (const how of ['early', 'fallback'] as const) {
+      const times: number[] = [];
+      for (let n = 0; n < 20; n += 1) {
+        const { id, item } = beginOwn(h);
+        await envelope(id, panel, await deliver(h, id, panel));
+        refused.set(item, how);
+        const started = Bun.nanoseconds();
+        const response = await h.jobs.claim(id, panel.publicKey, 2);
+        times.push((Bun.nanoseconds() - started) / 1e6);
+        expect((await envelope(id, panel, response)).parsed.state).toBe('withdrawn');
+      }
+      samples.set(`transition_${how}`, times);
+    }
+    const medians = Object.fromEntries([...samples].map(([outcome, values]) => [outcome, median(values)]));
     console.log(`[follow-up timing] ${label}: medians ms ${JSON.stringify(Object.fromEntries(Object.entries(medians).map(([k, v]) => [k, Number(v.toFixed(3))])))}`);
     return medians;
   }
 
-  /**
-   * The guards: an immediate map (the noise floor of the code path alone), a
-   * store-shaped guard (one asynchronous hop per item, as the live guard's
-   * content-serving check makes), and a slow store (a 3 ms wait per call,
-   * as a loaded index under the live guard's content retrieval).
-   */
-  const GUARDS: Array<[string, (items: readonly unknown[]) => Promise<readonly boolean[]>]> = [
-    ['immediate', async (items) => items.map(() => true)],
-    ['store-shaped', async (items) => Promise.all(items.map(async () => { await Bun.sleep(0); return true; }))],
-    ['slow store (3 ms per call)', async (items) => { await Bun.sleep(3); return items.map(() => true); }],
-  ];
-
-  for (const [label, guard] of GUARDS) {
-    test(`phase-2 response times do not differ by outcome beyond the stated tolerance (${label})`, async () => {
-      const medians = await measure(label, guard);
+  for (const [label, fallbackMs] of [['content fallback 0 ms', 0], ['content fallback 3 ms', 3]] as const) {
+    test(`phase-2 response times across outcomes, persistent refusals and transitions: raw numbers logged, floored responses within the stated tolerance (${label})`, async () => {
+      // Without the floor, for the record: a persistently refused job whose
+      // guard reaches the content fallback, and the transition request, cost
+      // more than idle (two guard round trips, or a withdrawal and a second
+      // seal); this is why the floor exists.
+      const raw = await measure(`${label}, no floor`, fallbackMs, 0);
+      expect(raw.withdrawn_early!).toBeGreaterThan(0);
+      // With the shipped floor: every response, whatever the state, takes at
+      // least the floor, and the medians sit within the tolerance of idle.
+      const medians = await measure(`${label}, floor ${PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS} ms`, fallbackMs, PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS);
       const baseline = medians.idle!;
       const noise = Math.abs(medians.control! - baseline);
-      // Tolerance: the larger of 2 ms, half the idle median and twice the A/A noise floor.
-      const tolerance = Math.max(2, baseline * 0.5, noise * 2);
-      for (const outcome of OUTCOMES) expect(Math.abs(medians[outcome]! - baseline), `${label}: ${outcome} median ${medians[outcome]} vs idle ${baseline} (noise ${noise})`).toBeLessThanOrEqual(tolerance);
-    }, 90_000);
+      // Tolerance: the larger of 2 ms, 10% of the floored idle median and twice the A/A noise floor.
+      const tolerance = Math.max(2, baseline * 0.1, noise * 2);
+      for (const outcome of Object.keys(medians)) {
+        expect(medians[outcome]!, `${label}: ${outcome} below the floor`).toBeGreaterThanOrEqual(PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS - 1);
+        expect(Math.abs(medians[outcome]! - baseline), `${label}: ${outcome} median ${medians[outcome]} vs idle ${baseline} (noise ${noise})`).toBeLessThanOrEqual(tolerance);
+      }
+    }, 240_000);
   }
+
+  test('the floor is wall clock: a phase-2 response never returns before it, phase 1 is not held', async () => {
+    const h = harness(ON, { followUpFloorMs: 40 });
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    const started = Date.now();
+    const pending = await h.jobs.claim(jobId, panel.publicKey, 2);
+    expect(pending.status).toBe(202);
+    expect(Date.now() - started).toBeLessThan(40);
+    await settled(h.jobs);
+    for (let i = 0; i < 3; i += 1) {
+      const before = Date.now();
+      expect((await h.jobs.claim(jobId, panel.publicKey, 2)).status).toBe(200);
+      expect(Date.now() - before).toBeGreaterThanOrEqual(39);
+    }
+  });
 
   test('first-reveal cost: sealing the 36 KiB envelope against today\'s first bucket, measured and logged', async () => {
     const panel = await generatePanelKeyPair();

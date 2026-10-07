@@ -448,9 +448,9 @@ describe('kept answers and sealed jobs hold identities, not text', () => {
       corpusId: 'private-a',
       trustDomain: 'secure_local',
       trustTier: 'S4',
+      // Identifiers only: never the citation title or any other provenance field.
       provenance: {
         sourceItem: { family: 'file', provider: 'fixture', accountScope: 'personal', providerItemId: 'lab', localItemId: 'lab' },
-        citation: { title: 'lab.pdf' },
       },
     });
   });

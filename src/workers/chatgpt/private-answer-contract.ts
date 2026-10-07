@@ -81,6 +81,16 @@ export const PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS = 30 * 60_000;
  * seconds left into every envelope; a remount never extends it.
  */
 export const PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS = 20 * 60_000;
+/**
+ * A phase-2 response is held so that it takes at least this long, wall
+ * clock (design §A.5.4: a fixed response-time floor, applied because the
+ * measured latency of a persistently refused job whose guard reaches the
+ * store's content fallback, and of the request in which a job is withdrawn,
+ * exceeded the test's noise floor: docs/design/chatgpt-plugin.md,
+ * "Follow-up collection", Timing). The floor covers a guard round trip well
+ * above the measured ones; a guard slower than it would still show.
+ */
+export const PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS = 50;
 /** The capability a panel declares in every request body (`cap`); a request without it is capability 1. */
 export const PRIVATE_ANSWER_PANEL_CAPABILITY = 2;
 export type PrivateAnswerPanelCapability = 1 | 2;

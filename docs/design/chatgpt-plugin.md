@@ -807,34 +807,54 @@ the protocol the consult will ride on, and the limits it needs.
   fallback, ResizeObserver) keep firing and always report `H`. Hide reports
   the hidden card; Show returns to `H`. `R` is the outside box plus the gap
   above it (168 + 8 px). A withdrawal clears the answer, its sources, gaps
-  and outside text at once but keeps the reserved container, keeps
-  reporting the `H` last reported for the revealed answer (on a reopen that
-  never showed it, the same rule over the withdrawn card), and keeps polling
-  at the cadence for the rest of the server's window (`followSeconds` is
-  read from withdrawn envelopes too), so neither the host nor the relay
-  learns of it. The design's earlier withdrawal-on-resize residual is
-  closed by the locked height.
-- **Timing (design §A.5.4):** phase-2 responses share one code path and
-  do the same work in every state: the live guard before the seal, the
-  seal of the fixed-size envelope, the guard again after it (a withdrawn
-  job keeps its item identities so the same call is made and its result
-  discarded), then the release check. A measured test
-  (`test/chatgpt-private-follow-up.test.ts`) compares response-time medians
-  across idle, pending, appended, paused and withdrawn jobs carrying the
-  heaviest payloads the contract allows, with three guards: an immediate
-  map, a store-shaped guard (one asynchronous hop per item, as the live
-  guard's content-serving check), and a slow store (3 ms per call), plus a
-  second idle job as the A/A noise floor. Measured 2026-10-07 on the
-  remote build lane (medians, ms; idle / pending / appended / paused /
-  withdrawn): immediate 5.34 / 5.58 / 4.50 / 4.72 / 4.49; store-shaped
-  18.19 / 18.19 / 18.05 / 17.98 / 16.59; slow store 19.52 / 18.27 / 20.13
-  / 20.88 / 19.55; a second run with the A/A control gave an idle-versus-
-  control difference of 0.9 / 1.1 / 0.6 ms for the three guards. The
-  largest difference from idle (1.6 ms, withdrawn under the store-shaped
-  guard) is the size of that noise floor and of the spread between the
-  non-withdrawn states themselves, so no fixed response-time floor is
-  added; the test's tolerance is the larger of 2 ms, half the idle median
-  and twice the A/A noise, and a future regression fails it.
+  and outside text at once (hidden stays hidden, and Show then says it was
+  withdrawn) but keeps the reserved container, keeps reporting the revealed
+  answer's `H` (measured as soon as the answer is laid out, before the host
+  handshake, and kept beside the key in the panel's IndexedDB as a bounded
+  `{width, height}` so a re-mount at the same width reports it too), and
+  keeps polling at the cadence for the rest of the server's window
+  (`followSeconds` is read from withdrawn envelopes too). Residual, as the
+  design states (§A.5.5): a panel that never showed the answer at the
+  current width (a re-mount without a record for it, or a width change
+  after the withdrawal) measures the withdrawn card and settles that height
+  once; the host could see that, as plaintext `failed` already shows today.
+- **Timing (design §A.5.4):** phase-2 responses share one code path (the
+  live guard before the seal, the seal of the fixed-size envelope, the
+  guard again after it, the release check; a withdrawn job keeps its item
+  identities so the guard is called for it too), but the guard's own cost
+  depends on the item's state: the live guard
+  (`checkPrivateEvidenceItems`) refuses a missing corpus, provider or row
+  or a Secret tier from an early return, and otherwise reaches the store's
+  content check, which for a refused item may be a content read (the
+  fallback at the end of that function). A measured test
+  (`test/chatgpt-private-follow-up.test.ts`) uses a guard of that shape
+  over jobs carrying the heaviest payloads the contract allows: idle, an
+  idle A/A control, pending, appended, paused, a job persistently refused
+  by the early return, a job persistently refused through the content
+  fallback (0 ms and 3 ms of store time), and the transition request
+  itself (the request in which a fresh job is first refused, withdrawn and
+  sealed again), 20 fresh jobs per shape. **Measured without a floor,
+  2026-10-07, remote build lane (medians, ms):** fallback 0 ms: idle 4.15,
+  control 4.18, pending 2.59, appended 4.14, paused 4.92, withdrawn-early
+  4.04, withdrawn-fallback 14.13, transition-early 5.89,
+  transition-fallback 12.23; fallback 3 ms: idle 3.12, control 3.76,
+  pending 3.06, appended 4.81, paused 3.61, withdrawn-early 2.19,
+  withdrawn-fallback 21.21, transition-early 4.64, transition-fallback
+  18.88. The persistently refused job through the content fallback and
+  the fallback transition exceed the criterion (the larger of 2 ms, half
+  the idle median and twice the A/A noise) by 8–18 ms, so the design's
+  **fixed response-time floor is applied: every phase-2 response, first
+  delivery included, takes at least `PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS`
+  (50 ms, wall clock)**; phase 1 is not held. The test then measures the
+  same outcomes with the floor and requires every median at or above it
+  and within the larger of 2 ms, 10% of the floored idle median and twice
+  the A/A noise of idle. Measured with the floor (same run): fallback 0 ms
+  52.1–57.0 ms across all nine, fallback 3 ms 52.5–59.2 ms, the remaining
+  spread being timer granularity (the idle A/A control itself differs by
+  1.5–1.7 ms). Residual: a guard round trip slower than the floor
+  (a store read far slower than the 3 ms modelled) would still show; the
+  floor is sized well above the measured guard cost, not above every
+  possible one.
 - **C4b seams** on `PrivateAnswerJobs`: `outsideSeam(jobId)` (clocks and
   states, no text), `markOutside(jobId, rev, state)` and
   `appendOutsideBlock(jobId, rev, block)`. Both share one condition: a

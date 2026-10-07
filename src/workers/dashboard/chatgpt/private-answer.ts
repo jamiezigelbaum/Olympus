@@ -176,8 +176,15 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   // the polling deadline and the revision, kept through a withdrawal and on
   // reopen, so neither the relay (polls) nor the host (height) learns of it.
   let follow: { rev: number; until: number } | null = null;
-  // The height last reported for a revealed follow-up answer; a withdrawal keeps reporting it.
+  // The answer was withdrawn on the Mac: its payload is gone; what is shown
+  // (revealed or hidden) is a separate matter, so Hide and Show keep working.
+  let gone = false;
+  // The geometry of the revealed follow-up answer, measured as soon as it is
+  // laid out (before and regardless of the host handshake) and kept in the
+  // key store for a re-mount: a withdrawal keeps reporting it. A re-mount
+  // that never showed the answer at this width settles its height once.
   let lockedHeight = -1;
+  let lockedWidth = 0;
 
   // ---- host bridge -------------------------------------------------------
   let nextId = 1;
@@ -270,7 +277,9 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       canRetry = false;
       answer = null;
       follow = null;
+      gone = false;
       lockedHeight = -1;
+      lockedWidth = 0;
       sourcesOpen = false;
       askedOpen = false;
       notes = {};
@@ -384,6 +393,15 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       const fresh = typeof value.createdAt === 'number' && Date.now() - value.createdAt < KS.maxAgeMs;
       if (!fresh || !privateKey || typeof privateKey !== 'object' || privateKey.type !== 'private') return null;
       if (typeof value.publicKey !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(value.publicKey)) return null;
+      // The revealed geometry kept with the key (bounded: two numbers), for a re-mount at the same width.
+      const geometry = value.geometry;
+      const width = cardWidth();
+      if (geometry && typeof geometry === 'object' && typeof geometry.width === 'number' && typeof geometry.height === 'number'
+        && geometry.width > 0 && geometry.width < 10_000 && geometry.height > 0 && geometry.height <= config.frameCapPx
+        && (width === 0 || width === geometry.width) && lockedHeight < 0) {
+        lockedHeight = Math.floor(geometry.height);
+        lockedWidth = Math.floor(geometry.width);
+      }
       return { privateKey, publicKey: value.publicKey };
     } catch {
       return null;
@@ -397,6 +415,21 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       });
     } catch { /* memory only */ }
     void dropOldKeys();
+  }
+
+  /** Records the revealed geometry beside the job's key: a re-mount keeps reporting it through a withdrawal. */
+  let keptGeometry = '';
+  async function keepGeometry(jobId: string, width: number, height: number): Promise<void> {
+    const mark = jobId + ':' + width + ':' + height;
+    if (mark === keptGeometry) return;
+    keptGeometry = mark;
+    try {
+      const value = await inStore('readonly', (store) => store.get(jobId));
+      if (!value || typeof value !== 'object' || !value.privateKey) return;
+      await inStore('readwrite', (store) => {
+        store.put({ privateKey: value.privateKey, publicKey: value.publicKey, createdAt: value.createdAt, geometry: { width, height } }, jobId);
+      });
+    } catch { /* memory only */ }
   }
 
   /** Opportunistic: deletes pairs older than a day. Never waited on. */
@@ -602,8 +635,14 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     render();
   }
 
-  /** Shows the answer kept in memory again; never a new request. */
+  /** Shows the answer kept in memory again (or, once withdrawn, says so); never a new request. */
   function show(): void {
+    if (gone) {
+      phase = 'withdrawn';
+      focusAfter = 'status';
+      render();
+      return;
+    }
     if (!answer) return void collect(true);
     phase = 'revealed';
     focusAfter = 'answer';
@@ -752,13 +791,17 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
    */
   function withdrawn(byUser: boolean): void {
     answer = null;
+    gone = true;
     sourcesOpen = false;
     askedOpen = false;
     notes = {};
-    phase = 'withdrawn';
     errorText = T.withdrawn;
     canRetry = false;
-    focusAfter = byUser ? 'status' : '';
+    // Hidden stays hidden (Show then says it was withdrawn); shown turns into the withdrawn presentation.
+    if (phase !== 'hidden') {
+      phase = 'withdrawn';
+      focusAfter = byUser ? 'status' : '';
+    }
     render();
   }
 
@@ -815,7 +858,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       if (opened.kind === 'withdrawn') {
         follow.until = Date.now() + opened.followSeconds * config.secondMs;
         if (opened.rev >= follow.rev) follow.rev = opened.rev;
-        if (phase !== 'withdrawn') withdrawn(false);
+        if (!gone) withdrawn(false);
         continue;
       }
       if (!opened.answer.follow) continue;
@@ -1047,7 +1090,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       if (canRetry) view.row.appendChild(button(T.tryAgain, 'retry', () => void collect(true)));
       return view.card;
     }
-    if (phase === 'hidden' && answer) {
+    if (phase === 'hidden' && (answer || gone)) {
       line.textContent = T.hidden;
       view.row.appendChild(button(T.show, 'show', show, T.showLabel));
       return view.card;
@@ -1186,12 +1229,23 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const card = cardHeight();
     if (phase === 'revealed' && answer && answer.follow) {
       lockedHeight = Math.min(card + config.outsideHeightPx, config.frameCapPx);
+      lockedWidth = cardWidth();
+      if (info && lockedWidth > 0) void keepGeometry(info.jobId, lockedWidth, lockedHeight);
       return lockedHeight;
     }
     if (phase === 'withdrawn' && follow) {
-      return lockedHeight >= 0 ? lockedHeight : Math.min(card + config.outsideHeightPx, config.frameCapPx);
+      // Never shown here (a re-mount without a record for this width): the rule over the withdrawn card, settled once.
+      if (lockedHeight < 0) {
+        lockedHeight = Math.min(card + config.outsideHeightPx, config.frameCapPx);
+        lockedWidth = cardWidth();
+      }
+      return lockedHeight;
     }
     return card;
+  }
+
+  function cardWidth(): number {
+    return info && root.firstChild ? Math.ceil((root.firstChild as HTMLElement).offsetWidth || 0) : 0;
   }
 
   // One report per real change, at most once a frame: repeated reports of the
@@ -1206,13 +1260,15 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   let initialized = false;
   let lastHeight = -1;
   function reportHeight(force?: boolean): void {
-    if (!initialized) return;
+    // Measured (and the revealed geometry locked) whether or not the host has
+    // answered the handshake yet; only the report waits for it.
     const height = frameHeight();
+    if (!initialized) return;
     if (height === lastHeight && !force) return;
     lastHeight = height;
     const host = openai();
     if (host && typeof host.notifyIntrinsicHeight === 'function') host.notifyIntrinsicHeight(height);
-    const width = info && root.firstChild ? Math.ceil((root.firstChild as HTMLElement).offsetWidth || 0) : 0;
+    const width = cardWidth();
     notify('ui/notifications/size-changed', width > 0 ? { width, height } : { height });
   }
 
