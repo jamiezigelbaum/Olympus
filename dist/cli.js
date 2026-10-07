@@ -101,7 +101,7 @@ async function writePrivateFileAtomic(path, text) {
   }
   await syncDirectory(dirname2(path));
 }
-function writePrivateFileAtomicSync(path, text) {
+function writePrivateFileAtomicSync(path, text, options = {}) {
   const temp = temporaryPathFor(path);
   try {
     const descriptor = openSync2(temp, "wx", 384);
@@ -112,6 +112,7 @@ function writePrivateFileAtomicSync(path, text) {
       closeSync2(descriptor);
     }
     renameSync(temp, path);
+    options.onPublished?.();
   } catch (error) {
     try {
       rmSync(temp, { force: true });
@@ -7850,6 +7851,7 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/control/launch" },
     { method: "POST", path: "/dashboard/control/launch/redeem" },
     { method: "POST", path: "/dashboard/control/session" },
+    { method: "POST", path: "/dashboard/control/session/local" },
     { method: "GET", path: "/dashboard/dispositions" },
     { method: "GET", path: "/dashboard/dispositions.json" },
     { method: "POST", path: "/dashboard/dispositions" },
@@ -30768,7 +30770,7 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync as chmodSync5, existsSync as existsSync17, mkdirSync as mkdirSync12, readFileSync as readFileSync17, writeFileSync as writeFileSync5 } from "node:fs";
+import { chmodSync as chmodSync5, existsSync as existsSync17, mkdirSync as mkdirSync12, readFileSync as readFileSync17 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
 import { dirname as dirname17, join as join24 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
@@ -31036,13 +31038,36 @@ function writeSovereigntyConfigFile(input) {
     throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
   }
   const config = validateSovereigntyConfig(input.config);
+  publishSovereigntyConfigFile(path, config);
+  return path;
+}
+function publishSovereigntyConfigFile(path, config) {
   const directory = dirname17(path);
   mkdirSync12(directory, { recursive: true, mode: 448 });
   chmodSync5(directory, 448);
-  writeFileSync5(path, `${JSON.stringify(config, null, 2)}
-`, { mode: 384 });
+  __sovereigntyFileTestHooks.beforePublish?.(path);
+  writePrivateFileAtomicSync(path, `${JSON.stringify(config, null, 2)}
+`);
   chmodSync5(path, 384);
-  return path;
+}
+function updateSovereigntyConfigFile(input) {
+  return withFileLeaseSync(input.path, (lease) => {
+    let current;
+    try {
+      current = validateSovereigntyConfig(JSON.parse(readFileSync17(input.path, "utf8")));
+    } catch {
+      return { ok: false, reason: "unreadable" };
+    }
+    if (input.expect && JSON.stringify(validateSovereigntyConfig(input.expect)) !== JSON.stringify(current)) {
+      return { ok: false, reason: "conflict", current };
+    }
+    const next = input.patch(current);
+    if (next === current)
+      return { ok: true, config: current, changed: false };
+    const validated = validateSovereigntyConfig(next);
+    lease.commit(() => publishSovereigntyConfigFile(input.path, validated));
+    return { ok: true, config: validated, changed: true };
+  }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
   const sourceLayoutPath = join24(dirname17(fileURLToPath4(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
@@ -31432,8 +31457,10 @@ function stringArrayField(value, label) {
   }
   return value.map((item) => item.trim()).filter(Boolean);
 }
-var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SOVEREIGNTY_PRESETS, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SOVEREIGNTY_PRESETS, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER, __sovereigntyFileTestHooks;
 var init_sovereignty = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
   init_operation_error();
   init_local_model_policy();
   init_config();
@@ -31471,6 +31498,7 @@ var init_sovereignty = __esm(() => {
     encrypted_cloud: 2,
     standard_cloud: 1
   };
+  __sovereigntyFileTestHooks = { beforePublish: undefined };
 });
 
 // src/workers/source-index/analyst-pool.ts
@@ -43130,7 +43158,7 @@ import {
   renameSync as renameSync5,
   statSync as statSync9,
   unlinkSync as unlinkSync2,
-  writeFileSync as writeFileSync6
+  writeFileSync as writeFileSync5
 } from "node:fs";
 import { dirname as dirname24 } from "node:path";
 async function runXBookmarksWindowDiagnostic(options) {
@@ -43369,7 +43397,7 @@ function writePrivateReport(pathValue, contents) {
   mkdirSync17(parent, { recursive: true, mode: 448 });
   const temporaryPath = `${reportPath}.tmp-${randomUUID11()}`;
   try {
-    writeFileSync6(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
+    writeFileSync5(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync9(temporaryPath, 384);
     renameSync5(temporaryPath, reportPath);
     chmodSync9(reportPath, 384);
@@ -43797,7 +43825,7 @@ import {
   chmodSync as chmodSync10,
   renameSync as renameSync6,
   rmSync as rmSync7,
-  writeFileSync as writeFileSync7
+  writeFileSync as writeFileSync6
 } from "node:fs";
 import { resolve as resolve5 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
@@ -44089,7 +44117,7 @@ function writeReceipt(pathValue, receipt) {
   const path = resolve5(pathValue);
   const temporary = `${path}.tmp-${randomUUID12()}`;
   try {
-    writeFileSync7(temporary, `${JSON.stringify(receipt, null, 2)}
+    writeFileSync6(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
       encoding: "utf8",
       flag: "wx",
@@ -51129,6 +51157,7 @@ var init_vocabulary = __esm(() => {
       versionUnknown: "(version unknown)",
       daemonMissing: "zkapi-clientd not installed",
       tor: "Tor found (a fresh Tor client per consult)",
+      torOff: "Tor off: the route is direct and your network address is visible to the provider",
       torMissing: "Tor not installed",
       key: "API key configured",
       keyMissing: "API key not configured",
@@ -51215,6 +51244,8 @@ var init_vocabulary = __esm(() => {
     saveFailed: "Olympus could not save this. Try again.",
     restarting: "Restarting the worker…",
     locked: "Unlock dashboard controls in Setup to see and change outside help.",
+    unlockIntro: "Changing outside help needs a session opened from this computer itself, not one an agent or the launch link could open. One click, in this browser, on this Mac.",
+    unlock: "Unlock outside help on this Mac",
     native: "Outside help is set up on this computer's own dashboard only, never from an agent or ChatGPT.",
     unavailable: "Outside help is not available from this worker."
   };
@@ -55400,7 +55431,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn3, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash37, randomUUID as randomUUID15 } from "node:crypto";
-import { accessSync as accessSync3, chmodSync as chmodSync13, constants as constants3, existsSync as existsSync32, mkdirSync as mkdirSync25, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync9, statSync as statSync13, writeFileSync as writeFileSync8 } from "node:fs";
+import { accessSync as accessSync3, chmodSync as chmodSync13, constants as constants3, existsSync as existsSync32, mkdirSync as mkdirSync25, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync9, statSync as statSync13, writeFileSync as writeFileSync7 } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir as homedir37, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter3, dirname as dirname33, join as join46, resolve as resolvePath2 } from "node:path";
@@ -55535,7 +55566,7 @@ function defaultZkapiConfinement() {
       wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
       selfTest: async (workDir, env) => {
         const script = join46(workDir, "confinement-self-test.cjs");
-        writeFileSync8(script, SELF_TEST_SCRIPT, { mode: 384 });
+        writeFileSync7(script, SELF_TEST_SCRIPT, { mode: 384 });
         const outside = runSelfTestProbe([process.execPath, script], env);
         const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
         return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
@@ -56448,7 +56479,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   let sendDeadline;
   result = await (async () => {
     try {
-      writeFileSync8(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
+      writeFileSync7(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
       const supervisorInstance = processInstanceIdentity(process.pid);
       updateState(statePath, now(), (state) => ({
         ...state,
@@ -60032,7 +60063,7 @@ var init_consult_settings = __esm(() => {
 
 // src/core/doctor.ts
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync34, mkdirSync as mkdirSync26, readFileSync as readFileSync30, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync34, mkdirSync as mkdirSync26, readFileSync as readFileSync30, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname35, join as join49 } from "node:path";
 import { homedir as homedir39 } from "node:os";
 function defaultDoctorHostProbe(env = process.env, options = {}) {
@@ -61163,7 +61194,7 @@ function readIngestionHealthState(path) {
 }
 function writeIngestionHealthState(path, state) {
   mkdirSync26(dirname35(path), { recursive: true });
-  writeFileSync9(path, `${JSON.stringify(state, null, 2)}
+  writeFileSync8(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function ingestionHealthHint(ledger) {
@@ -63290,7 +63321,7 @@ var init_tier_rules = __esm(() => {
 
 // src/workers/classification/tier-migration.ts
 import { createHash as createHash43 } from "node:crypto";
-import { chmodSync as chmodSync17, existsSync as existsSync39, mkdirSync as mkdirSync30, readFileSync as readFileSync36, renameSync as renameSync10, writeFileSync as writeFileSync11 } from "node:fs";
+import { chmodSync as chmodSync17, existsSync as existsSync39, mkdirSync as mkdirSync30, readFileSync as readFileSync36, renameSync as renameSync10, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 import { dirname as dirname41, join as join56 } from "node:path";
 function domainTier(domain) {
@@ -63318,7 +63349,7 @@ function writeTierMigrationState(statePath, state) {
 function writeOwnerOnlyFile(path, text) {
   mkdirSync30(dirname41(path), { recursive: true, mode: 448 });
   const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync11(temp, text, { mode: 384 });
+  writeFileSync10(temp, text, { mode: 384 });
   chmodSync17(temp, 384);
   renameSync10(temp, path);
 }
@@ -66122,7 +66153,7 @@ var init_native_process_service = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync32, readFileSync as readFileSync37, rmSync as rmSync11, writeFileSync as writeFileSync12 } from "node:fs";
+import { mkdirSync as mkdirSync32, readFileSync as readFileSync37, rmSync as rmSync11, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname43, join as join58 } from "node:path";
 import { homedir as homedir46 } from "node:os";
 function guardStateDir(env) {
@@ -66171,7 +66202,7 @@ function writeEmbeddingOperatorOverride(path, on) {
     return;
   }
   mkdirSync32(dirname43(path), { recursive: true });
-  writeFileSync12(path, `${EMBEDDING_PRIORITY_TOKEN}
+  writeFileSync11(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
 function asRecord11(value) {
@@ -82080,7 +82111,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync19, existsSync as existsSync42, lstatSync as lstatSync17, mkdirSync as mkdirSync34, readFileSync as readFileSync40, renameSync as renameSync11, writeFileSync as writeFileSync13 } from "node:fs";
+import { chmodSync as chmodSync19, existsSync as existsSync42, lstatSync as lstatSync17, mkdirSync as mkdirSync34, readFileSync as readFileSync40, renameSync as renameSync11, writeFileSync as writeFileSync12 } from "node:fs";
 import { join as join62 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync34(stateDir, { recursive: true, mode: 448 });
@@ -82095,7 +82126,7 @@ function ensureStateDir(stateDir) {
 }
 function writePrivateFile(path, contents) {
   const temporary = `${path}.tmp.${process.pid}`;
-  writeFileSync13(temporary, contents, { mode: 384 });
+  writeFileSync12(temporary, contents, { mode: 384 });
   chmodSync19(temporary, 384);
   renameSync11(temporary, path);
 }
@@ -89083,7 +89114,7 @@ import {
   readFileSync as readFileSync41,
   renameSync as renameSync12,
   rmSync as rmSync12,
-  writeFileSync as writeFileSync14
+  writeFileSync as writeFileSync13
 } from "node:fs";
 import { randomUUID as randomUUID21 } from "node:crypto";
 import { homedir as homedir49 } from "node:os";
@@ -89299,7 +89330,7 @@ function writeCatalogCache(path, catalog) {
   try {
     mkdirSync36(dirname47(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync14(tempPath, `${JSON.stringify({
+    writeFileSync13(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
@@ -99521,7 +99552,8 @@ function outsideHelpBlockerWords(code) {
 }
 function renderOutsideHelpCard(status, input) {
   const summary = summaryOf(status);
-  const canEdit = input.csrfToken !== undefined;
+  const canEdit = input.csrfToken !== undefined && input.localSession === true;
+  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const parts = [];
@@ -99531,6 +99563,9 @@ function renderOutsideHelpCard(status, input) {
   parts.push(`<p class="ohstate" data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</p>`);
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
+  if (canUnlock) {
+    parts.push(`<form class="ohform" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
   parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div><ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`);
   parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeTitle)}</div>`);
   if (route.state === "not_configured") {
@@ -99552,7 +99587,7 @@ function renderOutsideHelpCard(status, input) {
   }
   parts.push(renderEnable(status, summary, canEdit));
   const config2 = { csrfToken: input.csrfToken ?? "", paths: DASHBOARD_OUTSIDE_HELP_PATHS, copy: { saving: DASHBOARD_OUTSIDE_HELP_COPY.saving, failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed, restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting } };
-  const script = canEdit ? `<script>${outsideHelpClientScript(config2)}</script>` : "";
+  const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config2)}</script>` : "";
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
 }
 function renderReadiness(route) {
@@ -99562,7 +99597,7 @@ function renderReadiness(route) {
   const ready = route.readiness;
   const facts = [
     ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
-    ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
+    ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
     ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
     fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
     ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown
@@ -99642,9 +99677,10 @@ function outsideHelpClientScript(config2) {
       };
     }
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
+    if (kind === 'unlock') return {};
     return { confirm: true };
   }
-  var paths = { enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
   root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
@@ -99655,11 +99691,15 @@ function outsideHelpClientScript(config2) {
       buttons.forEach(function (button) { button.disabled = true; });
       message(form, config.copy.saving, false);
       try {
-        var response = await fetch(paths[kind], {
-          method: 'POST', credentials: 'same-origin', cache: 'no-store',
-          headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
-          body: JSON.stringify(bodyFor(form, kind, event.submitter)),
-        });
+        // The local unlock presents no credential at all: the boundary wants a
+        // loopback browser and nothing else. Every other form carries the CSRF token.
+        var response = await fetch(paths[kind], kind === 'unlock'
+          ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+          : {
+            method: 'POST', credentials: 'same-origin', cache: 'no-store',
+            headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify(bodyFor(form, kind, event.submitter)),
+          });
         var result = {};
         try { result = await response.json(); } catch (error) { result = {}; }
         if (!response.ok || !result.ok) {
@@ -99696,6 +99736,7 @@ var init_outside_help = __esm(() => {
   init_vocabulary();
   init_source_rows();
   DASHBOARD_OUTSIDE_HELP_PATHS = {
+    unlock: "/dashboard/control/session/local",
     enable: "/dashboard/consult",
     route: "/dashboard/consult/route",
     addRoute: "/dashboard/consult/route/add",
@@ -100107,7 +100148,11 @@ function renderOutsideHelpBody(options) {
   if (!status) {
     return `<div class="privacy outside" data-outside-unavailable>${head}<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unavailable)}</p></div>`;
   }
-  return renderOutsideHelpCard(status, { csrfToken, ...options?.basePath === undefined ? {} : { basePath: options.basePath } });
+  return renderOutsideHelpCard(status, {
+    csrfToken,
+    localSession: options?.outsideHelpLocalSession === true,
+    ...options?.basePath === undefined ? {} : { basePath: options.basePath }
+  });
 }
 var init_outside_help2 = __esm(() => {
   init_components();
@@ -100350,6 +100395,18 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return unauthorizedWorkerResponse();
       return dashboardControlLockedResponse();
     }
+    if (isDashboardLocalControlSessionRequest(request)) {
+      if (request.headers.has("Authorization"))
+        return dashboardConsultMacOnlyResponse();
+      if (request.headers.has("X-Forwarded-Proto") || request.headers.has("X-Forwarded-For") || request.headers.has("X-Forwarded-Host")) {
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      }
+      const origin = sameRequestOrigin(request);
+      if (!origin || !isLoopbackOrigin(origin))
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      const minted = mintDashboardControlSession(authToken, origin, now(), "local");
+      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
+    }
     if (isDashboardControlSessionRequest(request)) {
       if (!hasValidWorkerBearerToken(request.headers.get("Authorization"), authToken)) {
         const renewal = authorizeDashboardControlSession(request, authToken, now(), true);
@@ -100373,7 +100430,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
     if (isDashboardQueryTokenRequest(request, authToken)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
       if (authorization.status === "allowed") {
-        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
+        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
       }
       return fetchHandler(request);
@@ -100400,7 +100457,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
     if (isDashboardHtmlNavigationRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), false, true);
       if (authorization.status === "allowed") {
-        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
+        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
       }
       if (authorization.status === "origin_mismatch") {
@@ -100416,8 +100473,12 @@ function withWorkerBearerAuth(fetchHandler, options) {
         if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed(`session:${authorization.sessionId}`)) {
           return remoteAccessToggleLimitedResponse();
         }
-        const proven = isDashboardConsultControlRoute(request) ? withDashboardControlContextHeader(request, authorization.csrfToken) : request;
-        return withRenewedDashboardControlCookie(await fetchHandler(proven), authorization, now());
+        if (isDashboardConsultControlRoute(request)) {
+          if (authorization.grade !== "local")
+            return dashboardConsultMacOnlyResponse();
+          return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
+        }
+        return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
       if (authorization.status === "origin_mismatch" || authorization.status === "csrf_mismatch") {
         return dashboardControlForbiddenResponse(authorization.status);
@@ -100543,6 +100604,17 @@ function dashboardLaunchRefusedResponse(status) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
   });
 }
+function isDashboardLocalControlSessionRequest(request) {
+  return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
+}
+function isLoopbackOrigin(origin) {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
 function isDashboardControlLockRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === "/dashboard/control/session/lock";
 }
@@ -100651,19 +100723,22 @@ function dashboardControlOriginTag(authToken, origin) {
   return hmacTag(authToken, DASHBOARD_CONTROL_ORIGIN_CONTEXT, origin).slice(0, 22);
 }
 function dashboardControlSignature(authToken, parts) {
-  return hmacTag(authToken, DASHBOARD_CONTROL_SIGNATURE_CONTEXT, parts.nonce, String(parts.issuedSeconds), parts.originTag);
+  return hmacTag(authToken, DASHBOARD_CONTROL_SIGNATURE_CONTEXT, parts.nonce, String(parts.issuedSeconds), parts.originTag, parts.grade);
 }
 function dashboardControlCsrfToken(authToken, nonce) {
   return hmacTag(authToken, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
 }
 function encodeDashboardControlSession(parts) {
-  return [parts.nonce, parts.issuedSeconds, parts.originTag, parts.signature].join(".");
+  return [parts.nonce, parts.issuedSeconds, parts.originTag, GRADE_CODES[parts.grade], parts.signature].join(".");
 }
 function decodeDashboardControlSession(value) {
   const fields = value.split(".");
-  if (fields.length !== 4)
+  if (fields.length !== 5)
     return;
-  const [nonce, issued, originTag, signature] = fields;
+  const [nonce, issued, originTag, gradeCode, signature] = fields;
+  const grade = gradeCode === "b" ? "bearer" : gradeCode === "l" ? "local" : undefined;
+  if (!grade)
+    return;
   const issuedSeconds = Number(issued);
   if (!/^[A-Za-z0-9_-]{32}$/.test(nonce))
     return;
@@ -100671,24 +100746,26 @@ function decodeDashboardControlSession(value) {
     return;
   if (!/^[A-Za-z0-9_-]{22}$/.test(originTag) || !/^[A-Za-z0-9_-]{43}$/.test(signature))
     return;
-  return { nonce, issuedSeconds, originTag, signature };
+  return { nonce, issuedSeconds, originTag, grade, signature };
 }
 function dashboardControlExpiresAtMs(parts) {
   return (parts.issuedSeconds + DASHBOARD_CONTROL_SESSION_TTL_SECONDS) * 1000;
 }
-function mintDashboardControlSession(authToken, origin, nowMs) {
+function mintDashboardControlSession(authToken, origin, nowMs, grade = "bearer") {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
     nonce: randomBytes14(24).toString("base64url"),
     issuedSeconds: nowSeconds,
-    originTag: dashboardControlOriginTag(authToken, origin)
+    originTag: dashboardControlOriginTag(authToken, origin),
+    grade
   };
   const parts = { ...unsigned, signature: dashboardControlSignature(authToken, unsigned) };
   return {
     status: "allowed",
     sessionId: encodeDashboardControlSession(parts),
     csrfToken: dashboardControlCsrfToken(authToken, parts.nonce),
-    expiresAtMs: dashboardControlExpiresAtMs(parts)
+    expiresAtMs: dashboardControlExpiresAtMs(parts),
+    grade
   };
 }
 function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf, allowOriginlessNavigation = false) {
@@ -100720,7 +100797,8 @@ function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf
     status: "allowed",
     sessionId: encodeDashboardControlSession(parts),
     csrfToken,
-    expiresAtMs
+    expiresAtMs,
+    grade: parts.grade
   };
 }
 function withRenewedDashboardControlCookie(response, session, nowMs) {
@@ -100775,9 +100853,10 @@ function requestTargetOrigin(request) {
   return forwardedProto === "http" || forwardedProto === "https" ? `${forwardedProto}://${url.host}` : url.origin;
 }
 function withoutDashboardInternalContextHeaders(request) {
-  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER))
+  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER))
     return request;
   request.headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  request.headers.delete(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
   return request;
@@ -100839,8 +100918,10 @@ function normalizeGatewayPublicOrigin(value) {
     return;
   }
 }
-function withDashboardControlContextHeader(request, csrfToken) {
+function withDashboardControlContextHeader(request, csrfToken, grade) {
   request.headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
+  if (grade)
+    request.headers.set(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, grade);
   return request;
 }
 function cookieValue(header, name) {
@@ -100969,7 +101050,7 @@ function optionalEnv(value) {
   const trimmed2 = value?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, GRADE_CODES;
 var init_http = __esm(() => {
   init_worker_auth();
   init_dashboard_launch();
@@ -100984,6 +101065,7 @@ var init_http = __esm(() => {
     "/dashboard/consult/recover",
     "/dashboard/consult/abandon"
   ];
+  GRADE_CODES = { bearer: "b", local: "l" };
 });
 
 // src/workers/dashboard/pages/embedding-ledger.ts
@@ -103051,6 +103133,7 @@ function createEmailSourceWorker(options = {}) {
           const outsideHelp = sourceDashboard.consult && !dashboardUi && dashboardPage === "outside_help" && controlSessionCsrfToken !== undefined ? await sourceDashboard.consult.status().catch(() => {
             return;
           }) : undefined;
+          const outsideHelpLocalSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local";
           const outsideHelpSummary = sourceDashboard.consult && !dashboardUi && dashboardPage === "setup" ? safeOutsideHelpSummary(sourceDashboard.consult) : undefined;
           let modelInstalls;
           try {
@@ -103062,7 +103145,7 @@ function createEmailSourceWorker(options = {}) {
             ...modelInstalls ? { modelInstalls } : {},
             ...sourceDashboard.privacy && privacyShown ? { privacy: privacySummary?.ok ? privacySummary.summary : "unreadable" } : {},
             ...privacyRead?.ok ? { privacySettings: privacyRead.settings } : {},
-            ...outsideHelp ? { outsideHelp } : {},
+            ...outsideHelp ? { outsideHelp, outsideHelpLocalSession } : {},
             ...outsideHelpSummary ? { outsideHelpSummary } : {},
             embeddingRuntime,
             backgroundRuntime,
@@ -103316,7 +103399,7 @@ function createEmailSourceWorker(options = {}) {
           return json({ ok: true, settings: outcome.settings, status_message: "Privacy saved." });
         }
         if (request.method === "POST" && DASHBOARD_CONSULT_CONTROL_PATHS.includes(url.pathname)) {
-          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
             return json({ ok: false, error: { code: "mac_dashboard_only", message: "Outside help can be changed only from the dashboard on this computer, in an unlocked browser." } }, 403);
           }
           if (!sourceDashboard?.consult) {
@@ -106637,7 +106720,7 @@ import {
   rmSync as rmSync13,
   statSync as statSync20,
   statfsSync,
-  writeFileSync as writeFileSync15,
+  writeFileSync as writeFileSync14,
   writeSync as writeSync3
 } from "node:fs";
 import { homedir as homedir53 } from "node:os";
@@ -106861,7 +106944,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync15(join72(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync14(join72(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync13(runtimeDir, { recursive: true, force: true });
     renameSync13(staging, runtimeDir);
@@ -107100,7 +107183,7 @@ function refreshLock(lockPath, token) {
     return;
   try {
     const temporary = `${lockPath}.${process.pid}.tmp`;
-    writeFileSync15(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
+    writeFileSync14(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
     renameSync13(temporary, lockPath);
   } catch {}
 }
@@ -107210,7 +107293,7 @@ class ProgressReporter2 {
     try {
       mkdirSync38(dirname50(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync15(temporary, `${JSON.stringify(this.status)}
+      writeFileSync14(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync13(temporary, this.statusPath);
     } catch {}
@@ -107240,7 +107323,7 @@ var init_install = __esm(() => {
 // src/workers/source-index/built-in-reasoning/server.ts
 import { spawn as spawn5 } from "node:child_process";
 import { randomBytes as randomBytes15 } from "node:crypto";
-import { mkdtempSync as mkdtempSync3, rmSync as rmSync14, writeFileSync as writeFileSync16 } from "node:fs";
+import { mkdtempSync as mkdtempSync3, rmSync as rmSync14, writeFileSync as writeFileSync15 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
 import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir8 } from "node:os";
 import { join as join73 } from "node:path";
@@ -107401,7 +107484,7 @@ function createLlamaServerHandle(launch, options = {}) {
     const tokenFile = join73(tokenDir, "token");
     let spawnedProcess;
     try {
-      writeFileSync16(tokenFile, `${token}
+      writeFileSync15(tokenFile, `${token}
 `, { mode: 384 });
       spawnedProcess = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
         stdio: ["ignore", "ignore", "pipe"],
@@ -123710,18 +123793,23 @@ function createChatGptSetupBackend(options) {
         venice: options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile("venice")),
         local: Object.values(policy.modelProfiles).some((profile) => profile.provider === "local-openai-compatible" && profile.purpose !== "embedding")
       };
-      const next = applyModelChoice(policy, choice, configured);
+      const decided = applyModelChoice(policy, choice, configured);
       let restarting = false;
-      if (next.changed) {
+      if (decided.changed) {
         if (options.sovereignty.source !== "file" || !options.sovereignty.path)
           throw new ModelChoiceRefusal("model_not_configured");
-        writeSovereigntyConfigFile({ config: next.config, path: options.sovereignty.path, force: true });
-        policy = next.config;
-        restarting = options.requestReload();
+        const update = updateSovereigntyConfigFile({
+          path: options.sovereignty.path,
+          patch: (current) => applyModelChoice(current, choice, configured).config
+        });
+        if (!update.ok)
+          throw new ModelChoiceRefusal("model_not_configured");
+        policy = update.config;
+        restarting = update.changed ? options.requestReload() : false;
       }
       const answers = currentAnswerChoice(policy);
       return {
-        changed: next.changed,
+        changed: decided.changed,
         embedding: embeddingIsBuiltIn(policy) ? "built_in" : "custom",
         ...answers ? { answers } : {},
         restarting
@@ -123884,18 +123972,28 @@ function writeConsultSettings(input, location = {}) {
         if (currentRevision !== input.expectedRevision)
           return { ok: false, reason: "revision_conflict", current };
       }
+      let published = false;
       try {
         lease.commit(() => {
           writePrivateFileAtomicSync(path, `${JSON.stringify(candidate)}
-`);
+`, { onPublished: () => {
+            published = true;
+          } });
+          __consultSettingsWriterTestHooks.afterPublish?.(path);
           chmodSync22(path, 384);
         });
       } catch {
-        return { ok: false, reason: "write_failed" };
+        if (!published)
+          return { ok: false, reason: "write_failed" };
+        const actual = readConsultSettings({ path });
+        if (actual.state === "valid" && actual.settings.revision === nextRevision) {
+          return { ok: true, settings: actual.settings, publishedDespiteError: true };
+        }
+        return { ok: false, reason: "write_uncertain", current: actual };
       }
       const written = readConsultSettings({ path });
       if (written.state !== "valid")
-        return { ok: false, reason: "write_failed", current: written };
+        return { ok: false, reason: "write_uncertain", current: written };
       return { ok: true, settings: written.settings };
     }, { acquireTimeoutMs: CONSULT_SETTINGS_LEASE_TIMEOUT_MS });
   } catch (error2) {
@@ -123938,11 +124036,12 @@ function ensureSettingsDirectory(directory) {
     return "directory_custody";
   return "ok";
 }
-var CONSULT_SETTINGS_LEASE_TIMEOUT_MS = 2000;
+var __consultSettingsWriterTestHooks, CONSULT_SETTINGS_LEASE_TIMEOUT_MS = 2000;
 var init_consult_settings_writer = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_consult_settings();
+  __consultSettingsWriterTestHooks = { afterPublish: undefined };
 });
 
 // src/workers/email-source/dashboard-consult.ts
@@ -123959,7 +124058,6 @@ function createDashboardConsultAdapter(options) {
   const statePath = options.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
   const location = options.settingsLocation ?? { env };
   const readiness = options.readiness ?? zkapiConsultReadiness;
-  const recover = options.recoverSession ?? recoverZkapiSession;
   let policy = options.sovereignty.config;
   let restartPending = false;
   const zkapiProfile = () => {
@@ -123969,7 +124067,9 @@ function createDashboardConsultAdapter(options) {
     const [id, profile] = entries[0];
     return { id, profile };
   };
-  const transport = () => resolveZkapiConsultTransport(policy.modelProfiles, (secretRef) => options.resolveSecret(secretRef), { env, statePath });
+  const transport = () => resolveZkapiConsultTransport(policy.modelProfiles, () => {
+    return;
+  }, { env, statePath });
   const fenceHeld = () => {
     try {
       return Object.keys(zkapiOutstandingFences(statePath)).length > 0;
@@ -124020,8 +124120,7 @@ function createDashboardConsultAdapter(options) {
     if (!transportOptions)
       return base;
     try {
-      const { apiKey: _key, ...probe } = transportOptions;
-      const ready = await readiness({ ...probe, apiKeyPresent: transportOptions.apiKey !== undefined, now: () => now() });
+      const ready = await readiness({ ...transportOptions, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
       return {
         ...base,
         readiness: {
@@ -124029,7 +124128,8 @@ function createDashboardConsultAdapter(options) {
           blockers: [...ready.blockers],
           daemonFound: ready.daemonExecutable !== undefined,
           ...ready.daemonVersion ? { daemonVersion: ready.daemonVersion } : {},
-          torFound: ready.tor === "off" || ready.torExecutable !== undefined,
+          torMode: ready.tor,
+          torFound: ready.torExecutable !== undefined,
           apiKeyConfigured: ready.apiKeyConfigured,
           expiry: {
             state: ready.money.expiryEstimate.state,
@@ -124056,12 +124156,16 @@ function createDashboardConsultAdapter(options) {
     }
   };
   const policyWritable = () => options.sovereignty.source === "file" && Boolean(options.sovereignty.path);
-  const writePolicy = (next) => {
+  const writePolicy = (patch) => {
     if (!policyWritable())
       return { ok: false, httpStatus: 409, code: "policy_not_file", message: MESSAGES2.policyNotFile };
-    const validated = validateSovereigntyConfig(next);
-    writeSovereigntyConfigFile({ config: validated, path: options.sovereignty.path, force: true });
-    policy = validated;
+    const update = updateSovereigntyConfigFile({ path: options.sovereignty.path, expect: policy, patch });
+    if (!update.ok) {
+      if (update.reason === "conflict" && update.current)
+        policy = update.current;
+      return update.reason === "conflict" ? { ok: false, httpStatus: 409, code: "policy_changed", message: MESSAGES2.policyChanged } : { ok: false, httpStatus: 500, code: "policy_unreadable", message: MESSAGES2.policyUnreadable };
+    }
+    policy = update.config;
     return;
   };
   const invalid3 = (message, code = "invalid_params") => ({ ok: false, httpStatus: 400, code, message });
@@ -124095,7 +124199,7 @@ function createDashboardConsultAdapter(options) {
       const current = readConsultSettings(location);
       const base = current.state === "valid" ? current.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen = [...base.languages];
-      if (update.languages !== undefined) {
+      if (enabled && update.languages !== undefined) {
         if (!Array.isArray(update.languages) || update.languages.length === 0)
           return invalid3(MESSAGES2.languagesEmpty, "languages_empty");
         if (!update.languages.every((item) => typeof item === "string" && ALL_LANGUAGES.includes(item))) {
@@ -124138,7 +124242,8 @@ function createDashboardConsultAdapter(options) {
       const accepted = new Set(acknowledged);
       if (!ACKNOWLEDGEMENT_IDS.every((id) => accepted.has(id)))
         return invalid3(MESSAGES2.tickAll, "acknowledgements_incomplete");
-      const zkapi = { ...route.profile.zkapi ?? {} };
+      const zkapi = {};
+      const cleared = [];
       zkapi.acknowledgements = { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [...ACKNOWLEDGEMENT_IDS] };
       if (update.funding_date !== undefined && update.funding_date !== null && update.funding_date !== "") {
         if (typeof update.funding_date !== "string" || parseIsoDate(update.funding_date) === undefined)
@@ -124150,18 +124255,25 @@ function createDashboardConsultAdapter(options) {
         if (raw === undefined)
           continue;
         if (raw === null || raw === "") {
-          delete zkapi[key];
+          cleared.push(key);
           continue;
         }
         if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || key === "dailyRequestCap" && !Number.isInteger(raw))
           return invalid3(MESSAGES2.caps, "cap_invalid");
         zkapi[key] = raw;
       }
-      const next = structuredClone(policy);
-      const profile = next.modelProfiles[route.id];
-      profile.zkapi = zkapi;
       try {
-        const refused = writePolicy(next);
+        const refused = writePolicy((current) => {
+          const next = structuredClone(current);
+          const profile = next.modelProfiles[route.id];
+          if (!profile || profile.provider !== "zkapi")
+            throw new OperationError("config_error", "The zkAPI route is no longer in the policy file.");
+          const block = { ...profile.zkapi ?? {}, ...zkapi };
+          for (const key of cleared)
+            delete block[key];
+          profile.zkapi = block;
+          return next;
+        });
         if (refused)
           return refused;
       } catch (error2) {
@@ -124176,18 +124288,23 @@ function createDashboardConsultAdapter(options) {
         return invalid3(MESSAGES2.confirm, "confirmation_required");
       if (zkapiProfile())
         return { ok: false, httpStatus: 409, code: "route_exists", message: MESSAGES2.routeExists };
-      const next = structuredClone(policy);
-      next.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID] = {
-        provider: "zkapi",
-        trust: "standard_cloud",
-        purpose: "consult",
-        baseUrl: ZKAPI_DAEMON_DEFAULT_BASE_URL,
-        model: DASHBOARD_ZKAPI_DEFAULT_MODEL,
-        secretRef: `env:${DASHBOARD_ZKAPI_API_KEY_ENV}`,
-        zkapi: {}
-      };
       try {
-        const refused = writePolicy(next);
+        const refused = writePolicy((current) => {
+          if (Object.values(current.modelProfiles).some((profile) => profile.provider === "zkapi")) {
+            throw new OperationError("config_error", "A zkAPI route is already in the policy file.");
+          }
+          const next = structuredClone(current);
+          next.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID] = {
+            provider: "zkapi",
+            trust: "standard_cloud",
+            purpose: "consult",
+            baseUrl: ZKAPI_DAEMON_DEFAULT_BASE_URL,
+            model: DASHBOARD_ZKAPI_DEFAULT_MODEL,
+            secretRef: `env:${DASHBOARD_ZKAPI_API_KEY_ENV}`,
+            zkapi: {}
+          };
+          return next;
+        });
         if (refused)
           return refused;
       } catch (error2) {
@@ -124214,7 +124331,7 @@ function createDashboardConsultAdapter(options) {
         return { ok: false, httpStatus: 409, code: "no_unresolved_session", message: MESSAGES2.noFence };
       if (!scopes.includes(zkapiFenceScope({ env })))
         return { ok: false, httpStatus: 409, code: "unresolved_session_other_wallet", message: MESSAGES2.otherWallet };
-      const result = await recover(transportOptions);
+      const result = await options.recoverSession(transportOptions, zkapiProfile()?.profile.secretRef);
       const receipt = result.ok ? result.receipt : result.error.receipt;
       if (!result.ok)
         return { ok: false, httpStatus: 502, code: result.error.code, message: MESSAGES2.recoveryFailed };
@@ -124259,6 +124376,8 @@ function writeRefusal(reason, revision) {
       return { ok: false, httpStatus: 400, code: "invalid_params", message: MESSAGES2.languagesEmpty };
     case "write_failed":
       return { ok: false, httpStatus: 500, code: "write_failed", message: MESSAGES2.writeFailed };
+    case "write_uncertain":
+      return { ok: false, httpStatus: 500, code: "write_uncertain", message: MESSAGES2.writeUncertain };
   }
 }
 var DASHBOARD_ZKAPI_PROFILE_ID = "zkapi-consult", DASHBOARD_ZKAPI_API_KEY_ENV = "OLYMPUS_ZKAPI_API_KEY", DASHBOARD_ZKAPI_DEFAULT_MODEL = "openai/gpt-5-mini", ALL_LANGUAGES, ACKNOWLEDGEMENT_IDS, MESSAGES2;
@@ -124269,6 +124388,7 @@ var init_dashboard_consult = __esm(() => {
   init_consult_transport_zkapi();
   init_sovereignty();
   init_zkapi_consult_settings();
+  init_operation_error();
   init_consult_orchestrator();
   ALL_LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
   ACKNOWLEDGEMENT_IDS = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);
@@ -124284,7 +124404,10 @@ var init_dashboard_consult = __esm(() => {
     custody: "The folder ~/.olympus must belong to you alone (owner-only, not a link). Fix its permissions, then try again.",
     busy: "Another change is being written right now. Try again in a moment.",
     writeFailed: "Olympus could not write the settings file. Nothing was changed.",
+    writeUncertain: "Olympus could not confirm whether the settings file changed. Reload the page to see the current setting.",
     policyNotFile: "Your privacy policy is not kept in a file on this computer, so Olympus cannot record this here.",
+    policyChanged: "Your privacy policy file changed since this page loaded. Nothing was written; reload the page and try again.",
+    policyUnreadable: "Your privacy policy file could not be read. Nothing was written.",
     routeExists: "A zkAPI route is already configured.",
     tickAll: "Tick every statement to record your acknowledgement.",
     fundingDate: "Enter the funding date as YYYY-MM-DD, the day the deposit was confirmed.",
@@ -127102,20 +127225,26 @@ async function main() {
     pendingCount: pendingClassificationCount
   });
   const { createDashboardConsultAdapter: createDashboardConsultAdapter2 } = await Promise.resolve().then(() => (init_dashboard_consult(), exports_dashboard_consult));
+  const consultRouteKey = (secretRef) => {
+    if (!secretRef)
+      return;
+    try {
+      return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...readWorkerSetupEnv() ?? {} } })?.trim() || undefined;
+    } catch {
+      return;
+    }
+  };
   const dashboardConsult = createDashboardConsultAdapter2({
     sovereignty: {
       config: sovereigntyEngine.config,
       source: sovereigntyEngine.source,
       ...sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}
     },
-    resolveSecret: (secretRef) => {
-      if (!secretRef)
-        return;
-      try {
-        return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...readWorkerSetupEnv() ?? {} } })?.trim() || undefined;
-      } catch {
-        return;
-      }
+    secretPresent: (secretRef) => consultRouteKey(secretRef) !== undefined,
+    recoverSession: async (route, secretRef) => {
+      const { recoverZkapiSession: recoverZkapiSession2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
+      const apiKey = consultRouteKey(secretRef);
+      return recoverZkapiSession2({ ...route, ...apiKey ? { apiKey } : {} });
     },
     requestReload: () => requestModelReload(),
     env: process.env
@@ -129032,7 +129161,7 @@ import {
   renameSync as renameSync9,
   rmSync as rmSync10,
   statSync as statSync15,
-  writeFileSync as writeFileSync10
+  writeFileSync as writeFileSync9
 } from "node:fs";
 import { tmpdir as tmpdir4 } from "node:os";
 import { basename as basename7, isAbsolute as isAbsolute8, join as join51 } from "node:path";
@@ -129050,7 +129179,7 @@ function prepareWorkerUpgradeArtifact(options) {
   const artifactPath = join51(snapshotDir, "artifact.tgz");
   const descriptor = openSync12(artifactPath, "wx", 384);
   try {
-    writeFileSync10(descriptor, artifactBytes);
+    writeFileSync9(descriptor, artifactBytes);
     fsyncSync4(descriptor);
   } finally {
     closeSync12(descriptor);

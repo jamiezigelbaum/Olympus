@@ -1127,7 +1127,7 @@ async function writePrivateFileAtomic(path, text) {
   }
   await syncDirectory(dirname(path));
 }
-function writePrivateFileAtomicSync(path, text) {
+function writePrivateFileAtomicSync(path, text, options = {}) {
   const temp = temporaryPathFor(path);
   try {
     const descriptor = openSync(temp, "wx", 384);
@@ -1138,6 +1138,7 @@ function writePrivateFileAtomicSync(path, text) {
       closeSync(descriptor);
     }
     renameSync(temp, path);
+    options.onPublished?.();
   } catch (error) {
     try {
       rmSync(temp, { force: true });
@@ -3992,7 +3993,7 @@ var init_manifest = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync10, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync10 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { dirname as dirname8, join as join12 } from "node:path";
 function defaultSovereigntyConfigPath() {
@@ -4626,6 +4627,8 @@ function stringArrayField(value, label) {
 }
 var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
 var init_sovereignty = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
   init_operation_error();
   init_local_model_policy();
   init_config();
@@ -15440,7 +15443,7 @@ function constantTimeStringEqual(actual, expected) {
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname17, join as join22 } from "node:path";
 import { homedir as homedir14 } from "node:os";
 
@@ -15928,7 +15931,7 @@ init_connected_handles();
 // src/core/connect.ts
 init_model_transport();
 init_zkapi_consult_settings();
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname13, join as join16 } from "node:path";
 init_secret_store();
@@ -16038,7 +16041,7 @@ init_file_lease();
 init_zkapi_consult_settings();
 import { spawn, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash6, randomUUID as randomUUID7 } from "node:crypto";
-import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync10, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, realpathSync, rmSync as rmSync3, statSync as statSync10, writeFileSync as writeFileSync5 } from "node:fs";
+import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync10, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, realpathSync, rmSync as rmSync3, statSync as statSync10, writeFileSync as writeFileSync4 } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir as homedir12, tmpdir as tmpdir2 } from "node:os";
 import { delimiter as delimiter4, dirname as dirname15, join as join19, resolve as resolvePath2 } from "node:path";
@@ -16224,7 +16227,7 @@ function defaultZkapiConfinement() {
       wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
       selfTest: async (workDir, env) => {
         const script = join19(workDir, "confinement-self-test.cjs");
-        writeFileSync5(script, SELF_TEST_SCRIPT, { mode: 384 });
+        writeFileSync4(script, SELF_TEST_SCRIPT, { mode: 384 });
         const outside = runSelfTestProbe([process.execPath, script], env);
         const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
         return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
@@ -19027,7 +19030,7 @@ function readIngestionHealthState(path) {
 }
 function writeIngestionHealthState(path, state) {
   mkdirSync9(dirname17(path), { recursive: true });
-  writeFileSync6(path, `${JSON.stringify(state, null, 2)}
+  writeFileSync5(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function ingestionHealthHint(ledger) {
