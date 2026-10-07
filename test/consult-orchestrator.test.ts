@@ -1,0 +1,577 @@
+// The consult orchestrator (src/workers/chatgpt/consult-orchestrator.ts;
+// design docs/design/frontier-consult-lane.md §A.2, §A.3, §A.5.6, §A.7,
+// §A.8; stage C4b) on the real jobs engine, with a fake model, a fake writer
+// and a fake transport session. Nothing here starts a process, reads a
+// settings file or touches a network: the settings are in-memory reads and
+// the transport is a recorder. Includes the design's B5 cases (no dispatch
+// for old panels, stale settings, expired windows or a set latch, each x10)
+// and the precompute-reuse snapshot test.
+
+import { describe, expect, test } from 'bun:test';
+import { privateEvidencePack } from '../src/core/analyst-built-in.ts';
+import { consultWriterContextFromPack, evaluateConsultRequest } from '../src/core/consult-gate.ts';
+import { DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, type ConsultJobPolicy, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
+import type { ZkapiConsultReply, ZkapiConsultSession, ZkapiOpenControl, ZkapiOpenSessionResult, ZkapiSendControl } from '../src/core/consult-transport-zkapi.ts';
+import type { ConsultWriterInput, ConsultWriterOutcome } from '../src/core/consult-writer.ts';
+import {
+  CONSULT_DISPATCH_WINDOW_MS,
+  CONSULT_RECENT_ACTIVITY_MS,
+  createConsultOrchestrator,
+  resolveZkapiConsultTransport,
+  type ConsultOrchestrator,
+} from '../src/workers/chatgpt/consult-orchestrator.ts';
+import type { PrivateAnswerEnvelopeV1, PrivateAnswerModel, PrivateAnswerModelResult } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
+import { PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS, PrivateAnswerJobs, type ClaimResponse } from '../src/workers/chatgpt/private-answer-jobs.ts';
+
+const INSTALL = 'f'.repeat(32);
+const QUESTION = 'When does my lease end?';
+const ANSWER = 'Your lease ends in May.';
+const GAPS = ['The deposit terms are not stated.'];
+const EVIDENCE = [{ title: 'Lease', trust_domain: 'secure_local', chunks: ['The lease for the flat ends in May and the landlord holds the deposit.'] }];
+const PACK = privateEvidencePack(QUESTION, [{ id: 'lease-1', title: 'Lease', text: EVIDENCE[0]!.chunks[0]! }]);
+const CLEAN_QUESTION = 'How are rental deposit disputes usually resolved between tenants and landlords?';
+const COPIED_QUESTION = 'Does the lease for the flat ends in May and the landlord holds the deposit?';
+const OUTSIDE_TEXT = 'Deposit disputes are usually settled through a scheme or a small claims process.';
+
+const SETTINGS_ON: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true } };
+const ON: ConsultJobPolicy = bindConsultJobPolicy(SETTINGS_ON);
+const OFF: ConsultJobPolicy = bindConsultJobPolicy({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
+
+type Verdict = { sufficient: boolean | undefined; noAnswer: boolean };
+
+function model(verdict: Verdict | 'none' = { sufficient: false, noAnswer: false }, calls = { n: 0 }): PrivateAnswerModel {
+  return {
+    status: () => ({ state: 'ready' }),
+    answerPrivately: async (): Promise<PrivateAnswerModelResult> => {
+      calls.n += 1;
+      return {
+        answer: ANSWER,
+        citations: [{ title: 'Lease', source: 'Dropbox' }],
+        unanswered: [...GAPS],
+        ...(verdict === 'none' ? {} : { consult: { verdict, pack: PACK } }),
+      };
+    },
+  };
+}
+
+interface FakeSession {
+  sends: Array<{ question: string; control: ZkapiSendControl }>;
+  cancelled: number;
+  authorizeResults: boolean[];
+  session: ZkapiConsultSession;
+}
+
+interface Harness {
+  jobs: PrivateAnswerJobs;
+  orchestrator: ConsultOrchestrator;
+  clock: { now: number };
+  settings: { read: ConsultSettingsRead };
+  eligible: { refuse: boolean };
+  writer: { calls: ConsultWriterInput[]; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
+  transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy'; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; reply: 'reply' | 'failed' };
+  logs: string[];
+  calls: { n: number };
+}
+
+function harness(options: {
+  policy?: ConsultJobPolicy;
+  verdict?: Verdict | 'none';
+  writerOutcome?: ConsultWriterOutcome;
+  followUpWindowMs?: number;
+  completionTimeoutMs?: number;
+} = {}): Harness {
+  const clock = { now: 1_000_000 };
+  const settings = { read: SETTINGS_ON };
+  const eligible = { refuse: false };
+  const logs: string[] = [];
+  const calls = { n: 0 };
+  const writer: Harness['writer'] = {
+    calls: [],
+    kills: [],
+    outcome: options.writerOutcome ?? { kind: 'questions', questions: [CLEAN_QUESTION], promptTokens: 900, ms: 10 },
+    releases: [],
+    /** Every writer call waits until releaseAll(). */
+    holdAll() {
+      writer.hold = () => new Promise<void>((resolve) => {
+        writer.releases.push(resolve);
+      });
+    },
+    releaseAll() {
+      for (const release of writer.releases.splice(0)) release();
+    },
+  };
+  const transport: Harness['transport'] = { opens: [], result: 'ok', sessions: [], reply: 'reply' };
+  let orchestrator!: ConsultOrchestrator;
+  const jobs = new PrivateAnswerJobs({
+    eligible: async (items) => items.map(() => !eligible.refuse),
+    model: () => model(options.verdict, calls),
+    installId: () => INSTALL,
+    now: () => clock.now,
+    log: () => {},
+    audit: () => {},
+    claimHoldMs: 0,
+    consultPolicy: () => options.policy ?? ON,
+    ...(options.followUpWindowMs !== undefined ? { followUpWindowMs: options.followUpWindowMs } : {}),
+    onFirstDelivered: (jobId) => orchestrator.onFirstDelivered(jobId),
+    onAnswerActivity: () => orchestrator.onFreshAnswer(),
+  });
+  orchestrator = createConsultOrchestrator({
+    jobs,
+    eligible: async (items) => items.map(() => !eligible.refuse),
+    settings: () => settings.read,
+    now: () => clock.now,
+    log: (line) => logs.push(line),
+    completionTimeoutMs: () => options.completionTimeoutMs ?? 6 * 60_000,
+    writer: async (input, control) => {
+      writer.calls.push(input);
+      writer.kills.push(control.kill);
+      if (writer.hold) await writer.hold();
+      if (control.kill.aborted) return { kind: 'killed', reason: 'fresh_answer' };
+      return writer.outcome;
+    },
+    openSession: async (control): Promise<ZkapiOpenSessionResult> => {
+      transport.opens.push(control);
+      if (transport.result === 'busy') {
+        return { ok: false, error: { code: 'busy', message: 'Another consult is running.', outcome: 'not_sent', networkIdentity: 'not_verified' } };
+      }
+      const fake: FakeSession = { sends: [], cancelled: 0, authorizeResults: [], session: undefined as unknown as ZkapiConsultSession };
+      let state: ZkapiConsultSession['state'] = 'ready';
+      let finish!: (value: Awaited<ZkapiConsultSession['finished']>) => void;
+      const finished = new Promise<Awaited<ZkapiConsultSession['finished']>>((resolve) => {
+        finish = resolve;
+      });
+      fake.session = {
+        get state() {
+          return state;
+        },
+        async send(question, sendControl = {}): Promise<ZkapiConsultReply> {
+          fake.sends.push({ question, control: sendControl });
+          state = 'authorizing';
+          if (transport.beforeAuthorize) await transport.beforeAuthorize();
+          const ok = sendControl.authorize ? await sendControl.authorize(new AbortController().signal) : true;
+          fake.authorizeResults.push(ok);
+          if (!ok) {
+            state = 'cancelled';
+            const error = { code: 'authorization_refused' as const, message: 'refused', outcome: 'not_sent' as const, networkIdentity: 'not_verified' as const };
+            finish({ ok: false, error });
+            return { kind: 'failed', error };
+          }
+          state = 'dispatched';
+          if (transport.reply === 'failed') {
+            const error = { code: 'daemon_error' as const, message: 'failed', outcome: 'sent_failed' as const, networkIdentity: 'hidden' as const };
+            finish({ ok: false, error });
+            return { kind: 'failed', error };
+          }
+          state = 'replied';
+          const receipt = {} as ZkapiConsultReply extends { receipt: infer R } ? R : never;
+          queueMicrotask(() => finish({ ok: true, text: OUTSIDE_TEXT, routeLabel: 'zkAPI via Tor', networkIdentity: 'hidden', receipt: receipt as never, elapsedMs: 5 }));
+          return { kind: 'reply', text: OUTSIDE_TEXT, routeLabel: 'zkAPI via Tor', networkIdentity: 'hidden', receipt: receipt as never, elapsedMs: 5 };
+        },
+        cancel() {
+          fake.cancelled += 1;
+          if (state === 'ready' || state === 'authorizing') state = 'cancelled';
+        },
+        finished,
+      };
+      transport.sessions.push(fake);
+      return { ok: true, session: fake.session };
+    },
+  });
+  return { jobs, orchestrator, clock, settings, eligible, writer, transport, logs, calls };
+}
+
+async function settled(jobs: PrivateAnswerJobs, ms = 10_000): Promise<void> {
+  const live = (jobs as unknown as { jobs: Map<string, { claimKey?: string; outcome?: unknown }> }).jobs;
+  const quiet = () => jobs.pendingAnalyses === 0 && [...live.values()].every((job) => job.claimKey === undefined || job.outcome !== undefined);
+  const deadline = Date.now() + ms;
+  while (!quiet()) {
+    if (Date.now() > deadline) throw new Error('private answer jobs did not settle');
+    await Bun.sleep(2);
+  }
+  await Bun.sleep(0);
+}
+
+function begin(h: Harness, question = QUESTION): string {
+  return h.jobs.begin({ question, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, caller: question }).jobId!;
+}
+
+/** Claims and waits for first delivery; returns the first envelope response. */
+async function deliver(h: Harness, jobId: string, panel: Awaited<ReturnType<typeof generatePanelKeyPair>>, cap: 1 | 2 = 2): Promise<ClaimResponse> {
+  const first = await h.jobs.claim(jobId, panel.publicKey, cap);
+  expect(first.status).toBe(202);
+  await settled(h.jobs);
+  return h.jobs.claim(jobId, panel.publicKey, cap);
+}
+
+async function envelope(jobId: string, panel: Awaited<ReturnType<typeof generatePanelKeyPair>>, response: ClaimResponse): Promise<PrivateAnswerEnvelopeV1> {
+  expect(response.status).toBe(200);
+  return JSON.parse(await openPrivateAnswer(jobId, panel.privateKey, response.body as unknown as SealedPrivateAnswer)) as PrivateAnswerEnvelopeV1;
+}
+
+/** One full consult: begin, deliver (the trigger), wait for the orchestrator. */
+async function consult(h: Harness, cap: 1 | 2 = 2) {
+  const jobId = begin(h);
+  const panel = await generatePanelKeyPair();
+  const first = await deliver(h, jobId, panel, cap);
+  await h.orchestrator.idle();
+  return { jobId, panel, first };
+}
+
+describe('the gate fixtures behave as the tests assume', () => {
+  test('the clean question passes and the copied one is refused against the snapshot pack', () => {
+    const context = consultWriterContextFromPack(PACK, { writerVisibleTexts: [QUESTION, ANSWER, ...GAPS] });
+    expect(evaluateConsultRequest([CLEAN_QUESTION], context, {}, {}, { languages: ['en'] })).toEqual({ decision: 'pass', reasons: [] });
+    expect(evaluateConsultRequest([COPIED_QUESTION], context, {}, {}, { languages: ['en'] }).decision).toBe('refuse');
+  });
+});
+
+describe('trigger and the full path', () => {
+  test('after first delivery an insufficient answer with gaps schedules one consult: pending, writer, gate, warm session, authorized send, appended block', async () => {
+    const h = harness();
+    const { jobId, panel, first } = await consult(h);
+    // The first envelope was sealed before the trigger ran (first delivery is
+    // the first `ready` actually returned), so it reads idle at revision 1.
+    const initial = await envelope(jobId, panel, first);
+    expect(initial.outside).toEqual({ state: 'idle' });
+    expect(initial.rev).toBe(1);
+    // The writer saw the question, the answer and the gaps only.
+    expect(h.writer.calls).toEqual([{ question: QUESTION, answer: ANSWER, gaps: GAPS }]);
+    // The session opened with a cancel signal and a deadline while the writer ran, and sent once with final authorization.
+    expect(h.transport.opens.length).toBe(1);
+    expect(h.transport.opens[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(h.transport.opens[0]!.deadlineMs).toBeGreaterThan(0);
+    const session = h.transport.sessions[0]!;
+    expect(session.sends.map((send) => send.question)).toEqual([CLEAN_QUESTION]);
+    expect(session.sends[0]!.control.deadlineMs).toBeGreaterThan(0);
+    expect(session.authorizeResults).toEqual([true]);
+    expect(session.cancelled).toBe(0);
+    // The block is appended, fitted, with the question and the route label; the next envelope carries it.
+    const next = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(next.outside).toEqual({ state: 'appended', text: OUTSIDE_TEXT, question: CLEAN_QUESTION, route: 'zkAPI via Tor' });
+    expect(next.answer).toBe(ANSWER);
+    expect(next.unanswered).toEqual(GAPS);
+    // The snapshot is gone, the question is remembered for the repeat check, and the log carries codes only.
+    expect(h.jobs.consultSnapshot(jobId)).toBeUndefined();
+    expect(h.orchestrator.recentQuestions).toEqual([CLEAN_QUESTION]);
+    expect(h.logs.some((line) => line.startsWith('[consult] outcome=appended'))).toBe(true);
+    for (const line of h.logs) {
+      expect(line).not.toContain(CLEAN_QUESTION);
+      expect(line).not.toContain(OUTSIDE_TEXT);
+      expect(line).not.toContain(ANSWER);
+    }
+  });
+
+  test('negative triggers: outside help off, an old panel, a sufficient answer without gaps, "these items do not answer", or no verdict metadata start nothing', async () => {
+    for (const [label, h, cap] of [
+      ['off', harness({ policy: OFF }), 2],
+      ['old panel', harness(), 1],
+      ['sufficient', harness({ verdict: { sufficient: true, noAnswer: false } }), 2],
+      ['no answer', harness({ verdict: { sufficient: false, noAnswer: true } }), 2],
+      ['no metadata', harness({ verdict: 'none' }), 2],
+    ] as const) {
+      const sufficientModel = label === 'sufficient';
+      // A sufficient answer carries no gaps (cleanUnanswered drops them); the fake model always lists one, so strip it here.
+      if (sufficientModel) {
+        (h.jobs as unknown as { options: { model: () => PrivateAnswerModel } }).options.model = () => ({
+          status: () => ({ state: 'ready' }),
+          answerPrivately: async () => ({ answer: ANSWER, citations: [], unanswered: [], consult: { verdict: { sufficient: true, noAnswer: false }, pack: PACK } }),
+        });
+      }
+      await consult(h, cap);
+      expect({ label, writers: h.writer.calls.length, opens: h.transport.opens.length }).toEqual({ label, writers: 0, opens: 0 });
+    }
+  });
+
+  test('a sufficient answer that still lists gaps consults (gaps count); an unmarked answer with gaps consults too', async () => {
+    const withGaps = harness({ verdict: { sufficient: true, noAnswer: false } });
+    await consult(withGaps);
+    expect(withGaps.writer.calls.length).toBe(1);
+    const unmarked = harness({ verdict: { sufficient: undefined, noAnswer: false } });
+    await consult(unmarked);
+    expect(unmarked.writer.calls.length).toBe(1);
+  });
+
+  test('no delivery room: a follow-up window that cannot hold the writer, the completion timeout and the margin starts nothing', async () => {
+    // 6 min timeout + 2 min margin + 60 s writer = 9 min; an 8-minute window is too short.
+    const h = harness({ followUpWindowMs: 8 * 60_000 });
+    const { jobId, panel, first } = await consult(h);
+    expect(h.writer.calls.length).toBe(0);
+    expect(h.transport.opens.length).toBe(0);
+    expect((await envelope(jobId, panel, first)).outside).toEqual({ state: 'idle' });
+    const roomy = harness({ followUpWindowMs: 10 * 60_000 });
+    await consult(roomy);
+    expect(roomy.writer.calls.length).toBe(1);
+  });
+});
+
+describe('the snapshot', () => {
+  test('is deep-frozen, the same object on every read, holds exactly the pack, question, answer, gaps, verdict and item identities, and is dropped five minutes after first delivery', async () => {
+    const h = harness();
+    // Hold the writer so the snapshot can be inspected while the consult is pending.
+    h.writer.holdAll();
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    await deliver(h, jobId, panel);
+    const snapshot = h.jobs.consultSnapshot(jobId)!;
+    expect(snapshot).toBeDefined();
+    expect(h.jobs.consultSnapshot(jobId)).toBe(snapshot);
+    expect(snapshot.question).toBe(QUESTION);
+    expect(snapshot.answer).toBe(ANSWER);
+    expect(snapshot.gaps).toEqual(GAPS);
+    expect(snapshot.verdict).toEqual({ sufficient: false, noAnswer: false });
+    expect(snapshot.pack.candidates[0]!.chunks).toEqual(PACK.candidates[0]!.chunks);
+    expect(Object.keys(snapshot).sort()).toEqual(['answer', 'gaps', 'items', 'pack', 'question', 'verdict']);
+    // Items are identities only: no title or chunk text.
+    expect(JSON.stringify(snapshot.items)).not.toContain('Lease');
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.pack)).toBe(true);
+    expect(Object.isFrozen(snapshot.pack.candidates[0]!.chunks)).toBe(true);
+    expect(() => {
+      (snapshot as { question: string }).question = 'changed';
+    }).toThrow();
+    expect(() => {
+      (snapshot.pack.candidates[0]!.chunks as string[]).push('x');
+    }).toThrow();
+    // Retention: at most five minutes after first delivery, whatever the orchestrator does.
+    h.clock.now += PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS - 1;
+    expect(h.jobs.consultSnapshot(jobId)).toBe(snapshot);
+    h.clock.now += 1;
+    expect(h.jobs.consultSnapshot(jobId)).toBeUndefined();
+    h.writer.releaseAll();
+    await h.orchestrator.idle();
+  });
+
+  test('precompute reuse: two searches with the identical question share one analysis, and each job\'s snapshot carries that search-time pack', async () => {
+    const h = harness();
+    h.writer.holdAll();
+    const a = begin(h);
+    const b = h.jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, caller: 'other' }).jobId!;
+    const panelA = await generatePanelKeyPair();
+    const panelB = await generatePanelKeyPair();
+    await deliver(h, a, panelA);
+    await deliver(h, b, panelB);
+    expect(h.calls.n).toBe(1);
+    const snapA = h.jobs.consultSnapshot(a)!;
+    const snapB = h.jobs.consultSnapshot(b)!;
+    expect(snapA).toBeDefined();
+    expect(snapB).toBeDefined();
+    expect(snapA).not.toBe(snapB);
+    // The same frozen search-time pack feeds both.
+    expect(snapA.pack).toBe(snapB.pack);
+    h.writer.releaseAll();
+    await h.orchestrator.idle();
+  });
+
+  test('E1: an item the answer read that is no longer eligible before the writer runs ends the consult with the snapshot dropped and no writer call', async () => {
+    const h = harness();
+    // Deliver first (the guard must vouch at delivery), then revoke before the orchestrator's E1 check.
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    h.writer.hold = async () => {};
+    // Make the orchestrator see a refusal at E1 by refusing from the first-delivery hook onwards.
+    const first = await h.jobs.claim(jobId, panel.publicKey, 2);
+    expect(first.status).toBe(202);
+    await settled(h.jobs);
+    const before = h.eligible.refuse;
+    const original = h.orchestrator.onFirstDelivered.bind(h.orchestrator);
+    (h.jobs as unknown as { options: { onFirstDelivered: (id: string) => void } }).options.onFirstDelivered = (id) => {
+      h.eligible.refuse = true;
+      original(id);
+    };
+    await h.jobs.claim(jobId, panel.publicKey, 2);
+    await h.orchestrator.idle();
+    h.eligible.refuse = before;
+    expect(h.writer.calls.length).toBe(0);
+    expect(h.jobs.consultSnapshot(jobId)).toBeUndefined();
+    expect(h.logs.some((line) => line.includes('outcome=ineligible'))).toBe(true);
+  });
+});
+
+describe('writer outcomes and the gate', () => {
+  test('a gate refusal is silent: the session is cancelled, nothing is sent, the block reads idle and the log carries no text', async () => {
+    const h = harness({ writerOutcome: { kind: 'questions', questions: [COPIED_QUESTION], promptTokens: 900, ms: 10 } });
+    const { jobId, panel } = await consult(h);
+    expect(h.transport.sessions[0]!.sends).toEqual([]);
+    expect(h.transport.sessions[0]!.cancelled).toBe(1);
+    expect(h.transport.opens[0]!.signal!.aborted).toBe(true);
+    expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+    expect(h.logs.some((line) => line.startsWith('[consult] outcome=gate_refused'))).toBe(true);
+    for (const line of h.logs) expect(line).not.toContain('lease');
+    expect(h.orchestrator.recentQuestions).toEqual([]);
+  });
+
+  test('a skipped, declined, killed or failed writer ends the consult without a send', async () => {
+    for (const outcome of [
+      { kind: 'skipped', reason: 'memory_low' },
+      { kind: 'skipped', reason: 'prompt_too_long' },
+      { kind: 'declined', promptTokens: 100, ms: 5 },
+      { kind: 'killed', reason: 'deadline' },
+      { kind: 'failed', reason: 'named_entity' },
+    ] as const satisfies readonly ConsultWriterOutcome[]) {
+      const h = harness({ writerOutcome: outcome });
+      const { jobId, panel } = await consult(h);
+      expect({ outcome, sends: h.transport.sessions[0]?.sends ?? [], cancelled: h.transport.sessions[0]?.cancelled }).toEqual({ outcome, sends: [], cancelled: 1 });
+      expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+      expect(h.jobs.consultSnapshot(jobId)).toBeUndefined();
+    }
+  });
+
+  test('a fresh private answer while the writer runs kills it: the consult ends with the block idle', async () => {
+    const h = harness();
+    h.writer.holdAll();
+    const { jobId, panel } = await (async () => {
+      const id = begin(h);
+      const key = await generatePanelKeyPair();
+      await deliver(h, id, key);
+      return { jobId: id, panel: key };
+    })();
+    expect(h.writer.calls.length).toBe(1);
+    expect(h.writer.kills[0]!.aborted).toBe(false);
+    // Another search arrives: its analysis starts, which is answer activity.
+    begin(h, 'What does the garden bylaw say?');
+    expect(h.writer.kills[0]!.aborted).toBe(true);
+    h.writer.releaseAll();
+    await h.orchestrator.idle();
+    await settled(h.jobs);
+    expect(h.transport.sessions[0]!.sends).toEqual([]);
+    expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+    expect(h.logs.some((line) => line.includes('outcome=writer_killed code=fresh_answer'))).toBe(true);
+  });
+});
+
+describe('transport and dispatch', () => {
+  test('a busy transport skips the consult and never queues it', async () => {
+    const h = harness();
+    h.transport.result = 'busy';
+    const { jobId, panel } = await consult(h);
+    expect(h.transport.opens.length).toBe(1);
+    expect(h.transport.sessions.length).toBe(0);
+    expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+    expect(h.logs.some((line) => line.includes('outcome=transport_unavailable code=busy'))).toBe(true);
+  });
+
+  test('a failed completion marks the consult failed: the block reads idle and the panel shows nothing more', async () => {
+    const h = harness();
+    h.transport.reply = 'failed';
+    const { jobId, panel } = await consult(h);
+    expect(h.transport.sessions[0]!.authorizeResults).toEqual([true]);
+    expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+    expect(h.logs.some((line) => line.includes('outcome=reply_failed code=daemon_error'))).toBe(true);
+    expect(h.orchestrator.recentQuestions).toEqual([]);
+  });
+
+  test('the latch: one consult per job; a second trigger is a no-op and the latch cannot be taken twice', async () => {
+    const h = harness();
+    const { jobId } = await consult(h);
+    h.orchestrator.onFirstDelivered(jobId);
+    await h.orchestrator.idle();
+    expect(h.writer.calls.length).toBe(1);
+    expect(h.transport.sessions.length).toBe(1);
+    expect(h.jobs.takeConsultLatch(jobId)).toBe(false);
+  });
+
+  test('final authorization refuses when the panel has not collected within 75 s, or the dispatch window has passed', async () => {
+    for (const advance of [CONSULT_RECENT_ACTIVITY_MS + 1, CONSULT_DISPATCH_WINDOW_MS + 1]) {
+      const h = harness();
+      h.transport.beforeAuthorize = async () => {
+        h.clock.now += advance;
+      };
+      const { jobId, panel } = await consult(h);
+      expect(h.transport.sessions[0]!.authorizeResults).toEqual([false]);
+      expect(h.logs.some((line) => line.includes('outcome=authorization_refused'))).toBe(true);
+      // The block never stays pending once its consult is over.
+      expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+    }
+  });
+
+  test('final authorization re-checks eligibility (E2): a revoked item refuses the dispatch', async () => {
+    const h = harness();
+    h.transport.beforeAuthorize = async () => {
+      h.eligible.refuse = true;
+    };
+    await consult(h);
+    expect(h.transport.sessions[0]!.authorizeResults).toEqual([false]);
+  });
+});
+
+describe('B5: no dispatch for old panels, stale settings, expired windows or a set latch (each x10)', () => {
+  test('stale settings: a revision change between the trigger and the send refuses inside final authorization, nothing dispatched', async () => {
+    for (let round = 0; round < 10; round += 1) {
+      const h = harness();
+      h.transport.beforeAuthorize = async () => {
+        h.settings.read = { state: 'valid', settings: { ...SETTINGS_ON.settings, revision: 8 } };
+      };
+      await consult(h);
+      expect(h.transport.sessions[0]!.authorizeResults).toEqual([false]);
+      expect(h.orchestrator.recentQuestions).toEqual([]);
+    }
+  });
+
+  test('settings turned off, or the file gone, between the writer and the gate: no session is used and nothing is sent', async () => {
+    for (let round = 0; round < 10; round += 1) {
+      const h = harness();
+      h.writer.holdAll();
+      const jobId = begin(h);
+      const panel = await generatePanelKeyPair();
+      await deliver(h, jobId, panel);
+      h.settings.read = round % 2 === 0
+        ? { state: 'valid', settings: { ...SETTINGS_ON.settings, enabled: false } }
+        : { state: 'absent', settings: DEFAULT_CONSULT_SETTINGS };
+      h.writer.releaseAll();
+      await h.orchestrator.idle();
+      expect(h.transport.sessions[0]!.sends).toEqual([]);
+      expect(h.transport.sessions[0]!.cancelled).toBe(1);
+    }
+  });
+
+  test('old panels: capability 1 never dispatches', async () => {
+    for (let round = 0; round < 10; round += 1) {
+      const h = harness();
+      await consult(h, 1);
+      expect(h.transport.opens.length).toBe(0);
+    }
+  });
+
+  test('expired window: a clock past the dispatch window at authorization never dispatches', async () => {
+    for (let round = 0; round < 10; round += 1) {
+      const h = harness();
+      h.transport.beforeAuthorize = async () => {
+        h.clock.now += CONSULT_DISPATCH_WINDOW_MS + 1;
+      };
+      await consult(h);
+      expect(h.transport.sessions[0]!.authorizeResults).toEqual([false]);
+    }
+  });
+
+  test('a set latch: a latch taken before final authorization refuses the dispatch', async () => {
+    for (let round = 0; round < 10; round += 1) {
+      const h = harness();
+      let jobId: string | undefined;
+      h.transport.beforeAuthorize = async () => {
+        expect(h.jobs.takeConsultLatch(jobId!)).toBe(true);
+      };
+      const id = begin(h);
+      jobId = id;
+      const panel = await generatePanelKeyPair();
+      await deliver(h, id, panel);
+      await h.orchestrator.idle();
+      expect(h.transport.sessions[0]!.authorizeResults).toEqual([false]);
+    }
+  });
+});
+
+describe('the zkAPI route from the sovereignty profiles', () => {
+  test('exactly one zkapi profile with settings and a base URL gives transport options with the resolved key; none or two give undefined', () => {
+    const zkapi = { tor: 'required', timeoutMs: 360_000 } as unknown as NonNullable<Parameters<typeof resolveZkapiConsultTransport>[0][string]['zkapi']>;
+    const one = resolveZkapiConsultTransport(
+      { a: { provider: 'openai', baseUrl: 'https://x' }, z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', secretRef: 'env:K', model: 'openai/gpt-5-mini', zkapi } },
+      (ref) => (ref === 'env:K' ? 'key' : undefined),
+      { statePath: '/tmp/state.json' },
+    );
+    expect(one).toEqual({ baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini', apiKey: 'key', settings: zkapi, statePath: '/tmp/state.json' });
+    expect(resolveZkapiConsultTransport({ a: { provider: 'openai' } }, () => undefined)).toBeUndefined();
+    expect(resolveZkapiConsultTransport({ z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', zkapi }, y: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8788/v1', zkapi } }, () => undefined)).toBeUndefined();
+    expect(resolveZkapiConsultTransport({ z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', zkapi } }, () => { throw new Error('no store'); })).toMatchObject({ baseUrl: 'http://127.0.0.1:8787/v1' });
+  });
+});

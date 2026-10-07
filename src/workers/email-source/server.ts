@@ -4391,6 +4391,13 @@ export async function main(): Promise<void> {
       return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider]!(locator) : undefined;
     },
   });
+  // The consult orchestrator (stage C4b; consult-orchestrator.ts): after a
+  // follow-up job's first delivery it may write one outside question on the
+  // writer's own model server, pass it through the outbound gate and send it
+  // through the configured zkAPI route. Bound late: the jobs engine calls
+  // its hooks. No user-facing path enables outside help yet (C5), so every
+  // job binds it off and nothing here is triggered until one lands.
+  let consultOrchestrator: import('../chatgpt/consult-orchestrator.ts').ConsultOrchestrator | undefined;
   const privateAnswers = new PrivateAnswerJobs({
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
@@ -4399,6 +4406,8 @@ export async function main(): Promise<void> {
     // (~/.olympus/consult.json, read at every use, never cached): its
     // lifetime and whether a capability-2 panel enters follow-up collection.
     consultPolicy: () => bindConsultJobPolicy(readConsultSettings()),
+    onFirstDelivered: (jobId) => consultOrchestrator?.onFirstDelivered(jobId),
+    onAnswerActivity: () => consultOrchestrator?.onFreshAnswer(),
     // While an analysis runs (from the search) and from a claim to
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
@@ -4421,6 +4430,54 @@ export async function main(): Promise<void> {
   });
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30_000);
   privateAnswerSweep.unref?.();
+  {
+    const { createConsultOrchestrator, resolveZkapiConsultTransport } = await import('../chatgpt/consult-orchestrator.ts');
+    const { createConsultWriterServer, defaultConsultMemoryProbe, runConsultWriter } = await import('../../core/consult-writer.ts');
+    const { openZkapiConsultSession } = await import('../../core/consult-transport-zkapi.ts');
+    type WriterServer = import('../../core/consult-writer.ts').ConsultWriterServer;
+    // The writer's own llama-server on the answer model's verified files,
+    // created once those files are installed in this process; started on
+    // demand and killed after each call (SIGKILL; the answer server is never
+    // touched). The memory rule decides before every start.
+    let writerServer: WriterServer | undefined;
+    const writerServerFor = (): WriterServer | undefined => {
+      if (writerServer) return writerServer;
+      const runtime = workerBuiltInModel?.model.installedRuntime?.();
+      if (!runtime) return undefined;
+      writerServer = createConsultWriterServer(runtime, { env: process.env });
+      return writerServer;
+    };
+    const memory = defaultConsultMemoryProbe();
+    // The zkAPI route: the one `zkapi` sovereignty profile, if any. Without
+    // one the transport is unavailable and no consult is sent.
+    const transport = () => resolveZkapiConsultTransport(
+      sovereigntyEngine.config.modelProfiles,
+      (secretRef) => resolveSecretRefValueSync(secretRef, { env: process.env }),
+      { env: process.env },
+    );
+    consultOrchestrator = createConsultOrchestrator({
+      jobs: privateAnswers,
+      eligible: privateEvidenceEligible,
+      settings: () => readConsultSettings(),
+      writer: (input, control) => runConsultWriter(input, {
+        server: writerServerFor(),
+        memory,
+        kill: control.kill,
+        deadlineMs: control.deadlineMs,
+      }),
+      openSession: async (control) => {
+        const route = transport();
+        if (!route) {
+          return {
+            ok: false,
+            error: { code: 'transport_failed', message: 'No zkAPI consult route is configured.', outcome: 'not_sent', networkIdentity: 'not_verified' },
+          };
+        }
+        return openZkapiConsultSession(route, control);
+      },
+      completionTimeoutMs: () => transport()?.settings.timeoutMs ?? 6 * 60_000,
+    });
+  }
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,
