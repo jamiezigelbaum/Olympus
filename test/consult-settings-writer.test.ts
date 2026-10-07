@@ -51,6 +51,7 @@ const UPDATE: ConsultSettingsWriteInput = {
   languages: ['en', 'pt-BR'],
   domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS },
   strict: false,
+  level: 'unnamed',
   expectedRevision: 0,
 };
 
@@ -63,15 +64,24 @@ describe('writeConsultSettings: the happy path', () => {
     const home = tempHome();
     const env = { HOME: home };
     const result = writeConsultSettings(UPDATE, { env });
-    expect(result).toEqual({ ok: true, settings: { v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: UPDATE.domains, strict: false } });
+    expect(result).toEqual({ ok: true, settings: { v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: UPDATE.domains, strict: false, level: 'unnamed' } });
     expect(statSync(join(home, '.olympus')).mode & 0o777).toBe(0o700);
     expect(statSync(settingsFile(home)).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(readFileSync(settingsFile(home), 'utf8'))).toEqual({ v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: UPDATE.domains, strict: false });
+    expect(JSON.parse(readFileSync(settingsFile(home), 'utf8'))).toEqual({ v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: UPDATE.domains, strict: false, level: 'unnamed' });
     const read = readConsultSettings({ env });
     expect(read.state).toBe('valid');
     expect(read.settings.enabled).toBe(true);
     // No temporary file or lock is left behind.
     expect(readdirSync(join(home, '.olympus'))).toEqual(['consult.json']);
+  });
+
+  test('the level is always written, so the file never relies on the reader\'s default; an invalid level writes nothing', () => {
+    const home = tempHome();
+    const env = { HOME: home };
+    expect(writeConsultSettings({ ...UPDATE, level: 'general' }, { env })).toMatchObject({ ok: true, settings: { level: 'general' } });
+    expect(JSON.parse(readFileSync(settingsFile(home), 'utf8')).level).toBe('general');
+    expect(writeConsultSettings({ ...UPDATE, level: 'everything' as never, expectedRevision: 1 }, { env })).toEqual({ ok: false, reason: 'invalid_input' });
+    expect(JSON.parse(readFileSync(settingsFile(home), 'utf8'))).toMatchObject({ revision: 1, level: 'general' });
   });
 
   test('compare-and-swap: each write bumps the revision; a stale expected revision is refused and writes nothing', () => {

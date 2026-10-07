@@ -41,6 +41,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { freemem, platform as osPlatform, totalmem } from 'node:os';
 import { fetchModelEndpoint } from './model-transport.ts';
+import type { ConsultLevel } from './consult-gate.ts';
 import {
   builtInReasoningThreads,
   createLlamaServerHandle,
@@ -117,6 +118,45 @@ export const CONSULT_WRITER_SYSTEM = [
   'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.',
 ].join('\n');
 
+/**
+ * The writer's rules for the "Your situation, without names" level (owner
+ * decision 2026-10-07; full text in docs/design/consult-writer-instructions.md,
+ * "Level: your situation, without names"). The writer may send the user's
+ * actual situation and ask for a verdict on it, with everything that names or
+ * locates the user removed and every unneeded detail left out. Same reply
+ * shape and form limits as CONSULT_WRITER_SYSTEM; the per-question limit stays
+ * at 25 words (the owner's example, one situation sentence plus the question,
+ * is 22).
+ */
+export const CONSULT_WRITER_SYSTEM_UNNAMED = [
+  'You are the local analyst. You have just answered a user\'s question from their private documents. That answer is final.',
+  'You may now propose a consult: up to three short questions for an outside expert model that knows nothing about this user, to settle a point the answer could not.',
+  'What you write is sent as written, unreviewed, to an outside provider, and it costs money. If the answer is already good enough, or outside knowledge would not help, propose nothing.',
+  '',
+  'You may describe the user\'s actual situation without anything that identifies them, and ask for a verdict on it ("Can the landlord keep the whole deposit?").',
+  '',
+  'Always remove:',
+  '- names of people, companies, products, projects, schools and organisations, and employers: call each person or body by its part in this situation ("the landlord", "the employer", "the patient", "a software product");',
+  '- places smaller than a country; name a country only when the answer depends on it;',
+  '- exact dates and years;',
+  '- exact money amounts: use bands or relative terms ("about two months\' rent", "a few thousand");',
+  '- addresses, account, reference, phone and ID numbers, file and document titles, and anything quoted word for word.',
+  'Keep, when the question needs them: durations and rule numbers that define the problem ("gave 45 days\' notice where the lease requires 60 days"), and health, legal, financial and relationship facts.',
+  'Leave out every detail the answer does not need, even an allowed one. Never keep a job, a rare condition and a region together unless the answer needs all three: together they can point to one person.',
+  'Write every question yourself in plain words; never copy a sentence, or a phrase of five or more words, from the documents, the answer or the user.',
+  '',
+  'Form:',
+  '- Each question is at most 25 words: at most one short sentence of situation, then a short question of at most twelve content words, ending with a single question mark. Plain text only: no line breaks, markup, links, slashes, mail addresses, handles or codes.',
+  '- Use ordinary dictionary words of the user\'s language. At most three questions, on one subject, and at most 600 bytes in all.',
+  '',
+  'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.',
+].join('\n');
+
+/** The writer's rules for a level: the general level is CONSULT_WRITER_SYSTEM, unchanged. */
+export function consultWriterSystem(level: ConsultLevel): string {
+  return level === 'unnamed' ? CONSULT_WRITER_SYSTEM_UNNAMED : CONSULT_WRITER_SYSTEM;
+}
+
 /** The reply schema: one to three strings, or null (propose nothing). */
 export const CONSULT_WRITER_RESPONSE_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
@@ -154,8 +194,8 @@ export function boundConsultWriterInput(input: ConsultWriterInput): ConsultWrite
   });
 }
 
-/** The writer's messages: the rules, then the bounded question, answer and gaps. */
-export function buildConsultWriterPrompt(input: ConsultWriterInput): readonly ConsultWriterMessage[] {
+/** The writer's messages: the level's rules, then the bounded question, answer and gaps. */
+export function buildConsultWriterPrompt(input: ConsultWriterInput, level: ConsultLevel = 'general'): readonly ConsultWriterMessage[] {
   const bounded = boundConsultWriterInput(input);
   const user = [
     `Question: ${bounded.question}`,
@@ -163,7 +203,7 @@ export function buildConsultWriterPrompt(input: ConsultWriterInput): readonly Co
     bounded.gaps.length > 0 ? `Could not find:\n- ${bounded.gaps.join('\n- ')}` : 'Could not find: (the answer was marked incomplete without listing points)',
   ].join('\n\n');
   return Object.freeze([
-    Object.freeze({ role: 'system' as const, content: CONSULT_WRITER_SYSTEM }),
+    Object.freeze({ role: 'system' as const, content: consultWriterSystem(level) }),
     Object.freeze({ role: 'user' as const, content: user }),
   ]);
 }
@@ -351,6 +391,8 @@ export interface ConsultWriterRunOptions {
   readonly deadlineMs?: number;
   /** Keep the server after the call (warm mode); default: stop it. */
   readonly keepWarm?: boolean;
+  /** What the writer may send (the job's bound level); default the general level. */
+  readonly level?: ConsultLevel;
   readonly now?: () => number;
 }
 
@@ -370,7 +412,7 @@ export async function runConsultWriter(input: ConsultWriterInput, options: Consu
   const server = options.server;
   const memory = consultWriterMemoryDecision(safeProbe(options.memory));
   if (!memory.ok) return { kind: 'skipped', reason: memory.reason };
-  const messages = buildConsultWriterPrompt(input);
+  const messages = buildConsultWriterPrompt(input, options.level ?? 'general');
   const deadline = AbortSignal.timeout(options.deadlineMs ?? CONSULT_WRITER_LIMITS.deadlineMs);
   const stop = AbortSignal.any([options.kill, deadline]);
   const killedReason = (): 'fresh_answer' | 'deadline' => (options.kill.aborted ? 'fresh_answer' : 'deadline');

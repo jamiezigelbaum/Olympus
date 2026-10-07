@@ -148,7 +148,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   // The Sources disclosure (closed by default) and each source's brief open
   // result, by index. Memory only; a new answer resets both.
   let sourcesOpen = false;
-  let askedOpen = false;
   let notes: Record<number, { text: string; warn: boolean }> = {};
   // The key pair this job is claimed with: retries, polls and re-mounts reuse it.
   let pair: { jobId: string; privateKey: CryptoKey; publicKey: string } | null = null;
@@ -157,7 +156,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   let focusAfter = '';
   type Open = { kind: 'mac'; token: string } | { kind: 'web'; url: string };
   type Source = { name: string; open: Open | null };
-  type Outside = { state: string; text: string; cut: boolean; question: string };
+  type Outside = { state: string; text: string; cut: boolean; question: string; level: string };
   // `follow`: a follow-up envelope (the plaintext carried an outside block):
   // the outside container and the follow-up polling apply.
   type Answer = { text: string; sources: Source[]; unanswered: string[]; follow: boolean; rev: number; followSeconds: number; outside: Outside };
@@ -262,7 +261,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       follow = null;
       gone = false;
       sourcesOpen = false;
-      askedOpen = false;
       notes = {};
       pair = null;
     }
@@ -517,10 +515,12 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   function readOutside(value: Any): Outside | null {
     if (!value || typeof value !== 'object') return null;
     const state = value.state === 'pending' || value.state === 'appended' || value.state === 'paused' ? value.state : 'idle';
-    if (state !== 'appended') return { state, text: '', cut: false, question: '' };
+    if (state !== 'appended') return { state, text: '', cut: false, question: '', level: '' };
     const bounded = boundOutside(value.text);
     const question = typeof value.question === 'string' ? boundOutside(value.question).text : '';
-    return { state, text: bounded.text, cut: bounded.cut || value.cut === true, question };
+    // The rules the question was written under; an older engine sends none.
+    const level = value.level === 'unnamed' || value.level === 'general' ? value.level : '';
+    return { state, text: bounded.text, cut: bounded.cut || value.cut === true, question, level };
   }
 
   /** The decrypted plaintext, checked and reduced to what the panel shows: an answer, or a withdrawal. */
@@ -560,7 +560,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         follow: outside !== null,
         rev,
         followSeconds: outside ? followSeconds : 0,
-        outside: outside || { state: 'idle', text: '', cut: false, question: '' },
+        outside: outside || { state: 'idle', text: '', cut: false, question: '', level: '' },
       },
     };
   }
@@ -705,7 +705,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
           if (opened.kind === 'withdrawn') return withdrawn(byUser);
           answer = opened.answer;
           sourcesOpen = false;
-          askedOpen = false;
           notes = {};
           phase = 'revealed';
           focusAfter = byUser ? 'answer' : '';
@@ -754,7 +753,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     gone = true;
     follow = null;
     sourcesOpen = false;
-    askedOpen = false;
     notes = {};
     errorText = T.withdrawn;
     canRetry = false;
@@ -827,12 +825,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         if (phase === 'revealed') render();
       }
     }
-  }
-
-  function toggleAsked(): void {
-    askedOpen = !askedOpen;
-    focusAfter = 'asked';
-    render();
   }
 
   function toggleSources(): void {
@@ -1075,27 +1067,23 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const body = el('div', 'out-body');
     const state = shown.outside.state;
     if (state === 'appended') {
+      // Exactly what was sent, always shown, above the reply: "Sent without
+      // names:" for the unnamed level, "What Olympus asked:" otherwise. One text node; the
+      // sub-questions keep their own lines.
+      if (shown.outside.question) {
+        const asked = el('div', 'asked');
+        asked.setAttribute('data-key', 'asked');
+        asked.setAttribute('data-level', shown.outside.level || 'general');
+        asked.appendChild(el('p', 'asked-label', shown.outside.level === 'unnamed' ? T.outsideSentUnnamed : T.outsideAsked));
+        const question = el('p', 'asked-text');
+        question.textContent = shown.outside.question;
+        asked.appendChild(question);
+        body.appendChild(asked);
+      }
       const text = el('div', 'out-text');
       text.setAttribute('data-key', 'outside');
       text.textContent = shown.outside.text;
       body.appendChild(text);
-      if (shown.outside.question) {
-        const asked = el('div', 'asked');
-        const toggle = el('button', 'src-toggle') as HTMLButtonElement;
-        toggle.type = 'button';
-        toggle.setAttribute('data-key', 'asked');
-        toggle.setAttribute('aria-expanded', askedOpen ? 'true' : 'false');
-        toggle.appendChild(doc.createTextNode(T.outsideAsked));
-        toggle.appendChild(chevron());
-        onActivate(toggle, toggleAsked);
-        asked.appendChild(toggle);
-        if (askedOpen) {
-          const question = el('p', 'asked-text');
-          question.textContent = shown.outside.question;
-          asked.appendChild(question);
-        }
-        body.appendChild(asked);
-      }
       if (shown.outside.cut) body.appendChild(el('p', 'out-foot', T.outsideShortened));
     } else if (state === 'pending') {
       const line = el('p', 'out-sub working');
@@ -1284,8 +1272,9 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .out-text{font-size:0.875rem;line-height:1.5;white-space:pre-wrap}
 .out-sub{margin:0;font-size:0.8125rem;line-height:1.4;color:var(--muted)}
 .out-foot{margin:0.375rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
-.asked{margin-top:0.375rem}
-.asked-text{margin:0.25rem 0 0;font-size:0.8125rem;line-height:1.45;color:var(--muted);white-space:pre-wrap}
+.asked{margin:0 0 0.5rem}
+.asked-label{margin:0;font-size:0.75rem;line-height:1.4;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em}
+.asked-text{margin:0.25rem 0 0;font-size:0.8125rem;line-height:1.45;white-space:pre-wrap}
 .row{display:flex;align-items:center;gap:0.75rem}
 .icon{flex:none;display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:50%;background:var(--raise);border:1px solid var(--hair)}
 .lock{width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}

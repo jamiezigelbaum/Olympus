@@ -308,7 +308,7 @@ export function fitFirstAnswer(answer: { answer: string; citations: readonly Pri
   return { answer: text, citations, ...(unanswered.length > 0 ? { unanswered } : {}) };
 }
 
-/** The outside block inside its byte budget (text, then question, then route are cut; the state is always kept): what a job retains. */
+/** The outside block inside its byte budget (text, then question, then route are cut; the state and level are always kept): what a job retains. */
 export function fitOutsideBlock(block: PrivateAnswerOutsideBlockV1): PrivateAnswerOutsideBlockV1 {
   const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
   const state: PrivateAnswerOutsideBlockV1['state'] = block.state === 'pending' || block.state === 'appended' || block.state === 'paused' ? block.state : 'idle';
@@ -321,6 +321,8 @@ export function fitOutsideBlock(block: PrivateAnswerOutsideBlockV1): PrivateAnsw
     if (question) out.question = fitJsonString(question, limits.outsideQuestionBytes).text;
     const route = cleanTextField(block.route, limits.outsideRouteBytes);
     if (route) out.route = fitJsonString(route, limits.outsideRouteBytes).text;
+    // A closed value (at most 19 bytes serialized): never cut, never anything else.
+    if (block.level === 'unnamed' || block.level === 'general') out.level = block.level;
   }
   const budget = PRIVATE_ANSWER_BYTE_BUDGETS.outside;
   const over = () => utf8Bytes(JSON.stringify(out)) - budget;

@@ -1592,7 +1592,7 @@ function parseAcknowledgements(value, label) {
   }
   return { version: record.version, accepted: [...new Set(record.accepted)] };
 }
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 3, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 4, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
 var init_zkapi_consult_settings = __esm(() => {
   init_operation_error();
   ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
@@ -1639,6 +1639,10 @@ var init_zkapi_consult_settings = __esm(() => {
     {
       id: "local_files_risk",
       statement: "The balance is controlled by files on this computer. Losing them loses the money."
+    },
+    {
+      id: "situation_disclosure",
+      statement: 'With "Your situation, without names", the AI provider reads your actual situation, with names, places, exact dates, amounts and account numbers removed. An unusual situation could still hint at who you are.'
     }
   ];
   INTEGER_BOUNDS = {
@@ -52183,6 +52187,7 @@ var init_vocabulary = __esm(() => {
     outsidePending: "Looking up general background…",
     outsidePaused: "Anonymous answers are paused.",
     outsideAsked: "What Olympus asked:",
+    outsideSentUnnamed: "Sent without names:",
     outsideShortened: "Shortened by Olympus."
   };
   DASHBOARD_PICKER_COPY = {
@@ -52390,6 +52395,19 @@ var init_vocabulary = __esm(() => {
     },
     experimental: "Experimental: on macOS, Olympus can't yet confirm the connection is anonymous (network route not verified).",
     intro: "When the answer from your Mac is missing something, Olympus can ask a top AI model a short question through zkAPI. Payment is anonymous, and with Tor on the provider can't see where the question came from. Olympus blocks names and other identifying words before sending, but the provider reads the question.",
+    levelTitle: "What may zkAPI send?",
+    levels: {
+      unnamed: {
+        title: "Your situation, without names (recommended)",
+        body: "Sends your actual problem with names, places, exact dates, amounts and account numbers removed. Gets real answers."
+      },
+      general: {
+        title: "General questions only (strict)",
+        body: "Sends only textbook questions; nothing about your situation leaves. Safest, but rarely helpful."
+      }
+    },
+    levelSave: "Save",
+    levelNeedsAcks: 'Tick every statement below, including what "Your situation, without names" sends, before choosing it.',
     privacy: "Your files and private answer stay on this Mac. The outside model sees only the short question, and that question could still hint at private things.",
     state: {
       off: "Anonymous answers are off.",
@@ -59463,6 +59481,8 @@ function consultWriterContextFromPack(pack, options = {}) {
   walk(pack, "", -1, 0);
   for (const text of options.writerVisibleTexts ?? [])
     push("text", text, "writerVisible[]", -2);
+  for (const text of options.writerAnswerTexts ?? [])
+    push("text", text, WRITER_ANSWER_PATH, -2);
   for (const identifier of options.connectedAccountIdentifiers ?? []) {
     push("person_identifier", identifier, "connectedAccount[]", -3);
   }
@@ -59506,6 +59526,7 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
   if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > effective.maxQuestionBytes) {
     return refuse2(["question_too_many_bytes"]);
   }
+  const unnamed = options?.level === "unnamed";
   const reasons = new Set;
   let tokenCount = 0;
   for (const question of subQuestions) {
@@ -59518,7 +59539,7 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
     const nfkc = question.normalize("NFKC");
     for (const reason of scriptReasons(nfkc))
       reasons.add(reason);
-    for (const reason of questionStructureReasons(nfkc))
+    for (const reason of unnamed ? questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES) : questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION))
       reasons.add(reason);
     if (hasEncodedBlob(nfkc))
       reasons.add("encoded_blob");
@@ -59546,7 +59567,9 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
   if (reasons.size > 0)
     return refuse2([...reasons]);
   const model = questionModel(subQuestions);
-  for (const reason of compareWithSnapshot(model, context))
+  const languageOnly = unnamed ? consultVocabulary({ languages: options?.languages ?? [], domains: { units: false, countries: true, places: false, technical: false, medicines: false, medicineBrands: false } }) : null;
+  const ordinaryWord = languageOnly ? (token) => languageOnly.has(token) : undefined;
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord))
     reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent))
     reasons.add(reason);
@@ -59654,21 +59677,27 @@ function scriptOf(char) {
   }
   return `other:${char}`;
 }
-function questionStructureReasons(text) {
+function questionStructureReasons(text, maxContentWords, maxPreambleSentences = CONSULT_GATE_MAX_PREAMBLE_SENTENCES) {
   const trimmed2 = text.trim();
   const reasons = [];
   const marks = (trimmed2.match(/[?\u061F]/gu) ?? []).length;
   if (marks !== 1 || !/[?\u061F]$/u.test(trimmed2))
     reasons.push("not_a_question");
   const boundaries = (trimmed2.match(/[.!;](?=\s|$)|[\u3002\uFF01]/gu) ?? []).length;
-  if (boundaries > CONSULT_GATE_MAX_PREAMBLE_SENTENCES)
+  if (boundaries > maxPreambleSentences)
     reasons.push("too_many_sentences");
   let content = 0;
   forEachToken(foldText(trimmed2), (token) => {
     if (isContent(token.norm))
       content += 1;
   });
-  if (content > CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION)
+  const asked = trimmed2.split(/[.!;](?=\s)|[\u3002\uFF01]/u).at(-1) ?? trimmed2;
+  let askedContent = 0;
+  forEachToken(foldText(asked), (token) => {
+    if (isContent(token.norm))
+      askedContent += 1;
+  });
+  if (content > maxContentWords || askedContent > CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION)
     reasons.push("too_many_content_words");
   return reasons;
 }
@@ -60078,6 +60107,7 @@ function questionModel(subQuestions) {
     compactViews.push(viewTokens.join(""));
   }
   const numberKeys = new Set;
+  const ruleSeen = new Map;
   const dates = { full: new Set, monthDay: new Set };
   let digitConcat = "";
   for (const text of [joined, ...decoded]) {
@@ -60088,6 +60118,10 @@ function questionModel(subQuestions) {
       numberKeys.add(key);
     for (const key of figureKeys(wordDigits.join(" "), false).keys())
       numberKeys.add(key);
+    for (const form of [figureKeys(normalized2, true), figureKeys(wordDigits.join(" "), true)]) {
+      for (const [key, seen] of form)
+        ruleSeen.set(key, mergeFigureSeen(ruleSeen.get(key), seen));
+    }
     digitConcat += (normalized2.match(/\d/gu) ?? []).join("");
     const viewDates = dateKeys(normalized2, wordDigits);
     for (const key of viewDates.full)
@@ -60101,7 +60135,11 @@ function questionModel(subQuestions) {
   for (const host of hostnames(spelled))
     for (const key of hostKeysOf(host))
       hostKeys.add(key);
-  return { tokens, forms, tokenKeys, numberKeys, digitConcat, dates, hostKeys, compactViews };
+  const ruleOnlyKeys = new Set([...numberKeys].filter((key) => {
+    const seen = ruleSeen.get(key);
+    return seen !== undefined && seen.rule && !seen.bare && !seen.other;
+  }));
+  return { tokens, forms, tokenKeys, numberKeys, ruleOnlyKeys, digitConcat, dates, hostKeys, compactViews };
 }
 function rot13(word) {
   let out = "";
@@ -60268,9 +60306,10 @@ function runMatcher(question, minLength, minContent) {
     }
   };
 }
-function compareWithSnapshot(model, context) {
+function compareWithSnapshot(model, context, unnamed, ordinaryWord) {
   const reasons = new Set;
-  const fullRun = runMatcher(model.tokens, CONSULT_GATE_SHARED_RUN_TOKENS, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
+  const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
+  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
   const contentTokens = model.tokens.filter(isContent);
   const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
   const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS);
@@ -60295,6 +60334,9 @@ function compareWithSnapshot(model, context) {
   };
   const singleCandidates = new Map;
   const componentCandidates = new Map;
+  const figureSeen = new Map;
+  const identifierTokens = new Set;
+  const figureRefused = new Set;
   let group = Number.NaN;
   let previous;
   for (const entry of context.entries) {
@@ -60313,12 +60355,28 @@ function compareWithSnapshot(model, context) {
     const normalized = caseFold(folded);
     const words = hasNumberWord(normalized) ? numberWordsToDigits(wordsOf(folded)) : undefined;
     const snapshotFigures = figureKeys(normalized, true);
-    if (words)
-      for (const [key] of figureKeys(words.join(" "), false))
-        snapshotFigures.set(key, snapshotFigures.get(key) ?? false);
-    for (const [key, unit] of snapshotFigures) {
-      if (model.numberKeys.has(key) && (key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS || unit))
-        reasons.add("snapshot_figure");
+    if (words) {
+      for (const [key, seen] of figureKeys(words.join(" "), false))
+        if (!snapshotFigures.has(key))
+          snapshotFigures.set(key, seen);
+    }
+    if (unnamed) {
+      const forms = [figureKeys(normalized, true), ...words ? [figureKeys(words.join(" "), true)] : []];
+      for (const form of forms) {
+        for (const [key, seen] of form)
+          if (model.numberKeys.has(key))
+            figureSeen.set(key, mergeFigureSeen(figureSeen.get(key), seen));
+      }
+    }
+    for (const [key, seen] of snapshotFigures) {
+      if (!model.numberKeys.has(key))
+        continue;
+      if (key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS || seen.unit) {
+        if (unnamed)
+          figureRefused.add(key);
+        else
+          reasons.add("snapshot_figure");
+      }
     }
     for (const run of normalized.match(/\d(?:[\d]|[\s.\-/_](?=\d))*/gu) ?? []) {
       const digits = run.replace(/\D/gu, "");
@@ -60340,6 +60398,13 @@ function compareWithSnapshot(model, context) {
           if (model.hostKeys.has(key))
             reasons.add("snapshot_hostname");
       }
+    }
+    for (const span of addressSpans(normalized)) {
+      const asked = new Set(model.tokens.map((token) => token.replace(/^0+(?=\d)/u, "")));
+      const sameNumber = asked.has(span.number) && (span.words.some((word) => asked.has(word)) || asked.has(span.suffix));
+      const sameName = asked.has(span.suffix) && span.words.every((word) => asked.has(word));
+      if (sameNumber || sameName)
+        reasons.add("snapshot_identifier");
     }
     for (const value of labelledSecretValues(normalized)) {
       if (formHit(compact(value)))
@@ -60373,6 +60438,7 @@ function compareWithSnapshot(model, context) {
             identifierHit(formHit(segmentForm));
         }
         forEachToken(folded, (token) => {
+          identifierTokens.add(token.norm);
           if (token.norm.length < 3 || NAME_STOPWORDS.has(token.norm) || componentCandidates.has(token.norm))
             return;
           const source = formHit(token.norm);
@@ -60389,30 +60455,39 @@ function compareWithSnapshot(model, context) {
       break;
     let sentence = [];
     const closeSentence = () => {
-      if (sentence.length === CONSULT_GATE_SHARED_RUN_TOKENS - 1 && sentence.filter(isContent).length >= CONSULT_GATE_RUN_MIN_CONTENT_TOKENS && model.tokenKeys[0].includes(`${SEP}${sentence.join(SEP)}${SEP}`)) {
+      if (sentence.length >= CONSULT_GATE_SHARED_RUN_TOKENS - 1 && sentence.length < runTokens && sentence.filter(isContent).length >= CONSULT_GATE_RUN_MIN_CONTENT_TOKENS && model.tokenKeys[0].includes(`${SEP}${sentence.join(SEP)}${SEP}`)) {
         reasons.add("shared_token_run");
       }
       sentence = [];
     };
+    const wordingExempt = unnamed && entry.path === WRITER_ANSWER_PATH;
+    if (wordingExempt) {
+      closeOverlap();
+      fullRun.reset();
+      contentRun.reset();
+      contentSpan.reset();
+    }
     let first = true;
     forEachToken(folded, (token) => {
-      if (first || token.initial) {
-        closeSentence();
-        closeOverlap();
+      if (wordingExempt) {} else {
+        if (first || token.initial) {
+          closeSentence();
+          closeOverlap();
+        }
+        sentenceTokens += 1;
+        if (sentenceTokens > SENTENCE_OVERLAP_SPAN_TOKENS)
+          closeOverlap();
+        if (questionContent.has(token.norm)) {
+          sentenceContent.add(token.norm);
+          contentCounts.set(token.norm, (contentCounts.get(token.norm) ?? 0) + 1);
+        }
+        if (sentence.length < runTokens)
+          sentence.push(token.norm);
+        if (fullRun.feed(token.norm))
+          reasons.add("shared_token_run");
+        if (isContent(token.norm) && (contentRun.feed(token.norm) || contentSpan.feed(token.norm)))
+          reasons.add("shared_token_run");
       }
-      sentenceTokens += 1;
-      if (sentenceTokens > SENTENCE_OVERLAP_SPAN_TOKENS)
-        closeOverlap();
-      if (questionContent.has(token.norm)) {
-        sentenceContent.add(token.norm);
-        contentCounts.set(token.norm, (contentCounts.get(token.norm) ?? 0) + 1);
-      }
-      if (sentence.length < CONSULT_GATE_SHARED_RUN_TOKENS)
-        sentence.push(token.norm);
-      if (fullRun.feed(token.norm))
-        reasons.add("shared_token_run");
-      if (isContent(token.norm) && (contentRun.feed(token.norm) || contentSpan.feed(token.norm)))
-        reasons.add("shared_token_run");
       if (entry.kind === "vocabulary") {
         previous = token;
         first = false;
@@ -60448,17 +60523,33 @@ function compareWithSnapshot(model, context) {
         singleCandidates.set(token.norm, {
           source: model.forms.get(token.norm),
           labelled: token.labelled || (existing?.labelled ?? false),
-          initialOnly: (existing?.initialOnly ?? true) && initial && !token.labelled
+          initialOnly: (existing?.initialOnly ?? true) && initial && !token.labelled,
+          strongLabel: (existing?.strongLabel ?? false) || token.labelled && token.capitalized
         });
       }
       previous = token;
       first = false;
     });
-    closeSentence();
-    closeOverlap();
+    if (wordingExempt) {
+      sentence = [];
+      fullRun.reset();
+      contentRun.reset();
+      contentSpan.reset();
+    } else {
+      closeSentence();
+      closeOverlap();
+    }
   }
   if (reasons.size > 0)
     return reasons;
+  for (const key of figureRefused) {
+    const seen = figureSeen.get(key);
+    const exempt = seen !== undefined && seen.rule && !seen.bare && !seen.other && key.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key);
+    if (!exempt) {
+      reasons.add("snapshot_figure");
+      return reasons;
+    }
+  }
   for (const words of overlapCandidates) {
     const rare = words.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES);
     if (rare.length >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) {
@@ -60467,6 +60558,7 @@ function compareWithSnapshot(model, context) {
     }
   }
   const statOf = (token) => stats.get(token) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
+  const ordinary = (token) => ordinaryWord !== undefined && ordinaryWord(token) && !identifierTokens.has(token);
   const neverLower = (token) => statOf(token).lower === 0;
   const nameHit = (source) => {
     reasons.add(source === "decoded" ? "encoded_identifier" : "snapshot_name");
@@ -60489,6 +60581,8 @@ function compareWithSnapshot(model, context) {
     }
   }
   for (const [token, single] of singleCandidates) {
+    if (!single.strongLabel && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0)
+      continue;
     const stat3 = statOf(token);
     const dominatedByLower = stat3.lower >= 3 && stat3.lower >= 3 * stat3.capitalized;
     if (single.labelled || (single.initialOnly ? stat3.lower === 0 && stat3.lowerAnywhere === 0 : !dominatedByLower))
@@ -60671,6 +60765,36 @@ function expandYear(text) {
     return value;
   return value < 70 ? 2000 + value : 1900 + value;
 }
+function mergeFigureSeen(left, right) {
+  if (!left)
+    return right;
+  return { unit: left.unit || right.unit, rule: left.rule || right.rule, bare: left.bare || right.bare, other: left.other || right.other };
+}
+function addressSpans(normalized) {
+  const spans = [];
+  for (const clause of normalized.split(/[,.;:!?()\n]+/u)) {
+    const tokens = clause.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    tokens.forEach((token, at) => {
+      if (!STREET_SUFFIXES.has(token))
+        return;
+      for (let gap = 1;gap <= 5; gap += 1) {
+        for (const other of [at - gap, at + gap]) {
+          const number2 = tokens[other];
+          if (number2 === undefined || !/^\d{1,5}[a-z]?$/u.test(number2))
+            continue;
+          const [from, to] = other < at ? [other, at] : [at, other];
+          let words = tokens.slice(from + 1, to);
+          if (words.length === 0)
+            words = tokens.slice(to + 1, to + 4);
+          words = words.filter((word) => isContent(word) && !/^\d+$/u.test(word));
+          if (words.length > 0)
+            spans.push({ number: number2.replace(/^0+(?=\d)/u, ""), words, suffix: token });
+        }
+      }
+    });
+  }
+  return spans;
+}
 function figureKeys(normalized, needUnits) {
   const keys = new Map;
   for (const match of normalized.matchAll(/([^\s\d]?)\s?(\d+(?:[.,'\u2019_ ]\d+)*)\s?(%|[\p{L}$\u20AC\u00A3\u00A5\u20B9]{1,8})?/gu)) {
@@ -60678,21 +60802,30 @@ function figureKeys(normalized, needUnits) {
     const written = match[2];
     const after = match[3] ?? "";
     const unit = needUnits && (UNIT_WORDS.has(before) || UNIT_WORDS.has(after));
+    const end = (match.index ?? 0) + match[0].length;
+    const ruleUnit = after === "per" || after === "pour" ? /^\s?cent(?![\p{L}\p{N}])/u.test(normalized.slice(end)) : RULE_UNIT_WORDS.has(after);
+    const rule = needUnits && /^\d+$/u.test(written) && ruleUnit && !FIGURE_PREFIX_SYMBOLS.has(before);
+    const seen = { unit, rule, bare: !unit && !rule, other: unit && !rule };
     const parts = new Set([written]);
     if (written.includes(" "))
       for (const part of written.split(" "))
         parts.add(part);
+    for (const part of [...parts]) {
+      const whole = part.replace(/[.,]0{1,2}$/u, "");
+      if (whole !== part && /\d/u.test(whole))
+        parts.add(whole);
+    }
     for (const part of parts) {
       const digits = part.replace(/\D/gu, "");
       for (const key of [digits, digits.replace(/^0+(?=\d)/u, ""), digits.replace(/0+$/u, "")]) {
         if (key.length >= 2)
-          keys.set(key, (keys.get(key) ?? false) || unit);
+          keys.set(key, mergeFigureSeen(keys.get(key), seen));
       }
     }
   }
   return keys;
 }
-var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, PROSE_PATHS, SEP, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS;
+var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS, STREET_SUFFIXES;
 var init_consult_gate = __esm(() => {
   init_opsec();
   init_types();
@@ -61845,7 +61978,7 @@ var init_consult_gate = __esm(() => {
   SCALE_ARTICLES = new Set(["a", "an", "one", "un", "une", "uno", "una", "um", "uma", "een", "ein", "eine"]);
   DECIMAL_WORDS = new Set(["point", "virgule", "coma", "virgula", "komma"]);
   NUMBER_PARTS = [...NUMBER_WORDS.keys(), ...SCALE_WORDS.keys(), "en", "und", "e"].sort((a, b) => b.length - a.length);
-  PROSE_PATHS = new Set(["candidates[].chunks[]", "candidates[].facts[].claim", "writerVisible[]"]);
+  PROSE_PATHS = new Set(["candidates[].chunks[]", "candidates[].facts[].claim", "writerVisible[]", WRITER_ANSWER_PATH]);
   SEP = String.fromCharCode(1);
   MONTH_NAMES = buildMonthNames();
   ROMAN_MONTHS = new Map(["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"].map((numeral, index) => [numeral, index + 1]));
@@ -61971,6 +62104,134 @@ var init_consult_gate = __esm(() => {
     "¥",
     "₹"
   ]);
+  RULE_UNIT_WORDS = new Set([
+    "hour",
+    "hours",
+    "hr",
+    "hrs",
+    "h",
+    "minute",
+    "minutes",
+    "min",
+    "mins",
+    "day",
+    "days",
+    "week",
+    "weeks",
+    "month",
+    "months",
+    "%",
+    "percent",
+    "mes",
+    "meses",
+    "mois",
+    "maand",
+    "maanden",
+    "monat",
+    "monate",
+    "mese",
+    "mesi",
+    "dia",
+    "dias",
+    "jour",
+    "jours",
+    "dag",
+    "dagen",
+    "tag",
+    "tage",
+    "giorno",
+    "giorni",
+    "semana",
+    "semanas",
+    "semaine",
+    "semaines",
+    "week",
+    "weken",
+    "woche",
+    "wochen",
+    "settimana",
+    "settimane",
+    "hora",
+    "horas",
+    "heure",
+    "heures",
+    "uur",
+    "stunde",
+    "stunden",
+    "ora",
+    "ore",
+    "minuto",
+    "minutos",
+    "minuten",
+    "minuti",
+    "procent",
+    "prozent",
+    "percento",
+    "porcento",
+    "pourcent"
+  ]);
+  FIGURE_PREFIX_SYMBOLS = new Set(["$", "€", "£", "¥", "₹", "%"]);
+  STREET_SUFFIXES = new Set([
+    "street",
+    "st",
+    "road",
+    "rd",
+    "avenue",
+    "ave",
+    "av",
+    "lane",
+    "ln",
+    "way",
+    "drive",
+    "dr",
+    "court",
+    "ct",
+    "place",
+    "pl",
+    "square",
+    "sq",
+    "boulevard",
+    "blvd",
+    "terrace",
+    "crescent",
+    "close",
+    "row",
+    "quay",
+    "gardens",
+    "rua",
+    "travessa",
+    "avenida",
+    "largo",
+    "praca",
+    "alameda",
+    "estrada",
+    "rue",
+    "chemin",
+    "allee",
+    "impasse",
+    "quai",
+    "calle",
+    "plaza",
+    "paseo",
+    "carrer",
+    "camino",
+    "via",
+    "viale",
+    "piazza",
+    "corso",
+    "vicolo",
+    "strasse",
+    "str",
+    "gasse",
+    "platz",
+    "weg",
+    "straat",
+    "laan",
+    "plein",
+    "gracht",
+    "kade",
+    "singel"
+  ]);
 });
 
 // src/core/consult-settings.ts
@@ -61987,7 +62248,10 @@ __export(exports_consult_settings, {
   __consultSettingsTestHooks: () => __consultSettingsTestHooks,
   DEFAULT_CONSULT_SETTINGS: () => DEFAULT_CONSULT_SETTINGS,
   CONSULT_SETTINGS_VERSION: () => CONSULT_SETTINGS_VERSION,
-  CONSULT_SETTINGS_MAX_BYTES: () => CONSULT_SETTINGS_MAX_BYTES
+  CONSULT_SETTINGS_MAX_BYTES: () => CONSULT_SETTINGS_MAX_BYTES,
+  CONSULT_LEVEL_WHEN_UNSET: () => CONSULT_LEVEL_WHEN_UNSET,
+  CONSULT_LEVEL_FOR_NEW_SETUP: () => CONSULT_LEVEL_FOR_NEW_SETUP,
+  CONSULT_LEVELS: () => CONSULT_LEVELS
 });
 import { closeSync as closeSync11, constants as constants5, fstatSync as fstatSync3, openSync as openSync11, readSync as readSync3 } from "node:fs";
 import { join as join52 } from "node:path";
@@ -61998,9 +62262,12 @@ function consultSettingsPath(env = process.env) {
 function parseConsultSettings(value) {
   if (!isPlainObject(value))
     return;
-  if (!hasExactKeys(value, TOP_LEVEL_KEYS))
+  if (!hasKeys(value, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS))
     return;
   const { v, revision, enabled, languages, domains, strict } = value;
+  const level = Object.hasOwn(value, "level") ? value.level : CONSULT_LEVEL_WHEN_UNSET;
+  if (typeof level !== "string" || !CONSULT_LEVELS.includes(level))
+    return;
   if (v !== CONSULT_SETTINGS_VERSION)
     return;
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
@@ -62025,7 +62292,8 @@ function parseConsultSettings(value) {
     enabled,
     languages: Object.freeze([...languages]),
     domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] : true]))),
-    strict
+    strict,
+    level
   });
 }
 function parseConsultSettingsText(text) {
@@ -62097,7 +62365,7 @@ function consultOutsideHelpEnabled(read) {
   return read.state === "valid" && read.settings.enabled;
 }
 function consultGateOptionsFromSettings(settings) {
-  return { languages: [...settings.languages], domains: { ...settings.domains } };
+  return { languages: [...settings.languages], domains: { ...settings.domains }, level: settings.level };
 }
 function bindConsultJobPolicy(read) {
   const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS;
@@ -62106,7 +62374,8 @@ function bindConsultJobPolicy(read) {
     outsideHelp: consultOutsideHelpEnabled(read),
     languages: Object.freeze([...settings.languages]),
     domains: Object.freeze({ ...settings.domains }),
-    strict: settings.strict
+    strict: settings.strict,
+    level: settings.level
   });
 }
 function recheckConsultJobPolicy(policy, current) {
@@ -62117,6 +62386,8 @@ function recheckConsultJobPolicy(policy, current) {
   if (current.state === "invalid")
     return { ok: false, reason: "settings_invalid" };
   if (current.settings.revision !== policy.settingsRevision)
+    return { ok: false, reason: "settings_stale" };
+  if (current.settings.level !== policy.level)
     return { ok: false, reason: "settings_stale" };
   if (!current.settings.enabled)
     return { ok: false, reason: "settings_off" };
@@ -62162,26 +62433,28 @@ function isPlainObject(value) {
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
-function hasExactKeys(value, keys) {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+function hasKeys(value, required3, optional) {
+  return required3.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => required3.includes(key) || optional.includes(key));
 }
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
-var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, DEFAULT_CONSULT_SETTINGS, TOP_LEVEL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
+var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, CONSULT_LEVELS, CONSULT_LEVEL_WHEN_UNSET = "general", CONSULT_LEVEL_FOR_NEW_SETUP = "unnamed", DEFAULT_CONSULT_SETTINGS, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
 var init_consult_settings = __esm(() => {
   init_consult_gate();
   CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
+  CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
   DEFAULT_CONSULT_SETTINGS = Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision: 0,
     enabled: false,
     languages: Object.freeze([...DEFAULT_CONSULT_LANGUAGES]),
     domains: Object.freeze({ ...DEFAULT_CONSULT_DOMAIN_PACKS }),
-    strict: false
+    strict: false,
+    level: CONSULT_LEVEL_FOR_NEW_SETUP
   });
-  TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
+  REQUIRED_TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
+  OPTIONAL_TOP_LEVEL_KEYS = ["level"];
   DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
   OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
   LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
@@ -104207,6 +104480,7 @@ function renderOutsideHelpCard(status, input) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   parts.push(renderStatusBlock(status, summary, canEdit));
+  parts.push(renderLevel(status, canEdit));
   parts.push(renderProblems(status, canEdit));
   const shortList = `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
   const fullList = `<ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
@@ -104250,6 +104524,20 @@ function renderStatusBlock(status, summary, canEdit) {
   if (route.state === "configured" && route.readiness)
     lines.push(`<p class="ohline" data-outside-usage>${escapeHtml2(usageLine(route.readiness))}</p>`);
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">` + head + lines.join("") + `<p class="ohsmall" data-outside-cost>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLines.join(" "))}</p>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+function renderLevel(status, canEdit) {
+  const invalid2 = status.settings.state === "invalid";
+  const route = status.route;
+  const acknowledged = route.state === "configured" && route.acknowledgements.complete;
+  const current = status.settings.level;
+  const options = ["unnamed", "general"].map((level) => {
+    const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
+    const blocked = !canEdit || invalid2 || level === "unnamed" && current !== "unnamed" && !acknowledged;
+    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? " checked" : ""}${blocked ? ' disabled aria-disabled="true"' : ""}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
+  }).join("");
+  const hint = current !== "unnamed" && !acknowledged && route.state === "configured" ? `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelNeedsAcks)}</p>` : "";
+  const disabled = canEdit && !invalid2 ? "" : ' disabled aria-disabled="true"';
+  return `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelTitle)}</div>${options}${hint}` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function renderRouteLine(route) {
   if (route.state === "not_configured")
@@ -104434,6 +104722,12 @@ function outsideHelpClientScript(config2) {
         daily_spend_cap_usd: numberOrNull(field('daily_spend_cap_usd')),
       };
     }
+    if (kind === 'level') {
+      var picked = form.querySelector('input[name="level"]:checked');
+      // On or off as the status line says now (the switch updates it in place), so saving a level never flips the switch.
+      var state = root.querySelector('[data-outside-state-text]');
+      return { enabled: state ? state.getAttribute('data-outside-state') === 'on' : form.getAttribute('data-outside-current') === 'on', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
+    }
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
@@ -104449,7 +104743,7 @@ function outsideHelpClientScript(config2) {
     }
     setTimeout(poll, delay);
   }
-  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
   root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
@@ -119979,7 +120273,6 @@ function chatgptPrivateAnswerProgram(config2) {
   let canRetry = false;
   let answer = null;
   let sourcesOpen = false;
-  let askedOpen = false;
   let notes = {};
   let pair = null;
   let run = 0;
@@ -120077,7 +120370,6 @@ function chatgptPrivateAnswerProgram(config2) {
       follow = null;
       gone = false;
       sourcesOpen = false;
-      askedOpen = false;
       notes = {};
       pair = null;
     }
@@ -120324,10 +120616,11 @@ function chatgptPrivateAnswerProgram(config2) {
       return null;
     const state = value.state === "pending" || value.state === "appended" || value.state === "paused" ? value.state : "idle";
     if (state !== "appended")
-      return { state, text: "", cut: false, question: "" };
+      return { state, text: "", cut: false, question: "", level: "" };
     const bounded2 = boundOutside(value.text);
     const question = typeof value.question === "string" ? boundOutside(value.question).text : "";
-    return { state, text: bounded2.text, cut: bounded2.cut || value.cut === true, question };
+    const level = value.level === "unnamed" || value.level === "general" ? value.level : "";
+    return { state, text: bounded2.text, cut: bounded2.cut || value.cut === true, question, level };
   }
   function readAnswer(value) {
     if (!value || typeof value !== "object" || value.v !== 1)
@@ -120364,7 +120657,7 @@ function chatgptPrivateAnswerProgram(config2) {
         follow: outside !== null,
         rev,
         followSeconds: outside ? followSeconds : 0,
-        outside: outside || { state: "idle", text: "", cut: false, question: "" }
+        outside: outside || { state: "idle", text: "", cut: false, question: "", level: "" }
       }
     };
   }
@@ -120509,7 +120802,6 @@ function chatgptPrivateAnswerProgram(config2) {
             return withdrawn(byUser);
           answer = opened.answer;
           sourcesOpen = false;
-          askedOpen = false;
           notes = {};
           phase = "revealed";
           focusAfter = byUser ? "answer" : "";
@@ -120557,7 +120849,6 @@ function chatgptPrivateAnswerProgram(config2) {
     gone = true;
     follow = null;
     sourcesOpen = false;
-    askedOpen = false;
     notes = {};
     errorText = T.withdrawn;
     canRetry = false;
@@ -120630,11 +120921,6 @@ function chatgptPrivateAnswerProgram(config2) {
           render();
       }
     }
-  }
-  function toggleAsked() {
-    askedOpen = !askedOpen;
-    focusAfter = "asked";
-    render();
   }
   function toggleSources() {
     sourcesOpen = !sourcesOpen;
@@ -120865,27 +121151,20 @@ function chatgptPrivateAnswerProgram(config2) {
     const body = el("div", "out-body");
     const state = shown.outside.state;
     if (state === "appended") {
+      if (shown.outside.question) {
+        const asked = el("div", "asked");
+        asked.setAttribute("data-key", "asked");
+        asked.setAttribute("data-level", shown.outside.level || "general");
+        asked.appendChild(el("p", "asked-label", shown.outside.level === "unnamed" ? T.outsideSentUnnamed : T.outsideAsked));
+        const question = el("p", "asked-text");
+        question.textContent = shown.outside.question;
+        asked.appendChild(question);
+        body.appendChild(asked);
+      }
       const text = el("div", "out-text");
       text.setAttribute("data-key", "outside");
       text.textContent = shown.outside.text;
       body.appendChild(text);
-      if (shown.outside.question) {
-        const asked = el("div", "asked");
-        const toggle = el("button", "src-toggle");
-        toggle.type = "button";
-        toggle.setAttribute("data-key", "asked");
-        toggle.setAttribute("aria-expanded", askedOpen ? "true" : "false");
-        toggle.appendChild(doc2.createTextNode(T.outsideAsked));
-        toggle.appendChild(chevron());
-        onActivate(toggle, toggleAsked);
-        asked.appendChild(toggle);
-        if (askedOpen) {
-          const question = el("p", "asked-text");
-          question.textContent = shown.outside.question;
-          asked.appendChild(question);
-        }
-        body.appendChild(asked);
-      }
       if (shown.outside.cut)
         body.appendChild(el("p", "out-foot", T.outsideShortened));
     } else if (state === "pending") {
@@ -121123,8 +121402,9 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .out-text{font-size:0.875rem;line-height:1.5;white-space:pre-wrap}
 .out-sub{margin:0;font-size:0.8125rem;line-height:1.4;color:var(--muted)}
 .out-foot{margin:0.375rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
-.asked{margin-top:0.375rem}
-.asked-text{margin:0.25rem 0 0;font-size:0.8125rem;line-height:1.45;color:var(--muted);white-space:pre-wrap}
+.asked{margin:0 0 0.5rem}
+.asked-label{margin:0;font-size:0.75rem;line-height:1.4;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em}
+.asked-text{margin:0.25rem 0 0;font-size:0.8125rem;line-height:1.45;white-space:pre-wrap}
 .row{display:flex;align-items:center;gap:0.75rem}
 .icon{flex:none;display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:50%;background:var(--raise);border:1px solid var(--hair)}
 .lock{width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
@@ -124425,6 +124705,8 @@ function fitOutsideBlock(block) {
     const route = cleanTextField(block.route, limits.outsideRouteBytes);
     if (route)
       out.route = fitJsonString(route, limits.outsideRouteBytes).text;
+    if (block.level === "unnamed" || block.level === "general")
+      out.level = block.level;
   }
   const budget = PRIVATE_ANSWER_BYTE_BUDGETS.outside;
   const over = () => utf8Bytes2(JSON.stringify(out)) - budget;
@@ -124926,7 +125208,8 @@ class PrivateAnswerJobs {
       state: "appended",
       text: typeof block.text === "string" ? block.text : "",
       ...typeof block.question === "string" ? { question: block.question } : {},
-      ...typeof block.route === "string" ? { route: block.route } : {}
+      ...typeof block.route === "string" ? { route: block.route } : {},
+      ...block.level === "unnamed" || block.level === "general" ? { level: block.level } : {}
     });
     job.consult.settled = true;
     this.forgetConsultSnapshot(job);
@@ -126341,15 +126624,20 @@ __export(exports_consult_writer, {
   parseConsultWriterReply: () => parseConsultWriterReply,
   defaultConsultMemoryProbe: () => defaultConsultMemoryProbe,
   createConsultWriterServer: () => createConsultWriterServer,
+  consultWriterSystem: () => consultWriterSystem,
   consultWriterMemoryDecision: () => consultWriterMemoryDecision,
   buildConsultWriterPrompt: () => buildConsultWriterPrompt,
   boundConsultWriterInput: () => boundConsultWriterInput,
+  CONSULT_WRITER_SYSTEM_UNNAMED: () => CONSULT_WRITER_SYSTEM_UNNAMED,
   CONSULT_WRITER_SYSTEM: () => CONSULT_WRITER_SYSTEM,
   CONSULT_WRITER_RESPONSE_SCHEMA: () => CONSULT_WRITER_RESPONSE_SCHEMA,
   CONSULT_WRITER_LIMITS: () => CONSULT_WRITER_LIMITS
 });
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { freemem, platform as osPlatform4, totalmem as totalmem3 } from "node:os";
+function consultWriterSystem(level) {
+  return level === "unnamed" ? CONSULT_WRITER_SYSTEM_UNNAMED : CONSULT_WRITER_SYSTEM;
+}
 function boundConsultWriterInput(input) {
   const clean = (text3, max) => typeof text3 === "string" ? Array.from(text3.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim()).slice(0, max).join("") : "";
   return Object.freeze({
@@ -126358,7 +126646,7 @@ function boundConsultWriterInput(input) {
     gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : []).map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars)).filter(Boolean).slice(0, CONSULT_WRITER_LIMITS.gaps))
   });
 }
-function buildConsultWriterPrompt(input) {
+function buildConsultWriterPrompt(input, level = "general") {
   const bounded = boundConsultWriterInput(input);
   const user = [
     `Question: ${bounded.question}`,
@@ -126371,7 +126659,7 @@ ${bounded.answer}`,
 
 `);
   return Object.freeze([
-    Object.freeze({ role: "system", content: CONSULT_WRITER_SYSTEM }),
+    Object.freeze({ role: "system", content: consultWriterSystem(level) }),
     Object.freeze({ role: "user", content: user })
   ]);
 }
@@ -126479,7 +126767,7 @@ async function runConsultWriter(input, options) {
   const memory = consultWriterMemoryDecision(safeProbe(options.memory));
   if (!memory.ok)
     return { kind: "skipped", reason: memory.reason };
-  const messages = buildConsultWriterPrompt(input);
+  const messages = buildConsultWriterPrompt(input, options.level ?? "general");
   const deadline = AbortSignal.timeout(options.deadlineMs ?? CONSULT_WRITER_LIMITS.deadlineMs);
   const stop = AbortSignal.any([options.kill, deadline]);
   const killedReason = () => options.kill.aborted ? "fresh_answer" : "deadline";
@@ -126591,7 +126879,7 @@ async function writerCompletion(fetchImpl, endpoint2, messages, signal) {
     throw new Error("writer returned no text");
   return content;
 }
-var CONSULT_WRITER_LIMITS, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_RESPONSE_SCHEMA;
+var CONSULT_WRITER_LIMITS, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_RESPONSE_SCHEMA;
 var init_consult_writer = __esm(() => {
   init_model_transport();
   init_server4();
@@ -126632,6 +126920,30 @@ var init_consult_writer = __esm(() => {
     "- Each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary letters and spaces only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings, spelled-out letters or encoded strings.",
     "- Use ordinary dictionary words of the user's language, units, and standard abbreviations. Do not reuse wording between questions.",
     "- At most three questions, on one subject, and at most 600 bytes and 80 words in all.",
+    "",
+    'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.'
+  ].join(`
+`);
+  CONSULT_WRITER_SYSTEM_UNNAMED = [
+    "You are the local analyst. You have just answered a user's question from their private documents. That answer is final.",
+    "You may now propose a consult: up to three short questions for an outside expert model that knows nothing about this user, to settle a point the answer could not.",
+    "What you write is sent as written, unreviewed, to an outside provider, and it costs money. If the answer is already good enough, or outside knowledge would not help, propose nothing.",
+    "",
+    `You may describe the user's actual situation without anything that identifies them, and ask for a verdict on it ("Can the landlord keep the whole deposit?").`,
+    "",
+    "Always remove:",
+    '- names of people, companies, products, projects, schools and organisations, and employers: call each person or body by its part in this situation ("the landlord", "the employer", "the patient", "a software product");',
+    "- places smaller than a country; name a country only when the answer depends on it;",
+    "- exact dates and years;",
+    `- exact money amounts: use bands or relative terms ("about two months' rent", "a few thousand");`,
+    "- addresses, account, reference, phone and ID numbers, file and document titles, and anything quoted word for word.",
+    `Keep, when the question needs them: durations and rule numbers that define the problem ("gave 45 days' notice where the lease requires 60 days"), and health, legal, financial and relationship facts.`,
+    "Leave out every detail the answer does not need, even an allowed one. Never keep a job, a rare condition and a region together unless the answer needs all three: together they can point to one person.",
+    "Write every question yourself in plain words; never copy a sentence, or a phrase of five or more words, from the documents, the answer or the user.",
+    "",
+    "Form:",
+    "- Each question is at most 25 words: at most one short sentence of situation, then a short question of at most twelve content words, ending with a single question mark. Plain text only: no line breaks, markup, links, slashes, mail addresses, handles or codes.",
+    "- Use ordinary dictionary words of the user's language. At most three questions, on one subject, and at most 600 bytes in all.",
     "",
     'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.'
   ].join(`
@@ -126786,7 +127098,7 @@ function createConsultOrchestrator(options) {
     };
     let written;
     try {
-      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs });
+      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs, level: scheduled.policy.level });
     } catch {
       written = { kind: "failed", reason: "request_failed" };
     }
@@ -126811,7 +127123,7 @@ function createConsultOrchestrator(options) {
       record4(jobId, "error", startedAt, "snapshot_gone");
       return;
     }
-    const verdict = evaluateConsultRequest(written.questions, consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question, bounded.answer, ...bounded.gaps] }), {}, { recentApprovedQuestions: [...recent] }, consultGateOptionsFromSettings(settingsAtGate.settings));
+    const verdict = evaluateConsultRequest(written.questions, consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question], writerAnswerTexts: [bounded.answer, ...bounded.gaps] }), {}, { recentApprovedQuestions: [...recent] }, { ...consultGateOptionsFromSettings(settingsAtGate.settings), level: scheduled.policy.level });
     if (verdict.decision !== "pass") {
       await closeSession();
       fail(jobId);
@@ -126888,7 +127200,7 @@ function createConsultOrchestrator(options) {
       return;
     }
     const seam = options.jobs.outsideSeam(jobId);
-    const appended = seam ? options.jobs.appendOutsideBlock(jobId, seam.rev, { text: reply2.text, question: questionText, route: reply2.routeLabel }) : undefined;
+    const appended = seam ? options.jobs.appendOutsideBlock(jobId, seam.rev, { text: reply2.text, question: questionText, route: reply2.routeLabel, level: scheduled.policy.level }) : undefined;
     if (!appended?.ok) {
       fail(jobId);
       record4(jobId, "append_refused", startedAt, appended ? appended.reason : "job_gone");
@@ -127616,7 +127928,8 @@ function writeConsultSettings(input, location = {}) {
     enabled: input.enabled,
     languages: [...input.languages],
     domains: { ...input.domains },
-    strict: input.strict
+    strict: input.strict,
+    level: input.level
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
@@ -127785,6 +128098,7 @@ function createDashboardConsultAdapter(options) {
       languages: [...settings.languages],
       domains: { ...settings.domains },
       strict: settings.strict,
+      level: settings.level,
       ...read.state === "invalid" ? { invalidReason: read.reason } : {}
     };
   };
@@ -127918,13 +128232,27 @@ function createDashboardConsultAdapter(options) {
         }
         chosen = [...new Set(update.languages)];
       }
+      let level = current.state === "invalid" ? CONSULT_LEVEL_WHEN_UNSET : base.level;
+      if (update.level !== undefined) {
+        if (typeof update.level !== "string" || !CONSULT_LEVELS.includes(update.level))
+          return invalid3(MESSAGES2.levelUnknown, "level_unknown");
+        level = update.level;
+      }
+      const acknowledgementsComplete = () => {
+        const acknowledgements = zkapiProfile()?.profile.zkapi?.acknowledgements;
+        return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
+      };
+      if (level === "unnamed" && update.level === "unnamed" && (current.state !== "valid" || current.settings.level !== "unnamed")) {
+        if (!zkapiProfile())
+          return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
+        if (!acknowledgementsComplete())
+          return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES2.levelAcknowledgementsIncomplete };
+      }
       if (enabled) {
         const route = zkapiProfile();
         if (!route)
           return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
-        const acknowledgements = route.profile.zkapi?.acknowledgements;
-        const complete = acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
-        if (!complete)
+        if (!acknowledgementsComplete())
           return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES2.acknowledgementsIncomplete };
         const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed2.has(language)))
@@ -127935,6 +128263,7 @@ function createDashboardConsultAdapter(options) {
         languages: chosen,
         domains: { ...base.domains },
         strict: base.strict,
+        level,
         expectedRevision: revision,
         ...replaceInvalid ? { replaceInvalid: true } : {}
       }, location);
@@ -128110,6 +128439,8 @@ var init_dashboard_consult = __esm(() => {
     invalidCurrent: "The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.",
     routeMissing: "Add zkAPI before turning anonymous answers on.",
     acknowledgementsIncomplete: "Read and tick every statement about cost and risk before turning anonymous answers on.",
+    levelAcknowledgementsIncomplete: 'Read and tick every statement about cost and risk, including what "Your situation, without names" sends, before choosing it.',
+    levelUnknown: "Choose what zkAPI may send: your situation without names, or general questions only.",
     languageMissing: "A chosen language has no vocabulary pack installed on this computer.",
     languagesEmpty: "Choose at least one language.",
     noHome: "Olympus cannot find your home folder, so it cannot write the settings file.",
@@ -130874,7 +131205,8 @@ async function main() {
         server: writerServerFor(),
         memory,
         kill: control.kill,
-        deadlineMs: control.deadlineMs
+        deadlineMs: control.deadlineMs,
+        level: control.level
       }),
       openSession: async (control) => {
         const route = transport();

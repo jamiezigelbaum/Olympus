@@ -951,7 +951,7 @@ export class PrivateAnswerJobs {
    * holds is bounded whatever the reply was. A reply for a withdrawn,
    * expired or evicted job is discarded: nothing restores a withdrawn job.
    */
-  appendOutsideBlock(jobId: string, expectedRev: number, block: { text: string; question?: string; route?: string }): OutsideSeamResult {
+  appendOutsideBlock(jobId: string, expectedRev: number, block: { text: string; question?: string; route?: string; level?: 'unnamed' | 'general' }): OutsideSeamResult {
     const check = this.outsideWritable(jobId, expectedRev);
     if (!check.ok) return check;
     const job = check.job;
@@ -960,6 +960,7 @@ export class PrivateAnswerJobs {
       text: typeof block.text === 'string' ? block.text : '',
       ...(typeof block.question === 'string' ? { question: block.question } : {}),
       ...(typeof block.route === 'string' ? { route: block.route } : {}),
+      ...(block.level === 'unnamed' || block.level === 'general' ? { level: block.level } : {}),
     });
     job.consult.settled = true;
     this.forgetConsultSnapshot(job);

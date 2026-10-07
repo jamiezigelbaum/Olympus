@@ -4513,6 +4513,7 @@ export async function main(): Promise<void> {
         memory,
         kill: control.kill,
         deadlineMs: control.deadlineMs,
+        level: control.level,
       }),
       openSession: async (control) => {
         const route = transport();

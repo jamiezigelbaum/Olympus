@@ -321,3 +321,115 @@ Either no consult, or a list of up to three sub-questions, each standing alone.
 Never include your reasons, the evidence, or the owner's question alongside
 them; they are sent exactly as you write them (and, in strict mode, shown to
 the owner first).
+
+---
+
+## Level: your situation, without names
+
+Owner decision, 2026-10-07. Outside help has two levels, chosen on the Mac
+card under "What may zkAPI send?" and stored as `level` in
+`~/.olympus/consult.json`:
+
+- **General questions only** (`general`): everything above, unchanged. The
+  loaded rules are `CONSULT_WRITER_SYSTEM`, byte for byte as before (a test
+  pins its hash).
+- **Your situation, without names** (`unnamed`, the default for a new setup;
+  a settings file written before the level existed reads as `general`): the
+  rules in this section replace "Never relay private content", the verdict
+  rule and the stranger test above. The loaded form is
+  `CONSULT_WRITER_SYSTEM_UNNAMED` in `src/core/consult-writer.ts`, quoted
+  here in full:
+
+> You are the local analyst. You have just answered a user's question from
+> their private documents. That answer is final.
+> You may now propose a consult: up to three short questions for an outside
+> expert model that knows nothing about this user, to settle a point the
+> answer could not.
+> What you write is sent as written, unreviewed, to an outside provider, and
+> it costs money. If the answer is already good enough, or outside knowledge
+> would not help, propose nothing.
+>
+> You may describe the user's actual situation without anything that
+> identifies them, and ask for a verdict on it ("Can the landlord keep the
+> whole deposit?").
+>
+> Always remove:
+> - names of people, companies, products, projects, schools and
+>   organisations, and employers: call each person or body by its part in
+>   this situation ("the landlord", "the employer", "the patient", "a
+>   software product");
+> - places smaller than a country; name a country only when the answer
+>   depends on it;
+> - exact dates and years;
+> - exact money amounts: use bands or relative terms ("about two months'
+>   rent", "a few thousand");
+> - addresses, account, reference, phone and ID numbers, file and document
+>   titles, and anything quoted word for word.
+>
+> Keep, when the question needs them: durations and rule numbers that define
+> the problem ("gave 45 days' notice where the lease requires 60 days"), and
+> health, legal, financial and relationship facts.
+> Leave out every detail the answer does not need, even an allowed one. Never
+> keep a job, a rare condition and a region together unless the answer needs
+> all three: together they can point to one person.
+> Write every question yourself in plain words; never copy a sentence, or a
+> phrase of five or more words, from the documents, the answer or the user.
+>
+> Form:
+> - Each question is at most 25 words: at most one short sentence of
+>   situation, then a short question of at most twelve content words, ending
+>   with a single question mark. Plain text only: no line breaks, markup,
+>   links, slashes, mail addresses, handles or codes.
+> - Use ordinary dictionary words of the user's language. At most three
+>   questions, on one subject, and at most 600 bytes in all.
+>
+> Reply with one JSON object and nothing else: {"questions": ["...", "..."]}
+> with one to three questions, or {"questions": null} to propose nothing.
+
+Example: "A tenant gave 45 days' notice where the lease requires 60 days. Can
+the landlord keep a deposit of about two months' rent?" (23 words; the 25-word
+limit is unchanged because the example fits it). The owner's mockup wrote
+"requires 60"; the loaded example says "60 days" because the gate repeats a
+figure from the documents only when the question also names its duration
+(review round 1: a bare figure could be an amount).
+
+The outbound gate runs at both levels. At this level some of its rules widen
+(owner ruling in review, 2026-10-07: "err on the side of allowing more
+through"); the full list is the comment on
+`CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION` in
+`src/core/consult-gate.ts`:
+
+- size: 18 content words and two situation sentences per sub-question; the
+  question sentence keeps the cap of 12;
+- rule figures: a figure of up to three digits from the documents may be
+  repeated only when every occurrence there, in digits or words, and every
+  occurrence in the question is followed by a duration (hours to months) or
+  a full percent expression ("%", "percent", "per cent"); a rate ("120 per
+  hour"), money, a year count or a bare number refuses it;
+- copied wording: the copy rules do not compare against the local answer and
+  its gaps, and a copy of the documents or the owner's question must be five
+  words instead of four;
+- ordinary words: a dictionary word of the owner's languages, or a country,
+  is not taken for a name on its own when the snapshot also writes it in
+  lower case somewhere ("Retail Park" beside "a retail park", "Offer letter:
+  probation"). A dictionary word the snapshot only ever capitalizes ("rue des
+  Tanneurs", "Grace called"), a capitalized label or quoted value
+  ("Reporter: 'Fenwick'"), and a word of a title, path, author or account
+  value stay protected.
+
+Personal names outside the dictionaries, exact dates and years, ages, exact
+amounts, account, phone and ID numbers, addresses, mail addresses and handles
+are refused exactly as at the general level. Addresses are also protected
+as spans at both levels, whatever their capitalization (review round 2): a
+house number within five words of a street word ("7 Park street", "Rua da
+Rosa 12", "7 rue des Tanneurs") refuses a question that repeats the number
+with any word of the span, or the span's name words with its street word.
+
+**Accepted residuals (owner ruling).** A name, venue or project written in
+lower-case or dictionary words ("the red lion") and copied from the documents
+or the answer can pass at this level, and so can a person's name that is a
+dictionary word ("Rose", "Mason") when the snapshot also uses that word in
+lower case ("a rose bush", "the mason"). `bun eval/consult-leak/unnamed-level.ts` counts both. The rules above forbid
+the writer to send it; the gate does not catch it. The re-identification eval
+(`eval/consult-reid/`) and the false-refusal measurements
+(`docs/design/consult-gate-false-refusals.md`, "Unnamed level") report it.

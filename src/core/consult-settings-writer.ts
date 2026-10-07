@@ -29,6 +29,7 @@ import { FileLeaseBusyError, withFileLeaseSync } from './file-lease.ts';
 import type { ConsultDomainPacks, ConsultLanguage } from './consult-gate.ts';
 import {
   CONSULT_SETTINGS_VERSION,
+  type ConsultLevel,
   consultSettingsPath,
   parseConsultSettings,
   readConsultSettings,
@@ -44,6 +45,8 @@ export interface ConsultSettingsUpdate {
   readonly languages: readonly ConsultLanguage[];
   readonly domains: ConsultDomainPacks;
   readonly strict: boolean;
+  /** What the consult writer may send; always written, so the file never relies on the reader's default. */
+  readonly level: ConsultLevel;
 }
 
 export interface ConsultSettingsWriteInput extends ConsultSettingsUpdate {
@@ -120,6 +123,7 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
     languages: [...input.languages],
     domains: { ...input.domains },
     strict: input.strict,
+    level: input.level,
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) return { ok: false, reason: 'invalid_input' };
   const custody = ensureSettingsDirectory(dirname(path));

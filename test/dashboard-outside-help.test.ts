@@ -100,7 +100,7 @@ function status(overrides: {
   restartPending?: boolean;
 } = {}): DashboardOutsideHelpStatus {
   return {
-    settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false, ...overrides.settings },
+    settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false, level: 'unnamed', ...overrides.settings },
     route: overrides.route ?? configuredRoute(),
     languages: LANGUAGES,
     restartPending: overrides.restartPending ?? false,
@@ -178,9 +178,9 @@ describe('the Outside help page: states and copy', () => {
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
     expect(text).toContain('ONE transfer in total');
     expect(text).toContain('Gas prices move');
-    // The eight acknowledgements as checkboxes, all ticked.
-    expect(html.match(/name="acknowledged"/g)?.length).toBe(8);
-    expect(html.match(/name="acknowledged" value="[a-z_0-9]+" checked/g)?.length).toBe(8);
+    // The nine acknowledgements as checkboxes, all ticked.
+    expect(html.match(/name="acknowledged"/g)?.length).toBe(9);
+    expect(html.match(/name="acknowledged" value="[a-z_0-9]+" checked/g)?.length).toBe(9);
     for (const entry of ZKAPI_RISK_ACKNOWLEDGEMENTS) expect(html).toContain(entry.statement.replace(/'/g, '&#39;').replace(/"/g, '&quot;'));
     // The domain packs beside the languages: the current defaults, on and off, in plain words.
     expect(html).toContain('data-outside-domains="units,countries,places,technical,medicines"');
@@ -210,7 +210,7 @@ describe('the Outside help page: states and copy', () => {
     expect(html.match(/<ul class="ohshort" data-outside-disclosure>(.*?)<\/ul>/)?.[1]?.match(/<li>/g)?.length).toBe(3);
     expect(html).toContain('<details class="howto" data-outside-disclosure-more>');
     // Accepted at the current wording: one line, the statements behind Review.
-    expect(html).toContain(`data-outside-acknowledged="yes">You accepted the 8 cost and risk statements.<`);
+    expect(html).toContain(`data-outside-acknowledged="yes">You accepted the 9 cost and risk statements.<`);
     expect(html).toContain('data-outside-ack-review');
     // Nothing to fix: no problem list; secondary sections closed.
     expect(html).not.toContain('data-outside-blockers');
@@ -280,7 +280,7 @@ describe('the Outside help page: states and copy', () => {
     expect(text).toContain('zkapi-clientd not installed');
     // Not accepted: the eight statements are shown expanded, not behind Review.
     expect(html).not.toContain('data-outside-ack-review');
-    expect(html.match(/name="acknowledged"/g)?.length).toBe(8);
+    expect(html.match(/name="acknowledged"/g)?.length).toBe(9);
     expect(html).toContain('data-outside-acknowledged="no"');
     expect(html.match(/name="acknowledged" value="[a-z_0-9]+" checked/g)).toBeNull();
     expect(html).toContain(W.enableBlockedAcks);
@@ -374,6 +374,27 @@ describe('the Outside help page: states and copy', () => {
     expect(document.querySelector('[data-outside-state-text]')!.textContent).toBe(W.state.on);
     expect(document.querySelector('[data-outside-state-text]')!.getAttribute('data-outside-state')).toBe('on');
     expect(document.querySelector('[data-outside-help]')!.getAttribute('data-revision')).toBe('5');
+    // What may zkAPI send: the chosen level, posted to the same settings route, keeping the switch as it now reads.
+    const level = document.querySelector('form[data-outside-form="level"]')!;
+    (level.querySelector('input[name="level"][value="general"]') as unknown as { checked: boolean }).checked = true;
+    level.dispatchEvent(new window.Event('submit', { cancelable: true }));
+    await settle();
+    expect(posts[2]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.enable);
+    expect(posts[2]!.init.headers['X-Olympus-CSRF']).toBe('csrf');
+    expect(JSON.parse(posts[2]!.init.body)).toEqual({ enabled: true, revision: 5, level: 'general' });
+  });
+
+  test('What may zkAPI send: the two levels with the approved copy, the current one chosen; the unnamed one waits for its acknowledgement', () => {
+    const html = page(status());
+    const text = visibleText(html);
+    expect(text).toContain('What may zkAPI send?');
+    for (const line of ['Your situation, without names (recommended)', 'Sends your actual problem with names, places, exact dates, amounts and account numbers removed. Gets real answers.',
+      'General questions only (strict)', 'Sends only textbook questions; nothing about your situation leaves. Safest, but rarely helpful.']) expect(text).toContain(line);
+    expect(html).toContain('<input type="radio" name="level" value="unnamed" checked>');
+    const general = page(status({ settings: { level: 'general' }, route: configuredRoute({ complete: false }) }));
+    expect(general).toContain('<input type="radio" name="level" value="general" checked>');
+    expect(general).toContain('<input type="radio" name="level" value="unnamed" disabled aria-disabled="true">');
+    expect(visibleText(general)).toContain(W.levelNeedsAcks);
   });
 
   test('Tor off: the route is said to be direct with the network address visible, whether or not a tor binary exists', () => {
@@ -402,7 +423,7 @@ describe('the Outside help page: states and copy', () => {
     expect(html).not.toContain(`<button type="submit" class="btn">${W.saveRoute}</button>`);
     expect(html).toContain(`<button type="submit" class="btn" disabled aria-disabled="true">${W.saveRoute}</button>`);
     // Still reads every fact and every statement, read-only.
-    expect(html.match(/name="acknowledged"[^>]*disabled/g)?.length).toBe(8);
+    expect(html.match(/name="acknowledged"[^>]*disabled/g)?.length).toBe(9);
     // A local-grade session has no unlock to offer.
     expect(page(status())).not.toContain('data-outside-unlock');
   });
@@ -792,6 +813,44 @@ describe('the adapter: turning outside help on and off', () => {
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: false } });
   });
 
+  test('level: a new setup is written "unnamed"; a file without the key stays "general" through on and off', async () => {
+    const home = tempHome();
+    const { backend, env } = adapter({ home });
+    expect((await backend.setEnabled({ enabled: true, revision: 0 })).ok).toBe(true);
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 1, level: 'unnamed' } });
+    expect((await backend.status()).settings.level).toBe('unnamed');
+
+    const older = tempHome();
+    const { backend: olderBackend, env: olderEnv } = adapter({ home: older });
+    // A file written before the level existed (outside help on under the general rules).
+    writeFileSync(join(older, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 4, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
+    expect((await olderBackend.status()).settings.level).toBe('general');
+    expect((await olderBackend.setEnabled({ enabled: false, revision: 4 })).ok).toBe(true);
+    expect((await olderBackend.setEnabled({ enabled: true, revision: 5 })).ok).toBe(true);
+    expect(readConsultSettings({ env: olderEnv })).toMatchObject({ state: 'valid', settings: { revision: 6, enabled: true, level: 'general' } });
+    // A damaged file replaced without a choice keeps the narrower level.
+    writeFileSync(join(older, '.olympus', 'consult.json'), '{"v":1', { mode: 0o600 });
+    expect((await olderBackend.setEnabled({ enabled: false, revision: 0, replace_invalid: true })).ok).toBe(true);
+    expect(readConsultSettings({ env: olderEnv })).toMatchObject({ state: 'valid', settings: { level: 'general' } });
+  });
+
+  test('level: choosing "unnamed" needs every acknowledgement at the current version (it states what the level sends); "general" never does', async () => {
+    const stale = adapter({ home: tempHome(), profileOverrides: { acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION - 1, accepted: ALL_IDS.filter((id) => id !== 'situation_disclosure') } } });
+    writeFileSync(join(stale.env.HOME, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 1, enabled: false, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false, level: 'general' }), { mode: 0o600 });
+    expect(await stale.backend.setEnabled({ enabled: false, revision: 1, level: 'unnamed' })).toMatchObject({ ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: expect.stringContaining('without names') });
+    expect(readConsultSettings({ env: stale.env })).toMatchObject({ settings: { revision: 1, level: 'general' } });
+    expect(await stale.backend.setEnabled({ enabled: false, revision: 1, level: 'general' })).toMatchObject({ ok: true, revision: 2 });
+    expect(ZKAPI_RISK_ACKNOWLEDGEMENTS.some((entry) => entry.id === 'situation_disclosure' && /could still hint at who you are/.test(entry.statement))).toBe(true);
+
+    const current = adapter({ home: tempHome() });
+    writeFileSync(join(current.env.HOME, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 1, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false, level: 'general' }), { mode: 0o600 });
+    expect(await current.backend.setEnabled({ enabled: true, revision: 1, level: 'unnamed' })).toMatchObject({ ok: true, revision: 2 });
+    expect(readConsultSettings({ env: current.env })).toMatchObject({ settings: { enabled: true, level: 'unnamed' } });
+    expect(await current.backend.setEnabled({ enabled: true, revision: 2, level: 'general' })).toMatchObject({ ok: true, revision: 3 });
+    expect(await current.backend.setEnabled({ enabled: true, revision: 3, level: 'everything' })).toMatchObject({ ok: false, httpStatus: 400, code: 'level_unknown' });
+    expect(readConsultSettings({ env: current.env })).toMatchObject({ settings: { revision: 3, level: 'general' } });
+  });
+
   test('bad requests: no boolean, no revision, empty, unknown or uninstalled languages', async () => {
     const { backend } = adapter({ home: tempHome() });
     expect(await backend.setEnabled({ revision: 0 })).toMatchObject({ ok: false, httpStatus: 400 });
@@ -817,7 +876,7 @@ describe('the adapter: turning outside help on and off', () => {
 });
 
 describe('the adapter: the route, its acknowledgements and the fence', () => {
-  test('saveRoute records the eight acknowledgements at version 3, the funding date and the caps in the policy file, validated, then asks for a restart', async () => {
+  test('saveRoute records the nine acknowledgements at version 4, the funding date and the caps in the policy file, validated, then asks for a restart', async () => {
     const home = tempHome();
     const { backend, reloads, path } = adapter({ home, profileOverrides: { acknowledgements: { version: 0, accepted: [] } } });
     expect((await backend.status()).route).toMatchObject({ acknowledgements: { complete: false } });
