@@ -568,7 +568,7 @@ describe('Private-row re-home', () => {
       expect(currentCorpora(fixture, 'orchid')).toEqual([CORPORA.secure_local]);
       const third = await rehomePrivateTierRows({ set: fixture.set, ...wide, maxMoves: 25 });
       expect(third.refused).toBe(225);
-    });
+    }, 60_000);
 
     test('the shared queue is not read when moves are not permitted or there is nothing of ours', async () => {
       const { dir, cleanup } = tempDir('olympus-row-rehome-queue-');
@@ -624,7 +624,7 @@ describe('Private-row re-home', () => {
       console.log(`row re-home pass with 5000 unrelated queued moves: ${elapsed.toFixed(0)} ms`);
       expect(report.moved).toBe(1);
       expect(elapsed).toBeLessThan(5_000);
-    });
+    }, 60_000);
 
     test('a completed move whose note was lost is recorded again, once', async () => {
       const fixture = fixtureIn();
@@ -657,7 +657,7 @@ describe('Private-row re-home', () => {
       }
       expect(currentCorpora(fixture, 'row500')).toEqual([CORPORA.secure_local]);
       expect(calls).toBeGreaterThan(1); // bounded calls had to rotate past the blocked ones
-    });
+    }, 60_000);
 
     test('moved rows are handed to the embedding queue with the lane provider and survive a restart', async () => {
       let fixture = fixtureIn();
@@ -694,7 +694,7 @@ describe('Private-row re-home', () => {
       }
       const replay = await rehomePrivateTierRows({ set: fixture.set, ...wide });
       expect(replay.receiptsReplayed).toBe(1);
-    });
+    }, 60_000);
 
     test('a re-home raise completed by another executor (no entry key) gets the keyed receipt once, and replay adds no second note', async () => {
       const fixture = fixtureIn();

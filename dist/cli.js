@@ -57742,8 +57742,11 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
       reasons.add("identifier_shape");
     if (hasTechnicalFingerprint(nfkc))
       reasons.add("technical_fingerprint");
-    if (hasUnknownWord(nfkc, vocabulary))
+    if (hasUnknownWord(nfkc, vocabulary)) {
       reasons.add("unknown_word");
+      if (requestedPackNotLoaded(options ?? {}))
+        reasons.add("vocabulary_unavailable");
+    }
     let count = 0;
     forEachToken(foldText(nfkc), () => {
       count += 1;
@@ -58038,6 +58041,11 @@ function consultVocabulary(options) {
     vocabularyCache.set(key, loaded);
   }
   return loaded.vocabulary;
+}
+function requestedPackNotLoaded(options) {
+  if (evaluationVocabulary)
+    return false;
+  return (vocabularyCache.get(selectionKey(options))?.status ?? []).some((entry) => entry.origin === "user" && entry.state !== "loaded");
 }
 function verifiedPackFile(path, sha2563) {
   try {
@@ -59176,6 +59184,8 @@ var init_consult_gate = __esm(() => {
     "pt-pt-hunspell": "61d7365a29d9c2f15d60dd3033b464c87b459d0b779b0979c62bb17425ebcd4c",
     "cldr-units": "19c8502b1c09353e3011b8683dede75229984b924218d0dae31f092b89dff177",
     "cldr-countries": "1e90b040de7bfa69ce6f134021b6adf3c5ac48f578b958fd676a2cb28b577e75",
+    places: "d75e915054efdcbcbb3bbf083e4bb0210274463aa5e9704d0cbcfdd594ae0ee8",
+    "olympus-terms": "c64fd85082c07305dcb52165b3e0fa666d5bef2ce845573997e55b23718aa3c1",
     "rx-ingredients": "edaff96cb6251b73387889d1503280a81f7e59693c6f915056bae321777baae2",
     "rx-brands": "ea5dd90a5131aeee31e1d009b5d975bc792775361e0b9e9a1989e7b427bea2ca"
   };
@@ -59191,13 +59201,17 @@ var init_consult_gate = __esm(() => {
   };
   DEFAULT_CONSULT_DOMAIN_PACKS = Object.freeze({
     units: true,
-    countries: false,
+    countries: true,
+    places: true,
+    technical: true,
     medicines: true,
     medicineBrands: false
   });
   DOMAIN_PACK_IDS = {
     units: "cldr-units",
     countries: "cldr-countries",
+    places: "places",
+    technical: "olympus-terms",
     medicines: "rx-ingredients",
     medicineBrands: "rx-brands"
   };
@@ -60213,16 +60227,18 @@ function parseConsultSettings(value) {
     return;
   if (new Set(languages).size !== languages.length)
     return;
-  if (!isPlainObject(domains) || !hasExactKeys(domains, DOMAIN_KEYS))
+  if (!isPlainObject(domains))
     return;
-  if (!DOMAIN_KEYS.every((key) => typeof domains[key] === "boolean"))
+  if (!Object.keys(domains).every((key) => DOMAIN_KEYS.includes(key)))
+    return;
+  if (!DOMAIN_KEYS.every((key) => (key in domains) ? typeof domains[key] === "boolean" : OPTIONAL_DOMAIN_KEYS.includes(key)))
     return;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
     enabled,
     languages: Object.freeze([...languages]),
-    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key]]))),
+    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] : true]))),
     strict
   });
 }
@@ -60367,7 +60383,7 @@ function hasExactKeys(value, keys) {
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
-var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, DEFAULT_CONSULT_SETTINGS, TOP_LEVEL_KEYS, DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
+var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, DEFAULT_CONSULT_SETTINGS, TOP_LEVEL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
 var init_consult_settings = __esm(() => {
   init_consult_gate();
   CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
@@ -60381,6 +60397,7 @@ var init_consult_settings = __esm(() => {
   });
   TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
   DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
+  OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
   LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
   __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 });
