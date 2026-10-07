@@ -2183,7 +2183,7 @@ describe('LocalConnectorStore reactions', () => {
     await store.syncFromConnector(createChatConnector([reactedChatItem(THUMBS_UP_BY_TWO)]), { fetchContent: true });
     store.close();
 
-    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(12);
+    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(13);
 
     const db = new Database(dbPath, { readonly: true });
     try {
@@ -2221,6 +2221,14 @@ describe('LocalConnectorStore reactions', () => {
       rewind.exec('ALTER TABLE items DROP COLUMN source_scope_revision;');
       rewind.exec('ALTER TABLE items DROP COLUMN source_scope_generation;');
       rewind.exec('ALTER TABLE items DROP COLUMN reactions_json;');
+      rewind.exec(`
+        DROP TRIGGER connector_store_chunk_media_release;
+        DROP TABLE chunk_media_releases;
+        DROP TABLE chunk_media_failures;
+        DROP INDEX idx_connector_store_chunks_media;
+        ALTER TABLE chunks DROP COLUMN media_path;
+        ALTER TABLE chunks DROP COLUMN media_sha256;
+      `);
       rewind.query("UPDATE schema_version SET version = 8 WHERE store_id = 'connector-store'").run();
     } finally {
       rewind.close();

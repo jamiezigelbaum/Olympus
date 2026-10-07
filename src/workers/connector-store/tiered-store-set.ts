@@ -97,6 +97,7 @@ import { secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
+import { sweepImageContentToPrivate } from './tier-image-content-sweep.ts';
 
 
 /** Legs run in this order, least private first. */
@@ -527,6 +528,13 @@ export class TieredStoreSet {
     }
     try {
       settleNamesOnlyItems({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      // Picture content stored in a Personal or Public store before pictures
+      // were Private-only moves to the Private store (once).
+      sweepImageContentToPrivate({ set: this });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }

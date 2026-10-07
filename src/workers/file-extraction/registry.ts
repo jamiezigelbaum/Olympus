@@ -39,6 +39,8 @@ import {
   createRemoteVlmExtractor,
 } from './extractors/remote-vlm.ts';
 import { TEXT_EXTRACTOR_KIND, createTextExtractor } from './extractors/text.ts';
+import { createImagePreparation } from './extractors/image-prepare.ts';
+import { stillImagePreparationAvailable } from '../../core/media-cache.ts';
 import {
   TRANSCRIPTION_EXTRACTOR_KIND,
   createTranscriptionExtractor,
@@ -139,6 +141,21 @@ export function createDefaultExtractorRegistry(
       // Mac the same holds for an image: the built-in engine reads its text.
       pdfOcr: createPdfOcr(ocrShared),
       imageOcr: createImageOcr(ocrShared),
+      // On a Mac a still image is also prepared for media search (a JPEG in
+      // the owner-only media cache), so its picture can be embedded. The
+      // preparation tool ships with macOS only; elsewhere images stay as
+      // they were.
+      ...(config.media?.cacheDir && (config.media.platform !== undefined
+        ? config.media.platform === 'darwin'
+        : stillImagePreparationAvailable())
+        ? {
+          imagePreparation: createImagePreparation({
+            cacheDir: config.media.cacheDir,
+            ...(config.media.timeoutMs !== undefined ? { timeoutMs: config.media.timeoutMs } : {}),
+            ...(config.media.maxInputBytes !== undefined ? { maxInputBytes: config.media.maxInputBytes } : {}),
+          }),
+        }
+        : {}),
     }),
     createOcrExtractor(ocrShared),
     createVlmPdfExtractor({

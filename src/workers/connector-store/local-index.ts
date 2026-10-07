@@ -43,6 +43,14 @@ import type {
 } from '../../core/evidence-pack.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import {
+  isMediaCachePath,
+  mediaCacheDir,
+  releaseMediaCacheFile,
+  retainMediaCacheFile,
+  stillImagePreparationAvailable,
+  sweepMediaCache,
+} from '../../core/media-cache.ts';
+import {
   assertSqliteSchemaCanOpen,
   currentStoreMigrations,
   readSqliteSchemaVersion,
@@ -57,7 +65,7 @@ import {
   type TierCopy,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
-import { classifyContentTier, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { classifyContentTier, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -109,6 +117,7 @@ import {
   decodeEmbedding,
   encodeEmbedding,
   isApprovedSecureSourceEmbeddingProvider,
+  SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
@@ -238,7 +247,13 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13;
+/** The `sync_runs` connector id of a strip of picture content outside Private stores. */
+export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
+/** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
+const CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60_000;
+/** ... and dropped (the photo embeds as text) after this many failures. */
+const CHUNK_MEDIA_MAX_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3;
 const CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32;
 
@@ -364,7 +379,7 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 12,
       name: 'connector_store_trusted_source_scope_observation',
       up(db: Database) {
         addColumnIfMissing(db, 'items', 'source_scope_generation', 'TEXT');
@@ -372,7 +387,62 @@ export function connectorStoreMigrations() {
         addColumnIfMissing(db, 'items', 'source_scope_folder_keys_json', 'TEXT');
       },
     },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: 'connector_store_chunk_media',
+      up(db: Database) {
+        // Additive and inert: existing chunks keep NULL media and embed
+        // exactly as before (docs/design/photo-embeddings.md).
+        addColumnIfMissing(db, 'chunks', 'media_path', 'TEXT');
+        addColumnIfMissing(db, 'chunks', 'media_sha256', 'TEXT');
+        createConnectorStoreChunkMediaReleases(db);
+      },
+    },
   ];
+}
+
+/**
+ * Media a deleted chunk referenced, queued by a trigger so every path that
+ * deletes chunks (a replace, a tombstone, a purge) is covered without each
+ * one remembering to. The store drains it after its writes and lets the media
+ * cache drop the file when no chunk here references it any more.
+ */
+function createConnectorStoreChunkMediaReleases(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chunk_media_releases (
+      media_sha256 TEXT PRIMARY KEY,
+      media_path TEXT NOT NULL
+    );
+    -- "Does any chunk still hold this picture" is asked on every release.
+    CREATE INDEX IF NOT EXISTS idx_connector_store_chunks_media
+      ON chunks(media_sha256) WHERE media_sha256 IS NOT NULL;
+    -- Pictures the image encoder could not read: never sent again, so one
+    -- bad photo cannot hold up the rest of a store's embedding.
+    CREATE TABLE IF NOT EXISTS chunk_media_failures (
+      media_sha256 TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      failed_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 1
+    );
+    -- Images this store has stored a reading of since pictures are read: an
+    -- image without a row is read once more (a text-only reading from before),
+    -- one with a row is not listed again, whatever its picture became.
+    CREATE TABLE IF NOT EXISTS image_media_reads (
+      item_pk INTEGER PRIMARY KEY,
+      read_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_chunk_media_release
+    AFTER DELETE ON chunks
+    WHEN OLD.media_sha256 IS NOT NULL AND OLD.media_path IS NOT NULL
+    BEGIN
+      INSERT OR IGNORE INTO chunk_media_releases (media_sha256, media_path)
+      VALUES (OLD.media_sha256, OLD.media_path);
+    END;
+  `);
+  // A store migrated to 13 by an earlier build of this schema lacks the
+  // columns added since; every object above is idempotent, and so is this.
+  addColumnIfMissing(db, 'chunk_media_failures', 'attempts', 'INTEGER NOT NULL DEFAULT 1');
 }
 
 export const CONNECTOR_STORE_FTS_MIGRATION: SourceIndexFtsMigrationSpec = {
@@ -409,6 +479,12 @@ export interface LocalConnectorStoreOptions {
   trustDomain: SourceTrustDomain;
   /** Opens an existing store without migrations, WAL changes, or writes. */
   readOnly?: boolean;
+  /**
+   * Whether this machine reads pictures for media search (defaults to
+   * `stillImagePreparationAvailable()`); decides whether an image read
+   * before pictures were is listed for extraction once more.
+   */
+  stillImagesRead?: boolean;
   /** Clock for owner observations compared with provider snapshot cutoffs. */
   now?: () => Date;
   /**
@@ -799,7 +875,14 @@ export interface ConnectorStoreItemCopy {
   columns: Readonly<Record<(typeof CONNECTOR_STORE_COPY_ITEM_COLUMNS)[number], string | number | null>>;
   trustTier: SourceTrustTier;
   owners: ReadonlyArray<{ connectorId: string; ownershipKind: ConnectorStoreOwnershipKind; firstSeenAt: string; lastSeenAt: string }>;
-  chunks: ReadonlyArray<{ chunkIndex: number; boundedText: string; contentHash: string; embeddingInputHash: string | null }>;
+  chunks: ReadonlyArray<{
+    chunkIndex: number;
+    boundedText: string;
+    contentHash: string;
+    embeddingInputHash: string | null;
+    mediaPath?: string | null;
+    mediaSha256?: string | null;
+  }>;
   /** Current vectors only (content hash equal to the chunk's embedding input hash). */
   vectors: ReadonlyArray<{ chunkIndex: number; modelId: string; contentHash: string; embedding: Uint8Array }>;
   /** The write authority each exported model's vectors were minted under. */
@@ -1761,6 +1844,12 @@ export interface ConnectorStoreItemRepresentationExpectation {
   sourceVersion?: string;
   contentHash: string;
   chunkContentHashes: readonly string[];
+  /**
+   * The digest of the media the first chunk carries (a prepared photo), or
+   * absent for text alone. A changed picture behind unchanged text is a
+   * changed representation.
+   */
+  mediaSha256?: string;
   requiredSearchTokens?: readonly string[];
   embeddingModelId?: string;
 }
@@ -1774,6 +1863,18 @@ export interface ConnectorStoreItemRepresentationCoverage {
 export interface ConnectorStoreRepresentationRestoreItem {
   item: RawItem;
   expectation: ConnectorStoreItemRepresentationExpectation;
+  /**
+   * Media the item's content is also searched by, attached to its first
+   * chunk (docs/design/photo-embeddings.md). Its digest must match the
+   * expectation's `mediaSha256`.
+   */
+  media?: ConnectorStoreChunkMedia;
+}
+
+/** A prepared media file in the owner-only media cache, attached to a chunk. */
+export interface ConnectorStoreChunkMedia {
+  path: string;
+  sha256: string;
 }
 
 /**
@@ -2217,6 +2318,13 @@ export class LocalConnectorStore {
   // not opened it yet). Such a store has no reactions, and saying so is
   // cheaper and more honest than refusing to serve it.
   private reactionsColumnPresent = false;
+  /** Whether `chunks` carries the v13 media columns (a read-only open of an older store does not). */
+  private chunkMediaColumnsPresent = false;
+  /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
+  private imageMediaReadsPresent = false;
+  /** This store's name in the media cache's reference markers. */
+  private readonly mediaHolder: string;
+  private readonly stillImagesRead: boolean;
   // The four-tier ledger. Declared without an initializer on purpose (see the
   // tree-shaking note on trustReconciliationReadyCursors).
   private tierLedgerHandle: TierLedger | undefined;
@@ -2241,6 +2349,8 @@ export class LocalConnectorStore {
   constructor(options: LocalConnectorStoreOptions) {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
+    this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : this.dbPath;
+    this.stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
     this.family = options.family;
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date());
@@ -2289,9 +2399,14 @@ export class LocalConnectorStore {
         refuseUnversionedConnectorStoreSchema(this.db);
         this.migrate();
         runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
+        createConnectorStoreChunkMediaReleases(this.db);
         validateConnectorStoreSchema(this.db);
       }
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
+      this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
+      this.imageMediaReadsPresent = this.db.query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
+      ).get() !== null;
     } catch (error) {
       closeSqliteStore(this.db);
       throw error;
@@ -2300,6 +2415,7 @@ export class LocalConnectorStore {
 
   close(): void {
     try {
+      this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
@@ -2368,6 +2484,7 @@ export class LocalConnectorStore {
           metadataOwnerDecided: namesDecidedByOwner(existing.reasons),
           ...(title ? { title } : {}),
           ...(path ? { path } : {}),
+          mimeType: item.mimeType,
           subject: item.identity,
         },
         {
@@ -2803,18 +2920,22 @@ export class LocalConnectorStore {
       lastSeenAt: owner.last_seen_at,
     }));
     const chunks = (this.db.query(`
-      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_path, media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(row.item_pk) as Array<{
       chunk_index: number;
       bounded_text: string;
       content_hash: string;
       embedding_input_hash: string | null;
+      media_path: string | null;
+      media_sha256: string | null;
     }>).map((chunk) => ({
       chunkIndex: chunk.chunk_index,
       boundedText: chunk.bounded_text,
       contentHash: chunk.content_hash,
       embeddingInputHash: chunk.embedding_input_hash,
+      ...(chunk.media_path && chunk.media_sha256 ? { mediaPath: chunk.media_path, mediaSha256: chunk.media_sha256 } : {}),
     }));
     const vectors = (this.db.query(`
       SELECT c.chunk_index, e.model_id, e.content_hash, e.embedding
@@ -2897,7 +3018,7 @@ export class LocalConnectorStore {
     }
     const syncRunId = `connector-tier-move-${randomUUID()}`;
     const now = nowIso();
-    return this.db.transaction((): ConnectorStoreItemCopyImportSummary => {
+    const imported = this.db.transaction((): ConnectorStoreItemCopyImportSummary => {
       this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
@@ -2942,33 +3063,54 @@ export class LocalConnectorStore {
         `).run(itemPk, owner.connectorId, owner.ownershipKind, syncRunId, syncRunId, owner.firstSeenAt, owner.lastSeenAt);
       }
       const existing = this.db.query(`
-        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+          ${this.chunkMediaColumnsPresent ? 'media_sha256' : 'NULL AS media_sha256'}
         FROM chunks WHERE item_pk = ? ORDER BY chunk_index
       `).all(itemPk) as Array<{
         chunk_index: number;
         bounded_text: string;
         content_hash: string;
         embedding_input_hash: string | null;
+        media_sha256: string | null;
       }>;
       const namesOnly = options.layers === 'metadata';
+      // A picture rests only in a Private store: a copy into any other store
+      // (an owner's override, a move to Personal) keeps the text and drops
+      // the picture, and its chunks are re-hashed below so they embed as text.
+      const keepsMedia = this.trustDomain === 'secure_local' && this.chunkMediaColumnsPresent;
+      const strippedMedia = !keepsMedia && copy.chunks.some((chunk) => chunk.mediaSha256);
       const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
         const current = existing[index];
         return current?.chunk_index === chunk.chunkIndex
           && current.bounded_text === chunk.boundedText
           && current.content_hash === chunk.contentHash
-          && current.embedding_input_hash === chunk.embeddingInputHash;
+          && current.embedding_input_hash === chunk.embeddingInputHash
+          && (current.media_sha256 ?? undefined) === (keepsMedia ? chunk.mediaSha256 ?? undefined : undefined);
       });
       let chunksWritten = 0;
       if (!unchanged) {
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
-        const insert = this.db.query(`
-          INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
+        const insert = this.chunkMediaColumnsPresent
+          ? this.db.query(`
+            INSERT INTO chunks (
+              item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at,
+              media_path, media_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+          : this.db.query(`
+            INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `);
         for (const chunk of copy.chunks) {
-          insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+          if (this.chunkMediaColumnsPresent) {
+            insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now,
+              keepsMedia ? chunk.mediaPath ?? null : null, keepsMedia ? chunk.mediaSha256 ?? null : null);
+          } else {
+            insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+          }
           chunksWritten += 1;
         }
+        if (strippedMedia) this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
       }
       this.refreshFtsForItem(itemPk);
       const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
@@ -3025,6 +3167,64 @@ export class LocalConnectorStore {
           : {}),
       };
     })();
+    if (this.trustDomain === 'secure_local' && options.layers !== 'metadata') {
+      for (const chunk of copy.chunks) {
+        if (chunk.mediaPath && chunk.mediaSha256) retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+      }
+    }
+    this.releaseUnreferencedChunkMedia();
+    return imported;
+  }
+
+  /** The stored row's embedding seasoning, for re-hashing chunk inputs. */
+  /** Whether a picture failed recently enough to wait before it is sent again. */
+  private chunkMediaBackingOff(mediaSha256: string): boolean {
+    const row = this.db.query('SELECT failed_at, attempts FROM chunk_media_failures WHERE media_sha256 = ?')
+      .get(mediaSha256) as { failed_at: string; attempts: number } | null;
+    if (!row) return false;
+    const waitMs = CHUNK_MEDIA_RETRY_BASE_MS * 2 ** Math.max(0, row.attempts - 1);
+    return this.now().getTime() - Date.parse(row.failed_at) < waitMs;
+  }
+
+  /**
+   * Counts one failure of a picture. After CHUNK_MEDIA_MAX_ATTEMPTS the
+   * picture is dropped from every chunk carrying it, so the photo embeds as
+   * text; it comes back with the next extraction of a changed file.
+   */
+  private recordChunkMediaFailure(mediaSha256: string, reason: string): void {
+    const failedAt = this.now().toISOString();
+    this.db.query(`
+      INSERT INTO chunk_media_failures (media_sha256, reason, failed_at, attempts) VALUES (?, ?, ?, 1)
+      ON CONFLICT(media_sha256) DO UPDATE SET
+        reason = excluded.reason, failed_at = excluded.failed_at, attempts = chunk_media_failures.attempts + 1
+    `).run(mediaSha256, reason, failedAt);
+    const attempts = (this.db.query('SELECT attempts FROM chunk_media_failures WHERE media_sha256 = ?')
+      .get(mediaSha256) as { attempts: number }).attempts;
+    if (attempts < CHUNK_MEDIA_MAX_ATTEMPTS) return;
+    const chunks = this.db.query('SELECT chunk_pk, item_pk FROM chunks WHERE media_sha256 = ?')
+      .all(mediaSha256) as Array<{ chunk_pk: number; item_pk: number }>;
+    for (const chunk of chunks) this.clearChunkMedia(chunk.chunk_pk, chunk.item_pk);
+    this.db.query('DELETE FROM chunk_media_failures WHERE media_sha256 = ?').run(mediaSha256);
+  }
+
+  private storedEmbeddingSeasoning(itemPk: number): ConnectorStoreEmbeddingSeasoning {
+    return (this.db.query(`
+      SELECT title, search_text, mime_type, authored_at, updated_at FROM items WHERE item_pk = ?
+    `).get(itemPk) as ConnectorStoreEmbeddingSeasoning | null) ?? {
+      title: null, search_text: null, mime_type: null, authored_at: null, updated_at: null,
+    };
+  }
+
+  /**
+   * Drops a chunk's picture (its cache file is gone, or the encoder kept
+   * failing on it) and re-hashes the item's chunks: the item keeps and embeds
+   * its text instead of waiting for ever. The picture comes back only with a
+   * new extraction, which a changed file brings; nothing re-queues it, so the
+   * photo is not read again and again.
+   */
+  private clearChunkMedia(chunkPk: number, itemPk: number): void {
+    this.db.query('UPDATE chunks SET media_path = NULL, media_sha256 = NULL WHERE chunk_pk = ?').run(chunkPk);
+    this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
   }
 
   /**
@@ -3213,12 +3413,77 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Removes picture content this store must not hold: in a store that is not
+   * Private, the chunks (text read off a picture, and any picture) of every
+   * still image, as stored before pictures were Private-only (2026-10-07).
+   * Kept: items the owner placed by a per-item override, and items `keep`
+   * names (a tiered set's routed items, which it moves instead). Idempotent;
+   * a run that removed anything leaves a `sync_runs` note with its count.
+   * Returns the items stripped.
+   */
+  stripImageContentOutsidePrivate(options: {
+    keep?: (identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>) => boolean;
+  } = {}): number {
+    if (this.trustDomain === 'secure_local') return 0;
+    const rows = this.db.query(`
+      SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND LOWER(i.mime_type) LIKE 'image/%'
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+    `).all() as Array<{
+      item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+    }>;
+    const ledger = this.tierLedger();
+    let stripped = 0;
+    try {
+      for (const row of rows) {
+        const identity = {
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        };
+        if (options.keep?.(identity)) continue;
+        if (ledger?.getOverride(identity)) continue;
+        this.db.transaction(() => {
+          this.db.query('DELETE FROM chunk_embeddings WHERE item_pk = ?').run(row.item_pk);
+          this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
+          this.refreshFtsForItem(row.item_pk);
+        })();
+        stripped += 1;
+      }
+      if (stripped > 0) {
+        const at = this.now().toISOString();
+        this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
+        `).run(`image-content-private-only-${randomUUID()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+      }
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+    return stripped;
+  }
+
+  /**
    * Strip the kept text of a names-only copy (the owner-approved tier
    * migration purge): its chunks, their FTS rows and every vector go; the item
    * row (its names) stays. Returns the chunks removed. The caller has checked
    * the tier ledger says this copy serves names only.
    */
   stripCopyContent(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): number {
+    try {
+      return this.stripCopyContentHeld(identity);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private stripCopyContentHeld(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
   ): number {
     return this.db.transaction((): number => {
@@ -3966,6 +4231,16 @@ export class LocalConnectorStore {
     const selectedFilters = connectorStoreFilterSql(options.filters);
     let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
 
+    // A picture is read for media search where this machine can prepare it,
+    // and only into a Private store. A still image this store holds as text
+    // alone from BEFORE pictures were read (no `image_media_reads` row) is a
+    // candidate once more; the text lane queues it under its image-scoped
+    // version. Every image reading stored since records a row, so an image
+    // that ends without a picture (a tiny one, a dropped one) is not listed
+    // again pass after pass.
+    const imagesWithoutPicture = this.imageMediaReadsPresent
+      && this.trustDomain === 'secure_local'
+      && this.stillImagesRead;
     // With no media-type filter every scanned row is a match, so one query of
     // exactly `limit` rows is enough. With a filter the scan has to be able to
     // run past non-matching rows, hence a wider window.
@@ -3982,7 +4257,12 @@ export class LocalConnectorStore {
         AND LOWER(i.mime_type) <> 'inode/directory'
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
-        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk))
+        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${imagesWithoutPicture ? `OR (
+            LOWER(i.mime_type) LIKE 'image/%'
+            AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
+            AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk AND c.media_sha256 IS NOT NULL)
+          )` : ''})
         ${selectedFilters.sql}
       ORDER BY i.item_pk
       LIMIT ?
@@ -4108,6 +4388,7 @@ export class LocalConnectorStore {
     }
     const chunks = this.db.query(`
       SELECT c.chunk_index, c.content_hash,
+        ${this.chunkMediaColumnsPresent ? 'c.media_sha256' : 'NULL AS media_sha256'},
         CASE WHEN ? IS NULL THEN 1 ELSE EXISTS (
           SELECT 1 FROM chunk_embeddings embedding
           WHERE embedding.chunk_pk = c.chunk_pk
@@ -4124,12 +4405,15 @@ export class LocalConnectorStore {
     ) as Array<{
       chunk_index: number;
       content_hash: string;
+      media_sha256: string | null;
       embedding_current: number;
     }>;
     const exactChunks = chunks.filter((chunk) => (
       chunk.chunk_index >= 0
       && chunk.chunk_index < expectation.chunkContentHashes.length
       && chunk.content_hash === expectation.chunkContentHashes[chunk.chunk_index]
+      // The media rides on the first chunk only.
+      && (chunk.media_sha256 ?? undefined) === (chunk.chunk_index === 0 ? expectation.mediaSha256 : undefined)
     ));
     const chunksIndexed = exactChunks.length;
     const chunksEmbeddingCurrent = exactChunks.filter(
@@ -4418,6 +4702,9 @@ export class LocalConnectorStore {
       if (!sameSourceItemIdentity(item.identity, record.expectation.sourceItem)) {
         throw new Error('Representation restore expectation identity does not match its item.');
       }
+      if (record.media?.sha256 !== record.expectation.mediaSha256) {
+        throw new Error('Representation restore media does not match its expectation.');
+      }
       const key = sourceItemIdentityKey(item.identity);
       if (seenIdentities.has(key)) {
         throw new Error('Representation restore contains a duplicate item identity.');
@@ -4425,7 +4712,7 @@ export class LocalConnectorStore {
       seenIdentities.add(key);
     }
 
-    return this.db.transaction(() => {
+    const summary = this.db.transaction((): ConnectorStoreRepresentationRestoreSummary => {
       const syncRunId = `connector-representation-restore-${randomUUID()}`;
       const startedAt = this.now().toISOString();
       this.db.query(`
@@ -4550,6 +4837,12 @@ export class LocalConnectorStore {
         }
 
         if (this.itemRepresentationCoverage(record.expectation).complete) {
+          // Read again with nothing new (a tiny picture's same text): still a
+          // reading, so the image is not listed for one more.
+          if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+            this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
+              .run(existing.item_pk, this.now().toISOString());
+          }
           itemsUnchanged += 1;
           continue;
         }
@@ -4571,8 +4864,12 @@ export class LocalConnectorStore {
           options.preserveStoredSearchText === true,
           options.preserveStoredSearchTextOwnedFacets === true,
         );
-        this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars);
+        this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars, record.media);
         this.refreshFtsForItem(upsert.itemPk);
+        if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+          this.db.query('INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)')
+            .run(upsert.itemPk, this.now().toISOString());
+        }
         chunksAwaitingEmbedding += (this.db.query(`
           SELECT COUNT(*) AS count
           FROM chunks c
@@ -4612,6 +4909,50 @@ export class LocalConnectorStore {
         skippedProviderItemIds: skippedProviderItemIds.sort(),
       };
     })();
+    // References are taken once the content is committed: a rolled-back
+    // restore leaves no marker behind. The extraction's own staging hold
+    // keeps the file until then.
+    for (const record of options.items) {
+      if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
+        retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
+      } else if (record.media && this.chunkMediaColumnsPresent) {
+        const present = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
+          .get(record.media.sha256) as { present: number } | null;
+        if (present) retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
+      }
+    }
+    this.releaseUnreferencedChunkMedia();
+    return summary;
+  }
+
+  /**
+   * Keeps the media cache in step with this store's chunks. A chunk write
+   * that attaches media retains it (this store's marker beside the file);
+   * here, media no chunk here references any more (queued by the delete
+   * trigger) is given up, and the cache removes a file when its last holder
+   * goes. Best effort and cheap when nothing changed: a failure only keeps a
+   * file longer.
+   */
+  private releaseUnreferencedChunkMedia(): void {
+    if (!this.chunkMediaColumnsPresent) return;
+    try {
+      // Page by page until the queue is empty: a bulk purge or strip can queue
+      // far more than one page, and the store may be deleted right after.
+      for (;;) {
+      const queued = this.db.query('SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000')
+        .all() as Array<{ media_sha256: string; media_path: string }>;
+      if (queued.length === 0) break;
+      for (const entry of queued) {
+        const referenced = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
+          .get(entry.media_sha256) as { present: number } | null;
+        // The media cache refuses any path that is not its own `<sha256>.jpg`.
+        if (!referenced) releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+        this.db.query('DELETE FROM chunk_media_releases WHERE media_sha256 = ?').run(entry.media_sha256);
+      }
+      }
+    } catch {
+      // Kept longer, never lost: the queue row stays for the next pass.
+    }
   }
 
   /**
@@ -4638,6 +4979,14 @@ export class LocalConnectorStore {
    * the identities beyond their coordinates.
    */
   relinquishItems(options: ConnectorStoreRelinquishOptions): ConnectorStoreRelinquishSummary {
+    try {
+      return this.relinquishItemsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private relinquishItemsHeld(options: ConnectorStoreRelinquishOptions): ConnectorStoreRelinquishSummary {
     const syncConnectorId = requireNonEmpty(options.syncConnectorId, 'Relinquish sync connector id');
     const ownerConnectorId = requireNonEmpty(options.ownerConnectorId, 'Relinquish owner connector id');
     return this.db.transaction(() => {
@@ -4993,6 +5342,17 @@ export class LocalConnectorStore {
     dryRun: boolean;
     purgeUnevaluable?: boolean;
   }): ConnectorStorePurgeSummary {
+    try {
+      return this.purgeExcludedItemsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private purgeExcludedItemsHeld(options: {
+    dryRun: boolean;
+    purgeUnevaluable?: boolean;
+  }): ConnectorStorePurgeSummary {
     if (!this.exclusions.active) {
       return emptyPurgeSummary(this.corpusId, options.dryRun, this.exclusions);
     }
@@ -5074,6 +5434,17 @@ export class LocalConnectorStore {
    * row instead would silently convert metadata-only into invisible.
    */
   stripMetadataOnlyRepresentations(options: {
+    dryRun: boolean;
+    stripUnevaluable?: boolean;
+  }): ConnectorStoreMetadataOnlyStripSummary {
+    try {
+      return this.stripMetadataOnlyRepresentationsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private stripMetadataOnlyRepresentationsHeld(options: {
     dryRun: boolean;
     stripUnevaluable?: boolean;
   }): ConnectorStoreMetadataOnlyStripSummary {
@@ -5742,6 +6113,18 @@ export class LocalConnectorStore {
   // --- Sync -----------------------------------------------------------------
 
   async syncFromConnector(
+    connector: SourceConnector,
+    options?: ConnectorStoreSyncOptions,
+  ): Promise<ConnectorStoreSyncSummary> {
+    // A sync can tombstone or replace items; their pictures are released here.
+    try {
+      return await this.syncFromConnectorHeld(connector, options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private async syncFromConnectorHeld(
     connector: SourceConnector,
     options?: ConnectorStoreSyncOptions,
   ): Promise<ConnectorStoreSyncSummary> {
@@ -6909,8 +7292,9 @@ export class LocalConnectorStore {
     item: RawItem,
     itemPk: number,
     maxChunkChars: number,
+    media?: ConnectorStoreChunkMedia,
   ): { chunksIndexed: number; ftsContentChanged: boolean } {
-    return this.indexItemText(item, itemPk, maxChunkChars, textFromRawItem(item));
+    return this.indexItemText(item, itemPk, maxChunkChars, textFromRawItem(item), media);
   }
 
   // Citation-safe item metadata that seasons an embedding input, read from the
@@ -6943,6 +7327,7 @@ export class LocalConnectorStore {
     itemPk: number,
     maxChunkChars: number,
     text: string | undefined,
+    media?: ConnectorStoreChunkMedia,
   ): { chunksIndexed: number; ftsContentChanged: boolean } {
     // The single funnel every chunk this store writes passes through, which is
     // why the metadata-only refusal lives here rather than at each caller. A
@@ -6971,26 +7356,47 @@ export class LocalConnectorStore {
     // not repeat — a reaction aggregate preserved across a reaction-free emit.
     const seasoning = this.itemEmbeddingSeasoning(itemPk, item);
     const chunks = chunkText(text, maxChunkChars);
-    const desired = chunks.map((chunk, index) => ({
-      index,
-      text: chunk,
-      hash: hashString(chunk),
-      embeddingHash: hashString(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk })),
-    }));
+    if (media && !this.chunkMediaColumnsPresent) {
+      throw new Error('Connector store chunks cannot carry media before the v13 schema.');
+    }
+    // A picture rests only in a Private store (docs/design/photo-embeddings.md).
+    if (media && this.trustDomain !== 'secure_local') {
+      throw new Error('Connector store chunks carry picture media only in a Private store.');
+    }
+    // Media (a prepared photo) rides on the first chunk, and its digest is
+    // part of that chunk's embedding input: a changed picture re-embeds.
+    const desired = chunks.map((chunk, index) => {
+      const chunkMedia = index === 0 ? media : undefined;
+      return {
+        index,
+        text: chunk,
+        hash: hashString(chunk),
+        media: chunkMedia,
+        embeddingHash: connectorStoreChunkEmbeddingInputHash(
+          buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk }),
+          chunkMedia?.sha256,
+        ),
+      };
+    });
     const existing = this.db.query(`
-      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_path, media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(itemPk) as Array<{
       chunk_index: number;
       bounded_text: string;
       content_hash: string;
       embedding_input_hash: string | null;
+      media_path: string | null;
+      media_sha256: string | null;
     }>;
     const contentUnchanged = existing.length === desired.length && desired.every((chunk, index) => {
       const current = existing[index];
       return current?.chunk_index === chunk.index
         && current.bounded_text === chunk.text
-        && current.content_hash === chunk.hash;
+        && current.content_hash === chunk.hash
+        && (current.media_sha256 ?? undefined) === chunk.media?.sha256
+        && (current.media_path ?? undefined) === chunk.media?.path;
     });
     if (contentUnchanged) {
       const update = this.db.query(`
@@ -7013,14 +7419,26 @@ export class LocalConnectorStore {
     this.db.transaction(() => {
       this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
       const now = nowIso();
-      const insert = this.db.query(`
-        INSERT INTO chunks (
-          item_pk, chunk_index, bounded_text, content_hash,
-          embedding_input_hash, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `);
+      const insert = this.chunkMediaColumnsPresent
+        ? this.db.query(`
+          INSERT INTO chunks (
+            item_pk, chunk_index, bounded_text, content_hash,
+            embedding_input_hash, indexed_at, media_path, media_sha256
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        : this.db.query(`
+          INSERT INTO chunks (
+            item_pk, chunk_index, bounded_text, content_hash,
+            embedding_input_hash, indexed_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `);
       for (const chunk of desired) {
-        insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
+        if (this.chunkMediaColumnsPresent) {
+          insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now,
+            chunk.media?.path ?? null, chunk.media?.sha256 ?? null);
+        } else {
+          insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
+        }
       }
       this.refreshFtsForItem(itemPk);
     })();
@@ -7054,20 +7472,23 @@ export class LocalConnectorStore {
     seasoning: ConnectorStoreEmbeddingSeasoning,
   ): number {
     const chunks = this.db.query(`
-      SELECT chunk_index, bounded_text, embedding_input_hash
+      SELECT chunk_index, bounded_text, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_sha256' : 'NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(itemPk) as Array<{
       chunk_index: number;
       bounded_text: string;
       embedding_input_hash: string | null;
+      media_sha256: string | null;
     }>;
     const update = this.db.query(
       'UPDATE chunks SET embedding_input_hash = ? WHERE item_pk = ? AND chunk_index = ?',
     );
     let invalidated = 0;
     for (const chunk of chunks) {
-      const embeddingHash = hashString(
+      const embeddingHash = connectorStoreChunkEmbeddingInputHash(
         buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk.bounded_text }),
+        chunk.media_sha256 ?? undefined,
       );
       if (chunk.embedding_input_hash === embeddingHash) continue;
       update.run(embeddingHash, itemPk, chunk.chunk_index);
@@ -7443,6 +7864,11 @@ export class LocalConnectorStore {
     }
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
     await options.assertAuthorized?.();
+    // Media no chunk here references any more is released before an embed
+    // pass, and copies nothing holds are swept (at most hourly), so the
+    // regular drain also keeps the media cache tidy.
+    this.releaseUnreferencedChunkMedia();
+    sweepMediaCacheThrottled();
     const limit = normalizeEmbedLimit(options.limit);
     const journalId = normalizeMaintenanceJournalId(options.journalId);
     const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(
@@ -7666,6 +8092,7 @@ export class LocalConnectorStore {
     // were in flight. They were seen and not embedded, so they are reported as
     // skipped rather than silently dropped out of the counts.
     let staleSkipped = 0;
+    let readsImages: boolean | undefined;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
@@ -7682,10 +8109,67 @@ export class LocalConnectorStore {
         batch = recheck.kept;
         if (batch.length === 0) continue;
       }
-      const vectors = await provider.embed(batch.map((row) => ({
+      // Pictures, for a provider whose model reads them (one that does not
+      // embeds a photo's text and ignores the picture). A chunk is never
+      // embedded as text alone under an input hash that names its picture:
+      //  - the image encoder is not running (or a restart brought it back
+      //    without it): the chunk is held (seen, skipped, nothing recorded);
+      //  - its picture failed recently: it waits out a back-off, so one bad
+      //    photo cannot hold up the rest of the store; after
+      //    CHUNK_MEDIA_MAX_ATTEMPTS failures the picture is dropped and the
+      //    photo embeds as text;
+      //  - its cache file is gone (or not where the cache keeps files): the
+      //    picture is dropped and the item re-hashed, so it embeds as text.
+      // An engine fault is not a picture failure: the provider throws it and
+      // this pass stops with nothing recorded.
+      if (provider.imageSupport && batch.some((row) => row.media_sha256)) {
+        readsImages ??= await provider.imageSupport();
+        const skip = new Set<(typeof batch)[number]>();
+        for (const row of batch) {
+          if (!row.media_sha256) continue;
+          if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
+            skip.add(row);
+          } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync(row.media_path)) {
+            this.clearChunkMedia(row.chunk_pk, row.item_pk);
+            skip.add(row);
+          }
+        }
+        if (skip.size > 0) {
+          staleSkipped += skip.size;
+          batch = batch.filter((row) => !skip.has(row));
+          if (batch.length === 0) continue;
+        }
+      }
+      const inputsFor = (rows: typeof batch) => rows.map((row) => ({
         ...(row.title ? { title: row.title } : {}),
         text: buildConnectorStoreEmbeddingText(row),
-      })), { taskType: 'RETRIEVAL_DOCUMENT' });
+        // A chunk with a prepared photo hands it to the provider; one that
+        // reads images embeds both together, every other embeds the text.
+        ...(row.media_path && row.media_sha256
+          ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: 'image/jpeg' } }
+          : {}),
+      }));
+      let vectors: number[][];
+      try {
+        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
+      } catch (error) {
+        if (!(error instanceof SourceEmbeddingInputsFailedError)) throw error;
+        const failedRows = new Set(error.failedIndexes.map((index) => batch[index]).filter((row) => row !== undefined));
+        if (error.disposition === 'held') {
+          // The encoder is not running now: hold every photo for this pass.
+          readsImages = false;
+          for (const row of batch) if (row.media_sha256) failedRows.add(row);
+        } else {
+          // Pictures the encoder could not read: counted, retried later.
+          for (const row of failedRows) {
+            if (row.media_sha256) this.recordChunkMediaFailure(row.media_sha256, error.reason);
+          }
+        }
+        staleSkipped += failedRows.size;
+        batch = batch.filter((row) => !failedRows.has(row));
+        if (batch.length === 0) continue;
+        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
+      }
       if (vectors.length !== batch.length) {
         throw new Error('Connector store embedding provider returned the wrong number of vectors.');
       }
@@ -8518,6 +9002,8 @@ export class LocalConnectorStore {
     authored_at: string | null;
     updated_at: string | null;
     trust_tier: string;
+    media_path: string | null;
+    media_sha256: string | null;
   }> {
     const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
     if (selectedLocalItemIds && selectedLocalItemIds.length === 0) return [];
@@ -8546,7 +9032,8 @@ export class LocalConnectorStore {
         i.mime_type,
         i.authored_at,
         i.updated_at,
-        i.trust_tier
+        i.trust_tier,
+        ${this.chunkMediaColumnsPresent ? 'c.media_path, c.media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
@@ -8571,6 +9058,8 @@ export class LocalConnectorStore {
       authored_at: string | null;
       updated_at: string | null;
       trust_tier: string;
+      media_path: string | null;
+      media_sha256: string | null;
     }>;
   }
 
@@ -11469,6 +11958,28 @@ interface ConnectorStoreEmbeddingSeasoning {
   updated_at: string | null;
 }
 
+let lastMediaCacheSweepMs = 0;
+/** The media cache's orphan sweep, at most once an hour per process. Best effort. */
+function sweepMediaCacheThrottled(): void {
+  const now = Date.now();
+  if (now - lastMediaCacheSweepMs < 60 * 60_000) return;
+  lastMediaCacheSweepMs = now;
+  try {
+    sweepMediaCache(mediaCacheDir());
+  } catch {
+    // Next time.
+  }
+}
+
+/**
+ * A chunk's embedding input hash: the embedding text, and the digest of the
+ * picture the model reads beside it when the chunk carries one. Text alone
+ * hashes exactly as it always has, so no stored vector moves.
+ */
+export function connectorStoreChunkEmbeddingInputHash(embeddingText: string, mediaSha256?: string): string {
+  return mediaSha256 ? hashString(`${embeddingText}\n\u0000image:sha256:${mediaSha256}`) : hashString(embeddingText);
+}
+
 // Embedding text mirrors the Dropbox lane: citation-safe metadata header plus
 // the bounded chunk text.
 function buildConnectorStoreEmbeddingText(row: {
@@ -12324,6 +12835,16 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'locator_identity_index_state',
   'connector_store_locator_identity_insert',
   'connector_store_locator_identity_update',
+  'chunk_media_releases',
+  'connector_store_chunk_media_release',
+  'idx_connector_store_chunks_media',
+  'chunk_media_failures',
+  'image_media_reads',
+] as const;
+
+const CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
+  'chunk_pk', 'item_pk', 'chunk_index', 'bounded_text', 'content_hash',
+  'embedding_input_hash', 'indexed_at', 'media_path', 'media_sha256',
 ] as const;
 
 const CONNECTOR_STORE_REQUIRED_COLUMNS = {
@@ -12421,7 +12942,13 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   if (version === 9) validateConnectorStoreV9Schema(db);
   if (version === 10) validateConnectorStoreV10Schema(db);
   if (version === 11) validateConnectorStoreV11Schema(db);
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) validateConnectorStoreSchema(db);
+  if (version === 12) validateConnectorStoreV12Schema(db);
+  // Only the chunk shape here: the media tables, index and trigger are
+  // created idempotently after migration (an earlier build of version 13 may
+  // lack some), then the whole schema is checked.
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+    validateConnectorStoreV12Schema(db, 'v13', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
 }
 
 function validateConnectorStoreV6Schema(db: Database): void {
@@ -12430,22 +12957,35 @@ function validateConnectorStoreV6Schema(db: Database): void {
 }
 
 function validateConnectorStoreSchema(db: Database): void {
-  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, 'v12');
+  validateConnectorStoreV12Schema(db, 'v13', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
+  assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
+  assertExactTableColumns(db, 'image_media_reads', ['item_pk', 'read_at'], false, 'v13');
+  assertIndexColumns(db, 'idx_connector_store_chunks_media', ['media_sha256'], 'v13');
+  assertTriggerExists(db, 'connector_store_chunk_media_release', 'v13');
+}
+
+function validateConnectorStoreV12Schema(
+  db: Database,
+  versionLabel = 'v12',
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
+): void {
+  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
   assertExactTableColumns(
     db,
     'embedding_models',
     CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS,
     false,
-    'v12',
+    versionLabel,
   );
   assertExactTableColumns(
     db,
     'item_write_claims',
     CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS,
     false,
-    'v12',
+    versionLabel,
   );
-  validateConnectorStoreLocatorIdentitySchema(db, 'v12');
+  validateConnectorStoreLocatorIdentitySchema(db, versionLabel);
 }
 
 function validateConnectorStoreV11Schema(db: Database): void {
@@ -12523,8 +13063,9 @@ function validateConnectorStoreItemSchema(
   db: Database,
   itemColumns: readonly string[],
   versionLabel: string,
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
 ): void {
-  validateConnectorStoreSchemaShape(db, itemColumns, true, versionLabel);
+  validateConnectorStoreSchemaShape(db, itemColumns, true, versionLabel, chunkColumns);
   validateConnectorStoreFtsOwnership(db, versionLabel);
   assertIndexColumns(db, 'idx_connector_store_items_sender_id', ['sender_id'], versionLabel);
   assertIndexColumns(db, 'idx_connector_store_items_sender_label', ['sender_label'], versionLabel);
@@ -12561,10 +13102,11 @@ function validateConnectorStoreSchemaShape(
   itemColumns: readonly string[],
   conversationScoped: boolean,
   versionLabel: string,
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
 ): void {
   assertExactTableColumns(db, 'items', itemColumns, true, versionLabel);
   for (const [table, columns] of Object.entries(CONNECTOR_STORE_REQUIRED_COLUMNS)) {
-    assertExactTableColumns(db, table, columns, false, versionLabel);
+    assertExactTableColumns(db, table, table === 'chunks' ? chunkColumns : columns, false, versionLabel);
   }
   assertIndexColumns(db, 'idx_items_local_item_id', ['local_item_id'], versionLabel);
   assertIndexColumns(

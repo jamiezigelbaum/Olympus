@@ -10,7 +10,9 @@ import { availableParallelism } from 'node:os';
 import { dirname, join } from 'node:path';
 import { OperationError } from '../../../core/operation-error.ts';
 import { resolveEmbeddingEpoch } from '../embedding-identity.ts';
+import { isMediaCachePath } from '../../../core/media-cache.ts';
 import {
+  SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
   type SourceEmbeddingInput,
   type SourceEmbeddingProvider,
@@ -34,7 +36,13 @@ import {
   LITERT_RUNTIME_PACK,
   type BuiltInEmbeddingModelSpec,
 } from './manifest.ts';
-import { startLiteRtEmbedder, type LiteRtEmbedder, type LiteRtEmbedderOptions } from './litert-runtime.ts';
+import {
+  LiteRtImagesUnavailableError,
+  startLiteRtEmbedder,
+  type LiteRtEmbedder,
+  type LiteRtEmbedderOptions,
+  type LiteRtEmbedItem,
+} from './litert-runtime.ts';
 import { onnxRuntimeFromDirectory, type EmbeddingRuntime, type EmbeddingSession } from './runtime.ts';
 import { WordPieceTokenizer } from './wordpiece.ts';
 
@@ -116,6 +124,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private lastFailure: { atMs: number; error: Error } | undefined;
   /** One forward pass runs at a time; these wait for the slot, queries first. */
   private slotBusy = false;
+  private imageSupportWarned = false;
   private readonly waiting: { query: Array<() => void>; document: Array<() => void> } = { query: [], document: [] };
 
   constructor(options: BuiltInSourceEmbeddingProviderOptions = {}) {
@@ -177,6 +186,22 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   async warm(): Promise<void> {
     await this.load();
     await this.embed([{ text: 'warm up' }], { taskType: 'RETRIEVAL_QUERY' });
+  }
+
+  /**
+   * Whether a document's picture can be embedded now: the model reads images
+   * and its helper started the image encoder. Said once in the log when it
+   * cannot, because photos then wait instead of embedding.
+   */
+  async imageSupport(): Promise<boolean> {
+    if (this.spec.runtime !== 'litert' || !this.spec.vision) return false;
+    const model = this.loaded ?? await this.load();
+    const supported = model.kind === 'litert' && model.embedder.vision;
+    if (!supported && !this.imageSupportWarned) {
+      this.imageSupportWarned = true;
+      console.warn('[built-in embedding] the image encoder could not start on this machine; photos keep keyword search and wait for their picture vectors.');
+    }
+    return supported;
   }
 
   /** The owner asked to try a failed install again: no back-off wait. */
@@ -248,6 +273,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
+          ...(this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}),
         });
         model = { kind: 'litert', embedder };
       } else {
@@ -324,35 +350,67 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     return sums.map((sum) => normalize(sum));
   }
 
-  /** LiteRT tokenizes, windows and pools itself; this only frames the prompts and keeps the pass order. */
+  /**
+   * LiteRT tokenizes, windows and pools itself; this only frames the prompts
+   * and keeps the pass order. A document with a picture, on a model that reads
+   * images, is its usual prompt plus the picture, embedded together.
+   */
   private async embedLiteRt(
     embedder: LiteRtEmbedder,
     inputs: SourceEmbeddingInput[],
     taskType: SourceEmbeddingTaskType,
   ): Promise<number[][]> {
-    const prompts = inputs.map((input) => promptText(this.spec, input, taskType));
+    // A picture is sent only from inside the media cache, named for its
+    // digest; any other path fails its own input rather than being read.
+    const refused = new Set<number>();
+    const prompts: LiteRtEmbedItem[] = inputs.map((input, index) => {
+      const text = promptText(this.spec, input, taskType);
+      if (taskType !== 'RETRIEVAL_DOCUMENT' || !this.spec.vision || !input.image) return text;
+      if (!isMediaCachePath(input.image.path, input.image.sha256)) refused.add(index);
+      return { text, image: input.image.path };
+    });
     const out: number[][] = [];
+    const failed: number[] = [...refused];
     for (let offset = 0; offset < prompts.length; offset += LITERT_BATCH) {
-      const batch = prompts.slice(offset, offset + LITERT_BATCH);
+      const batch = prompts.slice(offset, offset + LITERT_BATCH)
+        .map((prompt, row) => (refused.has(offset + row) && typeof prompt !== 'string' ? prompt.text : prompt));
       let vectors: Float32Array[];
       try {
         vectors = await this.withSlot(taskType, () => embedder.embed(batch));
       } catch (error) {
+        if (error instanceof LiteRtImagesUnavailableError) {
+          // Held, not failed: the pictures wait for the encoder to run again.
+          throw new SourceEmbeddingInputsFailedError(
+            error.indexes.map((index) => offset + index),
+            'image_encoder_unavailable',
+            'held',
+          );
+        }
         throw new OperationError(
           'source_index_error',
           `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`,
           'This is a local runtime failure; Olympus restarts the model on the next try.',
         );
       }
-      for (const vector of vectors) {
+      for (const [row, vector] of vectors.entries()) {
+        if (vector.length === 0) {
+          // This input's picture could not be read; the rest of the batch is fine.
+          failed.push(offset + row);
+          out.push([]);
+          continue;
+        }
         if (vector.length !== this.dimension) {
           throw new OperationError('source_index_error', `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
         }
         out.push(normalize(vector));
       }
     }
+    if (failed.length > 0) {
+      throw new SourceEmbeddingInputsFailedError([...new Set(failed)].sort((left, right) => left - right), 'image_unreadable');
+    }
     return out;
   }
+
 
   private async forward(model: OnnxModel, batch: Window[]): Promise<Float64Array[]> {
     const rows = batch.length;

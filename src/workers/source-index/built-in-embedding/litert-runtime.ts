@@ -1,6 +1,7 @@
 // The parent side of the LiteRT-LM helper (litert-helper.ts): starts it under
-// Bun, sends it batches of text and reads back vectors. One request is in
-// flight at a time; the provider already runs one forward pass at a time.
+// Bun, sends it batches of text (and, for a model that reads images, text with
+// a picture) and reads back vectors. One request is in flight at a time; the
+// provider already runs one forward pass at a time.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
@@ -12,10 +13,37 @@ import type { LiteRtHelperSettings } from './litert-helper.ts';
 
 export type LiteRtDevice = 'gpu' | 'cpu';
 
+/**
+ * One input: text alone, or text with a picture (an absolute path to a
+ * prepared JPEG) that the model embeds together into one vector.
+ */
+export type LiteRtEmbedItem = string | { text: string; image?: string };
+
+/**
+ * Pictures were sent to a helper running without its image encoder (it may
+ * have been restarted without it). Nothing about the pictures is wrong: the
+ * caller holds them until the encoder runs again.
+ */
+export class LiteRtImagesUnavailableError extends Error {
+  readonly indexes: readonly number[];
+
+  constructor(indexes: readonly number[]) {
+    super('The built-in search model is running without its image encoder.');
+    this.name = 'LiteRtImagesUnavailableError';
+    this.indexes = indexes;
+  }
+}
+
 export interface LiteRtEmbedder {
   /** Where the helper runs the model now. */
   readonly device: LiteRtDevice;
-  embed(texts: readonly string[]): Promise<Float32Array[]>;
+  /** Whether the helper started the image encoder (it may run without it). */
+  readonly vision: boolean;
+  /**
+   * One vector per item. An item whose picture could not be read gets an
+   * EMPTY vector (length 0) while the rest are embedded.
+   */
+  embed(items: readonly LiteRtEmbedItem[]): Promise<Float32Array[]>;
   release(): Promise<void>;
 }
 
@@ -27,6 +55,11 @@ export interface LiteRtEmbedderOptions {
   /** `cpu` keeps the model off the GPU. */
   device: 'auto' | 'cpu';
   maxInputTokens: number;
+  /**
+   * Image tokens per picture for a model that reads images; absent keeps the
+   * vision encoder off and the helper refuses pictures.
+   */
+  visionTokensPerImage?: number;
   /** Defaults to this process when it is Bun, else Bun found on the machine. */
   bunPath?: string;
   /** Defaults to the helper next to this module (dist or source). */
@@ -70,6 +103,7 @@ interface Pending {
 class HelperProcess {
   readonly child: ChildProcessWithoutNullStreams;
   device: LiteRtDevice = 'cpu';
+  vision = false;
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private stderr = '';
@@ -100,6 +134,7 @@ class HelperProcess {
       threads: options.threads,
       device,
       maxInputTokens: options.maxInputTokens,
+      ...(options.visionTokensPerImage !== undefined ? { visionTokensPerImage: options.visionTokensPerImage } : {}),
     };
     const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -124,7 +159,7 @@ class HelperProcess {
         helper.stderr = (helper.stderr + chunk.toString('utf8')).slice(-4_000);
       });
       createInterface({ input: child.stdout }).on('line', (line) => {
-        let message: { ready?: boolean; device?: LiteRtDevice; fatal?: string; id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number };
+        let message: { ready?: boolean; device?: LiteRtDevice; vision?: boolean; fatal?: string; id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] };
         try {
           message = JSON.parse(line);
         } catch {
@@ -135,6 +170,7 @@ class HelperProcess {
             started = true;
             clearTimeout(timer);
             helper.device = message.device === 'gpu' ? 'gpu' : 'cpu';
+            helper.vision = message.vision === true;
             resolve(helper);
           } else if (message.fatal) {
             started = true;
@@ -170,7 +206,7 @@ class HelperProcess {
     });
   }
 
-  embed(texts: readonly string[]): Promise<Float32Array[]> {
+  embed(items: readonly LiteRtEmbedItem[]): Promise<Float32Array[]> {
     if (this.exited) return Promise.reject(new Error('The built-in search model is not running.'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
@@ -180,16 +216,31 @@ class HelperProcess {
         this.exited = true;
         this.failAll(new Error('The built-in search model stopped responding and was restarted.'));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve, reject, count: texts.length, timer });
-      this.child.stdin.write(`${JSON.stringify({ id, texts })}\n`);
+      this.pending.set(id, { resolve, reject, count: items.length, timer });
+      // Text alone keeps the original request shape; a batch with a picture
+      // sends items, each its text and the picture's path.
+      const request = items.every((item) => typeof item === 'string')
+        ? { id, texts: items }
+        : { id, items: items.map((item) => (typeof item === 'string' ? { text: item } : item)) };
+      this.child.stdin.write(`${JSON.stringify(request)}\n`);
     });
   }
 
-  private settle(message: { id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number }): void {
+  private settle(message: { id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] }): void {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
     if (!pending || message.id === undefined) return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
+    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
+      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
+      return;
+    }
+    const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
+    if (!message.error && failed.size === pending.count) {
+      // Every item's picture failed: nothing to decode, nothing wrong with the engine.
+      pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
+      return;
+    }
     if (message.error || !message.vectors || !message.dimension) {
       pending.reject(new Error(message.error ?? 'The built-in search model returned no vectors.'));
       // LiteRT-LM itself failed (a GPU dispatch failure, say): the helper is
@@ -204,8 +255,10 @@ class HelperProcess {
     }
     const bytes = Buffer.from(message.vectors, 'base64');
     const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-    const vectors = Array.from({ length: pending.count }, (_, index) => all.subarray(index * message.dimension!, (index + 1) * message.dimension!));
-    if (vectors.some((vector) => vector.length !== message.dimension)) {
+    const vectors = Array.from({ length: pending.count }, (_, index) => (failed.has(index)
+      ? new Float32Array(0)
+      : all.subarray(index * message.dimension!, (index + 1) * message.dimension!)));
+    if (vectors.some((vector, index) => !failed.has(index) && vector.length !== message.dimension)) {
       pending.reject(new Error('The built-in search model returned the wrong number of values.'));
       return;
     }
@@ -243,12 +296,17 @@ export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promi
   process.once('exit', releaseAtExit);
   return {
     get device() { return helper.device; },
-    async embed(texts) {
+    get vision() { return helper.vision; },
+    async embed(items) {
       if (helper.exited) {
         if (helper.device === 'gpu') device = 'cpu';
         helper = await HelperProcess.start(options, device);
       }
-      return helper.embed(texts);
+      // Checked against the helper that will run this batch, which a restart
+      // may have brought back without its image encoder.
+      const pictures = items.flatMap((item, index) => (typeof item !== 'string' && item.image ? [index] : []));
+      if (pictures.length > 0 && !helper.vision) throw new LiteRtImagesUnavailableError(pictures);
+      return helper.embed(items);
     },
     async release() {
       process.removeListener('exit', releaseAtExit);

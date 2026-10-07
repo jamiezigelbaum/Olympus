@@ -84,7 +84,7 @@ describe('SQLite schema migration runner', () => {
       }).close();
 
       let db = openDatabase(path);
-      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(12);
+      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(13);
       expect(tableColumns(db, 'items')).toEqual(expect.arrayContaining([
         'search_text',
         'sender_id',
@@ -101,6 +101,7 @@ describe('SQLite schema migration runner', () => {
         'item_write_claims',
         'item_locator_identities',
         'locator_identity_index_state',
+        'chunk_media_releases',
       ]));
       db.close();
 
@@ -112,7 +113,7 @@ describe('SQLite schema migration runner', () => {
       }).close();
 
       db = openDatabase(path);
-      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(12);
+      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(13);
       expect(schemaVersionRows(db, 'connector-store')).toBe(1);
       db.close();
     } finally {

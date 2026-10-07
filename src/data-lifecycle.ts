@@ -69,6 +69,7 @@ import {
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
 import { closeSqliteStore } from './core/sqlite-store.ts';
+import { isMediaCachePath, mediaCacheDir, releaseMediaCacheFile } from './core/media-cache.ts';
 import type { ConnectedHandleRegistry } from './workers/credential-broker/connected-handles.ts';
 
 export interface LifecyclePathContext {
@@ -608,6 +609,12 @@ export function deleteOlympusData(options: {
   for (const target of uniqueDeleteTargets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
+  // A source's photo copies live in the shared media cache: each one its
+  // stores held is released before the stores go, and removed unless another
+  // source's store still holds it.
+  if (selectedSource) {
+    removed.push(...releaseSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [], options, options.dryRun === true));
+  }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
@@ -820,6 +827,10 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // OLYMPUS_REMOTE_CONNECTIONS_DB_PATH or XDG_DATA_HOME can put it outside
     // the known roots below.
     ...remoteConnectionsDeleteTargets(context),
+    // Prepared photo copies (docs/design/photo-embeddings.md). Named on its
+    // own because OLYMPUS_MEDIA_CACHE_DIR or XDG_DATA_HOME can put it outside
+    // the known roots; it is always a directory Olympus created for itself.
+    ...mediaCacheDeleteTargets(context),
     ...knownOlympusDataRoots(context).map((path): DeleteTarget => ({
       path,
       kind: 'known_root',
@@ -832,6 +843,84 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     ...globExisting(join(home, '.config', 'systemd', 'user'), /^olympus.*\.(service|timer)$/)
       .map(serviceUnitTarget),
   ];
+}
+
+function mediaCacheDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
+  try {
+    return [{ path: mediaCacheDir(envForContext(context)), kind: 'known_root', allowRecursive: true }];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Releases the media-cache copies the given connector stores reference (the
+ * store's own reference marker, as LocalConnectorStore holds it: named by the
+ * store's real path, whatever spelling of it this process was given) and
+ * returns the copies removed, or those a dry run would release. A path is
+ * checked to be a media-cache file by its shape, not against this process's
+ * configured cache directory, which may differ from the worker's.
+ */
+function releaseSourceMedia(storePaths: readonly string[], _context: LifecyclePathContext, dryRun: boolean): string[] {
+  const released: string[] = [];
+  for (const storePath of storePaths) {
+    if (storePath === ':memory:' || !existsSync(storePath)) continue;
+    // A file that is not SQLite at all holds no references. One that is, and
+    // cannot be read (corrupt, locked past the timeout), stops the delete:
+    // deleting it would orphan its pictures' markers, so the sweep would
+    // never remove those Private copies.
+    if (!looksLikeSqlite(storePath)) continue;
+    const unreadable = () => new OperationError(
+      'invalid_params',
+      `Cannot read the picture references in ${storePath}; nothing was deleted.`,
+      'Stop the Olympus worker (olympus worker stop) so the store is not busy, or repair the store, then retry.',
+    );
+    let rows: Array<{ media_path: string; media_sha256: string }> = [];
+    let db: Database;
+    try {
+      db = new Database(storePath, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000;');
+    } catch {
+      throw unreadable();
+    }
+    try {
+      const columns = (db.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
+      if (columns.includes('media_sha256')) {
+        rows = db.query(`
+          SELECT DISTINCT media_path, media_sha256 FROM chunks
+          WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+        `).all() as Array<{ media_path: string; media_sha256: string }>;
+      }
+    } catch {
+      throw unreadable();
+    } finally {
+      closeSqliteStore(db);
+    }
+    for (const row of rows) {
+      if (!isMediaCachePath(row.media_path, row.media_sha256)) continue;
+      if (dryRun) {
+        if (existsSync(row.media_path)) released.push(row.media_path);
+      } else if (releaseMediaCacheFile(row.media_path, row.media_sha256, storePath)) {
+        released.push(row.media_path);
+      }
+    }
+  }
+  return released;
+}
+
+function looksLikeSqlite(path: string): boolean {
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const header = Buffer.alloc(16);
+      const read = readSync(fd, header, 0, 16, 0);
+      return read === 16 && header.toString('latin1') === 'SQLite format 3\u0000';
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePathContext): DeleteTarget[] {

@@ -368,6 +368,8 @@ export function scopeBoundEmbeddingProvider(
     assertBindingCurrent() {
       authority.assertRefCurrent(ref);
     },
+    // A class method is not an own property, so the spread above drops it.
+    ...(provider.imageSupport ? { imageSupport: () => provider.imageSupport!() } : {}),
   };
 }
 

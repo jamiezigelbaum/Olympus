@@ -20,7 +20,7 @@
  * decoders live in `document-formats.ts` and this file has none of its own.
  */
 
-import type { ExtractionDerivation, Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
+import type { ExtractedMedia, ExtractionDerivation, Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
 import {
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
@@ -76,9 +76,11 @@ import {
   normalizeTableCell,
   type ZipEntryDirectoryRecord,
 } from './document-formats.ts';
+import type { ImagePreparation } from './image-prepare.ts';
+import { releaseMediaCacheFile } from '../../../core/media-cache.ts';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export const TEXT_EXTRACTOR_KIND = 'local_text';
 export const TEXT_EXTRACTOR_VERSION = '2026-05-22';
@@ -109,6 +111,13 @@ export interface TextExtractorOptions {
    * image names-only as before.
    */
   imageOcr?: ImageOcr;
+  /**
+   * Prepares an image for media search (a JPEG copy in the media cache).
+   * Injected by the registry on macOS; absent elsewhere, which leaves images
+   * exactly as they were. With it, an image is indexed: a short descriptor
+   * plus any text OCR read, with the prepared copy attached as `media`.
+   */
+  imagePreparation?: ImagePreparation;
   /**
    * Emit a media descriptor for an image instead of declining it.
    *
@@ -155,10 +164,21 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   const imageMediaDescriptor = options.imageMediaDescriptor ?? false;
   const pdfOcr = options.pdfOcr;
   const imageOcr = options.imageOcr;
+  const imagePreparation = options.imagePreparation;
   return {
     kind,
     version,
     needsBytes: true,
+    // Pictures read for media search are a new reading of an image: an image
+    // read before (names only, or OCR text) is queued once more under this.
+    ...(imagePreparation
+      ? {
+        versionFor(mimeType: string | undefined): string {
+          const normalized = normalizeMimeType(mimeType);
+          return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}` : version;
+        },
+      }
+      : {}),
     egress: 'local',
     accepts(mimeType) {
       return textLaneAccepts(mimeType);
@@ -196,6 +216,24 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+        if (imagePreparation) {
+          const prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context.sizeBytes });
+          if (prepared.kind === 'settled') return prepared.output;
+          if (prepared.kind === 'media') {
+            let output: ExtractorOutput;
+            try {
+              const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
+              output = preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+            } catch (error) {
+              releaseStaged(prepared.media);
+              throw error;
+            }
+            // A result that does not carry the picture on gives up the
+            // extraction's hold, so the cached copy does not outlive it.
+            if (output.status !== 'indexed') releaseStaged(prepared.media);
+            return output;
+          }
+        }
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
         if (ocrOutput) return ocrOutput;
         if (!imageMediaDescriptor) {
@@ -239,6 +277,55 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
       };
     },
+  };
+}
+
+function releaseStaged(media: ExtractedMedia): void {
+  if (media.stagingHolder) releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname(media.path));
+}
+
+/**
+ * The descriptor an image chunk carries. The words the model reads beside the
+ * picture are the item's title and context (the store adds them) and this.
+ */
+export const IMAGE_MEDIA_DESCRIPTOR = 'Photo';
+
+/**
+ * Appended to the text lane's version for images when pictures are read for
+ * media search (2026-10-07).
+ */
+export const IMAGE_MEDIA_VERSION_SUFFIX = '+image-media-2026-10-07';
+
+/**
+ * An image prepared for media search: indexed, with the prepared copy as
+ * `media` and a short descriptor plus whatever text OCR read as its text. An
+ * OCR failure is returned as is, so the job retries or settles exactly as it
+ * did before; an empty OCR read is just a photo without text.
+ */
+function preparedImageOutput(
+  media: ExtractedMedia,
+  ocr: ExtractorOutput | undefined,
+  maxBoundedTextChars: number,
+): ExtractorOutput {
+  if (ocr && (ocr.status === 'failed_retryable' || ocr.status === 'failed_terminal')) return ocr;
+  const ocrText = ocr?.status === 'indexed' ? ocr.text : '';
+  const bounded = boundText(
+    normalizeExtractedText(ocrText ? `${IMAGE_MEDIA_DESCRIPTOR}\n${ocrText}` : IMAGE_MEDIA_DESCRIPTOR),
+    maxBoundedTextChars,
+  );
+  return {
+    status: 'indexed',
+    text: bounded.text,
+    media,
+    derivations: [
+      buildDerivation({
+        artifact: 'image_media',
+        structural: { kind: 'image', label: 'prepared image' },
+        bounded: boundText(IMAGE_MEDIA_DESCRIPTOR, maxBoundedTextChars),
+      }),
+      ...(ocr?.status === 'indexed' ? ocr.derivations ?? [] : []),
+    ],
+    ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
   };
 }
 

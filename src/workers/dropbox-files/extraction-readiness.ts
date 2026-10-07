@@ -28,17 +28,21 @@ import type {
   FileExtractionStatus,
 } from '../../core/source-family.ts';
 import { dropboxOutOfContentScopeSql } from './content-scope-policy.ts';
+import { stillImagePreparationAvailable } from '../../core/media-cache.ts';
+import { DEFAULT_STILL_IMAGE_EXTENSIONS } from '../../core/source-ingestion-policy.ts';
 
 /**
- * Content the store deliberately does not read: the pixels and the shelf.
+ * Content the store deliberately does not read: video and the shelf, and still
+ * images on a machine that cannot prepare them for media search (since
+ * 2026-10-07 a Mac reads them; docs/design/photo-embeddings.md), matching
+ * the default ingestion policy.
  *
  * A file matching these is expected to be metadata-only, so on its own it never
  * manufactures operator work — see the ladder's deferral rung for the one thing
  * that changes that.
  */
 export const DROPBOX_DEFAULT_DEFERRED_MEDIA_EXTENSIONS = [
-  '3gp', 'avi', 'bmp', 'gif', 'heic', 'heif', 'jpeg', 'jpg', 'm4v', 'mov',
-  'mp4', 'mpeg', 'mpg', 'png', 'tif', 'tiff', 'webm', 'webp',
+  '3gp', 'avi', 'm4v', 'mov', 'mp4', 'mpeg', 'mpg', 'webm',
 ] as const;
 export const DROPBOX_DEFAULT_DEFERRED_BOOK_EXTENSIONS = [
   'azw', 'azw3', 'azw4', 'cba', 'cb7', 'cbr', 'cbt', 'cbz', 'djv', 'djvu',
@@ -150,11 +154,14 @@ export function minimumUsefulExtractionCharsSql(entryAlias: string): string {
  * Content the store expects to hold as metadata only, expressed against the
  * ladder's own `mime_type_lower` / `path_lower` columns.
  */
-export function defaultDeferredContentReadinessSql(): string {
+export function defaultDeferredContentReadinessSql(
+  stillImagesRead: boolean = stillImagePreparationAvailable(),
+): string {
   return [
-    "mime_type_lower LIKE 'image/%'",
     "mime_type_lower LIKE 'video/%'",
+    ...(stillImagesRead ? [] : ["mime_type_lower LIKE 'image/%'"]),
     ...DROPBOX_DEFAULT_DEFERRED_MEDIA_EXTENSIONS.map((extension) => `path_lower LIKE '%.${extension}'`),
+    ...(stillImagesRead ? [] : DEFAULT_STILL_IMAGE_EXTENSIONS.map((extension) => `path_lower LIKE '%.${extension}'`)),
     ...DROPBOX_DEFAULT_DEFERRED_BOOK_EXTENSIONS.map((extension) => `path_lower LIKE '%.${extension}'`),
     ...DROPBOX_DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS.map((segment) => `path_lower LIKE '%/${segment}/%'`),
   ].join('\n                OR ');

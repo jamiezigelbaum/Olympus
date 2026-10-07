@@ -131,6 +131,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           metadataOwnerDecided: namesDecidedByOwner(record.reasons),
           ...(itemTitle ? { title: itemTitle } : {}),
           ...(itemPath ? { path: itemPath } : {}),
+          mimeType: plan.item.mimeType,
           subject: identity,
         },
         {

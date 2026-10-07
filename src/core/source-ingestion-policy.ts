@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { OperationError } from './operation-error.ts';
+import { stillImagePreparationAvailable } from './media-cache.ts';
 
 export const SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1;
 
@@ -50,9 +51,15 @@ export interface SourceIngestionPolicyLoadOptions {
 }
 
 const DEFAULT_DROPBOX_ROOT = '/';
-const DEFAULT_DEFERRED_MEDIA_EXTENSIONS = [
-  '3gp', 'avi', 'bmp', 'gif', 'heic', 'heif', 'jpeg', 'jpg', 'm4v', 'mov',
-  'mp4', 'mpeg', 'mpg', 'png', 'tif', 'tiff', 'webm', 'webp',
+// Video stays names-only. Still images are read by default since 2026-10-07
+// where this machine can prepare them for the built-in model's image encoder
+// (macOS first; docs/design/photo-embeddings.md); elsewhere they stay
+// names-only, as before, so no picture is downloaded for nothing.
+const DEFAULT_DEFERRED_VIDEO_EXTENSIONS = [
+  '3gp', 'avi', 'm4v', 'mov', 'mp4', 'mpeg', 'mpg', 'webm',
+] as const;
+export const DEFAULT_STILL_IMAGE_EXTENSIONS = [
+  'bmp', 'gif', 'heic', 'heif', 'jpeg', 'jpg', 'png', 'tif', 'tiff', 'webp',
 ] as const;
 const DEFAULT_DEFERRED_BOOK_EXTENSIONS = [
   'azw', 'azw3', 'azw4', 'cba', 'cb7', 'cbr', 'cbt', 'cbz', 'djv', 'djvu',
@@ -72,7 +79,10 @@ export function defaultDropboxIngestionPolicyPath(): string {
   return join(homedir(), '.olympus', 'sources', 'dropbox.personal.ingestion.json');
 }
 
-export function defaultDropboxIngestionPolicy(): SourceIngestionPolicy {
+export function defaultDropboxIngestionPolicy(
+  options: { stillImagesRead?: boolean } = {},
+): SourceIngestionPolicy {
+  const stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
   return {
     schemaVersion: SOURCE_INGESTION_POLICY_SCHEMA_VERSION,
     source: 'dropbox.personal',
@@ -85,8 +95,11 @@ export function defaultDropboxIngestionPolicy(): SourceIngestionPolicy {
     rules: [
       {
         match: {
-          mime_type_prefixes: ['image/', 'video/'],
-          extensions: [...DEFAULT_DEFERRED_MEDIA_EXTENSIONS],
+          mime_type_prefixes: stillImagesRead ? ['video/'] : ['image/', 'video/'],
+          extensions: [
+            ...DEFAULT_DEFERRED_VIDEO_EXTENSIONS,
+            ...(stillImagesRead ? [] : DEFAULT_STILL_IMAGE_EXTENSIONS),
+          ].sort(),
         },
         action: 'metadata_only',
         reason: 'media_default_metadata_only',
