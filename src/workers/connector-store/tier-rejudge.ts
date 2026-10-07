@@ -144,6 +144,7 @@ function rejudgeOne(
   const title = columnString(exported.columns['title']);
   const path = columnString(exported.columns['locator_uri']);
   const sender = columnString(exported.columns['sender_label']);
+  const mimeType = columnString(exported.columns['mime_type']);
   const content = classifyContentTier(
     {
       text,
@@ -154,6 +155,7 @@ function rejudgeOne(
       ...(title ? { title } : {}),
       ...(path ? { path } : {}),
       ...(sender ? { sender } : {}),
+      ...(mimeType ? { mimeType } : {}),
       subject: identity,
     },
     {

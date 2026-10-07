@@ -17,6 +17,20 @@ export interface SourceEmbeddingInput {
   text: string;
   title?: string;
   media?: SourceEmbeddingMediaInput[];
+  /**
+   * A prepared local image (the media cache's JPEG of a photo) to embed
+   * together with the text, for a document. Only a provider whose model
+   * reads images uses it (the built-in EmbeddingGemma 2); every other
+   * provider embeds the text alone and ignores it.
+   */
+  image?: SourceEmbeddingImageInput;
+}
+
+export interface SourceEmbeddingImageInput {
+  /** An absolute path in the owner-only media cache. */
+  path: string;
+  sha256: string;
+  mimeType: string;
 }
 
 export interface SourceEmbeddingMediaInput {

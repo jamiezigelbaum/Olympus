@@ -20,7 +20,7 @@
  * decoders live in `document-formats.ts` and this file has none of its own.
  */
 
-import type { ExtractionDerivation, Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
+import type { ExtractedMedia, ExtractionDerivation, Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
 import {
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
@@ -76,6 +76,7 @@ import {
   normalizeTableCell,
   type ZipEntryDirectoryRecord,
 } from './document-formats.ts';
+import type { ImagePreparation } from './image-prepare.ts';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -109,6 +110,13 @@ export interface TextExtractorOptions {
    * image names-only as before.
    */
   imageOcr?: ImageOcr;
+  /**
+   * Prepares an image for media search (a JPEG copy in the media cache).
+   * Injected by the registry on macOS; absent elsewhere, which leaves images
+   * exactly as they were. With it, an image is indexed: a short descriptor
+   * plus any text OCR read, with the prepared copy attached as `media`.
+   */
+  imagePreparation?: ImagePreparation;
   /**
    * Emit a media descriptor for an image instead of declining it.
    *
@@ -155,6 +163,7 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   const imageMediaDescriptor = options.imageMediaDescriptor ?? false;
   const pdfOcr = options.pdfOcr;
   const imageOcr = options.imageOcr;
+  const imagePreparation = options.imagePreparation;
   return {
     kind,
     version,
@@ -196,6 +205,14 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         });
       }
       if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+        if (imagePreparation) {
+          const prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context.sizeBytes });
+          if (prepared.kind === 'settled') return prepared.output;
+          if (prepared.kind === 'media') {
+            const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
+            return preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+          }
+        }
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
         if (ocrOutput) return ocrOutput;
         if (!imageMediaDescriptor) {
@@ -239,6 +256,45 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
       };
     },
+  };
+}
+
+/**
+ * The descriptor an image chunk carries. The words the model reads beside the
+ * picture are the item's title and context (the store adds them) and this.
+ */
+export const IMAGE_MEDIA_DESCRIPTOR = 'Photo';
+
+/**
+ * An image prepared for media search: indexed, with the prepared copy as
+ * `media` and a short descriptor plus whatever text OCR read as its text. An
+ * OCR failure is returned as is, so the job retries or settles exactly as it
+ * did before; an empty OCR read is just a photo without text.
+ */
+function preparedImageOutput(
+  media: ExtractedMedia,
+  ocr: ExtractorOutput | undefined,
+  maxBoundedTextChars: number,
+): ExtractorOutput {
+  if (ocr && (ocr.status === 'failed_retryable' || ocr.status === 'failed_terminal')) return ocr;
+  const ocrText = ocr?.status === 'indexed' ? ocr.text : '';
+  const bounded = boundText(
+    normalizeExtractedText(ocrText ? `${IMAGE_MEDIA_DESCRIPTOR}\n${ocrText}` : IMAGE_MEDIA_DESCRIPTOR),
+    maxBoundedTextChars,
+  );
+  return {
+    status: 'indexed',
+    text: bounded.text,
+    media,
+    derivations: [
+      buildDerivation({
+        artifact: 'image_media',
+        structural: { kind: 'image', label: 'prepared image' },
+        bounded: boundText(IMAGE_MEDIA_DESCRIPTOR, maxBoundedTextChars),
+      }),
+      ...(ocr?.status === 'indexed' ? ocr.derivations ?? [] : []),
+    ],
+    ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
   };
 }
 

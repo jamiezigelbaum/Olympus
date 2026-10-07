@@ -42,6 +42,7 @@ import type {
   LocalContentRequest,
 } from '../../core/evidence-pack.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { releaseMediaCacheFile, retainMediaCacheFile } from '../../core/media-cache.ts';
 import {
   assertSqliteSchemaCanOpen,
   currentStoreMigrations,
@@ -238,7 +239,7 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13;
 const MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3;
 const CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32;
 
@@ -364,7 +365,7 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 12,
       name: 'connector_store_trusted_source_scope_observation',
       up(db: Database) {
         addColumnIfMissing(db, 'items', 'source_scope_generation', 'TEXT');
@@ -372,7 +373,40 @@ export function connectorStoreMigrations() {
         addColumnIfMissing(db, 'items', 'source_scope_folder_keys_json', 'TEXT');
       },
     },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: 'connector_store_chunk_media',
+      up(db: Database) {
+        // Additive and inert: existing chunks keep NULL media and embed
+        // exactly as before (docs/design/photo-embeddings.md).
+        addColumnIfMissing(db, 'chunks', 'media_path', 'TEXT');
+        addColumnIfMissing(db, 'chunks', 'media_sha256', 'TEXT');
+        createConnectorStoreChunkMediaReleases(db);
+      },
+    },
   ];
+}
+
+/**
+ * Media a deleted chunk referenced, queued by a trigger so every path that
+ * deletes chunks (a replace, a tombstone, a purge) is covered without each
+ * one remembering to. The store drains it after its writes and lets the media
+ * cache drop the file when no chunk here references it any more.
+ */
+function createConnectorStoreChunkMediaReleases(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chunk_media_releases (
+      media_sha256 TEXT PRIMARY KEY,
+      media_path TEXT NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_chunk_media_release
+    AFTER DELETE ON chunks
+    WHEN OLD.media_sha256 IS NOT NULL AND OLD.media_path IS NOT NULL
+    BEGIN
+      INSERT OR IGNORE INTO chunk_media_releases (media_sha256, media_path)
+      VALUES (OLD.media_sha256, OLD.media_path);
+    END;
+  `);
 }
 
 export const CONNECTOR_STORE_FTS_MIGRATION: SourceIndexFtsMigrationSpec = {
@@ -799,7 +833,14 @@ export interface ConnectorStoreItemCopy {
   columns: Readonly<Record<(typeof CONNECTOR_STORE_COPY_ITEM_COLUMNS)[number], string | number | null>>;
   trustTier: SourceTrustTier;
   owners: ReadonlyArray<{ connectorId: string; ownershipKind: ConnectorStoreOwnershipKind; firstSeenAt: string; lastSeenAt: string }>;
-  chunks: ReadonlyArray<{ chunkIndex: number; boundedText: string; contentHash: string; embeddingInputHash: string | null }>;
+  chunks: ReadonlyArray<{
+    chunkIndex: number;
+    boundedText: string;
+    contentHash: string;
+    embeddingInputHash: string | null;
+    mediaPath?: string | null;
+    mediaSha256?: string | null;
+  }>;
   /** Current vectors only (content hash equal to the chunk's embedding input hash). */
   vectors: ReadonlyArray<{ chunkIndex: number; modelId: string; contentHash: string; embedding: Uint8Array }>;
   /** The write authority each exported model's vectors were minted under. */
@@ -1761,6 +1802,12 @@ export interface ConnectorStoreItemRepresentationExpectation {
   sourceVersion?: string;
   contentHash: string;
   chunkContentHashes: readonly string[];
+  /**
+   * The digest of the media the first chunk carries (a prepared photo), or
+   * absent for text alone. A changed picture behind unchanged text is a
+   * changed representation.
+   */
+  mediaSha256?: string;
   requiredSearchTokens?: readonly string[];
   embeddingModelId?: string;
 }
@@ -1774,6 +1821,18 @@ export interface ConnectorStoreItemRepresentationCoverage {
 export interface ConnectorStoreRepresentationRestoreItem {
   item: RawItem;
   expectation: ConnectorStoreItemRepresentationExpectation;
+  /**
+   * Media the item's content is also searched by, attached to its first
+   * chunk (docs/design/photo-embeddings.md). Its digest must match the
+   * expectation's `mediaSha256`.
+   */
+  media?: ConnectorStoreChunkMedia;
+}
+
+/** A prepared media file in the owner-only media cache, attached to a chunk. */
+export interface ConnectorStoreChunkMedia {
+  path: string;
+  sha256: string;
 }
 
 /**
@@ -2217,6 +2276,10 @@ export class LocalConnectorStore {
   // not opened it yet). Such a store has no reactions, and saying so is
   // cheaper and more honest than refusing to serve it.
   private reactionsColumnPresent = false;
+  /** Whether `chunks` carries the v13 media columns (a read-only open of an older store does not). */
+  private chunkMediaColumnsPresent = false;
+  /** This store's name in the media cache's reference markers. */
+  private readonly mediaHolder: string;
   // The four-tier ledger. Declared without an initializer on purpose (see the
   // tree-shaking note on trustReconciliationReadyCursors).
   private tierLedgerHandle: TierLedger | undefined;
@@ -2241,6 +2304,7 @@ export class LocalConnectorStore {
   constructor(options: LocalConnectorStoreOptions) {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
+    this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : this.dbPath;
     this.family = options.family;
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date());
@@ -2292,6 +2356,7 @@ export class LocalConnectorStore {
         validateConnectorStoreSchema(this.db);
       }
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
+      this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
     } catch (error) {
       closeSqliteStore(this.db);
       throw error;
@@ -2368,6 +2433,7 @@ export class LocalConnectorStore {
           metadataOwnerDecided: namesDecidedByOwner(existing.reasons),
           ...(title ? { title } : {}),
           ...(path ? { path } : {}),
+          mimeType: item.mimeType,
           subject: item.identity,
         },
         {
@@ -2803,18 +2869,22 @@ export class LocalConnectorStore {
       lastSeenAt: owner.last_seen_at,
     }));
     const chunks = (this.db.query(`
-      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_path, media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(row.item_pk) as Array<{
       chunk_index: number;
       bounded_text: string;
       content_hash: string;
       embedding_input_hash: string | null;
+      media_path: string | null;
+      media_sha256: string | null;
     }>).map((chunk) => ({
       chunkIndex: chunk.chunk_index,
       boundedText: chunk.bounded_text,
       contentHash: chunk.content_hash,
       embeddingInputHash: chunk.embedding_input_hash,
+      ...(chunk.media_path && chunk.media_sha256 ? { mediaPath: chunk.media_path, mediaSha256: chunk.media_sha256 } : {}),
     }));
     const vectors = (this.db.query(`
       SELECT c.chunk_index, e.model_id, e.content_hash, e.embedding
@@ -2897,7 +2967,7 @@ export class LocalConnectorStore {
     }
     const syncRunId = `connector-tier-move-${randomUUID()}`;
     const now = nowIso();
-    return this.db.transaction((): ConnectorStoreItemCopyImportSummary => {
+    const imported = this.db.transaction((): ConnectorStoreItemCopyImportSummary => {
       this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
@@ -2942,31 +3012,50 @@ export class LocalConnectorStore {
         `).run(itemPk, owner.connectorId, owner.ownershipKind, syncRunId, syncRunId, owner.firstSeenAt, owner.lastSeenAt);
       }
       const existing = this.db.query(`
-        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+          ${this.chunkMediaColumnsPresent ? 'media_sha256' : 'NULL AS media_sha256'}
         FROM chunks WHERE item_pk = ? ORDER BY chunk_index
       `).all(itemPk) as Array<{
         chunk_index: number;
         bounded_text: string;
         content_hash: string;
         embedding_input_hash: string | null;
+        media_sha256: string | null;
       }>;
       const namesOnly = options.layers === 'metadata';
+      if (!namesOnly && !this.chunkMediaColumnsPresent && copy.chunks.some((chunk) => chunk.mediaSha256)) {
+        throw new Error('Connector store chunks cannot carry media before the v13 schema.');
+      }
       const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
         const current = existing[index];
         return current?.chunk_index === chunk.chunkIndex
           && current.bounded_text === chunk.boundedText
           && current.content_hash === chunk.contentHash
-          && current.embedding_input_hash === chunk.embeddingInputHash;
+          && current.embedding_input_hash === chunk.embeddingInputHash
+          && (current.media_sha256 ?? undefined) === (chunk.mediaSha256 ?? undefined);
       });
       let chunksWritten = 0;
       if (!unchanged) {
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
-        const insert = this.db.query(`
-          INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
+        const insert = this.chunkMediaColumnsPresent
+          ? this.db.query(`
+            INSERT INTO chunks (
+              item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at,
+              media_path, media_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+          : this.db.query(`
+            INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `);
         for (const chunk of copy.chunks) {
-          insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+          if (this.chunkMediaColumnsPresent) {
+            insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now,
+              chunk.mediaPath ?? null, chunk.mediaSha256 ?? null);
+          } else {
+            insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+          }
+          if (chunk.mediaPath) retainMediaCacheFile(chunk.mediaPath, this.mediaHolder);
           chunksWritten += 1;
         }
       }
@@ -3025,6 +3114,8 @@ export class LocalConnectorStore {
           : {}),
       };
     })();
+    this.releaseUnreferencedChunkMedia();
+    return imported;
   }
 
   /**
@@ -4108,6 +4199,7 @@ export class LocalConnectorStore {
     }
     const chunks = this.db.query(`
       SELECT c.chunk_index, c.content_hash,
+        ${this.chunkMediaColumnsPresent ? 'c.media_sha256' : 'NULL AS media_sha256'},
         CASE WHEN ? IS NULL THEN 1 ELSE EXISTS (
           SELECT 1 FROM chunk_embeddings embedding
           WHERE embedding.chunk_pk = c.chunk_pk
@@ -4124,12 +4216,15 @@ export class LocalConnectorStore {
     ) as Array<{
       chunk_index: number;
       content_hash: string;
+      media_sha256: string | null;
       embedding_current: number;
     }>;
     const exactChunks = chunks.filter((chunk) => (
       chunk.chunk_index >= 0
       && chunk.chunk_index < expectation.chunkContentHashes.length
       && chunk.content_hash === expectation.chunkContentHashes[chunk.chunk_index]
+      // The media rides on the first chunk only.
+      && (chunk.media_sha256 ?? undefined) === (chunk.chunk_index === 0 ? expectation.mediaSha256 : undefined)
     ));
     const chunksIndexed = exactChunks.length;
     const chunksEmbeddingCurrent = exactChunks.filter(
@@ -4418,6 +4513,9 @@ export class LocalConnectorStore {
       if (!sameSourceItemIdentity(item.identity, record.expectation.sourceItem)) {
         throw new Error('Representation restore expectation identity does not match its item.');
       }
+      if (record.media?.sha256 !== record.expectation.mediaSha256) {
+        throw new Error('Representation restore media does not match its expectation.');
+      }
       const key = sourceItemIdentityKey(item.identity);
       if (seenIdentities.has(key)) {
         throw new Error('Representation restore contains a duplicate item identity.');
@@ -4425,7 +4523,7 @@ export class LocalConnectorStore {
       seenIdentities.add(key);
     }
 
-    return this.db.transaction(() => {
+    const summary = this.db.transaction((): ConnectorStoreRepresentationRestoreSummary => {
       const syncRunId = `connector-representation-restore-${randomUUID()}`;
       const startedAt = this.now().toISOString();
       this.db.query(`
@@ -4571,7 +4669,7 @@ export class LocalConnectorStore {
           options.preserveStoredSearchText === true,
           options.preserveStoredSearchTextOwnedFacets === true,
         );
-        this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars);
+        this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars, record.media);
         this.refreshFtsForItem(upsert.itemPk);
         chunksAwaitingEmbedding += (this.db.query(`
           SELECT COUNT(*) AS count
@@ -4612,6 +4710,32 @@ export class LocalConnectorStore {
         skippedProviderItemIds: skippedProviderItemIds.sort(),
       };
     })();
+    this.releaseUnreferencedChunkMedia();
+    return summary;
+  }
+
+  /**
+   * Keeps the media cache in step with this store's chunks. A chunk write
+   * that attaches media retains it (this store's marker beside the file);
+   * here, media no chunk here references any more (queued by the delete
+   * trigger) is given up, and the cache removes a file when its last holder
+   * goes. Best effort and cheap when nothing changed: a failure only keeps a
+   * file longer.
+   */
+  private releaseUnreferencedChunkMedia(): void {
+    if (!this.chunkMediaColumnsPresent) return;
+    try {
+      const queued = this.db.query('SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000')
+        .all() as Array<{ media_sha256: string; media_path: string }>;
+      for (const entry of queued) {
+        const referenced = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
+          .get(entry.media_sha256) as { present: number } | null;
+        if (!referenced) releaseMediaCacheFile(entry.media_path, this.mediaHolder);
+        this.db.query('DELETE FROM chunk_media_releases WHERE media_sha256 = ?').run(entry.media_sha256);
+      }
+    } catch {
+      // Kept longer, never lost: the queue row stays for the next pass.
+    }
   }
 
   /**
@@ -6909,8 +7033,9 @@ export class LocalConnectorStore {
     item: RawItem,
     itemPk: number,
     maxChunkChars: number,
+    media?: ConnectorStoreChunkMedia,
   ): { chunksIndexed: number; ftsContentChanged: boolean } {
-    return this.indexItemText(item, itemPk, maxChunkChars, textFromRawItem(item));
+    return this.indexItemText(item, itemPk, maxChunkChars, textFromRawItem(item), media);
   }
 
   // Citation-safe item metadata that seasons an embedding input, read from the
@@ -6943,6 +7068,7 @@ export class LocalConnectorStore {
     itemPk: number,
     maxChunkChars: number,
     text: string | undefined,
+    media?: ConnectorStoreChunkMedia,
   ): { chunksIndexed: number; ftsContentChanged: boolean } {
     // The single funnel every chunk this store writes passes through, which is
     // why the metadata-only refusal lives here rather than at each caller. A
@@ -6971,26 +7097,43 @@ export class LocalConnectorStore {
     // not repeat — a reaction aggregate preserved across a reaction-free emit.
     const seasoning = this.itemEmbeddingSeasoning(itemPk, item);
     const chunks = chunkText(text, maxChunkChars);
-    const desired = chunks.map((chunk, index) => ({
-      index,
-      text: chunk,
-      hash: hashString(chunk),
-      embeddingHash: hashString(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk })),
-    }));
+    if (media && !this.chunkMediaColumnsPresent) {
+      throw new Error('Connector store chunks cannot carry media before the v13 schema.');
+    }
+    // Media (a prepared photo) rides on the first chunk, and its digest is
+    // part of that chunk's embedding input: a changed picture re-embeds.
+    const desired = chunks.map((chunk, index) => {
+      const chunkMedia = index === 0 ? media : undefined;
+      return {
+        index,
+        text: chunk,
+        hash: hashString(chunk),
+        media: chunkMedia,
+        embeddingHash: connectorStoreChunkEmbeddingInputHash(
+          buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk }),
+          chunkMedia?.sha256,
+        ),
+      };
+    });
     const existing = this.db.query(`
-      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_path, media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(itemPk) as Array<{
       chunk_index: number;
       bounded_text: string;
       content_hash: string;
       embedding_input_hash: string | null;
+      media_path: string | null;
+      media_sha256: string | null;
     }>;
     const contentUnchanged = existing.length === desired.length && desired.every((chunk, index) => {
       const current = existing[index];
       return current?.chunk_index === chunk.index
         && current.bounded_text === chunk.text
-        && current.content_hash === chunk.hash;
+        && current.content_hash === chunk.hash
+        && (current.media_sha256 ?? undefined) === chunk.media?.sha256
+        && (current.media_path ?? undefined) === chunk.media?.path;
     });
     if (contentUnchanged) {
       const update = this.db.query(`
@@ -7013,17 +7156,30 @@ export class LocalConnectorStore {
     this.db.transaction(() => {
       this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
       const now = nowIso();
-      const insert = this.db.query(`
-        INSERT INTO chunks (
-          item_pk, chunk_index, bounded_text, content_hash,
-          embedding_input_hash, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `);
+      const insert = this.chunkMediaColumnsPresent
+        ? this.db.query(`
+          INSERT INTO chunks (
+            item_pk, chunk_index, bounded_text, content_hash,
+            embedding_input_hash, indexed_at, media_path, media_sha256
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        : this.db.query(`
+          INSERT INTO chunks (
+            item_pk, chunk_index, bounded_text, content_hash,
+            embedding_input_hash, indexed_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `);
       for (const chunk of desired) {
-        insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
+        if (this.chunkMediaColumnsPresent) {
+          insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now,
+            chunk.media?.path ?? null, chunk.media?.sha256 ?? null);
+        } else {
+          insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
+        }
       }
       this.refreshFtsForItem(itemPk);
     })();
+    if (media) retainMediaCacheFile(media.path, this.mediaHolder);
     return { chunksIndexed: chunks.length, ftsContentChanged: true };
   }
 
@@ -7054,20 +7210,23 @@ export class LocalConnectorStore {
     seasoning: ConnectorStoreEmbeddingSeasoning,
   ): number {
     const chunks = this.db.query(`
-      SELECT chunk_index, bounded_text, embedding_input_hash
+      SELECT chunk_index, bounded_text, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? 'media_sha256' : 'NULL AS media_sha256'}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(itemPk) as Array<{
       chunk_index: number;
       bounded_text: string;
       embedding_input_hash: string | null;
+      media_sha256: string | null;
     }>;
     const update = this.db.query(
       'UPDATE chunks SET embedding_input_hash = ? WHERE item_pk = ? AND chunk_index = ?',
     );
     let invalidated = 0;
     for (const chunk of chunks) {
-      const embeddingHash = hashString(
+      const embeddingHash = connectorStoreChunkEmbeddingInputHash(
         buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk.bounded_text }),
+        chunk.media_sha256 ?? undefined,
       );
       if (chunk.embedding_input_hash === embeddingHash) continue;
       update.run(embeddingHash, itemPk, chunk.chunk_index);
@@ -7443,6 +7602,9 @@ export class LocalConnectorStore {
     }
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
     await options.assertAuthorized?.();
+    // Media no chunk here references any more is released before an embed
+    // pass, so the regular drain also keeps the media cache tidy.
+    this.releaseUnreferencedChunkMedia();
     const limit = normalizeEmbedLimit(options.limit);
     const journalId = normalizeMaintenanceJournalId(options.journalId);
     const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(
@@ -7682,9 +7844,24 @@ export class LocalConnectorStore {
         batch = recheck.kept;
         if (batch.length === 0) continue;
       }
+      // A chunk whose prepared picture is gone from the media cache is not
+      // embedded as text alone under an input hash that names the picture:
+      // it is seen and skipped, keeps its keyword search, and embeds again
+      // once a new extraction brings the picture back.
+      const mediaMissing = batch.filter((row) => row.media_path && !existsSync(row.media_path));
+      if (mediaMissing.length > 0) {
+        staleSkipped += mediaMissing.length;
+        batch = batch.filter((row) => !mediaMissing.includes(row));
+        if (batch.length === 0) continue;
+      }
       const vectors = await provider.embed(batch.map((row) => ({
         ...(row.title ? { title: row.title } : {}),
         text: buildConnectorStoreEmbeddingText(row),
+        // A chunk with a prepared photo hands it to the provider; one that
+        // reads images embeds both together, every other embeds the text.
+        ...(row.media_path && row.media_sha256
+          ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: 'image/jpeg' } }
+          : {}),
       })), { taskType: 'RETRIEVAL_DOCUMENT' });
       if (vectors.length !== batch.length) {
         throw new Error('Connector store embedding provider returned the wrong number of vectors.');
@@ -8518,6 +8695,8 @@ export class LocalConnectorStore {
     authored_at: string | null;
     updated_at: string | null;
     trust_tier: string;
+    media_path: string | null;
+    media_sha256: string | null;
   }> {
     const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
     if (selectedLocalItemIds && selectedLocalItemIds.length === 0) return [];
@@ -8546,7 +8725,8 @@ export class LocalConnectorStore {
         i.mime_type,
         i.authored_at,
         i.updated_at,
-        i.trust_tier
+        i.trust_tier,
+        ${this.chunkMediaColumnsPresent ? 'c.media_path, c.media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
@@ -8571,6 +8751,8 @@ export class LocalConnectorStore {
       authored_at: string | null;
       updated_at: string | null;
       trust_tier: string;
+      media_path: string | null;
+      media_sha256: string | null;
     }>;
   }
 
@@ -11469,6 +11651,15 @@ interface ConnectorStoreEmbeddingSeasoning {
   updated_at: string | null;
 }
 
+/**
+ * A chunk's embedding input hash: the embedding text, and the digest of the
+ * picture the model reads beside it when the chunk carries one. Text alone
+ * hashes exactly as it always has, so no stored vector moves.
+ */
+export function connectorStoreChunkEmbeddingInputHash(embeddingText: string, mediaSha256?: string): string {
+  return mediaSha256 ? hashString(`${embeddingText}\n\u0000image:sha256:${mediaSha256}`) : hashString(embeddingText);
+}
+
 // Embedding text mirrors the Dropbox lane: citation-safe metadata header plus
 // the bounded chunk text.
 function buildConnectorStoreEmbeddingText(row: {
@@ -12324,6 +12515,13 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'locator_identity_index_state',
   'connector_store_locator_identity_insert',
   'connector_store_locator_identity_update',
+  'chunk_media_releases',
+  'connector_store_chunk_media_release',
+] as const;
+
+const CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
+  'chunk_pk', 'item_pk', 'chunk_index', 'bounded_text', 'content_hash',
+  'embedding_input_hash', 'indexed_at', 'media_path', 'media_sha256',
 ] as const;
 
 const CONNECTOR_STORE_REQUIRED_COLUMNS = {
@@ -12421,6 +12619,7 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   if (version === 9) validateConnectorStoreV9Schema(db);
   if (version === 10) validateConnectorStoreV10Schema(db);
   if (version === 11) validateConnectorStoreV11Schema(db);
+  if (version === 12) validateConnectorStoreV12Schema(db);
   if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) validateConnectorStoreSchema(db);
 }
 
@@ -12430,22 +12629,32 @@ function validateConnectorStoreV6Schema(db: Database): void {
 }
 
 function validateConnectorStoreSchema(db: Database): void {
-  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, 'v12');
+  validateConnectorStoreV12Schema(db, 'v13', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
+  assertTriggerExists(db, 'connector_store_chunk_media_release', 'v13');
+}
+
+function validateConnectorStoreV12Schema(
+  db: Database,
+  versionLabel = 'v12',
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
+): void {
+  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
   assertExactTableColumns(
     db,
     'embedding_models',
     CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS,
     false,
-    'v12',
+    versionLabel,
   );
   assertExactTableColumns(
     db,
     'item_write_claims',
     CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS,
     false,
-    'v12',
+    versionLabel,
   );
-  validateConnectorStoreLocatorIdentitySchema(db, 'v12');
+  validateConnectorStoreLocatorIdentitySchema(db, versionLabel);
 }
 
 function validateConnectorStoreV11Schema(db: Database): void {
@@ -12523,8 +12732,9 @@ function validateConnectorStoreItemSchema(
   db: Database,
   itemColumns: readonly string[],
   versionLabel: string,
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
 ): void {
-  validateConnectorStoreSchemaShape(db, itemColumns, true, versionLabel);
+  validateConnectorStoreSchemaShape(db, itemColumns, true, versionLabel, chunkColumns);
   validateConnectorStoreFtsOwnership(db, versionLabel);
   assertIndexColumns(db, 'idx_connector_store_items_sender_id', ['sender_id'], versionLabel);
   assertIndexColumns(db, 'idx_connector_store_items_sender_label', ['sender_label'], versionLabel);
@@ -12561,10 +12771,11 @@ function validateConnectorStoreSchemaShape(
   itemColumns: readonly string[],
   conversationScoped: boolean,
   versionLabel: string,
+  chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
 ): void {
   assertExactTableColumns(db, 'items', itemColumns, true, versionLabel);
   for (const [table, columns] of Object.entries(CONNECTOR_STORE_REQUIRED_COLUMNS)) {
-    assertExactTableColumns(db, table, columns, false, versionLabel);
+    assertExactTableColumns(db, table, table === 'chunks' ? chunkColumns : columns, false, versionLabel);
   }
   assertIndexColumns(db, 'idx_items_local_item_id', ['local_item_id'], versionLabel);
   assertIndexColumns(

@@ -50,9 +50,11 @@ export interface SourceIngestionPolicyLoadOptions {
 }
 
 const DEFAULT_DROPBOX_ROOT = '/';
+// Video stays names-only. Still images are read by default since 2026-10-07:
+// the shared text lane prepares them for the built-in model's image encoder
+// (docs/design/photo-embeddings.md), and their content rests Private.
 const DEFAULT_DEFERRED_MEDIA_EXTENSIONS = [
-  '3gp', 'avi', 'bmp', 'gif', 'heic', 'heif', 'jpeg', 'jpg', 'm4v', 'mov',
-  'mp4', 'mpeg', 'mpg', 'png', 'tif', 'tiff', 'webm', 'webp',
+  '3gp', 'avi', 'm4v', 'mov', 'mp4', 'mpeg', 'mpg', 'webm',
 ] as const;
 const DEFAULT_DEFERRED_BOOK_EXTENSIONS = [
   'azw', 'azw3', 'azw4', 'cba', 'cb7', 'cbr', 'cbt', 'cbz', 'djv', 'djvu',
@@ -85,7 +87,7 @@ export function defaultDropboxIngestionPolicy(): SourceIngestionPolicy {
     rules: [
       {
         match: {
-          mime_type_prefixes: ['image/', 'video/'],
+          mime_type_prefixes: ['video/'],
           extensions: [...DEFAULT_DEFERRED_MEDIA_EXTENSIONS],
         },
         action: 'metadata_only',

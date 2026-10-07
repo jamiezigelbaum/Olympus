@@ -181,6 +181,7 @@ export function decideItemTiers(
       provider: item.identity.provider,
       ...(text !== undefined ? { text } : {}),
       ...(extra.namesOnly ? { namesOnly: true } : {}),
+      mimeType: item.mimeType,
       subject: item.identity,
     },
     {

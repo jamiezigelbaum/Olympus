@@ -30,15 +30,16 @@ import type {
 import { dropboxOutOfContentScopeSql } from './content-scope-policy.ts';
 
 /**
- * Content the store deliberately does not read: the pixels and the shelf.
+ * Content the store deliberately does not read: video and the shelf. Still
+ * images left this list on 2026-10-07 (photos are read and embedded; see
+ * docs/design/photo-embeddings.md), matching the default ingestion policy.
  *
  * A file matching these is expected to be metadata-only, so on its own it never
  * manufactures operator work — see the ladder's deferral rung for the one thing
  * that changes that.
  */
 export const DROPBOX_DEFAULT_DEFERRED_MEDIA_EXTENSIONS = [
-  '3gp', 'avi', 'bmp', 'gif', 'heic', 'heif', 'jpeg', 'jpg', 'm4v', 'mov',
-  'mp4', 'mpeg', 'mpg', 'png', 'tif', 'tiff', 'webm', 'webp',
+  '3gp', 'avi', 'm4v', 'mov', 'mp4', 'mpeg', 'mpg', 'webm',
 ] as const;
 export const DROPBOX_DEFAULT_DEFERRED_BOOK_EXTENSIONS = [
   'azw', 'azw3', 'azw4', 'cba', 'cb7', 'cbr', 'cbt', 'cbz', 'djv', 'djvu',
@@ -152,7 +153,6 @@ export function minimumUsefulExtractionCharsSql(entryAlias: string): string {
  */
 export function defaultDeferredContentReadinessSql(): string {
   return [
-    "mime_type_lower LIKE 'image/%'",
     "mime_type_lower LIKE 'video/%'",
     ...DROPBOX_DEFAULT_DEFERRED_MEDIA_EXTENSIONS.map((extension) => `path_lower LIKE '%.${extension}'`),
     ...DROPBOX_DEFAULT_DEFERRED_BOOK_EXTENSIONS.map((extension) => `path_lower LIKE '%.${extension}'`),

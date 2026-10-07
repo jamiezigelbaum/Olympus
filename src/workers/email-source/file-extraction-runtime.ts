@@ -36,6 +36,7 @@ import {
   type ExtractionCandidateReader,
 } from '../../core/file-extraction-source.ts';
 import type { RawItem } from '../../core/contracts.ts';
+import { mediaCacheDir } from '../../core/media-cache.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
 import {
@@ -328,7 +329,12 @@ export function createFileExtractionRuntime(
     return undefined;
   }
 
-  const extractorConfig = options.extractors ?? {};
+  const extractorConfig: ExtractorRegistryConfig = {
+    ...(options.extractors ?? {}),
+    // Prepared photo copies live in the owner-only media cache under the
+    // Olympus data directory (docs/design/photo-embeddings.md).
+    media: { cacheDir: mediaCacheDir(env), ...(options.extractors?.media ?? {}) },
+  };
   const registry = createDefaultExtractorRegistry(extractorConfig);
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
 

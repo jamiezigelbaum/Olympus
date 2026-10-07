@@ -910,6 +910,7 @@ async function settleOneJob(input: {
         grantOrdinal: job.grantOrdinal,
       },
       ...(output.derivations ? { derivations: output.derivations } : {}),
+      ...(output.media ? { media: output.media } : {}),
     });
   } catch (error) {
     // The sink rethrows programming errors on purpose, and they are worth

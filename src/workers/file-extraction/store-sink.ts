@@ -161,6 +161,10 @@ export interface ConnectorStoreExtractionSinkOptions {
 export interface ExtractionSinkPlan {
   item: RawItem;
   expectation: ConnectorStoreItemRepresentationExpectation;
+  /**
+   * The prepared media copy, attached by the store to the item's first chunk.
+   */
+  media?: { path: string; sha256: string };
 }
 
 /**
@@ -200,6 +204,7 @@ function identityForRef(
 export function buildExtractionRepresentationExpectation(
   identity: SourceItemIdentity,
   text: string,
+  mediaSha256?: string,
 ): ConnectorStoreItemRepresentationExpectation {
   return {
     sourceItem: identity,
@@ -209,6 +214,7 @@ export function buildExtractionRepresentationExpectation(
       text,
       CONNECTOR_STORE_DEFAULT_MAX_CHUNK_CHARS,
     ).map(connectorStoreHashString),
+    ...(mediaSha256 ? { mediaSha256 } : {}),
   };
 }
 
@@ -324,7 +330,7 @@ export function createConnectorStoreExtractionSink(
       let summary;
       try {
         summary = store.restoreItemRepresentations({
-          items: [{ item: plan.item, expectation: plan.expectation }],
+          items: [{ item: plan.item, expectation: plan.expectation, ...(plan.media ? { media: plan.media } : {}) }],
           syncConnectorId: options.syncConnectorId,
           ownerConnectorId: options.ownerConnectorId,
           ownershipKind: options.ownershipKind,
@@ -490,6 +496,7 @@ export function planExtractionSinkWrite(
       metadata: metadataForItem(stored, ref, request.metadata),
       fetchedAt: request.fetchedAt,
     },
-    expectation: buildExtractionRepresentationExpectation(identity, text),
+    expectation: buildExtractionRepresentationExpectation(identity, text, request.media?.sha256),
+    ...(request.media ? { media: { path: request.media.path, sha256: request.media.sha256 } } : {}),
   };
 }

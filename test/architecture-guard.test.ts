@@ -194,6 +194,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/bounded-text.ts',
   'src/workers/file-extraction/extractors/command-runner.ts',
   'src/workers/file-extraction/extractors/document-formats.ts',
+  'src/workers/file-extraction/extractors/image-prepare.ts',
   'src/workers/file-extraction/extractors/ocr.ts',
   'src/workers/file-extraction/extractors/openai-compatible-client.ts',
   'src/workers/file-extraction/extractors/pdf-render.ts',
