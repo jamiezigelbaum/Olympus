@@ -588,6 +588,97 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
+  test('a pass that ignores its abort is abandoned, and each waiting reason is named in the status', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-heal-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 1, 'therapy');
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      const lines: string[] = [];
+      let clock = 0;
+      let calls = 0;
+      const answering = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'therapy', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: {
+          // The first call never settles and ignores its signal; later calls answer.
+          complete(request) {
+            calls += 1;
+            return calls === 1 ? new Promise(() => {}) : answering.complete(request);
+          },
+        },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        log: (line) => lines.push(line),
+        now: () => new Date(clock),
+        maxPassMs: 60_000,
+        abandonAfterMs: 30_000,
+      });
+      void service.runOnce();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect((await service.runOnce()).state).toBe('skipped_running');
+      expect(service.status().waiting?.reason).toBe('pass_running');
+      clock += 61_000;
+      expect((await service.runOnce()).state).toBe('skipped_running');
+      expect(service.status().waiting?.reason).toBe('pass_stuck');
+      expect(service.backlog().summary).toContain('Nothing asked now: a pass ran too long and was stopped.');
+      // The aborted call never settles: still held off inside the grace...
+      clock += 10_000;
+      expect((await service.runOnce()).state).toBe('skipped_running');
+      // ...and abandoned past it: this tick runs a fresh pass that asks.
+      clock += 30_000;
+      const fresh = await service.runOnce();
+      expect(fresh).toMatchObject({ state: 'ran', report: { calls: 1 } });
+      expect(lines.some((line) => line.includes('was abandoned and a new pass starts'))).toBe(true);
+      expect(service.status().waiting).toBeUndefined();
+      service.stop();
+
+      // Breaker, answers and no model are told apart, content-free.
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 2, 'divorce papers');
+      let breaker = true;
+      let answers = false;
+      let available = true;
+      const reasons = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: answering,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        breakerOpen: () => breaker,
+        answersInFlight: () => answers,
+        modelAvailable: () => available,
+        modelState: () => 'failed',
+        log: (line) => lines.push(line),
+      });
+      await reasons.runOnce();
+      expect(reasons.status().waiting?.reason).toBe('breaker_open');
+      expect(lines).toContain('Olympus tier sniffer: questions are waiting, nothing asked: the private model is resting after failures.');
+      breaker = false;
+      answers = true;
+      await reasons.runOnce();
+      expect(reasons.backlog().waiting?.reason).toBe('yielding_to_answers');
+      answers = false;
+      available = false;
+      await reasons.runOnce();
+      expect(reasons.status().waiting).toMatchObject({ reason: 'no_model', label: 'the private model is not available (failed)' });
+      available = true;
+      expect(await reasons.runOnce()).toMatchObject({ state: 'ran', report: { calls: 1 } });
+      expect(reasons.status().waiting).toBeUndefined();
+      reasons.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('an approval names lane, profile, model and prompt version: changing any one needs a new approval', () => {
     const base = { recorded_at: '2026-09-23T10:00:00.000Z', what: 'x', model_id: 'm', prompt_version: 'p1', lane: 'local', profile_id: 'local-a', status: 'complete' as const };
     const approved = { ...base, kind: 'classifier_model_decision' as const, approved_by: 'owner' as const };

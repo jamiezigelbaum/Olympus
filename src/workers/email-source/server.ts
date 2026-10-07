@@ -1138,6 +1138,8 @@ export function stopBuiltInModelOnShutdown(model: Pick<BuiltInAnalystModel, 'sto
  * download); a fresh install is started by the answer pool when the local
  * model service is down.
  */
+const BUILT_IN_MODEL_RETRY_MS = 10 * 60_000;
+
 function createWorkerSharedBuiltInModel(
   env: Record<string, string | undefined>,
 ): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } | undefined {
@@ -1168,8 +1170,21 @@ function createWorkerSharedBuiltInModel(
   if (base.status().state !== 'not_started') void model.prepare();
   // A fresh install's first download, started by the tier sniffer when it
   // has items waiting for this model (prepare() is shared and deduplicated).
+  // A verified install whose server once failed to start is re-armed too, at
+  // most once per BUILT_IN_MODEL_RETRY_MS: otherwise `failed` would keep the
+  // sniffer and the private panel off this model until the engine restarts.
+  let lastRetryMs = 0;
   const startIfIdle = (): void => {
-    if (base.status().state === 'not_started') void model.prepare();
+    const status = base.status();
+    if (status.state === 'not_started') {
+      void model.prepare();
+      return;
+    }
+    if (status.state === 'failed' && status.failure?.reason === 'runtime_load_failed'
+      && Date.now() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
+      lastRetryMs = Date.now();
+      void model.prepare();
+    }
   };
   return { model, available: () => prepared && installedOnDisk(), startIfIdle };
 }
@@ -1818,7 +1833,11 @@ export async function main(): Promise<void> {
   // Answers in flight (source answers, ChatGPT searches, private answer
   // panel jobs): the first one preempts the sniffer, which yields until none
   // is left. The private panel's answer and the sniffer share one local model.
-  const answerActivity = createAnswerActivity(() => preemptTierSniffer?.());
+  // A lease never released (an answer that never settles) expires, so it
+  // cannot hold the sniffer off for good; said once each, content-free.
+  const answerActivity = createAnswerActivity(() => preemptTierSniffer?.(), {
+    onExpired: (openMs) => console.warn(`Olympus answer activity: an answer still open after ${Math.round(openMs / 60_000)} min stopped holding background work.`),
+  });
   // Set once the sniffer runs: its backlog, for the status surface.
   let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
   const connector = createEmailSourceConnectorFromEnv();
@@ -3360,6 +3379,9 @@ export async function main(): Promise<void> {
               remaining_questions: backlog.remainingQuestions,
               summary: backlog.summary,
               awaiting_owner_approval: backlog.awaitingOwnerApproval,
+              ...(backlog.waiting
+                ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since }
+                : {}),
             }
           : undefined;
       },
@@ -4597,15 +4619,20 @@ export async function main(): Promise<void> {
         model: snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
-        ...(snifferRuntime.source === 'built_in' ? { modelAvailable: () => snifferRuntime.builtIn.available(), startModel: () => snifferRuntime.builtIn.startIfIdle?.() } : {}),
+        ...(snifferRuntime.source === 'built_in'
+          ? {
+              modelAvailable: () => snifferRuntime.builtIn.available(),
+              startModel: () => snifferRuntime.builtIn.startIfIdle?.(),
+              modelState: () => workerBuiltInModel?.model.status().state,
+            }
+          : {}),
         ownerContext: privacyOwnerWords,
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
         answersInFlight: () => answerActivity.busy,
-        shouldYield: () => answerActivity.busy
-          || secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
+        breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved
         // for the sniffer by default, and a Personal verdict's queued move

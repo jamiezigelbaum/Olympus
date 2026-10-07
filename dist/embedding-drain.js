@@ -27915,6 +27915,9 @@ var BUILT_IN_SNIFFER_LANE = Object.freeze({
   profile: Object.freeze({ provider: "built-in", trust: "local", model: BUILT_IN_SNIFFER_PROFILE_ID, purpose: "classification" })
 });
 
+// src/workers/answer-activity.ts
+var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+
 // src/workers/email-source/server.ts
 init_privacy_profile();
 
@@ -28571,6 +28574,7 @@ init_tier_ledger();
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
+var DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
 var DEFAULT_STALE_MOVE_MS = 60 * 60000;
 var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)";
 
@@ -28581,7 +28585,10 @@ class TierSnifferService {
   running = false;
   runningSinceMs = 0;
   overrunReported = false;
+  overrunAbortedAtMs = 0;
+  passGeneration = 0;
   waitingReason;
+  waiting;
   moveFailures = new Map;
   abort;
   lastTick;
@@ -28636,8 +28643,9 @@ class TierSnifferService {
     return {
       checkingItems,
       remainingQuestions,
-      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.`,
-      awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval"
+      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
+      awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
+      ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
   }
   status() {
@@ -28645,41 +28653,56 @@ class TierSnifferService {
       lane: this.options.lane.kind,
       modelId: this.options.lane.modelId,
       callsToday: this.budget.usedToday(),
-      ...this.lastTick ? { lastTick: this.lastTick } : {}
+      ...this.lastTick ? { lastTick: this.lastTick } : {},
+      ...this.waiting ? { waiting: { ...this.waiting } } : {}
     };
   }
   async runOnce() {
     if (this.stopped)
       return { state: "skipped_running" };
     if (this.running) {
-      const runningMs = this.clockMs() - this.runningSinceMs;
+      const nowMs = this.clockMs();
+      const runningMs = nowMs - this.runningSinceMs;
       if (runningMs >= (this.options.maxPassMs ?? DEFAULT_TIER_SNIFFER_MAX_PASS_MS) && !this.overrunReported) {
         this.overrunReported = true;
+        this.overrunAbortedAtMs = nowMs;
         this.abort?.abort();
         this.options.log?.(`Olympus tier sniffer: a pass ran ${Math.round(runningMs / 60000)} min without finishing; it was stopped.`);
+        this.setWaiting("pass_stuck");
+        return { state: "skipped_running" };
       }
-      return { state: "skipped_running" };
+      if (this.overrunAbortedAtMs === 0 || nowMs - this.overrunAbortedAtMs < (this.options.abandonAfterMs ?? DEFAULT_TIER_SNIFFER_ABANDON_MS)) {
+        if (this.overrunAbortedAtMs === 0)
+          this.setWaiting("pass_running");
+        return { state: "skipped_running" };
+      }
+      this.options.log?.("Olympus tier sniffer: a stopped pass did not end; it was abandoned and a new pass starts.");
+      this.running = false;
     }
+    const generation = ++this.passGeneration;
     this.running = true;
     this.runningSinceMs = this.clockMs();
     this.overrunReported = false;
-    this.abort = new AbortController;
+    this.overrunAbortedAtMs = 0;
+    const abort = new AbortController;
+    this.abort = abort;
+    let tick;
     try {
-      const tick = await this.tick(this.abort.signal);
-      this.lastTick = tick;
-      this.reportWaiting(tick);
-      return tick;
+      tick = await this.tick(abort.signal);
     } catch (error) {
-      const tick = { state: "failed", error: error instanceof Error ? error.name : "unknown" };
-      this.lastTick = tick;
-      this.reportWaiting(tick);
-      return tick;
-    } finally {
-      this.running = false;
-      this.abort = undefined;
-      if (this.stopped)
-        this.closeLedgers();
+      tick = { state: "failed", error: error instanceof Error ? error.name : "unknown" };
     }
+    if (generation !== this.passGeneration) {
+      abort.abort();
+      return tick;
+    }
+    this.running = false;
+    this.abort = undefined;
+    this.lastTick = tick;
+    this.reportWaiting(tick);
+    if (this.stopped)
+      this.closeLedgers();
+    return tick;
   }
   clockMs() {
     return (this.options.now?.() ?? new Date).getTime();
@@ -28687,27 +28710,87 @@ class TierSnifferService {
   reportWaiting(tick) {
     let reason;
     if (tick.state === "model_unavailable")
-      reason = "the private model is not available";
+      reason = "no_model";
     else if (tick.state === "awaiting_owner_approval")
-      reason = "waiting for the owner to approve the classifier";
+      reason = "awaiting_owner_approval";
     else if (tick.state === "failed")
-      reason = `the pass failed (${tick.error})`;
+      reason = "failed";
     else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
-      reason = stop === "yield" || stop === "preempted" ? "yielding to answers in progress or a resting private model" : stop === "daily_budget" ? "the daily call budget is used up" : stop === "transport_failures" ? "the private model is not answering" : undefined;
+      reason = stop === "yield" || stop === "preempted" ? this.answering() || !this.breakerOpen() ? "yielding_to_answers" : "breaker_open" : stop === "daily_budget" ? "daily_budget" : stop === "transport_failures" ? "model_not_answering" : undefined;
     }
-    const key = reason ?? (tick.state === "ran" && tick.report.calls > 0 ? "asking" : this.waitingReason);
-    if (key === this.waitingReason)
+    if (reason) {
+      this.setWaiting(reason, tick);
       return;
-    const previous = this.waitingReason;
-    this.waitingReason = key;
-    if (key === "asking") {
-      if (previous && previous !== "asking")
+    }
+    if (tick.state === "ran" && (tick.report.calls > 0 || tick.report.pendingSeen === 0)) {
+      const previous = this.waitingReason;
+      this.waiting = undefined;
+      this.waitingReason = "asking";
+      if (tick.report.calls > 0 && previous && previous !== "asking")
         this.options.log?.("Olympus tier sniffer: asking again.");
+    }
+  }
+  setWaiting(reason, tick) {
+    const label = this.waitLabel(reason, tick);
+    if (!this.waiting || this.waiting.reason !== reason) {
+      this.waiting = { reason, label, since: new Date(this.clockMs()).toISOString() };
+    } else {
+      this.waiting = { ...this.waiting, label };
+    }
+    if (reason === this.waitingReason)
+      return;
+    this.waitingReason = reason;
+    if (reason === "pass_running" || reason === "pass_stuck")
+      return;
+    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}.`);
+  }
+  waitLabel(reason, tick) {
+    switch (reason) {
+      case "yielding_to_answers":
+        return "yielding to answers in progress";
+      case "breaker_open":
+        return "the private model is resting after failures";
+      case "pass_running":
+        return "a pass is still running";
+      case "pass_stuck":
+        return "a pass ran too long and was stopped";
+      case "awaiting_owner_approval":
+        return "waiting for the owner to approve the classifier";
+      case "no_model": {
+        const state = this.modelState();
+        return `the private model is not available${state ? ` (${state})` : ""}`;
+      }
+      case "daily_budget":
+        return "the daily call budget is used up";
+      case "model_not_answering":
+        return "the private model is not answering";
+      case "failed":
+        return `the pass failed (${tick?.state === "failed" ? tick.error : "unknown"})`;
+    }
+  }
+  breakerOpen() {
+    try {
+      return this.options.breakerOpen?.() ?? false;
+    } catch {
+      return false;
+    }
+  }
+  modelState() {
+    try {
+      return this.options.modelState?.();
+    } catch {
       return;
     }
-    if (reason)
-      this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${reason}.`);
+  }
+  yieldNow() {
+    if (this.answering() || this.breakerOpen())
+      return true;
+    try {
+      return this.options.shouldYield?.() ?? false;
+    } catch {
+      return false;
+    }
   }
   ledgerPaths() {
     const paths = new Set;
@@ -28805,7 +28888,7 @@ class TierSnifferService {
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
-      ...this.options.shouldYield ? { shouldYield: this.options.shouldYield } : {},
+      shouldYield: () => this.yieldNow(),
       signal
     });
     if (report.calls > 0 || report.verdictsApplied > 0) {
@@ -29186,6 +29269,7 @@ function parseOptionalTimeoutSeconds(value, name) {
   }
   return Math.round(seconds * 1000);
 }
+var BUILT_IN_MODEL_RETRY_MS = 10 * 60000;
 var CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
   [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }]
