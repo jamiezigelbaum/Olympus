@@ -127311,7 +127311,7 @@ async function main() {
       return writerServer;
     };
     const memory = defaultConsultMemoryProbe2();
-    const transport = () => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: process.env }), { env: process.env });
+    const transport = () => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...readWorkerSetupEnv() ?? {} } }), { env: process.env });
     consultOrchestrator = createConsultOrchestrator2({
       jobs: privateAnswers,
       eligible: privateEvidenceEligible,

@@ -4468,10 +4468,13 @@ export async function main(): Promise<void> {
     };
     const memory = defaultConsultMemoryProbe();
     // The zkAPI route: the one `zkapi` sovereignty profile, if any. Without
-    // one the transport is unavailable and no consult is sent.
+    // one the transport is unavailable and no consult is sent. The key is
+    // read per call from the same environment the outside-help card checks
+    // (process env plus worker.env), so the card never says a key is present
+    // that the send cannot use.
     const transport = () => resolveZkapiConsultTransport(
       sovereigntyEngine.config.modelProfiles,
-      (secretRef) => resolveSecretRefValueSync(secretRef, { env: process.env }),
+      (secretRef) => resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...(readWorkerSetupEnv() ?? {}) } }),
       { env: process.env },
     );
     consultOrchestrator = createConsultOrchestrator({
