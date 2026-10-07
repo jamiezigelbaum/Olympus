@@ -13577,7 +13577,7 @@ var init_local_index = __esm(() => {
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
     [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
-    [EMBEDDINGGEMMA_2.modelId, 0.69]
+    [EMBEDDINGGEMMA_2.modelId, 0.73]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",

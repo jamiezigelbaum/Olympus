@@ -192,16 +192,19 @@ const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map(
 // positives and paraphrases start at 0.40 (most at 0.43 to 0.56; the weaker
 // true positives are lexical matches, which stand on their own merit).
 //
-// EmbeddingGemma 2 (Google's LiteRT build), calibrated 2026-10-07 on fresh
-// copies of the same two stores (288 chunks), scoring each true positive and
-// paraphrase against the store that holds its answer. Its cosines sit on a
-// higher, narrower scale: off-topic questions peak at 0.63 for everyday topics
-// and 0.68 for medical topics the corpus does not hold (eye exam, dental
-// x-ray); true positives start at 0.74 (median 0.83) and paraphrases at 0.71
-// (median 0.74), save one at 0.66 ("do I have worms", which Arctic also
-// missed). 0.69 sits between. The same question set put Arctic's off-topic
-// peak at 0.37, under its 0.40 bar; Arctic found 13 of the 20 paraphrases,
-// this model 19.
+// EmbeddingGemma 2 (Google's LiteRT build): 0.73, set 2026-10-07 on copies
+// of the owner's two Dropbox stores. Its cosines sit on a higher, narrower
+// scale than Arctic's. A first calibration on the small health corpus
+// (288 chunks) put off-topic questions at 0.68 at most and answers from 0.71,
+// so 0.69. A blind set written after more files arrived (978 chunks, 40
+// answerable and 10 unanswerable questions) found medical near-misses the
+// corpus does not hold (colonoscopy, allergy test, bone density) at 0.70-0.72:
+// at 0.69 it returned results for 7 unanswerable questions to Arctic's 5. At
+// 0.73 it returned them for the same 5, still finding 36 answers to Arctic's
+// 29. A second, independent blind set (45 answerable, 15 unanswerable, many
+// of them near misses) confirmed 0.73: 42 answers found to Arctic's 38,
+// results for the same 10 unanswerable questions, 67 wrong results to
+// Arctic's 66 (most from keyword search, which both share).
 //
 // Every built-in model needs its own bar before it ships: cosine scales differ
 // by model, and a bar carried over from another model either lets everything
@@ -209,7 +212,7 @@ const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map(
 // registered built-in model without one.
 const CALIBRATED_SEMANTIC_RELEVANCE_BARS: ReadonlyMap<string, number> = new Map([
   [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
-  [EMBEDDINGGEMMA_2.modelId, 0.69],
+  [EMBEDDINGGEMMA_2.modelId, 0.73],
 ]);
 
 /** The relevance bar calibrated for a model's vector lane, if one has been. */

@@ -439,8 +439,8 @@ match must contain every concept of the question (three of a longer one),
 or concepts that carry most of its weight (rare words count more than
 common ones); and a vector match must clear its model's calibrated bar
 (built-in Arctic's is 0.40 best-cosine, calibrated on the owner's corpus
-copies: off-topic questions peak at 0.39; EmbeddingGemma 2's is 0.69, its
-off-topic peak 0.68). Before this, the built-in
+copies: off-topic questions peak at 0.39; EmbeddingGemma 2's is 0.73,
+calibrated and then checked on a blind question set). Before this, the built-in
 model's nearest neighbours and words like "do" and "about" made every
 non-empty Private corpus match every question (live smoke: every question
 reported 12 Private matches and the panel answered "these private items do
