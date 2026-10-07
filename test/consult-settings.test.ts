@@ -339,11 +339,18 @@ describe('per-job binding', () => {
 });
 
 // Design §A.9: changed only on the Mac, never from ChatGPT, an agent tool or
-// the relay. This stage ships no writer at all, and only doctor imports the
-// settings module.
+// the relay. No writer ships yet. The readers: doctor (its status line), and
+// since stage C4a the private-answer jobs engine, which binds each job's
+// policy at creation (`bindConsultJobPolicy`) through the production wiring
+// in the worker server. Both only read; the list below is exact so a new
+// importer is a reviewed decision.
 describe('the settings module stays off the hosted surfaces', () => {
   const SETTINGS_MODULE = 'src/core/consult-settings.ts';
-  const SETTINGS_IMPORTERS: readonly string[] = ['src/core/doctor.ts'];
+  const SETTINGS_IMPORTERS: readonly string[] = [
+    'src/core/doctor.ts',
+    'src/workers/chatgpt/private-answer-jobs.ts',
+    'src/workers/email-source/server.ts',
+  ];
 
   function sourceFiles(dir: string): string[] {
     const root = join(repoRoot, dir);
@@ -363,8 +370,9 @@ describe('the settings module stays off the hosted surfaces', () => {
 
   test('only the allowed modules import the settings module', () => {
     const sources = [...sourceFiles('src'), ...sourceFiles('connect-relay'), ...sourceFiles('exchange'), ...sourceFiles('scripts')];
+    // Static `from '…'` imports and dynamic `import('…')` alike.
     const importers = sources.filter((file) => file !== SETTINGS_MODULE
-      && /from ['"][./]*(?:core\/)?consult-settings(?:\.ts)?['"]/.test(readFileSync(join(repoRoot, file), 'utf8')));
+      && /(?:from|import\s*\()\s*['"][./]*(?:core\/)?consult-settings(?:\.ts)?['"]/.test(readFileSync(join(repoRoot, file), 'utf8')));
     expect(importers.sort()).toEqual([...SETTINGS_IMPORTERS].sort());
   });
 

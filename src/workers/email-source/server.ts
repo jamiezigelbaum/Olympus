@@ -4339,6 +4339,7 @@ export async function main(): Promise<void> {
   // built-in private model. Without it on this machine every private match
   // reports `no_model` with counts only.
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
+  const { bindConsultJobPolicy, readConsultSettings } = await import('../../core/consult-settings.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
   const { createDropboxOpenTargets, localDropboxRoots, localOpenArguments } = await import('../dropbox-files/open-target.ts');
@@ -4381,6 +4382,10 @@ export async function main(): Promise<void> {
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
+    // Each job binds the outside-help settings current at its creation
+    // (~/.olympus/consult.json, read at every use, never cached): its
+    // lifetime and whether a capability-2 panel enters follow-up collection.
+    consultPolicy: () => bindConsultJobPolicy(readConsultSettings()),
     // While an analysis runs (from the search) and from a claim to
     // ready/failed, the sniffer stays off the shared model.
     activity: answerActivity,
