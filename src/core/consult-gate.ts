@@ -935,16 +935,19 @@ export type ConsultLanguage = 'en' | 'nl' | 'fr' | 'es' | 'pt-PT' | 'pt-BR' | 'd
  *                   (owner decision 2026-10-07, from the false-refusal
  *                   measurement): a country name narrows where the owner is or
  *                   travels, and several are given names (Jordan, Georgia,
- *                   Chad), but the snapshot name rules still refuse any name
- *                   the documents hold, and cities stay refused. The owner can
- *                   turn it off.
+ *                   Chad). The snapshot name rules refuse a name the
+ *                   documents hold only where they recognise it as a name
+ *                   (heuristic, capitalisation-based). The owner can turn it
+ *                   off.
  *   places          GeoNames populated places of 15,000 or more and first-level
  *                   regions (name and ASCII name, CC BY 4.0). Default on (owner
  *                   decision 2026-10-07): cities and regions are no longer
  *                   refused as unknown words. Many place names are also given
- *                   names (Victoria, Sydney, Austin), but the snapshot name
- *                   rules still refuse any such word the owner's documents
- *                   hold, so the pack widens only words absent from them.
+ *                   names (Victoria, Sydney, Austin). The snapshot name rules
+ *                   refuse such a word the owner's documents hold only where
+ *                   they recognise it as a name, which is heuristic
+ *                   (capitalisation rules); a lower-case or unusually placed
+ *                   occurrence can pass. The owner can turn the pack off.
  *   technical       Olympus-authored general terms (olympus-terms): units the
  *                   CLDR pack drops (Celsius, Fahrenheit), file formats,
  *                   protocols, device and network terms, and a few stable

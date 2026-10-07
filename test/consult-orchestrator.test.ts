@@ -238,24 +238,32 @@ describe('the gate fixtures behave as the tests assume', () => {
     expect(evaluateConsultRequest([COPIED_QUESTION], context, {}, {}, { languages: ['en'] }).decision).toBe('refuse');
   });
 
-  test('the implied-place case (M0 round 2): "Portugal", never written in a Lisbon answer, is still refused by the gate with the default options (snapshot name rule); unit words pass', () => {
-    const lisbon = privateEvidencePack('What should I prepare for the Lisbon trip?', [
+  test('the implied-place case (M0 round 2): "Portugal" with countries and places on, absent from or present in the snapshot, and with both packs off; unit words pass', () => {
+    const texts = (place: string) => ['What should I prepare for the trip?', `Your itinerary covers three days in ${place} with a morning flight and a hotel near the river.`, 'Passport rules for the trip are not stated.'];
+    const lisbon = privateEvidencePack('What should I prepare for the trip?', [
       { id: 'itinerary', text: 'Three days in Lisbon: the flight lands in the morning and the hotel is near the river.' },
     ]);
-    const context = consultWriterContextFromPack(lisbon, {
-      writerVisibleTexts: ['What should I prepare for the Lisbon trip?', 'Your itinerary covers three days in Lisbon with a morning flight and a hotel near the river.', 'Entry and passport rules for the trip are not stated.'],
-    });
+    const portugalPack = privateEvidencePack('What should I prepare for the trip?', [
+      { id: 'itinerary', text: 'Three days in Portugal: the flight lands in the morning and the hotel is near the river.' },
+    ]);
+    const absent = consultWriterContextFromPack(lisbon, { writerVisibleTexts: texts('Lisbon') });
+    const present = consultWriterContextFromPack(portugalPack, { writerVisibleTexts: texts('Portugal') });
     const defaults = consultGateOptionsFromSettings(DEFAULT_CONSULT_SETTINGS);
-    expect(defaults.domains).toMatchObject({ countries: true, technical: true });
-    // Countries are admitted by default (owner decision 2026-10-07), so the
-    // vocabulary no longer refuses "Portugal"; the snapshot name rule does,
-    // because the documents hold it. Turned off (with the places pack, which also holds a Portugal), the vocabulary refuses too.
-    const portugal = evaluateConsultRequest(['What entry rules apply to visitors arriving in Portugal?'], context, {}, {}, defaults);
-    expect(portugal.decision).toBe('refuse');
-    expect(portugal.reasons).toContain('snapshot_name');
-    expect(portugal.reasons).not.toContain('unknown_word');
-    const noCountries = evaluateConsultRequest(['What entry rules apply to visitors arriving in Portugal?'], context, {}, {}, { ...defaults, domains: { ...defaults.domains, countries: false, places: false } });
-    expect(noCountries.reasons).toContain('unknown_word');
+    expect(defaults.domains).toMatchObject({ countries: true, places: true, technical: true });
+    const question = ['What entry rules apply to visitors arriving in Portugal?'];
+    // Countries are admitted by default (owner decision 2026-10-07): an implied
+    // country the documents never write passes; one they do write is refused by
+    // the snapshot name rule; with the countries and places packs off the
+    // vocabulary refuses it.
+    expect(evaluateConsultRequest(question, absent, {}, {}, defaults)).toEqual({ decision: 'pass', reasons: [] });
+    const held = evaluateConsultRequest(question, present, {}, {}, defaults);
+    expect(held.decision).toBe('refuse');
+    expect(held.reasons).toContain('snapshot_name');
+    expect(held.reasons).not.toContain('unknown_word');
+    const off = evaluateConsultRequest(question, absent, {}, {}, { ...defaults, domains: { ...defaults.domains, countries: false, places: false } });
+    expect(off.decision).toBe('refuse');
+    expect(off.reasons).toContain('unknown_word');
+    const context = absent;
     expect(evaluateConsultRequest(['What passport validity do most countries require from visitors?'], context, {}, {}, defaults)).toEqual({ decision: 'pass', reasons: [] });
     // The temperature scale names (C4b review round 1 found them refused) are
     // in the olympus-terms pack since 2026-10-07, capitalised or not.

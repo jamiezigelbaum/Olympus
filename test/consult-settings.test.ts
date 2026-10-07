@@ -84,6 +84,17 @@ function placeSettings(home: string, settings: Record<string, unknown>): void {
 }
 
 describe('parseConsultSettings', () => {
+  test('a file written before the places and technical keys stays valid, with both on; unknown keys still reject', () => {
+    const { places: _places, technical: _technical, ...oldDomains } = VALID.domains;
+    const old = parseConsultSettings({ ...VALID, domains: oldDomains });
+    expect(old?.domains).toEqual({ ...VALID.domains, places: true, technical: true });
+    expect(parseConsultSettings({ ...VALID, domains: { ...oldDomains, technical: false } })?.domains.technical).toBe(false);
+    expect(parseConsultSettings({ ...VALID, domains: { ...oldDomains, extra: true } })).toBeUndefined();
+    const { units: _units, ...missingRequired } = oldDomains;
+    expect(parseConsultSettings({ ...VALID, domains: missingRequired })).toBeUndefined();
+    expect(parseConsultSettings({ ...VALID, domains: { ...oldDomains, places: 'yes' } })).toBeUndefined();
+  });
+
   test('accepts exactly the schema', () => {
     expect(parseConsultSettings(VALID)).toEqual(VALID as never);
     expect(parseConsultSettings({ ...VALID, revision: 0, enabled: false, strict: true, languages: ['de', 'it', 'nl', 'fr', 'es', 'pt-PT'] })).toBeDefined();
