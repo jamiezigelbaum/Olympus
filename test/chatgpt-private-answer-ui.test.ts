@@ -110,6 +110,10 @@ function fakeIndexedDb(mode: 'ok' | 'throw' | 'error' | 'hang' = 'ok'): FakeIdb 
                 const req: any = {};
                 return step(req, () => { map.set(key, structuredClone(value)); req.result = key; });
               },
+              delete: (key: string) => {
+                const req: any = {};
+                return step(req, () => { map.delete(key); });
+              },
               openCursor: () => {
                 const req: any = {};
                 const keys = [...map.keys()];

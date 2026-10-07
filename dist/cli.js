@@ -50892,7 +50892,6 @@ var init_vocabulary = __esm(() => {
     withdrawn: "This private answer is no longer available from your Mac.",
     outsideTitle: "Outside background — not from your documents",
     outsideNote: "General information from an outside model. It did not read your documents and has not been checked.",
-    outsideIdle: "Nothing added from outside.",
     outsidePending: "Looking up general background…",
     outsidePaused: "Outside help is paused.",
     outsideAsked: "What Olympus asked",
@@ -112904,7 +112903,7 @@ async function checkPrivateEvidence(guard, items) {
     return items.map(() => false);
   return answer.map((value) => value === true);
 }
-var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS, PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS = 50, PRIVATE_ANSWER_PANEL_CAPABILITY = 2, PRIVATE_MATCH_COUNT_CAP = 50, NoPrivateEvidenceError;
+var PRIVATE_ANSWER_RESOURCE_URI = "ui://olympus/private-answer", PRIVATE_ANSWER_META_KEY = "olympus/privateAnswer", PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS, PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, PRIVATE_ANSWER_PANEL_CAPABILITY = 2, PRIVATE_MATCH_COUNT_CAP = 50, NoPrivateEvidenceError;
 var init_private_answer_contract = __esm(() => {
   PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
   PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS = 30 * 60000;
@@ -112938,8 +112937,6 @@ function chatgptPrivateAnswerProgram(config2) {
   let focusAfter = "";
   let follow = null;
   let gone = false;
-  let lockedHeight = -1;
-  let lockedWidth = 0;
   let nextId = 1;
   const pending = {};
   function post(message) {
@@ -113029,8 +113026,6 @@ function chatgptPrivateAnswerProgram(config2) {
       answer = null;
       follow = null;
       gone = false;
-      lockedHeight = -1;
-      lockedWidth = 0;
       sourcesOpen = false;
       askedOpen = false;
       notes = {};
@@ -113142,7 +113137,15 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   async function keptKey(jobId) {
     try {
-      const value = await inStore("readonly", (store) => store.get(jobId));
+      const value = await inStore("readwrite", (store) => {
+        const read = store.get(jobId);
+        read.onsuccess = () => {
+          const found = read.result;
+          if (found && (typeof found.createdAt !== "number" || Date.now() - found.createdAt >= KS.maxAgeMs))
+            store.delete(jobId);
+        };
+        return read;
+      });
       if (!value || typeof value !== "object")
         return null;
       const privateKey = value.privateKey;
@@ -113151,12 +113154,6 @@ function chatgptPrivateAnswerProgram(config2) {
         return null;
       if (typeof value.publicKey !== "string" || !/^[A-Za-z0-9_-]{87}$/.test(value.publicKey))
         return null;
-      const geometry = value.geometry;
-      const width = cardWidth();
-      if (geometry && typeof geometry === "object" && typeof geometry.width === "number" && typeof geometry.height === "number" && geometry.width > 0 && geometry.width < 1e4 && geometry.height > 0 && geometry.height <= config2.frameCapPx && (width === 0 || width === geometry.width) && lockedHeight < 0) {
-        lockedHeight = Math.floor(geometry.height);
-        lockedWidth = Math.floor(geometry.width);
-      }
       return { privateKey, publicKey: value.publicKey };
     } catch {
       return null;
@@ -113169,21 +113166,6 @@ function chatgptPrivateAnswerProgram(config2) {
       });
     } catch {}
     dropOldKeys();
-  }
-  let keptGeometry = "";
-  async function keepGeometry(jobId, width, height) {
-    const mark = jobId + ":" + width + ":" + height;
-    if (mark === keptGeometry)
-      return;
-    keptGeometry = mark;
-    try {
-      const value = await inStore("readonly", (store) => store.get(jobId));
-      if (!value || typeof value !== "object" || !value.privateKey)
-        return;
-      await inStore("readwrite", (store) => {
-        store.put({ privateKey: value.privateKey, publicKey: value.publicKey, createdAt: value.createdAt, geometry: { width, height } }, jobId);
-      });
-    } catch {}
   }
   async function dropOldKeys() {
     try {
@@ -113473,12 +113455,8 @@ function chatgptPrivateAnswerProgram(config2) {
             fail(T.generic, false, byUser);
             return;
           }
-          if (opened.kind === "withdrawn") {
-            follow = { rev: opened.rev, until: Date.now() + opened.followSeconds * config2.secondMs };
-            withdrawn(byUser);
-            followUp(mine, jobId, keys);
-            return;
-          }
+          if (opened.kind === "withdrawn")
+            return withdrawn(byUser);
           answer = opened.answer;
           sourcesOpen = false;
           askedOpen = false;
@@ -113527,6 +113505,7 @@ function chatgptPrivateAnswerProgram(config2) {
   function withdrawn(byUser) {
     answer = null;
     gone = true;
+    follow = null;
     sourcesOpen = false;
     askedOpen = false;
     notes = {};
@@ -113587,14 +113566,8 @@ function chatgptPrivateAnswerProgram(config2) {
       }
       if (mine !== run || !follow || !opened)
         continue;
-      if (opened.kind === "withdrawn") {
-        follow.until = Date.now() + opened.followSeconds * config2.secondMs;
-        if (opened.rev >= follow.rev)
-          follow.rev = opened.rev;
-        if (!gone)
-          withdrawn(false);
-        continue;
-      }
+      if (opened.kind === "withdrawn")
+        return withdrawn(false);
       if (!opened.answer.follow)
         continue;
       follow.until = Date.now() + opened.answer.followSeconds * config2.secondMs;
@@ -113835,14 +113808,13 @@ function chatgptPrivateAnswerProgram(config2) {
   function outsideView(shown) {
     const box = el("section", "outside");
     box.setAttribute("aria-label", T.outsideTitle);
-    box.style.height = config2.outsideHeightPx - config2.outsideGapPx + "px";
     const head = el("div", "out-head");
     head.appendChild(el("h3", "out-title", T.outsideTitle));
     head.appendChild(el("p", "out-note", T.outsideNote));
     box.appendChild(head);
     const body = el("div", "out-body");
-    const state = shown ? shown.outside.state : "idle";
-    if (shown && state === "appended") {
+    const state = shown.outside.state;
+    if (state === "appended") {
       const text = el("div", "out-text");
       text.setAttribute("data-key", "outside");
       text.textContent = shown.outside.text;
@@ -113871,18 +113843,14 @@ function chatgptPrivateAnswerProgram(config2) {
       line.appendChild(el("span", "spinner"));
       line.appendChild(doc2.createTextNode(T.outsidePending));
       body.appendChild(line);
-    } else if (state === "paused") {
-      body.appendChild(el("p", "out-sub", T.outsidePaused));
     } else {
-      body.appendChild(el("p", "out-sub", T.outsideIdle));
+      body.appendChild(el("p", "out-sub", T.outsidePaused));
     }
     box.appendChild(body);
     return box;
   }
   function revealedView(shown) {
     const view = card(true);
-    if (shown.follow)
-      view.card.classList.add("follow");
     view.line.textContent = T.notSent;
     view.row.appendChild(button(T.hide, "hide", hide, T.hideLabel));
     const body = el("div", "answer");
@@ -113910,10 +113878,8 @@ function chatgptPrivateAnswerProgram(config2) {
     if (info) {
       const revealed = phase === "revealed" && answer;
       root.appendChild(revealed ? revealedView(answer) : cardView(info));
-      if (revealed && answer.follow)
+      if (revealed && answer.follow && answer.outside.state !== "idle")
         root.appendChild(outsideView(answer));
-      else if (phase === "withdrawn" && follow)
-        root.appendChild(outsideView(null));
     }
     if (!focusAfter && had)
       focusAfter = had;
@@ -113928,33 +113894,19 @@ function chatgptPrivateAnswerProgram(config2) {
     afterLayout();
   }
   function cardHeight() {
-    const node = info ? root.firstChild : null;
-    if (!node)
+    if (!info)
       return 0;
-    let margins = 0;
-    if (typeof window.getComputedStyle === "function") {
-      const style = window.getComputedStyle(node);
-      margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
-    }
-    return Math.ceil((node.offsetHeight || 0) + margins);
-  }
-  function frameHeight() {
-    const card2 = cardHeight();
-    if (phase === "revealed" && answer && answer.follow) {
-      lockedHeight = Math.min(card2 + config2.outsideHeightPx, config2.frameCapPx);
-      lockedWidth = cardWidth();
-      if (info && lockedWidth > 0)
-        keepGeometry(info.jobId, lockedWidth, lockedHeight);
-      return lockedHeight;
-    }
-    if (phase === "withdrawn" && follow) {
-      if (lockedHeight < 0) {
-        lockedHeight = Math.min(card2 + config2.outsideHeightPx, config2.frameCapPx);
-        lockedWidth = cardWidth();
+    let total = 0;
+    for (let i = 0;i < root.children.length; i++) {
+      const node = root.children[i];
+      let margins = 0;
+      if (typeof window.getComputedStyle === "function") {
+        const style = window.getComputedStyle(node);
+        margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
       }
-      return lockedHeight;
+      total += (node.offsetHeight || 0) + margins;
     }
-    return card2;
+    return Math.ceil(total);
   }
   function cardWidth() {
     return info && root.firstChild ? Math.ceil(root.firstChild.offsetWidth || 0) : 0;
@@ -113962,9 +113914,9 @@ function chatgptPrivateAnswerProgram(config2) {
   let initialized = false;
   let lastHeight = -1;
   function reportHeight(force) {
-    const height = frameHeight();
     if (!initialized)
       return;
+    const height = cardHeight();
     if (height === lastHeight && !force)
       return;
     lastHeight = height;
@@ -113995,7 +113947,7 @@ function chatgptPrivateAnswerProgram(config2) {
     if (!observer && typeof window.ResizeObserver === "function") {
       observer = new window.ResizeObserver(() => afterLayout());
     }
-    const node = info ? root.firstChild : null;
+    const node = info ? root : null;
     if (!observer || node === observed)
       return;
     if (observed)
@@ -114059,9 +114011,6 @@ function chatgptPrivateAnswerPageHtml(options) {
     keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore },
     capability: CHATGPT_PRIVATE_ANSWER_CAPABILITY,
     followPollMs: options.followPollMs ?? CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS,
-    outsideHeightPx: CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX,
-    outsideGapPx: CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX,
-    frameCapPx: CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX,
     outsideLines: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES,
     outsideLineChars: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS,
     outsideBytes: CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES
@@ -114087,7 +114036,7 @@ function chatgptPrivateAnswerPageHtml(options) {
 function scriptJson2(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_CAPABILITY = 2, CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS = 30000, CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX = 176, CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX = 8, CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX = 640, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES = 40, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS = 240, CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES = 4096, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_CAPABILITY = 2, CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS = 30000, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES = 40, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS = 240, CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES = 4096, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
 var init_private_answer2 = __esm(() => {
   init_vocabulary();
   init_private_answer_contract();
@@ -114115,9 +114064,8 @@ p,h2{margin:0}
 html:root>body #panel{display:block!important;height:auto!important;min-height:0!important}
 #panel:empty{display:none!important}
 html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
-html:root>body #panel>.card.follow{max-height:464px!important;overflow:auto!important}
 .card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
-.outside{display:block;box-sizing:border-box;margin:8px 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);overflow:auto;overflow-wrap:anywhere}
+.outside{display:block;box-sizing:border-box;margin:0.5rem 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);max-height:20rem;overflow:auto;overflow-wrap:anywhere}
 .out-head{position:sticky;top:0;z-index:1;padding:0.625rem 0.875rem 0.375rem;background:var(--tint);border-bottom:1px solid var(--hair)}
 .out-title{margin:0;font-size:0.8125rem;font-weight:600;line-height:1.35}
 .out-note{margin:0.0625rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
@@ -117652,7 +117600,6 @@ class PrivateAnswerJobs {
   openRateGlobal;
   outsideHelpTtlMs;
   followUpWindowMs;
-  followUpFloorMs;
   resetting;
   options;
   constructor(options) {
@@ -117681,7 +117628,6 @@ class PrivateAnswerJobs {
     this.openRefilledAt = this.now();
     this.outsideHelpTtlMs = options.outsideHelpTtlMs ?? PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS;
     this.followUpWindowMs = options.followUpWindowMs ?? PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS;
-    this.followUpFloorMs = options.followUpFloorMs ?? PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS;
   }
   get size() {
     return this.jobs.size;
@@ -117780,7 +117726,7 @@ class PrivateAnswerJobs {
     if (outcome.kind === "failed")
       return { status: 200, body: { status: "failed" } };
     if (outcome.kind === "retained" || outcome.kind === "withdrawn")
-      return this.floored(this.followUpResponse(job, panel.key));
+      return this.followUpResponse(job, panel.key);
     if (!await this.stillReleasable(job))
       return this.jobs.get(jobId) === job ? { status: 200, body: { status: "failed" } } : gone();
     if (this.jobs.get(jobId) !== job || job.outcome !== outcome)
@@ -117817,28 +117763,14 @@ class PrivateAnswerJobs {
       return { status: 200, body: { status: "ready", v: 1, ...sealed } };
     }
   }
-  async floored(response) {
-    if (this.followUpFloorMs <= 0)
-      return response;
-    const started = Date.now();
-    const result = await response;
-    const left = this.followUpFloorMs - (Date.now() - started);
-    if (left > 0) {
-      await new Promise((resolve10) => {
-        const timer = setTimeout(resolve10, left);
-        timer.unref?.();
-      });
-    }
-    return result;
-  }
   async guardFollowUp(job) {
-    const kind = job.outcome?.kind;
-    const items = job.guardItems ?? [];
-    const ok = await checkPrivateEvidence(this.options.eligible, items);
-    const current = job.outcome?.kind;
-    if (kind !== "retained" || current !== "retained")
+    if (job.outcome?.kind !== "retained")
       return;
-    if (job.guardItems !== undefined && ok.every(Boolean))
+    const items = job.sealedItems;
+    const ok = await checkPrivateEvidence(this.options.eligible, items ?? []);
+    if (job.outcome?.kind !== "retained")
+      return;
+    if (items !== undefined && ok.every(Boolean))
       return;
     this.withdraw(job);
   }
@@ -118001,7 +117933,6 @@ class PrivateAnswerJobs {
     job.outside = { state: "idle" };
     job.opens = undefined;
     job.sealedItems = undefined;
-    job.guardItems = undefined;
     this.jobs.delete(id);
   }
   bindPolicy() {
@@ -118396,10 +118327,8 @@ class PrivateAnswerJobs {
             timing.precomputed = precomputed;
             timing.waitAtClaimMs = this.now() - claimedAt;
             job.sealedItems = result.usedItems;
-            if (outcome.kind === "retained") {
-              job.guardItems = result.usedItems;
+            if (outcome.kind === "retained")
               job.rev = 1;
-            }
             settle(outcome);
             return;
           }

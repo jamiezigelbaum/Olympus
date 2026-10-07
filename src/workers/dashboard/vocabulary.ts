@@ -1648,8 +1648,7 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
    */
   outsideTitle: 'Outside background — not from your documents',
   outsideNote: 'General information from an outside model. It did not read your documents and has not been checked.',
-  /** The container is always present; these lines fill it before, without, or while waiting for an outside reply. */
-  outsideIdle: 'Nothing added from outside.',
+  /** The container shows while an outside reply is on its way, or paused. */
   outsidePending: 'Looking up general background…',
   outsidePaused: 'Outside help is paused.',
   /** The collapsed disclosure that shows the question Olympus sent. */

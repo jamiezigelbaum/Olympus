@@ -1,20 +1,21 @@
 /**
  * The private answer panel's follow-up collection (design
- * docs/design/frontier-consult-lane.md §A.5.2, §A.5.5, §A.6; evals B3 and
- * B4), driven in happy-dom against a fake host and a fake relay that seals
- * real envelopes with the engine's own serializer, padder and sealer.
+ * docs/design/frontier-consult-lane.md §A.5.2, §A.6; eval B4), driven in
+ * happy-dom against a fake host and a fake relay that seals real envelopes
+ * with the engine's own serializer, padder and sealer.
  *
  * - The capability handshake rides every request, phase 1 and phase 2, in
  *   one shape.
  * - After first reveal the panel polls at its cadence until the server's
- *   `followSeconds` runs out; the first answer never changes; the outside
- *   block shows in its own container; a withdrawal replaces the answer.
- * - The host transcript (every height the panel reports) is identical across
- *   outside outcomes wherever the first answer and the width are the same:
- *   `H = min(A + 176, 640)`, the outside container never measured.
- * - Hostile outside text is text only: the attribution stays, no node but a
- *   text node is made from it, and the geometry is unchanged.
+ *   `followSeconds` runs out, the job is gone or the answer is withdrawn;
+ *   the first answer never changes; the outside block shows in its own
+ *   container once there is something to show; a withdrawal replaces the
+ *   answer (hidden stays hidden; Show then says so).
+ * - Hostile outside text is text only: the attribution stays and no node
+ *   but a text node is made from it.
  * - An older engine's plaintext (no outside block) is today's answer.
+ * - The frame is as tall as its content (owner ruling 2026-10-07: no
+ *   reserved or locked geometry in version one).
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
@@ -22,13 +23,7 @@ import { PRIVATE_ANSWER_META_KEY, type PrivateAnswerEnvelopeV1 } from '../src/wo
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { padPrivateAnswerEnvelope, serializePrivateAnswerEnvelope } from '../src/workers/chatgpt/private-answer-payload.ts';
 import { PRIVATE_ANSWER_RELAY_ORIGIN, privateAnswerPageHtml, privateAnswerResourceHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
-import {
-  CHATGPT_PRIVATE_ANSWER_CAPABILITY,
-  CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS,
-  CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX,
-  CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX,
-  CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX,
-} from '../src/workers/dashboard/chatgpt/private-answer.ts';
+import { CHATGPT_PRIVATE_ANSWER_CAPABILITY, CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
 
 const RELAY = PRIVATE_ANSWER_RELAY_ORIGIN;
@@ -36,8 +31,6 @@ const JOB = `oly2p.${'a'.repeat(32)}.${'B'.repeat(43)}`;
 const ANSWER = 'The lease on Orchard Lane ends 31 March.';
 const OUTSIDE_TEXT = 'Residential leases in many places renew automatically unless notice is given.\n\nCheck the notice period in the contract.';
 const QUESTION = 'How do residential leases usually renew?';
-const R = CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX;
-const CAP = CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX;
 
 type Outside = PrivateAnswerEnvelopeV1['outside'];
 type EnvelopeOverride = { [K in keyof PrivateAnswerEnvelopeV1]?: PrivateAnswerEnvelopeV1[K] | undefined };
@@ -93,11 +86,13 @@ function envelopeOf(partial: EnvelopeOverride): PrivateAnswerEnvelopeV1 {
 }
 
 /** A minimal IndexedDB (structured clone into a map), shared between mounts to prove re-mounts. */
-function fakeIndexedDb(): { open(name: string): any; stores: Map<string, Map<string, any>> } {
+function fakeIndexedDb(): { open(name: string): any; stores: Map<string, Map<string, any>>; deleted: string[] } {
   const stores = new Map<string, Map<string, any>>();
+  const deleted: string[] = [];
   const later = (fn: () => void) => setTimeout(fn, 0);
   return {
     stores,
+    deleted,
     open(name: string) {
       const req: any = {};
       later(() => {
@@ -119,6 +114,7 @@ function fakeIndexedDb(): { open(name: string): any; stores: Map<string, Map<str
             tx.objectStore = () => ({
               get: (key: string) => { const r: any = {}; return step(r, () => { r.result = map.has(key) ? structuredClone(map.get(key)) : undefined; }); },
               put: (value: unknown, key: string) => { const r: any = {}; return step(r, () => { map.set(key, structuredClone(value)); }); },
+              delete: (key: string) => { const r: any = {}; return step(r, () => { map.delete(key); deleted.push(key); }); },
               openCursor: () => { const r: any = {}; return step(r, () => { r.result = null; }); },
             });
             return tx;
@@ -135,9 +131,10 @@ function fakeIndexedDb(): { open(name: string): any; stores: Map<string, Map<str
 
 interface MountOptions {
   replies?: Reply[];
-  /** The revealed first-answer card's measured height (A), the closed card's (working, hidden, withdrawn), and the width. */
+  /** The revealed first-answer card's measured height, the closed card's (working, hidden, withdrawn), the outside container's, and the width. */
   cardHeight?: number;
   closedHeight?: number;
+  outsideHeight?: number;
   width?: number;
   initAfterMs?: number | 'never';
   initFallbackMs?: number;
@@ -213,9 +210,10 @@ function mount(options: MountOptions = {}): Host {
   const proto = (win as any).HTMLElement.prototype;
   const cardHeight = options.cardHeight ?? 300;
   const closedHeight = options.closedHeight ?? 90;
+  const outsideHeight = options.outsideHeight ?? 120;
   const width = options.width ?? 600;
-  // Distinct heights for the revealed card (`card open`) and every closed card, so a report of the wrong one shows.
-  Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: any) { return this.classList?.contains('card') ? (this.classList.contains('open') ? cardHeight : closedHeight) : this.classList?.contains('outside') ? 999 : 0; } });
+  // Distinct heights for the revealed card (`card open`), every closed card and the outside container.
+  Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: any) { return this.classList?.contains('card') ? (this.classList.contains('open') ? cardHeight : closedHeight) : this.classList?.contains('outside') ? outsideHeight : 0; } });
   Object.defineProperty(proto, 'offsetWidth', { configurable: true, get(this: any) { return this.classList?.contains('card') ? width : 0; } });
   new Function('window', 'document', script)(win, win.document);
   const panel = () => win.document.getElementById('panel')!;
@@ -289,12 +287,12 @@ describe('follow-up polling', () => {
       ],
     });
     await reveal(host);
-    const box = host.outside()!;
-    expect(box).not.toBeNull();
-    expect(box.querySelector('.out-sub')?.textContent).toBe(W.outsideIdle);
+    // Idle: no container yet; the frame is the card alone.
+    expect(host.outside()).toBeNull();
+    expect(host.doc.getElementById('panel')!.children).toHaveLength(1);
     await host.until(() => host.outside()?.querySelector('.out-sub')?.textContent === W.outsidePending, 'the pending line');
     expect(host.outside()!.querySelector('.out-sub .spinner')).not.toBeNull();
-    await host.until(() => host.outside()?.querySelector('.out-text') !== null, 'the outside text');
+    await host.until(() => host.outside()?.querySelector('.out-text') != null, 'the outside text');
     // Served with followSeconds 0 on the last poll: polling stops.
     await host.until(() => host.fetched.length >= 4, 'the final poll');
     const count = host.fetched.length;
@@ -328,6 +326,9 @@ describe('follow-up polling', () => {
     host.button(W.show).click();
     expect(host.outside()!.querySelector('.out-text')?.textContent).toBe(OUTSIDE_TEXT);
     expect(host.fetched.length).toBe(count);
+    // The frame grew with the container: card plus container plus the container's 0.5rem margin.
+    await sleep(20);
+    expect(host.heights().at(-1)).toBe(300 + 120 + 8);
   });
 
   test('the time between follow-up polls is the cadence, never the 2-second acquisition poll', async () => {
@@ -352,13 +353,13 @@ describe('follow-up polling', () => {
       ],
     });
     await reveal(host);
-    await host.until(() => host.outside()?.querySelector('.out-text') !== null, 'the outside text after the failures');
+    await host.until(() => host.outside()?.querySelector('.out-text') != null, 'the outside text after the failures');
     expect(host.fetched.length).toBeGreaterThanOrEqual(7);
     expect(host.text()).toContain(ANSWER);
     expect(host.doc.querySelector('.sub.warn')).toBeNull();
   });
 
-  test('a withdrawal replaces the answer at once; the polling cadence and the reported height carry on unchanged', async () => {
+  test('a withdrawal replaces the answer at once: nothing of it remains, no container, no button, polling ends', async () => {
     const host = mount({
       followPollMs: 15,
       replies: [
@@ -368,66 +369,45 @@ describe('follow-up polling', () => {
     });
     await reveal(host);
     expect(host.outside()!.querySelector('.out-text')?.textContent).toBe(OUTSIDE_TEXT);
-    const revealedHeight = host.heights().at(-1);
-    expect(revealedHeight).toBe(300 + R);
     await host.until(() => host.text().includes(W.withdrawn), 'the withdrawn sentence');
     expect(host.doc.querySelector('.card .sub.warn')?.textContent).toBe(W.withdrawn);
     expect(host.buttons()).toHaveLength(0);
-    // The reserved container stays, empty; nothing of the answer or the outside block remains.
-    expect(host.outside()).not.toBeNull();
-    expect(host.outside()!.querySelector('.out-text')).toBeNull();
+    expect(host.outside()).toBeNull();
     for (const gone of ['31 March', 'Orchard', OUTSIDE_TEXT, QUESTION, 'monthly rent']) expect(host.text()).not.toContain(gone);
-    // Polling continues at the cadence for the rest of the window, with the same body.
     const count = host.fetched.length;
-    await host.until(() => host.fetched.length >= count + 3, 'polls after the withdrawal');
+    await sleep(80);
+    expect(host.fetched.length).toBe(count);
     const key = host.fetched[0]!.body.publicKey;
     for (const call of host.fetched) expect(call.body).toEqual({ v: 1, publicKey: key, cap: 2 });
-    // The host was told nothing new: every height is still the revealed one.
+  });
+
+  test('hidden when the withdrawal arrives: stays hidden with Show; Show then tells the withdrawal without reacquiring', async () => {
+    const host = mount({ followPollMs: 15, replies: [{ envelope: { rev: 1, followSeconds: 500, outside: { state: 'appended', text: OUTSIDE_TEXT } } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 400, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
+    await reveal(host);
+    host.button(W.hide).click();
+    await host.until(() => host.fetched.length >= 2, 'the poll that found the withdrawal');
     await sleep(30);
-    expect(host.heights().filter((height) => height !== 0 && height !== 90).every((height) => height === revealedHeight)).toBe(true);
-    expect(host.heights()).not.toContain(90 + R);
-    expect(host.heights().at(-1)).toBe(revealedHeight);
+    expect(host.doc.querySelector('.card .sub')?.textContent).toBe(W.hidden);
+    expect(host.buttons().map((b) => b.textContent)).toEqual([W.show]);
+    host.button(W.show).click();
+    expect(host.text()).toContain(W.withdrawn);
+    for (const gone of [ANSWER, OUTSIDE_TEXT, 'Orchard', 'monthly rent']) expect(host.text()).not.toContain(gone);
+    expect(host.buttons()).toHaveLength(0);
+    expect(host.outside()).toBeNull();
+    const count = host.fetched.length;
+    await sleep(60);
+    expect(host.fetched.length).toBe(count);
+    expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
   });
 
-  test('hidden when the withdrawal arrives: stays hidden with Show; Show tells the withdrawal at the retained height; host messages equal hide-live-show', async () => {
-    const script = async (second: Reply) => {
-      const host = mount({ followPollMs: 15, heightResendMs: 20, replies: [{ envelope: { rev: 1, followSeconds: 500, outside: { state: 'appended', text: OUTSIDE_TEXT } } }, second] });
-      await host.until(() => host.heights().length >= 2, 'the handshake resend');
-      await reveal(host);
-      host.button(W.hide).click();
-      await host.until(() => host.fetched.length >= 3, 'polls while hidden');
-      await sleep(30);
-      expect(host.doc.querySelector('.card .sub')?.textContent).toBe(W.hidden);
-      expect(host.buttons().map((b) => b.textContent)).toEqual([W.show]);
-      host.button(W.show).click();
-      await sleep(30);
-      return host;
-    };
-    const live = await script({ envelope: { rev: 1, followSeconds: 400, outside: { state: 'appended', text: OUTSIDE_TEXT } } });
-    const withdrawn = await script({ envelope: { rev: 2, state: 'withdrawn', followSeconds: 400, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } });
-    expect(live.text()).toContain(ANSWER);
-    expect(withdrawn.text()).toContain(W.withdrawn);
-    for (const gone of [ANSWER, OUTSIDE_TEXT, 'Orchard', 'monthly rent']) expect(withdrawn.text()).not.toContain(gone);
-    expect(withdrawn.buttons()).toHaveLength(0);
-    expect(withdrawn.outside()).not.toBeNull();
-    // No reacquisition: the same key, polls only.
-    expect(new Set(withdrawn.fetched.map((call) => call.body.publicKey)).size).toBe(1);
-    expect(withdrawn.heights()).toEqual(live.heights());
-    expect(withdrawn.sizes()).toEqual(live.sizes());
-    expect(withdrawn.sent.map((m) => m.method)).toEqual(live.sent.map((m) => m.method));
-    expect(withdrawn.heights().at(-1)).toBe(300 + R);
-  });
-
-  test('a withdrawal in the first response is the same sentence, keeps the window, and reports the same rule', async () => {
+  test('a withdrawal in the first response is the same sentence, and nothing is polled', async () => {
     const host = mount({ followPollMs: 15, replies: [{ envelope: { state: 'withdrawn', followSeconds: 400, answer: undefined, citations: undefined, unanswered: undefined } }] });
     host.push(ready());
     await host.until(() => host.text().includes(W.withdrawn), 'the withdrawn sentence');
     expect(host.buttons()).toHaveLength(0);
-    await host.until(() => host.fetched.length >= 3, 'polls after a withdrawn first response');
-    await sleep(20);
-    // Never shown here and no record: the rule over the withdrawn (closed) card, settled once.
-    expect(host.heights().at(-1)).toBe(Math.min(90 + R, CAP));
-    expect(host.outside()).not.toBeNull();
+    await sleep(80);
+    expect(host.fetched).toHaveLength(1);
+    expect(host.outside()).toBeNull();
   });
 
   test('410 during follow-up (expiry or eviction) stops the polling and keeps what is shown', async () => {
@@ -448,7 +428,6 @@ describe('follow-up polling', () => {
     await sleep(80);
     expect(host.fetched).toHaveLength(1);
     expect(host.outside()).toBeNull();
-    expect(host.doc.querySelector('.card.follow')).toBeNull();
     expect(host.doc.getElementById('panel')!.children).toHaveLength(1);
     expect(host.heights().at(-1)).toBe(300);
   });
@@ -475,152 +454,23 @@ describe('follow-up polling', () => {
     await sleep(80);
     expect(after.fetched).toHaveLength(1);
     expect(after.outside()!.querySelector('.out-text')?.textContent).toBe(OUTSIDE_TEXT);
-    expect(after.heights().at(-1)).toBe(Math.min(300 + R, CAP));
-    await after.close();
-    hosts.pop();
-
-    // Reopened after a withdrawal, inside the window, at the same width: the
-    // sentence, the same polling, and the height the revealed answer had
-    // (kept beside the key), not the withdrawn card's.
-    const withdrawn = mount({ idb, claim, followPollMs: 15, replies: [{ envelope: { rev: 3, state: 'withdrawn', followSeconds: 200, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
-    withdrawn.push(ready());
-    await withdrawn.until(() => withdrawn.text().includes(W.withdrawn), 'the withdrawn sentence');
-    expect(withdrawn.fetched[0]!.body.publicKey).toBe(first.fetched[0]!.body.publicKey);
-    await withdrawn.until(() => withdrawn.fetched.length >= 3, 'polling continues after a withdrawn reopen');
-    expect(withdrawn.heights().at(-1)).toBe(Math.min(300 + R, CAP));
-    expect(withdrawn.heights()).not.toContain(90 + R);
     const record = idb.stores.get('keys')!.get(JOB)!;
-    expect(Object.keys(record).sort()).toEqual(['createdAt', 'geometry', 'privateKey', 'publicKey']);
-    expect(record.geometry).toEqual({ width: 600, height: 300 + R });
-    await withdrawn.close();
+    expect(Object.keys(record).sort()).toEqual(['createdAt', 'privateKey', 'publicKey']);
+  });
+
+  test('the key store deletes an expired record in the read that finds it, before a fresh key replaces it', async () => {
+    const stale = fakeIndexedDb();
+    const seed = mount({ idb: stale, replies: [{ legacy: true }] });
+    await reveal(seed);
+    const sample = stale.stores.get('keys')!.get(JOB)!;
+    stale.stores.get('keys')!.set(JOB, { ...sample, createdAt: Date.now() - 24 * 60 * 60_000 - 1 });
+    await seed.close();
     hosts.pop();
-
-    // At another width the record does not apply: the rule over the withdrawn card, settled once (the acknowledged residual).
-    const narrow = mount({ idb, claim, width: 420, followPollMs: 15, replies: [{ envelope: { rev: 3, state: 'withdrawn', followSeconds: 200, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
-    narrow.push(ready());
-    await narrow.until(() => narrow.text().includes(W.withdrawn), 'the withdrawn sentence');
-    await sleep(30);
-    expect(narrow.heights().at(-1)).toBe(90 + R);
-  });
-
-  test('the revealed geometry is locked before the host answers the handshake, so an early withdrawal still reports it', async () => {
-    const host = mount({ initAfterMs: 600, heightResendMs: 20, followPollMs: 15, replies: [{ envelope: { followSeconds: 400 } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 300, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
-    await reveal(host);
-    await host.until(() => host.text().includes(W.withdrawn), 'the withdrawal, before initialization');
-    await host.until(() => host.heights().length >= 2, 'the handshake heights');
-    // Reported only once the host answered, after the withdrawal: the revealed H, never the withdrawn card's.
-    expect(host.heights().every((height) => height === 90 || height === 300 + R)).toBe(true);
-    expect(host.heights().at(-1)).toBe(300 + R);
-    expect(host.heights()).not.toContain(90 + R);
-  });
-});
-
-describe('fixed reported geometry (host transcript)', () => {
-  interface Scenario { name: string; replies: Reply[]; expectWithdrawn?: boolean }
-  const outcomes: Scenario[] = [
-    { name: 'idle (nothing triggered, refused, skipped or failed alike)', replies: [{ envelope: { followSeconds: 120, outside: { state: 'idle' } } }] },
-    { name: 'pending', replies: [{ envelope: { followSeconds: 120, outside: { state: 'pending' } } }] },
-    { name: 'appended', replies: [{ envelope: { followSeconds: 120, outside: { state: 'appended', text: OUTSIDE_TEXT.repeat(8), question: QUESTION, cut: true } } }] },
-    { name: 'paused', replies: [{ envelope: { followSeconds: 120, outside: { state: 'paused' } } }] },
-    { name: 'idle then appended', replies: [{ envelope: { followSeconds: 120 } }, { envelope: { rev: 2, followSeconds: 60, outside: { state: 'appended', text: OUTSIDE_TEXT } } }] },
-    { name: 'follow-up expiry (followSeconds 0)', replies: [{ envelope: { followSeconds: 0, outside: { state: 'appended', text: OUTSIDE_TEXT } } }] },
-    { name: '410 after reveal', replies: [{ envelope: { followSeconds: 120 } }, { status: 410, body: { status: 'gone' } }] },
-    { name: 'withdrawn after reveal', replies: [{ envelope: { followSeconds: 120, outside: { state: 'appended', text: OUTSIDE_TEXT } } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 60, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] },
-    { name: 'withdrawn after pending', replies: [{ envelope: { followSeconds: 120, outside: { state: 'pending' } } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 60, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] },
-  ];
-
-  async function transcript(scenario: Scenario, options: MountOptions = {}): Promise<{ heights: number[]; sizes: unknown[] }> {
-    // The scripted replies are consumed as they are served: each mount gets its own copy.
-    const host = mount({ followPollMs: 15, heightResendMs: 20, ...options, replies: [...scenario.replies] });
-    // The handshake's forced resend fires first (height 0, twice), so what follows is the card's own story.
-    await host.until(() => host.heights().length >= 2, 'the handshake resend');
-    await reveal(host);
-    // Let the follow-up polls run through the scripted outcomes, then a load event.
-    await sleep(120);
-    host.win.dispatchEvent(new host.win.Event('load'));
-    await sleep(40);
-    return { heights: host.heights(), sizes: host.sizes() };
-  }
-
-  for (const [cardHeight, width] of [[300, 600], [100, 420], [500, 760]] as const) {
-    test(`A=${cardHeight} width=${width}: identical host messages for every outside outcome; H = min(A + ${R}, ${CAP})`, async () => {
-      const H = Math.min(cardHeight + R, CAP);
-      const baseline = await transcript(outcomes[0]!, { cardHeight, width });
-      expect(baseline.heights).toContain(H);
-      // Working card (closed), then revealed (H), whatever follows: never a measured total, never a change on withdrawal.
-      expect(baseline.heights.every((height) => height === 0 || height === 90 || height === H)).toBe(true);
-      expect(baseline.sizes.every((size: any) => size.height === 0 || size.height === 90 || size.height === H)).toBe(true);
-      expect(baseline.sizes.filter((size: any) => size.height === H).every((size: any) => size.width === width)).toBe(true);
-      for (const scenario of outcomes.slice(1)) {
-        const other = await transcript(scenario, { cardHeight, width });
-        expect(other.heights, scenario.name).toEqual(baseline.heights);
-        expect(other.sizes, scenario.name).toEqual(baseline.sizes);
-      }
-    }, 20_000);
-  }
-
-  test('a card taller than 640 − R scrolls inside the card: the follow class is set, the cap holds', async () => {
-    const host = mount({ cardHeight: 2_000, replies: [{ envelope: { followSeconds: 0 } }] });
-    await reveal(host);
-    await sleep(30);
-    expect(host.doc.querySelector('section.card.follow')).not.toBeNull();
-    expect(host.heights().at(-1)).toBe(CAP);
-    const html = privateAnswerResourceHtml();
-    expect(html).toContain('html:root>body #panel>.card.follow{max-height:464px!important;overflow:auto!important}');
-    expect(html).toContain('.out-head{position:sticky;top:0;');
-    expect(CAP - R).toBe(464);
-  });
-
-  test('the reserved allocation R is the outside box plus its gap above, from the CSS constants', async () => {
-    // happy-dom does no layout, so the bound is asserted from what the CSS and the inline style say.
-    const host = mount({ replies: [{ envelope: { followSeconds: 0 } }] });
-    await reveal(host);
-    const box = host.outside()!;
-    const boxHeight = Number.parseInt(box.style.height, 10);
-    const margin = /\.outside\{[^}]*margin:(\d+)px 0 0;/.exec(privateAnswerResourceHtml())![1];
-    expect(boxHeight + Number(margin)).toBe(R);
-    expect(CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX).toBe(Number(margin));
-    expect(boxHeight).toBe(R - CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX);
-    // Padding stays off the box itself, so the inline height is the whole border box (box-sizing: border-box).
-    expect(privateAnswerResourceHtml()).toMatch(/\.outside\{[^}]*box-sizing:border-box;[^}]*padding:0;/);
-  });
-
-  test('a delayed handshake and the fallback both report H, never a measured total', async () => {
-    // Whether the host answers before or after the reveal (a loaded runner
-    // decides), every report is the working card or H: never the card plus
-    // the container, never the withdrawn or hidden card.
-    const late = mount({ initAfterMs: 400, heightResendMs: 20, replies: [{ envelope: { followSeconds: 0, outside: { state: 'appended', text: OUTSIDE_TEXT } } }] });
-    await reveal(late);
-    await late.until(() => late.heights().length >= 2 && late.heights().at(-1) === 300 + R, 'the handshake heights');
-    expect(late.heights().every((height) => height === 90 || height === 300 + R)).toBe(true);
-    const silent = mount({ initAfterMs: 'never', initFallbackMs: 40, heightResendMs: 20, replies: [{ envelope: { followSeconds: 0, outside: { state: 'pending' } } }] });
-    await reveal(silent);
-    await silent.until(() => silent.heights().length >= 1 && silent.heights().at(-1) === 300 + R, 'the fallback height');
-    expect(silent.sent.some((m) => m.method === 'ui/notifications/initialized')).toBe(false);
-    expect(silent.heights().every((height) => height === 90 || height === 300 + R)).toBe(true);
-  });
-
-  test('a withdrawal from any prior outcome keeps reporting H, through a later load event and a width change', async () => {
-    const withdrawnReply: Reply = { envelope: { rev: 5, state: 'withdrawn', followSeconds: 100, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } };
-    const runs: number[][] = [];
-    for (const prior of [{ state: 'idle' }, { state: 'pending' }, { state: 'appended', text: OUTSIDE_TEXT }] as Outside[]) {
-      const host = mount({ followPollMs: 15, heightResendMs: 20, replies: [{ envelope: { followSeconds: 300, outside: prior } }, withdrawnReply] });
-      await host.until(() => host.heights().length >= 2, 'the handshake resend');
-      await reveal(host);
-      await host.until(() => host.text().includes(W.withdrawn), 'the withdrawal');
-      await sleep(30);
-      // A later notification, and a width change that shrinks the withdrawn card: still H.
-      host.win.dispatchEvent(new host.win.Event('load'));
-      const proto = (host.win as any).HTMLElement.prototype;
-      Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: any) { return this.classList?.contains('card') ? 60 : 0; } });
-      host.win.dispatchEvent(new host.win.Event('load'));
-      await sleep(20);
-      runs.push(host.heights());
-      expect(host.heights().at(-1)).toBe(300 + R);
-      for (const wrong of [60, 60 + R, 90 + R]) expect(host.heights()).not.toContain(wrong);
-    }
-    expect(runs[1]).toEqual(runs[0]);
-    expect(runs[2]).toEqual(runs[0]);
+    const again = mount({ idb: stale, replies: [{ legacy: true }] });
+    await reveal(again);
+    expect(stale.deleted).toContain(JOB);
+    expect(again.fetched[0]!.body.publicKey).not.toBe(sample.publicKey);
+    expect(stale.stores.get('keys')!.get(JOB)!.publicKey).toBe(again.fetched[0]!.body.publicKey);
   });
 });
 
@@ -637,10 +487,7 @@ describe('hostile outside text (eval B4)', () => {
     ['thousands of long lines', Array.from({ length: 2_000 }, (_, index) => `line ${index} ${'x'.repeat(500)}`).join('\n')],
   ];
 
-  test.each(HOSTILE)('%s: attribution stays, text nodes only, geometry unchanged', async (_name, text) => {
-    const benign = mount({ replies: [{ envelope: { followSeconds: 0, outside: { state: 'appended', text: OUTSIDE_TEXT } } }] });
-    await reveal(benign);
-    await sleep(40);
+  test.each(HOSTILE)('%s: attribution stays, text nodes only', async (_name, text) => {
     const host = mount({ replies: [{ envelope: { followSeconds: 0, outside: { state: 'appended', text, question: text.slice(0, 300) } } }] });
     await reveal(host);
     await sleep(40);
@@ -664,10 +511,6 @@ describe('hostile outside text (eval B4)', () => {
     for (const line of lines) expect([...line].length).toBeLessThanOrEqual(240);
     expect(new TextEncoder().encode(shown).length).toBeLessThanOrEqual(4_096);
     expect(shown.includes('\n\n\n')).toBe(false);
-    // The geometry is exactly the benign transcript.
-    expect(host.heights()).toEqual(benign.heights());
-    expect(host.sizes()).toEqual(benign.sizes());
-    expect(outside.style.height).toBe(`${R - CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX}px`);
     // Nothing reached the host but the handshake and sizes.
     expect(new Set(host.sent.map((m) => m.method))).toEqual(new Set(['ui/initialize', 'ui/notifications/initialized', 'ui/notifications/size-changed']));
     expect(host.calls.map(([name]) => name).filter((name) => name !== 'notifyIntrinsicHeight')).toEqual([]);

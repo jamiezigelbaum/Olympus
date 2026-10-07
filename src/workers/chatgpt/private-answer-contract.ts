@@ -36,15 +36,14 @@
  * - Two collection phases. Phase 1, initial acquisition, is unchanged:
  *   `202 pending` with Retry-After 2, `429`, plaintext `200 failed`, `409`,
  *   `410`, until the first `ready` (first delivery, recorded by the engine).
- *   Phase 2, uniform follow-up, applies to a job whose policy had outside
- *   help on when it was created AND whose claiming panel declared `cap: 2`:
- *   from first delivery, every request by the claiming key gets `200 ready`
- *   with a freshly sealed envelope of exactly 36,864 padded plaintext bytes
- *   (PrivateAnswerEnvelopeV1), whatever any consult did; withdrawal is a
- *   state inside the envelope, never a plaintext `failed`. The only other
- *   responses are infrastructure and identity ones (400, 409, 410 after the
- *   job's policy-bound expiry or eviction, 429, 503), none of which depends
- *   on a consult outcome.
+ *   Phase 2, follow-up, applies to a job whose policy had outside help on
+ *   when it was created AND whose claiming panel declared `cap: 2`: from
+ *   first delivery, every request by the claiming key gets `200 ready` with
+ *   a freshly sealed envelope of exactly 36,864 padded plaintext bytes
+ *   (PrivateAnswerEnvelopeV1) carrying the answer, the outside block's
+ *   state and, once withdrawn, the withdrawal (never a plaintext `failed`).
+ *   The other responses are 400, 409, 410 after the job's policy-bound
+ *   expiry or eviction, 429 and 503.
  * - A job with outside help on lives PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS
  *   (30 minutes) instead of PRIVATE_ANSWER_JOB_TTL_MS (10); its follow-up
  *   window is min(first delivery + PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, expiry),
@@ -63,6 +62,12 @@
  *   strip, no errors.
  * The relay is unchanged: it forwards request and response bodies unread
  * (512-byte request cap, 8 MiB response cap).
+ *
+ * What is and is not hidden (owner ruling 2026-10-07, version one): the
+ * content is sealed to the panel's key, so ChatGPT and the relay never see
+ * what was asked outside or what came back. They may infer that outside
+ * help ran on a question (response timing, the panel's size changes, how
+ * long it keeps polling). That inference is accepted for version one.
  */
 
 export const PRIVATE_ANSWER_RESOURCE_URI = 'ui://olympus/private-answer';
@@ -81,16 +86,6 @@ export const PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS = 30 * 60_000;
  * seconds left into every envelope; a remount never extends it.
  */
 export const PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS = 20 * 60_000;
-/**
- * A phase-2 response is held so that it takes at least this long, wall
- * clock (design §A.5.4: a fixed response-time floor, applied because the
- * measured latency of a persistently refused job whose guard reaches the
- * store's content fallback, and of the request in which a job is withdrawn,
- * exceeded the test's noise floor: docs/design/chatgpt-plugin.md,
- * "Follow-up collection", Timing). The floor covers a guard round trip well
- * above the measured ones; a guard slower than it would still show.
- */
-export const PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS = 50;
 /** The capability a panel declares in every request body (`cap`); a request without it is capability 1. */
 export const PRIVATE_ANSWER_PANEL_CAPABILITY = 2;
 export type PrivateAnswerPanelCapability = 1 | 2;
@@ -179,9 +174,9 @@ export interface PrivateAnswerPlaintextV1 {
 
 /**
  * The outside block inside a follow-up envelope (design §A.5.2, §A.6). `idle`
- * covers nothing triggered, refused, skipped and failed alike, so neither
- * the panel nor anyone watching it can tell them apart. Text, question and
- * route are present only when `appended`; `cut` says the text was shortened.
+ * covers nothing triggered, refused, skipped and failed alike: the panel
+ * shows nothing for any of them. Text, question and route are present only
+ * when `appended`; `cut` says the text was shortened.
  */
 export interface PrivateAnswerOutsideBlockV1 {
   state: 'idle' | 'pending' | 'appended' | 'paused';

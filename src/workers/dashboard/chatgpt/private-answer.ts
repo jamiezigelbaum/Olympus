@@ -43,15 +43,13 @@
  * body carries `cap: 2`, unconditionally. A decrypted plaintext that carries
  * an `outside` block is a follow-up envelope: the panel keeps the first
  * answer exactly as revealed, shows the outside block in its own container
- * under the card (application-owned attribution pinned while the text
- * scrolls, plain text only, bounded), and polls the same request every 30 s
- * until the server-computed `followSeconds` runs out; a `withdrawn` state
- * replaces the answer. The reported geometry is locked by a numeric rule,
- * not by silencing the notifications: `H = min(A + R, 640)` where `A` is
- * the first-answer card alone and `R` = 176 px, the outside container,
- * always present and always the same height; the card scrolls inside
- * `640 − R` when it is taller. A plaintext without `outside` (an older
- * engine) is today's answer: no polling, no strip, no error.
+ * under the card once there is something to show (application-owned
+ * attribution pinned while the text scrolls, plain text only, bounded), and
+ * polls the same request every 30 s until the server-computed
+ * `followSeconds` runs out, the job is gone, or the answer is withdrawn (a
+ * `withdrawn` state replaces the answer and ends the polling). The frame is
+ * as tall as its content, as always. A plaintext without `outside` (an
+ * older engine) is today's answer: no polling, no container, no error.
  */
 import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY } from '../vocabulary.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../../chatgpt/private-answer-contract.ts';
@@ -80,12 +78,8 @@ export interface ChatGptPrivateAnswerConfig {
   keyStore: { database: string; store: string; maxAgeMs: number; timeoutMs: number };
   /** The capability declared in every request body (`cap`). */
   capability: number;
-  /** Follow-up collection: the cadence of the uniform request after first reveal. */
+  /** Follow-up collection: the cadence of the same request after first reveal. */
   followPollMs: number;
-  /** The outside container's reserved allocation (R, its gap above included), the gap itself, and the frame cap, in px. */
-  outsideHeightPx: number;
-  outsideGapPx: number;
-  frameCapPx: number;
   /** The outside text's line policy. */
   outsideLines: number;
   outsideLineChars: number;
@@ -126,10 +120,6 @@ export const CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-
 export const CHATGPT_PRIVATE_ANSWER_CAPABILITY = 2;
 /** Follow-up polling cadence: far below the engine's and relay's rate limits. */
 export const CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS = 30_000;
-/** The outside container's reserved allocation (R, design §A.5.5): its box plus the gap above it; and the frame cap. */
-export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX = 176;
-export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX = 8;
-export const CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX = 640;
 /** The outside text's line policy (design §A.6), mirrored from the engine's payload contract. */
 export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES = 40;
 export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS = 240;
@@ -172,19 +162,12 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   // the reserved container, the geometry rule and the polling apply.
   type Answer = { text: string; sources: Source[]; unanswered: string[]; follow: boolean; rev: number; followSeconds: number; outside: Outside };
   type Opened = { kind: 'answer'; answer: Answer } | { kind: 'withdrawn'; rev: number; followSeconds: number };
-  // Follow-up collection for the current job, independent of what is shown:
-  // the polling deadline and the revision, kept through a withdrawal and on
-  // reopen, so neither the relay (polls) nor the host (height) learns of it.
+  // Follow-up collection for the current job: the polling deadline and the
+  // last revision seen, independent of whether the answer is shown or hidden.
   let follow: { rev: number; until: number } | null = null;
   // The answer was withdrawn on the Mac: its payload is gone; what is shown
   // (revealed or hidden) is a separate matter, so Hide and Show keep working.
   let gone = false;
-  // The geometry of the revealed follow-up answer, measured as soon as it is
-  // laid out (before and regardless of the host handshake) and kept in the
-  // key store for a re-mount: a withdrawal keeps reporting it. A re-mount
-  // that never showed the answer at this width settles its height once.
-  let lockedHeight = -1;
-  let lockedWidth = 0;
 
   // ---- host bridge -------------------------------------------------------
   let nextId = 1;
@@ -278,8 +261,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       answer = null;
       follow = null;
       gone = false;
-      lockedHeight = -1;
-      lockedWidth = 0;
       sourcesOpen = false;
       askedOpen = false;
       notes = {};
@@ -387,21 +368,21 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   async function keptKey(jobId: string): Promise<{ privateKey: CryptoKey; publicKey: string } | null> {
     try {
-      const value = await inStore('readonly', (store) => store.get(jobId));
+      // One transaction: read the record and, when it has expired, delete it
+      // there and then (the day-old sweep below is only opportunistic).
+      const value = await inStore('readwrite', (store) => {
+        const read = store.get(jobId);
+        read.onsuccess = () => {
+          const found = read.result;
+          if (found && (typeof found.createdAt !== 'number' || Date.now() - found.createdAt >= KS.maxAgeMs)) store.delete(jobId);
+        };
+        return read;
+      });
       if (!value || typeof value !== 'object') return null;
       const privateKey = value.privateKey;
       const fresh = typeof value.createdAt === 'number' && Date.now() - value.createdAt < KS.maxAgeMs;
       if (!fresh || !privateKey || typeof privateKey !== 'object' || privateKey.type !== 'private') return null;
       if (typeof value.publicKey !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(value.publicKey)) return null;
-      // The revealed geometry kept with the key (bounded: two numbers), for a re-mount at the same width.
-      const geometry = value.geometry;
-      const width = cardWidth();
-      if (geometry && typeof geometry === 'object' && typeof geometry.width === 'number' && typeof geometry.height === 'number'
-        && geometry.width > 0 && geometry.width < 10_000 && geometry.height > 0 && geometry.height <= config.frameCapPx
-        && (width === 0 || width === geometry.width) && lockedHeight < 0) {
-        lockedHeight = Math.floor(geometry.height);
-        lockedWidth = Math.floor(geometry.width);
-      }
       return { privateKey, publicKey: value.publicKey };
     } catch {
       return null;
@@ -415,21 +396,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       });
     } catch { /* memory only */ }
     void dropOldKeys();
-  }
-
-  /** Records the revealed geometry beside the job's key: a re-mount keeps reporting it through a withdrawal. */
-  let keptGeometry = '';
-  async function keepGeometry(jobId: string, width: number, height: number): Promise<void> {
-    const mark = jobId + ':' + width + ':' + height;
-    if (mark === keptGeometry) return;
-    keptGeometry = mark;
-    try {
-      const value = await inStore('readonly', (store) => store.get(jobId));
-      if (!value || typeof value !== 'object' || !value.privateKey) return;
-      await inStore('readwrite', (store) => {
-        store.put({ privateKey: value.privateKey, publicKey: value.publicKey, createdAt: value.createdAt, geometry: { width, height } }, jobId);
-      });
-    } catch { /* memory only */ }
   }
 
   /** Opportunistic: deletes pairs older than a day. Never waited on. */
@@ -736,12 +702,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
             fail(T.generic, false, byUser);
             return;
           }
-          if (opened.kind === 'withdrawn') {
-            follow = { rev: opened.rev, until: Date.now() + opened.followSeconds * config.secondMs };
-            withdrawn(byUser);
-            void followUp(mine, jobId, keys);
-            return;
-          }
+          if (opened.kind === 'withdrawn') return withdrawn(byUser);
           answer = opened.answer;
           sourcesOpen = false;
           askedOpen = false;
@@ -785,13 +746,13 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   /**
    * The answer was withdrawn on the Mac (an item is no longer eligible): its
-   * text, sources, gaps and outside block are gone from here at once. The
-   * follow-up polling and the reported geometry carry on exactly as before,
-   * so the withdrawal is not told to the relay or the host.
+   * text, sources, gaps and outside block are gone from here at once, and the
+   * follow-up polling ends. Hidden stays hidden (Show then says so).
    */
   function withdrawn(byUser: boolean): void {
     answer = null;
     gone = true;
+    follow = null;
     sourcesOpen = false;
     askedOpen = false;
     notes = {};
@@ -807,11 +768,11 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   /**
    * Follow-up collection: the same request, at the same cadence, until the
-   * server says the window has ended (followSeconds 0) or the job is gone.
-   * Whatever comes back is one of two things to show: a newer revision's
-   * outside block, or a withdrawal. Anything else (a transport failure, a
-   * rate limit, a busy Mac) changes nothing and the cadence continues. The
-   * first answer and its sources are never replaced.
+   * server says the window has ended (followSeconds 0), the job is gone, or
+   * the answer is withdrawn. Whatever comes back is one of two things to
+   * show: a newer revision's outside block, or a withdrawal. Anything else
+   * (a transport failure, a rate limit, a busy Mac) changes nothing and the
+   * cadence continues. The first answer and its sources are never replaced.
    */
   async function followUp(mine: number, jobId: string, keys: { publicKey: string; privateKey: CryptoKey }): Promise<void> {
     for (;;) {
@@ -855,12 +816,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         opened = null;
       }
       if (mine !== run || !follow || !opened) continue;
-      if (opened.kind === 'withdrawn') {
-        follow.until = Date.now() + opened.followSeconds * config.secondMs;
-        if (opened.rev >= follow.rev) follow.rev = opened.rev;
-        if (!gone) withdrawn(false);
-        continue;
-      }
+      if (opened.kind === 'withdrawn') return withdrawn(false);
       if (!opened.answer.follow) continue;
       follow.until = Date.now() + opened.answer.followSeconds * config.secondMs;
       if (answer && opened.answer.rev >= follow.rev) {
@@ -1104,23 +1060,21 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   /**
    * The outside block's own container, below and outside the first-answer
-   * card (design §A.6): always present for a follow-up answer, always the
-   * same height, its attribution header application-owned and pinned while
-   * the body scrolls. The body is one text node; nothing in it is markup, a
-   * link or a heading, whatever the text says.
+   * card (design §A.6), shown while a reply is pending, paused or appended
+   * (nothing for `idle`): its attribution header application-owned and
+   * pinned while the body scrolls. The body is one text node; nothing in it
+   * is markup, a link or a heading, whatever the text says.
    */
-  function outsideView(shown: Answer | null): HTMLElement {
+  function outsideView(shown: Answer): HTMLElement {
     const box = el('section', 'outside');
     box.setAttribute('aria-label', T.outsideTitle);
-    // The box plus its gap above (CSS .outside margin-top) is exactly the reserved allocation R.
-    box.style.height = (config.outsideHeightPx - config.outsideGapPx) + 'px';
     const head = el('div', 'out-head');
     head.appendChild(el('h3', 'out-title', T.outsideTitle));
     head.appendChild(el('p', 'out-note', T.outsideNote));
     box.appendChild(head);
     const body = el('div', 'out-body');
-    const state = shown ? shown.outside.state : 'idle';
-    if (shown && state === 'appended') {
+    const state = shown.outside.state;
+    if (state === 'appended') {
       const text = el('div', 'out-text');
       text.setAttribute('data-key', 'outside');
       text.textContent = shown.outside.text;
@@ -1148,10 +1102,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       line.appendChild(el('span', 'spinner'));
       line.appendChild(doc.createTextNode(T.outsidePending));
       body.appendChild(line);
-    } else if (state === 'paused') {
-      body.appendChild(el('p', 'out-sub', T.outsidePaused));
     } else {
-      body.appendChild(el('p', 'out-sub', T.outsideIdle));
+      body.appendChild(el('p', 'out-sub', T.outsidePaused));
     }
     box.appendChild(body);
     return box;
@@ -1159,7 +1111,6 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   function revealedView(shown: Answer): HTMLElement {
     const view = card(true);
-    if (shown.follow) view.card.classList.add('follow');
     view.line.textContent = T.notSent;
     view.row.appendChild(button(T.hide, 'hide', hide, T.hideLabel));
     const body = el('div', 'answer');
@@ -1185,8 +1136,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     if (info) {
       const revealed = phase === 'revealed' && answer;
       root.appendChild(revealed ? revealedView(answer!) : cardView(info));
-      if (revealed && answer!.follow) root.appendChild(outsideView(answer!));
-      else if (phase === 'withdrawn' && follow) root.appendChild(outsideView(null));
+      if (revealed && answer!.follow && answer!.outside.state !== 'idle') root.appendChild(outsideView(answer!));
     }
     if (!focusAfter && had) focusAfter = had;
     if (focusAfter) {
@@ -1200,48 +1150,23 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   }
 
   // ---- height --------------------------------------------------------------
-  // The frame is exactly the card: its border box plus its margins. Never the
-  // document's or viewport's height, which are at least the frame's current
-  // size and would hold it open at whatever height the host started it.
+  // The frame is exactly its content: the card (and, when shown, the outside
+  // container), each its border box plus its margins. Never the document's
+  // or viewport's height, which are at least the frame's current size and
+  // would hold it open at whatever height the host started it.
   function cardHeight(): number {
-    const node = info ? root.firstChild as HTMLElement | null : null;
-    if (!node) return 0;
-    let margins = 0;
-    if (typeof (window as Any).getComputedStyle === 'function') {
-      const style = (window as Any).getComputedStyle(node);
-      margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
-    }
-    return Math.ceil((node.offsetHeight || 0) + margins);
-  }
-
-  /**
-   * What the host is told (design §A.5.5): for a revealed follow-up answer,
-   * `H = min(A + R, cap)` where `A` is the first-answer card alone (the
-   * outside container is never measured, so `H` never depends on what a
-   * consult did) and `R` the container's fixed height. The card itself
-   * scrolls inside `cap − R` when it is taller (CSS). A withdrawal keeps
-   * reporting the height last reported for the revealed answer (or, on a
-   * reopen that never showed it, the same rule over the withdrawn card), so
-   * the host sees no change. Every other state reports the card as before;
-   * Hide reports the hidden card.
-   */
-  function frameHeight(): number {
-    const card = cardHeight();
-    if (phase === 'revealed' && answer && answer.follow) {
-      lockedHeight = Math.min(card + config.outsideHeightPx, config.frameCapPx);
-      lockedWidth = cardWidth();
-      if (info && lockedWidth > 0) void keepGeometry(info.jobId, lockedWidth, lockedHeight);
-      return lockedHeight;
-    }
-    if (phase === 'withdrawn' && follow) {
-      // Never shown here (a re-mount without a record for this width): the rule over the withdrawn card, settled once.
-      if (lockedHeight < 0) {
-        lockedHeight = Math.min(card + config.outsideHeightPx, config.frameCapPx);
-        lockedWidth = cardWidth();
+    if (!info) return 0;
+    let total = 0;
+    for (let i = 0; i < root.children.length; i++) {
+      const node = root.children[i] as HTMLElement;
+      let margins = 0;
+      if (typeof (window as Any).getComputedStyle === 'function') {
+        const style = (window as Any).getComputedStyle(node);
+        margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
       }
-      return lockedHeight;
+      total += (node.offsetHeight || 0) + margins;
     }
-    return card;
+    return Math.ceil(total);
   }
 
   function cardWidth(): number {
@@ -1260,10 +1185,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   let initialized = false;
   let lastHeight = -1;
   function reportHeight(force?: boolean): void {
-    // Measured (and the revealed geometry locked) whether or not the host has
-    // answered the handshake yet; only the report waits for it.
-    const height = frameHeight();
     if (!initialized) return;
+    const height = cardHeight();
     if (height === lastHeight && !force) return;
     lastHeight = height;
     const host = openai();
@@ -1289,7 +1212,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     if (!observer && typeof (window as Any).ResizeObserver === 'function') {
       observer = new (window as Any).ResizeObserver(() => afterLayout());
     }
-    const node = info ? root.firstChild as Element | null : null;
+    const node = info ? root : null;
     if (!observer || node === observed) return;
     if (observed) observer.unobserve(observed);
     observed = node;
@@ -1352,9 +1275,8 @@ p,h2{margin:0}
 html:root>body #panel{display:block!important;height:auto!important;min-height:0!important}
 #panel:empty{display:none!important}
 html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
-html:root>body #panel>.card.follow{max-height:464px!important;overflow:auto!important}
 .card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
-.outside{display:block;box-sizing:border-box;margin:8px 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);overflow:auto;overflow-wrap:anywhere}
+.outside{display:block;box-sizing:border-box;margin:0.5rem 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);max-height:20rem;overflow:auto;overflow-wrap:anywhere}
 .out-head{position:sticky;top:0;z-index:1;padding:0.625rem 0.875rem 0.375rem;background:var(--tint);border-bottom:1px solid var(--hair)}
 .out-title{margin:0;font-size:0.8125rem;font-weight:600;line-height:1.35}
 .out-note{margin:0.0625rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
@@ -1419,9 +1341,6 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore },
     capability: CHATGPT_PRIVATE_ANSWER_CAPABILITY,
     followPollMs: options.followPollMs ?? CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS,
-    outsideHeightPx: CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX,
-    outsideGapPx: CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX,
-    frameCapPx: CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX,
     outsideLines: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES,
     outsideLineChars: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS,
     outsideBytes: CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES,

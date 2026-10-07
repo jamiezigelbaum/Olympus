@@ -758,28 +758,27 @@ the protocol the consult will ride on, and the limits it needs.
   key; the engine records `firstDeliveredAt` and fixes
   `followUntil = min(firstDeliveredAt + 20 min, expiry)`. A remount never
   extends it.
-- **Phase 2, uniform follow-up,** for a job whose policy had outside help
+- **Phase 2, follow-up,** for a job whose policy had outside help
   on when it was created (`~/.olympus/consult.json`, bound at creation;
   later changes never alter it) and whose claiming panel declared `cap: 2`:
   every request from the claiming key gets `200 ready` with a freshly sealed
   envelope of exactly **36,864 padded plaintext bytes** (36 KiB; 36,880
-  bytes of ciphertext, about 49 KB on the wire), whatever any consult did.
-  The plaintext is version 1, extended:
+  bytes of ciphertext, about 49 KB on the wire; the fixed size is a simple
+  bound, not a hiding measure). The plaintext is version 1, extended:
   `{v:1, rev, state: "answer"|"withdrawn", answer?, citations?, unanswered?,
   followSeconds, outside: {state: "idle"|"pending"|"appended"|"paused",
   text?, cut?, question?, route?}}`. `rev` only increases; `idle` covers
   nothing triggered, refused, skipped and failed alike; a withdrawal (an
   item the answer read is no longer eligible, checked on every hand-out and
   every source open) is terminal and lives inside the envelope, never as a
-  plaintext `failed`. The only other responses are infrastructure and
-  identity ones (`400`, `409`, `410` after expiry or eviction, `429`,
-  `503`), none of which depends on an outcome. The job keeps its bounded
+  plaintext `failed`. The other responses are `400`, `409`, `410` after
+  expiry or eviction, `429` and `503`. The job keeps its bounded
   first-answer plaintext and its open tokens in memory for its lifetime
   (at most about 7 MB across the 200-job cap); the tokens are minted once
   and identical in every envelope.
-- **Lifetimes are policy-bound, never outcome-bound:** 30 minutes with
-  outside help on, 10 off; eviction at the cap is oldest-first whatever
-  happened. A reply for an expired or evicted job is discarded.
+- **Lifetimes are policy-bound:** 30 minutes with outside help on, 10 off;
+  eviction at the cap is oldest-first. A reply for an expired or evicted
+  job is discarded.
 - **Mixed versions.** Old panel (no `cap`) on a new engine: today's
   behavior exactly, bucket padding and plaintext `failed` included; no
   consult can be dispatched for it. New panel on an old engine: the old
@@ -789,72 +788,28 @@ the protocol the consult will ride on, and the limits it needs.
 - **The relay is unchanged:** it forwards both bodies unread (512-byte
   request cap; 8 MiB response cap).
 - **Panel:** after first reveal of a follow-up envelope it polls the same
-  request every 30 s until `followSeconds` runs out (or `410`). The first
-  answer and its sources never change. The outside block has its own
-  container under the "Private answer from your Mac" card, with the
-  application-owned attribution "Outside background — not from your
-  documents. General information from an outside model. It did not read
-  your documents and has not been checked." pinned while the body scrolls,
-  a collapsed "What Olympus asked", and "Shortened by Olympus." when cut;
-  the text is set with `textContent` only (markdown literal, links not
-  clickable), control and bidirectional characters stripped, blank runs
-  collapsed, at most 40 lines of 240 characters and 4,096 bytes.
-- **Fixed reported geometry** (design §A.5.5, owner-accepted 640 px cap):
-  for a follow-up answer the panel reports `H = min(A + 176, 640)`, `A` the
-  first-answer card alone (the outside container is never measured), from
-  first reveal, after the window ends and on reopen; the card scrolls
-  inside 464 px when taller. The notifications (initialize, resend, load,
-  fallback, ResizeObserver) keep firing and always report `H`. Hide reports
-  the hidden card; Show returns to `H`. `R` is the outside box plus the gap
-  above it (168 + 8 px). A withdrawal clears the answer, its sources, gaps
-  and outside text at once (hidden stays hidden, and Show then says it was
-  withdrawn) but keeps the reserved container, keeps reporting the revealed
-  answer's `H` (measured as soon as the answer is laid out, before the host
-  handshake, and kept beside the key in the panel's IndexedDB as a bounded
-  `{width, height}` so a re-mount at the same width reports it too), and
-  keeps polling at the cadence for the rest of the server's window
-  (`followSeconds` is read from withdrawn envelopes too). Residual, as the
-  design states (§A.5.5): a panel that never showed the answer at the
-  current width (a re-mount without a record for it, or a width change
-  after the withdrawal) measures the withdrawn card and settles that height
-  once; the host could see that, as plaintext `failed` already shows today.
-- **Timing (design §A.5.4):** phase-2 responses share one code path (the
-  live guard before the seal, the seal of the fixed-size envelope, the
-  guard again after it, the release check; a withdrawn job keeps its item
-  identities so the guard is called for it too), but the guard's own cost
-  depends on the item's state: the live guard
-  (`checkPrivateEvidenceItems`) refuses a missing corpus, provider or row
-  or a Secret tier from an early return, and otherwise reaches the store's
-  content check, which for a refused item may be a content read (the
-  fallback at the end of that function). A measured test
-  (`test/chatgpt-private-follow-up.test.ts`) uses a guard of that shape
-  over jobs carrying the heaviest payloads the contract allows: idle, an
-  idle A/A control, pending, appended, paused, a job persistently refused
-  by the early return, a job persistently refused through the content
-  fallback (0 ms and 3 ms of store time), and the transition request
-  itself (the request in which a fresh job is first refused, withdrawn and
-  sealed again), 20 fresh jobs per shape. **Measured without a floor,
-  2026-10-07, remote build lane (medians, ms):** fallback 0 ms: idle 4.15,
-  control 4.18, pending 2.59, appended 4.14, paused 4.92, withdrawn-early
-  4.04, withdrawn-fallback 14.13, transition-early 5.89,
-  transition-fallback 12.23; fallback 3 ms: idle 3.12, control 3.76,
-  pending 3.06, appended 4.81, paused 3.61, withdrawn-early 2.19,
-  withdrawn-fallback 21.21, transition-early 4.64, transition-fallback
-  18.88. The persistently refused job through the content fallback and
-  the fallback transition exceed the criterion (the larger of 2 ms, half
-  the idle median and twice the A/A noise) by 8–18 ms, so the design's
-  **fixed response-time floor is applied: every phase-2 response, first
-  delivery included, takes at least `PRIVATE_ANSWER_FOLLOW_UP_FLOOR_MS`
-  (50 ms, wall clock)**; phase 1 is not held. The test then measures the
-  same outcomes with the floor and requires every median at or above it
-  and within the larger of 2 ms, 10% of the floored idle median and twice
-  the A/A noise of idle. Measured with the floor (same run): fallback 0 ms
-  52.1–57.0 ms across all nine, fallback 3 ms 52.5–59.2 ms, the remaining
-  spread being timer granularity (the idle A/A control itself differs by
-  1.5–1.7 ms). Residual: a guard round trip slower than the floor
-  (a store read far slower than the 3 ms modelled) would still show; the
-  floor is sized well above the measured guard cost, not above every
-  possible one.
+  request every 30 s until `followSeconds` runs out, the job is gone
+  (`410`) or the answer is withdrawn. The first answer and its sources
+  never change. The outside block has its own container under the
+  "Private answer from your Mac" card, shown while a reply is pending,
+  paused or appended (nothing while idle), with the application-owned
+  attribution "Outside background — not from your documents. General
+  information from an outside model. It did not read your documents and
+  has not been checked." pinned while the body scrolls, a collapsed "What
+  Olympus asked", and "Shortened by Olympus." when cut; the text is set
+  with `textContent` only (markdown literal, links not clickable), control
+  and bidirectional characters stripped, blank runs collapsed, at most 40
+  lines of 240 characters and 4,096 bytes. A withdrawal clears the answer,
+  its sources, gaps and outside text at once and ends the polling; hidden
+  stays hidden, and Show then says the answer was withdrawn. The frame is
+  as tall as its content, as today.
+- **What is and is not hidden (owner ruling 2026-10-07, version one).** The
+  content is sealed to the panel's key: ChatGPT and the relay never see the
+  first answer, what was asked outside or what came back. They may infer
+  that outside help ran on a question, from response timing, from the
+  panel's size changes and from how long it keeps polling, never what was
+  asked or answered. This is accepted for version one; no response-time
+  floor, reserved geometry or polling parity is attempted.
 - **C4b seams** on `PrivateAnswerJobs`: `outsideSeam(jobId)` (clocks and
   states, no text), `markOutside(jobId, rev, state)` and
   `appendOutsideBlock(jobId, rev, block)`. Both share one condition: a
