@@ -57695,8 +57695,10 @@ function parseSnifferBatchResponse(text, expected) {
     const tier = candidate.tier;
     if (tier !== "personal" && tier !== "private")
       continue;
-    const category = candidate.category;
-    if (typeof category !== "string" || !SNIFFER_CATEGORIES.includes(category))
+    if (typeof candidate.category !== "string")
+      continue;
+    const category = snifferCategoryOf(candidate.category, tier);
+    if (!category)
       continue;
     if (!isUnitConfidence(candidate.confidence))
       continue;
@@ -57705,6 +57707,16 @@ function parseSnifferBatchResponse(text, expected) {
   for (const i of repeated)
     verdicts.delete(i);
   return verdicts;
+}
+function snifferCategoryOf(raw, tier) {
+  if (SNIFFER_CATEGORIES.includes(raw))
+    return raw;
+  if (tier !== "private")
+    return;
+  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (SNIFFER_CATEGORIES.includes(key))
+    return key;
+  return SNIFFER_CATEGORY_SYNONYMS[key] ?? "other";
 }
 function snifferMaterialCarriesSecret(material) {
   return detectSecretFindingKinds(material).length > 0;
@@ -57752,7 +57764,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_HARD_CATEGORIES, SNIFFER_PERSONAL_CATEGORIES, SNIFFER_INJECTION_CATEGORY = "injection", STEER_WORD, CONFIDENCE_NUMBER, HIGH_CONFIDENCE_NUMBER, SAME_SENTENCE, NEAR, INJECTION_PATTERNS, WORD_RUN_MARKERS, LETTER_SPACED_MARKERS, LETTER_SPACED_MIN_RUN = 4, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_HARD_CATEGORIES, SNIFFER_PERSONAL_CATEGORIES, SNIFFER_INJECTION_CATEGORY = "injection", STEER_WORD, CONFIDENCE_NUMBER, HIGH_CONFIDENCE_NUMBER, SAME_SENTENCE, NEAR, INJECTION_PATTERNS, WORD_RUN_MARKERS, LETTER_SPACED_MARKERS, LETTER_SPACED_MIN_RUN = 4, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_engine();
   init_delphi_scorer();
@@ -57871,6 +57883,19 @@ var init_sniffer = __esm(() => {
 `);
   SNIFFER_PROMPT_VERSION = `p-${createHash40("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
   SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash40("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_CATEGORY_SYNONYMS = {
+    insurance: "financial",
+    money: "financial",
+    finance: "financial",
+    tax: "financial",
+    medical: "health",
+    mental_health: "therapy",
+    contract: "legal",
+    contracts: "legal",
+    immigration: "legal",
+    relationship: "intimate",
+    relationships: "intimate"
+  };
 });
 
 // src/workers/classification/sniffer-lane.ts

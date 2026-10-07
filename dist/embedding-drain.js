@@ -27404,8 +27404,10 @@ function parseSnifferBatchResponse(text, expected) {
     const tier = candidate.tier;
     if (tier !== "personal" && tier !== "private")
       continue;
-    const category = candidate.category;
-    if (typeof category !== "string" || !SNIFFER_CATEGORIES.includes(category))
+    if (typeof candidate.category !== "string")
+      continue;
+    const category = snifferCategoryOf(candidate.category, tier);
+    if (!category)
       continue;
     if (!isUnitConfidence(candidate.confidence))
       continue;
@@ -27414,6 +27416,29 @@ function parseSnifferBatchResponse(text, expected) {
   for (const i of repeated)
     verdicts.delete(i);
   return verdicts;
+}
+var SNIFFER_CATEGORY_SYNONYMS = {
+  insurance: "financial",
+  money: "financial",
+  finance: "financial",
+  tax: "financial",
+  medical: "health",
+  mental_health: "therapy",
+  contract: "legal",
+  contracts: "legal",
+  immigration: "legal",
+  relationship: "intimate",
+  relationships: "intimate"
+};
+function snifferCategoryOf(raw, tier) {
+  if (SNIFFER_CATEGORIES.includes(raw))
+    return raw;
+  if (tier !== "private")
+    return;
+  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (SNIFFER_CATEGORIES.includes(key))
+    return key;
+  return SNIFFER_CATEGORY_SYNONYMS[key] ?? "other";
 }
 function snifferMaterialCarriesSecret(material) {
   return detectSecretFindingKinds(material).length > 0;

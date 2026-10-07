@@ -433,14 +433,45 @@ export function parseSnifferBatchResponse(text: string, expected: ReadonlySet<nu
     }
     const tier = candidate.tier;
     if (tier !== 'personal' && tier !== 'private') continue;
-    const category = candidate.category;
-    if (typeof category !== 'string' || !(SNIFFER_CATEGORIES as readonly string[]).includes(category)) continue;
+    if (typeof candidate.category !== 'string') continue;
+    const category = snifferCategoryOf(candidate.category, tier);
+    if (!category) continue;
     if (!isUnitConfidence(candidate.confidence)) continue;
-    verdicts.set(i, { tier, category: category as SnifferCategory, confidence: candidate.confidence });
+    verdicts.set(i, { tier, category, confidence: candidate.confidence });
   }
   // Two answers for one item are no answer: the model was not following the contract.
   for (const i of repeated) verdicts.delete(i);
   return verdicts;
+}
+
+/**
+ * A PRIVATE answer whose category is outside the list is still an answer
+ * (otherwise the item is asked again until it falls to fail-safe Private):
+ * the model names the kind of private matter in its own words ("insurance",
+ * calibration 2026-10-05). Near synonyms map to the listed kind, anything else
+ * to `other`; both stay Private. A PERSONAL answer with an unknown category is
+ * no answer, as before: it may never make an item Personal.
+ */
+const SNIFFER_CATEGORY_SYNONYMS: Readonly<Record<string, SnifferCategory>> = {
+  insurance: 'financial',
+  money: 'financial',
+  finance: 'financial',
+  tax: 'financial',
+  medical: 'health',
+  mental_health: 'therapy',
+  contract: 'legal',
+  contracts: 'legal',
+  immigration: 'legal',
+  relationship: 'intimate',
+  relationships: 'intimate',
+};
+
+export function snifferCategoryOf(raw: string, tier: SnifferTier): SnifferCategory | undefined {
+  if ((SNIFFER_CATEGORIES as readonly string[]).includes(raw)) return raw as SnifferCategory;
+  if (tier !== 'private') return undefined;
+  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if ((SNIFFER_CATEGORIES as readonly string[]).includes(key)) return key as SnifferCategory;
+  return SNIFFER_CATEGORY_SYNONYMS[key] ?? 'other';
 }
 
 /** Material the model may never read: anything with a secret finding in it. */
