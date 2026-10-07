@@ -183,6 +183,9 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   // 1. The status block: the switch, the route in one line, today's usage.
   parts.push(renderStatusBlock(status, summary, canEdit));
 
+  // 1b. What zkAPI may send: the two levels.
+  parts.push(renderLevel(status, canEdit));
+
   // 2. Problems, one list, each line with its fix.
   parts.push(renderProblems(status, canEdit));
 
@@ -197,7 +200,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
       + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml(W.disclosureMore)}</summary>${fullList}</details>`);
   }
 
-  // 4. Cost and risk: the eight acknowledgements, collapsed once accepted.
+  // 4. Cost and risk: the nine acknowledgements, collapsed once accepted.
   if (route.state === 'configured') parts.push(renderAcknowledgements(route, canEdit));
 
   // 5. Secondary sections, collapsed unless they need attention.
@@ -245,6 +248,33 @@ function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: Dashboar
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="${invalid ? 'yes' : 'no'}">`
     + head + lines.join('')
     + `<p class="ohsmall" data-outside-cost>${escapeHtml(W.costLines.join(' '))}</p>`
+    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+
+/**
+ * "What may zkAPI send?": the two levels, saved through the same local-grade,
+ * CSRF-protected settings route as the switch (the worker re-checks every
+ * rule). Choosing "Your situation, without names" needs every
+ * acknowledgement at the current version, which includes the statement of
+ * what that level sends.
+ */
+function renderLevel(status: DashboardOutsideHelpStatus, canEdit: boolean): string {
+  const invalid = status.settings.state === 'invalid';
+  const route = status.route;
+  const acknowledged = route.state === 'configured' && route.acknowledgements.complete;
+  const current = status.settings.level;
+  const options = (['unnamed', 'general'] as const).map((level) => {
+    const copy = W.levels[level];
+    // The unnamed option is offered once its acknowledgement is recorded, or when it is already the setting.
+    const blocked = !canEdit || invalid || (level === 'unnamed' && current !== 'unnamed' && !acknowledged);
+    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? ' checked' : ''}${blocked ? ' disabled aria-disabled="true"' : ''}>`
+      + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
+  }).join('');
+  const hint = current !== 'unnamed' && !acknowledged && route.state === 'configured' ? `<p class="pnote ohsmall">${escapeHtml(W.levelNeedsAcks)}</p>` : '';
+  const disabled = canEdit && !invalid ? '' : ' disabled aria-disabled="true"';
+  return `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml(current)}" data-outside-current="${status.settings.state === 'on' ? 'on' : 'off'}">`
+    + `<div class="sect">${escapeHtml(W.levelTitle)}</div>${options}${hint}`
+    + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(W.levelSave)}</button></div>`
     + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 
@@ -490,6 +520,12 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
         daily_spend_cap_usd: numberOrNull(field('daily_spend_cap_usd')),
       };
     }
+    if (kind === 'level') {
+      var picked = form.querySelector('input[name="level"]:checked');
+      // On or off as the status line says now (the switch updates it in place), so saving a level never flips the switch.
+      var state = root.querySelector('[data-outside-state-text]');
+      return { enabled: state ? state.getAttribute('data-outside-state') === 'on' : form.getAttribute('data-outside-current') === 'on', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
+    }
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
@@ -505,7 +541,7 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     }
     setTimeout(poll, delay);
   }
-  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
   root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
     form.addEventListener('submit', async function (event) {
       event.preventDefault();

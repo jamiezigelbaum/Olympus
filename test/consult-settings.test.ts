@@ -188,7 +188,7 @@ describe('readConsultSettings fails closed', () => {
     const read = readConsultSettings({ env: { HOME: home } });
     expect(read.state).toBe('valid');
     expect(consultOutsideHelpEnabled(read)).toBe(true);
-    expect(consultGateOptionsFromSettings(read.settings)).toEqual({ languages: ['en', 'pt-BR'], domains: VALID.domains });
+    expect(consultGateOptionsFromSettings(read.settings)).toEqual({ languages: ['en', 'pt-BR'], domains: VALID.domains, level: 'unnamed' });
   });
 
   test('reads at each use: a change is visible to the next read with no restart', () => {

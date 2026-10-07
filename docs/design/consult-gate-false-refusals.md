@@ -57,3 +57,53 @@ Expected residual false-refusal rate on ordinary English questions, estimated by
 ## Latency
 
 1,275 gate calls across five configurations (warm, plus one vocabulary load per distinct pack selection): median under 1 ms (0.4 to 0.9 ms across runs), p95 1 to 7 ms. The first call with a given pack selection pays vocabulary decompression, up to about 10 s on a cold first call in this run. The gate is not a latency concern after the first call.
+
+## Unnamed level
+
+Date: 2026-10-07. The "Your situation, without names" level (owner decision
+2026-10-07; rules in `docs/design/consult-writer-instructions.md`). Run
+`bun eval/consult-leak/unnamed-level.ts`; the leak corpus runs at both levels
+in `bun eval/consult-leak/run.ts`.
+
+**Set.** 30 situation cases (`eval/consult-leak/unnamed-questions.ts`):
+housing, employment, health, family, finance, consumer, travel, education.
+Each carries the documents the answer read (names, towns, dates, amounts,
+account numbers, titles), the answer and its gaps, one legitimate question as
+a careful writer at this level would send it, and 67 leak variants (the same
+question with a name, place, date or year, exact amount, identifier or title
+put back). Written before the gate was widened and not edited against its
+verdicts, except one canary ("Greg") that the independent oracle's ROT13 view
+matched in ordinary prose ("after they").
+
+**Before and after (hand-written legitimate questions).**
+
+| | general gate (before) | unnamed gate (after) |
+|---|---|---|
+| legitimate refused | 29 / 30 (97%) | 24 / 30 (80%) |
+| leak variants passed | 0 / 67 | 0 / 67 |
+| leak corpus: canary leaks, leak cases passed | 0, 0 | 0, 0 |
+| leak corpus clean set refused | 22.6% | 22.6% |
+
+Before, 28 of 30 failed the 12-content-word cap alone. After, the 24 left:
+11 the name rules on ordinary words the documents capitalize or label
+("Customer reported", "Retail Park", "Offer letter: probation", "Orchard
+Way" making "way" a name), 6 copies of five or more document words (the
+level's own rules forbid these), 3 figures (11 and 22 years, which the level
+refuses because a year count is as often an age; a bare 180), 1 a generic
+document title ("Fit note"), 1 an unknown word (INR), 1 two situation
+sentences, and 1 both (two sentences, and "timesheets"). The name rules are the
+protection this level depends on, so they are not relaxed.
+
+**Real local writer.** The built-in Qwen3.5 4B writer, run on this set with
+the unnamed rules (`eval/consult-reid/run-real.ts`, recorded in
+`eval/consult-reid/recorded-unnamed-set.json`): 30 of 30 proposed; 15 pass
+the unnamed gate, against 7 of the same outputs at the general gate; no
+output that passes carries a canary. The small model mostly writes general
+questions with a little situation, rarely the full situation sentence.
+
+**Gate fix found on the way (both levels).** A snapshot amount with a zero
+fraction ("2,400.00") was keyed only as "240000" and "24", so "2,400" in a
+question was not matched; it now also keys as "2400" and is refused.
+
+The unnamed false-refusal rate is held by a regression ceiling at the
+measured 80% (`UNNAMED_LEVEL_GATES`), not a usability target.

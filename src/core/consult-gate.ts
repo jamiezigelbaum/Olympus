@@ -170,8 +170,8 @@ export const CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12;
  * ("gave 45 days' notice where the lease requires 60"), and it restates the
  * situation the local answer described. Four rules widen for that level,
  * and only these four; every rule that refuses names, places, dates and
- * years, identifiers, hosts and secrets is unchanged, and so is every rule
- * that compares against the documents and the owner's own question:
+ * years, ages, amounts, identifiers, titles, hosts and secrets is unchanged
+ * (eval/consult-leak: zero leaks at both levels):
  *
  *   - the content-word size cap of a whole sub-question rises to fit one
  *     situation sentence plus the question (the measured unnamed set needs
@@ -2029,7 +2029,8 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
     // Number words and date words are read here exactly as on the question side.
     const words = hasNumberWord(normalized) ? numberWordsToDigits(wordsOf(folded)) : undefined;
     const snapshotFigures = figureKeys(normalized, true);
-    if (words) for (const [key, seen] of figureKeys(words.join(' '), false)) snapshotFigures.set(key, mergeFigureSeen(snapshotFigures.get(key), seen));
+    // Number words add keys; a figure already read from digits keeps how it was written.
+    if (words) for (const [key, seen] of figureKeys(words.join(' '), false)) if (!snapshotFigures.has(key)) snapshotFigures.set(key, seen);
     for (const [key, seen] of snapshotFigures) {
       if (!model.numberKeys.has(key)) continue;
       if (key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS || seen.unit) {
@@ -2484,7 +2485,7 @@ const RULE_UNIT_WORDS: ReadonlySet<string> = new Set([
   'minuten', 'minuti', 'procent', 'prozent', 'percento', 'porcento', 'pourcent',
 ]);
 
-/** Symbols before a figure that make it money or a share, never a rule figure. */
+// Symbols before a figure that make it money or a share, never a rule figure.
 const FIGURE_PREFIX_SYMBOLS: ReadonlySet<string> = new Set(['$', '\u20AC', '\u00A3', '\u00A5', '\u20B9', '%']);
 
 /**

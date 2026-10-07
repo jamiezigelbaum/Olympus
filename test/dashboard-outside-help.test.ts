@@ -210,7 +210,7 @@ describe('the Outside help page: states and copy', () => {
     expect(html.match(/<ul class="ohshort" data-outside-disclosure>(.*?)<\/ul>/)?.[1]?.match(/<li>/g)?.length).toBe(3);
     expect(html).toContain('<details class="howto" data-outside-disclosure-more>');
     // Accepted at the current wording: one line, the statements behind Review.
-    expect(html).toContain(`data-outside-acknowledged="yes">You accepted the 8 cost and risk statements.<`);
+    expect(html).toContain(`data-outside-acknowledged="yes">You accepted the 9 cost and risk statements.<`);
     expect(html).toContain('data-outside-ack-review');
     // Nothing to fix: no problem list; secondary sections closed.
     expect(html).not.toContain('data-outside-blockers');
@@ -280,7 +280,7 @@ describe('the Outside help page: states and copy', () => {
     expect(text).toContain('zkapi-clientd not installed');
     // Not accepted: the eight statements are shown expanded, not behind Review.
     expect(html).not.toContain('data-outside-ack-review');
-    expect(html.match(/name="acknowledged"/g)?.length).toBe(8);
+    expect(html.match(/name="acknowledged"/g)?.length).toBe(9);
     expect(html).toContain('data-outside-acknowledged="no"');
     expect(html.match(/name="acknowledged" value="[a-z_0-9]+" checked/g)).toBeNull();
     expect(html).toContain(W.enableBlockedAcks);
@@ -374,6 +374,27 @@ describe('the Outside help page: states and copy', () => {
     expect(document.querySelector('[data-outside-state-text]')!.textContent).toBe(W.state.on);
     expect(document.querySelector('[data-outside-state-text]')!.getAttribute('data-outside-state')).toBe('on');
     expect(document.querySelector('[data-outside-help]')!.getAttribute('data-revision')).toBe('5');
+    // What may zkAPI send: the chosen level, posted to the same settings route, keeping the switch as it now reads.
+    const level = document.querySelector('form[data-outside-form="level"]')!;
+    (level.querySelector('input[name="level"][value="general"]') as unknown as { checked: boolean }).checked = true;
+    level.dispatchEvent(new window.Event('submit', { cancelable: true }));
+    await settle();
+    expect(posts[2]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.enable);
+    expect(posts[2]!.init.headers['X-Olympus-CSRF']).toBe('csrf');
+    expect(JSON.parse(posts[2]!.init.body)).toEqual({ enabled: true, revision: 5, level: 'general' });
+  });
+
+  test('What may zkAPI send: the two levels with the approved copy, the current one chosen; the unnamed one waits for its acknowledgement', () => {
+    const html = page(status());
+    const text = visibleText(html);
+    expect(text).toContain('What may zkAPI send?');
+    for (const line of ['Your situation, without names (recommended)', 'Sends your actual problem with names, places, exact dates, amounts and account numbers removed. Gets real answers.',
+      'General questions only (strict)', 'Sends only textbook questions; nothing about your situation leaves. Safest, but rarely helpful.']) expect(text).toContain(line);
+    expect(html).toContain('<input type="radio" name="level" value="unnamed" checked>');
+    const general = page(status({ settings: { level: 'general' }, route: configuredRoute({ complete: false }) }));
+    expect(general).toContain('<input type="radio" name="level" value="general" checked>');
+    expect(general).toContain('<input type="radio" name="level" value="unnamed" disabled aria-disabled="true">');
+    expect(visibleText(general)).toContain(W.levelNeedsAcks);
   });
 
   test('Tor off: the route is said to be direct with the network address visible, whether or not a tor binary exists', () => {

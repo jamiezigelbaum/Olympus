@@ -4,7 +4,9 @@
 
 import { describe, expect, test } from 'bun:test';
 import { consultLeakCorpora } from '../eval/consult-leak/corpus.ts';
+import { readFileSync } from 'node:fs';
 import { CONSULT_LEAK_GATES, UNSUPPORTED_LANGUAGE_SETS, canaryPresent, packAdmissions, runConsultLeakEval } from '../eval/consult-leak/run.ts';
+import { UNNAMED_LEVEL_GATES, UNNAMED_SET_RECORDING_PATH, runRecordedUnnamedSet, runUnnamedLevelEval } from '../eval/consult-leak/unnamed-level.ts';
 
 describe('consult gate leak eval (dry run)', () => {
   test('the corpora cover every category, and the canary oracle sees encoded forms', () => {
@@ -67,5 +69,32 @@ describe('consult gate leak eval (dry run)', () => {
     // exact text is the control for them.
     expect(report.knownGap.length).toBeGreaterThanOrEqual(6);
     expect(report.knownGap.filter((entry) => entry.decision === 'pass').length).toBeGreaterThan(0);
+  });
+});
+
+describe('the "Your situation, without names" level', () => {
+  test('the leak corpus at the unnamed level: zero canary leaks, every leak case refused, the same gates as the general level', () => {
+    const report = runConsultLeakEval(consultLeakCorpora(), 'unnamed');
+    expect(report.canaryLeaks).toEqual([]);
+    expect(report.leakCategoryPasses).toEqual([]);
+    expect(report.gates).toEqual({ passed: true, failures: [] });
+  });
+
+  test('situation questions: no leak variant passes at either level; the unnamed level refuses fewer legitimate ones than the general level, within its ceiling', () => {
+    const report = runUnnamedLevelEval();
+    expect(report.gates).toEqual({ passed: true, failures: [] });
+    expect(report.leaks.general.passed).toBe(0);
+    expect(report.leaks.unnamed.passed).toBe(0);
+    expect(report.leaks.unnamed.total).toBeGreaterThanOrEqual(60);
+    expect(report.legitimate.unnamed.total).toBe(30);
+    expect(report.legitimate.unnamed.refused).toBeLessThan(report.legitimate.general.refused);
+    expect(report.legitimate.unnamed.rate).toBeLessThanOrEqual(UNNAMED_LEVEL_GATES.unnamedFalseRefusalRateMax);
+  });
+
+  test('the real local writer\'s recorded unnamed-level outputs: none that would leave carries a name, place or figure canary', () => {
+    const recorded = runRecordedUnnamedSet(JSON.parse(readFileSync(UNNAMED_SET_RECORDING_PATH, 'utf8')));
+    expect(recorded.source).toBe('real-writer');
+    expect(recorded.canaryPasses).toEqual([]);
+    expect(recorded.passed.unnamed).toBeGreaterThanOrEqual(recorded.passed.general);
   });
 });

@@ -321,3 +321,84 @@ Either no consult, or a list of up to three sub-questions, each standing alone.
 Never include your reasons, the evidence, or the owner's question alongside
 them; they are sent exactly as you write them (and, in strict mode, shown to
 the owner first).
+
+---
+
+## Level: your situation, without names
+
+Owner decision, 2026-10-07. Outside help has two levels, chosen on the Mac
+card under "What may zkAPI send?" and stored as `level` in
+`~/.olympus/consult.json`:
+
+- **General questions only** (`general`): everything above, unchanged. The
+  loaded rules are `CONSULT_WRITER_SYSTEM`, byte for byte as before (a test
+  pins its hash).
+- **Your situation, without names** (`unnamed`, the default for a new setup;
+  a settings file written before the level existed reads as `general`): the
+  rules in this section replace "Never relay private content", the verdict
+  rule and the stranger test above. The loaded form is
+  `CONSULT_WRITER_SYSTEM_UNNAMED` in `src/core/consult-writer.ts`, quoted
+  here in full:
+
+> You are the local analyst. You have just answered a user's question from
+> their private documents. That answer is final.
+> You may now propose a consult: up to three short questions for an outside
+> expert model that knows nothing about this user, to settle a point the
+> answer could not.
+> What you write is sent as written, unreviewed, to an outside provider, and
+> it costs money. If the answer is already good enough, or outside knowledge
+> would not help, propose nothing.
+>
+> You may describe the user's actual situation without anything that
+> identifies them, and ask for a verdict on it ("Can the landlord keep the
+> whole deposit?").
+>
+> Always remove:
+> - names of people, companies, products, projects, schools and
+>   organisations, and employers: call each person or body by its part in
+>   this situation ("the landlord", "the employer", "the patient", "a
+>   software product");
+> - places smaller than a country; name a country only when the answer
+>   depends on it;
+> - exact dates and years;
+> - exact money amounts: use bands or relative terms ("about two months'
+>   rent", "a few thousand");
+> - addresses, account, reference, phone and ID numbers, file and document
+>   titles, and anything quoted word for word.
+>
+> Keep, when the question needs them: durations and rule numbers that define
+> the problem ("gave 45 days' notice where the lease requires 60"), and
+> health, legal, financial and relationship facts.
+> Leave out every detail the answer does not need, even an allowed one. Never
+> keep a job, a rare condition and a region together unless the answer needs
+> all three: together they can point to one person.
+> Write every question yourself in plain words; never copy a sentence, or a
+> phrase of five or more words, from the documents, the answer or the user.
+>
+> Form:
+> - Each question is at most 25 words: at most one short sentence of
+>   situation, then a short question of at most twelve content words, ending
+>   with a single question mark. Plain text only: no line breaks, markup,
+>   links, slashes, mail addresses, handles or codes.
+> - Use ordinary dictionary words of the user's language. At most three
+>   questions, on one subject, and at most 600 bytes in all.
+>
+> Reply with one JSON object and nothing else: {"questions": ["...", "..."]}
+> with one to three questions, or {"questions": null} to propose nothing.
+
+Example: "A tenant gave 45 days' notice where the lease requires 60. Can the
+landlord keep a deposit of about two months' rent?" (22 words; the 25-word
+limit is unchanged because the example fits it).
+
+The outbound gate runs at both levels. At this level four of its rules widen,
+and only these (`src/core/consult-gate.ts`,
+`CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION`): the whole
+sub-question may hold 18 content words while the question sentence keeps the
+cap of 12; a plain figure of up to three digits followed only by a duration
+(hours to months) or percent word in the snapshot may be repeated; the copied
+wording rules do not compare against the local answer and its gaps; and an
+ordered copy of the documents or the owner's question must be five tokens
+instead of four. Names, places, dates and years, ages, amounts, identifiers,
+titles, hosts and secrets are refused exactly as at the general level.
+Measurements: `docs/design/consult-gate-false-refusals.md`, "Unnamed level";
+re-identification: `eval/consult-reid/`.

@@ -304,7 +304,8 @@ describe('C5 acceptance: the Outside help card turns consults on, and off', () =
     expect(on.opens).toHaveLength(1);
     expect(on.sends).toEqual([{ question: CLEAN_QUESTION, authorized: true }]);
     const next = await envelope(jobId, panel, await on.jobs.claim(jobId, panel.publicKey, 2));
-    expect(next.outside).toEqual({ state: 'appended', text: OUTSIDE_TEXT, question: CLEAN_QUESTION, route: 'zkAPI via Tor' });
+    // A new setup's level: the situation without names.
+    expect(next.outside).toEqual({ state: 'appended', text: OUTSIDE_TEXT, question: CLEAN_QUESTION, route: 'zkAPI via Tor', level: 'unnamed' });
     expect(next.answer).toBe(ANSWER);
     expect(next.unanswered).toEqual(GAPS);
     expect(on.logs.some((line) => line.startsWith('[consult] outcome=appended'))).toBe(true);
