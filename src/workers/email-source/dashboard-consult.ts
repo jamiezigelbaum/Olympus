@@ -20,9 +20,12 @@
  *     readiness (zkapiConsultReadiness: blockers as codes), the risk
  *     acknowledgements, the per-language vocabulary packs;
  *   - `setEnabled`: writes consult.json through the writer (compare-and-swap
- *     on the revision the page was built from); turning on requires a
- *     configured route with every acknowledgement accepted;
- *   - `saveRoute`: records the eight acknowledgements (version 3), the
+ *     on the revision the page was built from), with the level the owner
+ *     chose ("What may zkAPI send?"); turning on, and choosing "Your
+ *     situation, without names", each require a configured route with every
+ *     acknowledgement accepted at the current version (version 4 adds the
+ *     statement of what that level sends);
+ *   - `saveRoute`: records the nine acknowledgements (version 4), the
  *     owner-confirmed funding date and the optional daily caps in the zkapi
  *     profile of the owner's sovereignty policy file, as one transaction over
  *     the file as it is now (lease, re-read, patch only that block, validate,
@@ -34,8 +37,11 @@
  */
 import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
 import {
+  CONSULT_LEVEL_WHEN_UNSET,
+  CONSULT_LEVELS,
   DEFAULT_CONSULT_SETTINGS,
   readConsultSettings,
+  type ConsultLevel,
   type ConsultSettingsLocation,
 } from '../../core/consult-settings.ts';
 import { writeConsultSettings, type ConsultSettingsWriteRefusal } from '../../core/consult-settings-writer.ts';
@@ -124,6 +130,8 @@ const MESSAGES = {
   invalidCurrent: 'The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.',
   routeMissing: 'Add zkAPI before turning anonymous answers on.',
   acknowledgementsIncomplete: 'Read and tick every statement about cost and risk before turning anonymous answers on.',
+  levelAcknowledgementsIncomplete: 'Read and tick every statement about cost and risk, including what "Your situation, without names" sends, before choosing it.',
+  levelUnknown: 'Choose what zkAPI may send: your situation without names, or general questions only.',
   languageMissing: 'A chosen language has no vocabulary pack installed on this computer.',
   languagesEmpty: 'Choose at least one language.',
   noHome: 'Olympus cannot find your home folder, so it cannot write the settings file.',
@@ -194,6 +202,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       languages: [...settings.languages],
       domains: { ...settings.domains },
       strict: settings.strict,
+      level: settings.level,
       ...(read.state === 'invalid' ? { invalidReason: read.reason } : {}),
     };
   };
@@ -334,13 +343,30 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         }
         chosen = [...new Set(update.languages)];
       }
+      // The level: what the form chose, else the file's own. A file that is
+      // being replaced because it is damaged keeps the narrower level unless
+      // the owner chose otherwise, so a repair never widens the scope.
+      let level: ConsultLevel = current.state === 'invalid' ? CONSULT_LEVEL_WHEN_UNSET : base.level;
+      if (update.level !== undefined) {
+        if (typeof update.level !== 'string' || !(CONSULT_LEVELS as readonly string[]).includes(update.level)) return invalid(MESSAGES.levelUnknown, 'level_unknown');
+        level = update.level as ConsultLevel;
+      }
+      const acknowledgementsComplete = (): boolean => {
+        const acknowledgements = zkapiProfile()?.profile.zkapi?.acknowledgements;
+        return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION
+          && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
+      };
+      // Widening to "Your situation, without names" needs the owner to have
+      // read what it sends (acknowledgement `situation_disclosure`, version 4),
+      // whether outside help is on or off; narrowing never does.
+      if (level === 'unnamed' && update.level === 'unnamed' && (current.state !== 'valid' || current.settings.level !== 'unnamed')) {
+        if (!zkapiProfile()) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
+        if (!acknowledgementsComplete()) return { ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: MESSAGES.levelAcknowledgementsIncomplete };
+      }
       if (enabled) {
         const route = zkapiProfile();
         if (!route) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
-        const acknowledgements = route.profile.zkapi?.acknowledgements;
-        const complete = acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION
-          && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
-        if (!complete) return { ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: MESSAGES.acknowledgementsIncomplete };
+        if (!acknowledgementsComplete()) return { ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: MESSAGES.acknowledgementsIncomplete };
         const installed = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed.has(language))) return invalid(MESSAGES.languageMissing, 'language_pack_missing');
       }
@@ -350,6 +376,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         domains: { ...base.domains },
         // Strict mode's approval step is stage C6; until then the flag is only kept as saved.
         strict: base.strict,
+        level,
         expectedRevision: revision,
         ...(replaceInvalid ? { replaceInvalid: true } : {}),
       }, location);

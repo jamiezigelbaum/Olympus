@@ -179,8 +179,11 @@ export interface PrivateAnswerPlaintextV1 {
 /**
  * The outside block inside a follow-up envelope (design §A.5.2, §A.6). `idle`
  * covers nothing triggered, refused, skipped and failed alike: the panel
- * shows nothing for any of them. Text, question and route are present only
- * when `appended`; `cut` says the text was shortened.
+ * shows nothing for any of them. Text, question, route and level are present
+ * only when `appended`; `cut` says the text was shortened. `question` is
+ * exactly what was sent; `level` says under which rules it was written
+ * ("unnamed": the situation without names; "general": textbook questions
+ * only), so the panel can label it. An older engine sends no `level`.
  */
 export interface PrivateAnswerOutsideBlockV1 {
   state: 'idle' | 'pending' | 'appended' | 'paused';
@@ -188,6 +191,7 @@ export interface PrivateAnswerOutsideBlockV1 {
   cut?: boolean;
   question?: string;
   route?: string;
+  level?: 'unnamed' | 'general';
 }
 
 /**

@@ -16,7 +16,7 @@
  *     ┌ open the transport session (warm: lease, Tor, daemon, policy)   ┐ in parallel
  *     └ writer on its own server (memory rule, token bound, deadline)   ┘
  *       over ONE bounded input (question, answer, gaps), also the gate's
- *       writerVisibleTexts
+ *       writerVisibleTexts (question) and writerAnswerTexts (answer, gaps)
  *     gate over the snapshot pack + that bounded input      refuse → failed, silently
  *     session ready? busy or any failure → failed (never queued)
  *     send(question, authorize): E2 eligibility awaited FIRST, then
@@ -57,6 +57,7 @@ import {
   consultGateOptionsFromSettings,
   recheckConsultJobPolicy,
   type ConsultJobPolicy,
+  type ConsultLevel,
   type ConsultSettingsRead,
 } from '../../core/consult-settings.ts';
 import type { ZkapiConsultSettings } from '../../core/zkapi-consult-settings.ts';
@@ -104,8 +105,12 @@ export type ConsultJobsSeam = Pick<
 
 export interface ConsultOrchestratorOptions {
   readonly jobs: ConsultJobsSeam;
-  /** The writer (consult-writer.ts runConsultWriter, bound to its server and the memory probe); `kill` aborts on a fresh answer. */
-  readonly writer: (input: ConsultWriterInput, control: { kill: AbortSignal; deadlineMs: number }) => Promise<ConsultWriterOutcome>;
+  /**
+   * The writer (consult-writer.ts runConsultWriter, bound to its server and
+   * the memory probe); `kill` aborts on a fresh answer; `level` is the job's
+   * bound level, which selects the writer's rules.
+   */
+  readonly writer: (input: ConsultWriterInput, control: { kill: AbortSignal; deadlineMs: number; level: ConsultLevel }) => Promise<ConsultWriterOutcome>;
   /** Opens the transport session (openZkapiConsultSession bound to the configured route); a failure means no consult. */
   readonly openSession: (control: ZkapiOpenControl) => Promise<ZkapiOpenSessionResult>;
   /** Whether a route exists now (profile and inference key present); checked before any writer work. Default: assumed available. */
@@ -281,7 +286,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     };
     let written: ConsultWriterOutcome;
     try {
-      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs });
+      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs, level: scheduled.policy.level });
     } catch {
       written = { kind: 'failed', reason: 'request_failed' };
     }
@@ -298,7 +303,9 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     }
     // The gate (§A.4): the evidence as the pack, plus the question, answer
     // and gaps exactly as the writer saw them; languages and packs from the
-    // settings now. A refusal is silent: the verdict never leaves the machine.
+    // settings now, and the level the job bound (the recheck below has just
+    // confirmed the file still holds it). A refusal is silent: the verdict
+    // never leaves the machine.
     const settingsAtGate = options.settings();
     const policyNow = recheckConsultJobPolicy(scheduled.policy, settingsAtGate);
     if (!policyNow.ok) {
@@ -316,10 +323,13 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     }
     const verdict = evaluateConsultRequest(
       written.questions,
-      consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question, bounded.answer, ...bounded.gaps] }),
+      // The owner's question, then the answer and its gaps: compared alike,
+      // except that the unnamed level does not treat restating the answer's
+      // situation as copying (consult-gate.ts, writerAnswerTexts).
+      consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question], writerAnswerTexts: [bounded.answer, ...bounded.gaps] }),
       {},
       { recentApprovedQuestions: [...recent] },
-      consultGateOptionsFromSettings(settingsAtGate.settings),
+      { ...consultGateOptionsFromSettings(settingsAtGate.settings), level: scheduled.policy.level },
     );
     if (verdict.decision !== 'pass') {
       await closeSession();
@@ -396,7 +406,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       return;
     }
     const seam = options.jobs.outsideSeam(jobId);
-    const appended = seam ? options.jobs.appendOutsideBlock(jobId, seam.rev, { text: reply.text, question: questionText, route: reply.routeLabel }) : undefined;
+    const appended = seam ? options.jobs.appendOutsideBlock(jobId, seam.rev, { text: reply.text, question: questionText, route: reply.routeLabel, level: scheduled.policy.level }) : undefined;
     if (!appended?.ok) {
       // A reply for a withdrawn, expired or evicted job is discarded (§A.5.4); the money is spent and the loss is stated.
       fail(jobId);

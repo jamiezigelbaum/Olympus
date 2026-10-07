@@ -73,7 +73,7 @@ interface Harness {
   eligible: { refuse: boolean; hold?: (() => Promise<void>) | undefined };
   route: { available: boolean };
   activity: { busy: boolean };
-  writer: { calls: ConsultWriterInput[]; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
+  writer: { calls: ConsultWriterInput[]; levels: string[]; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
   transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy'; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; onReply?: () => void; reply: 'reply' | 'failed' };
   logs: string[];
   calls: { n: number; asked: boolean[] };
@@ -85,9 +85,10 @@ function harness(options: {
   writerOutcome?: ConsultWriterOutcome;
   followUpWindowMs?: number;
   completionTimeoutMs?: number;
+  settings?: ConsultSettingsRead;
 } = {}): Harness {
   const clock = { now: 1_000_000 };
-  const settings = { read: SETTINGS_ON };
+  const settings = { read: options.settings ?? SETTINGS_ON };
   const eligible: Harness['eligible'] = { refuse: false };
   const route = { available: true };
   const activity = { busy: false };
@@ -95,6 +96,7 @@ function harness(options: {
   const calls = { n: 0, asked: [] as boolean[] };
   const writer: Harness['writer'] = {
     calls: [],
+    levels: [],
     kills: [],
     outcome: options.writerOutcome ?? { kind: 'questions', questions: [CLEAN_QUESTION], promptTokens: 900, ms: 10 },
     releases: [],
@@ -137,6 +139,7 @@ function harness(options: {
     completionTimeoutMs: () => options.completionTimeoutMs ?? 6 * 60_000,
     writer: async (input, control) => {
       writer.calls.push(input);
+      writer.levels.push(control.level);
       writer.kills.push(control.kill);
       if (writer.hold) await writer.hold();
       if (control.kill.aborted) return { kind: 'killed', reason: 'fresh_answer' };
@@ -285,6 +288,8 @@ describe('trigger and the full path', () => {
     expect(initial.rev).toBe(1);
     // The writer saw the question, the answer and the gaps only.
     expect(h.writer.calls).toEqual([{ question: QUESTION, answer: ANSWER, gaps: GAPS }]);
+    // Under the level the job bound (a new setup's default).
+    expect(h.writer.levels).toEqual(['unnamed']);
     // The session opened with a cancel signal and a deadline while the writer ran, and sent once with final authorization.
     expect(h.transport.opens.length).toBe(1);
     expect(h.transport.opens[0]!.signal).toBeInstanceOf(AbortSignal);
@@ -296,7 +301,7 @@ describe('trigger and the full path', () => {
     expect(session.cancelled).toBe(0);
     // The block is appended, fitted, with the question and the route label; the next envelope carries it.
     const next = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
-    expect(next.outside).toEqual({ state: 'appended', text: OUTSIDE_TEXT, question: CLEAN_QUESTION, route: 'zkAPI via Tor' });
+    expect(next.outside).toEqual({ state: 'appended', text: OUTSIDE_TEXT, question: CLEAN_QUESTION, route: 'zkAPI via Tor', level: 'unnamed' });
     expect(next.answer).toBe(ANSWER);
     expect(next.unanswered).toEqual(GAPS);
     // The snapshot is gone, the question is remembered for the repeat check, and the log carries codes only.
@@ -310,6 +315,21 @@ describe('trigger and the full path', () => {
     }
   });
 
+
+  test('the bound level selects the writer\'s rules and labels the block; a level change before the gate refuses as stale', async () => {
+    const general: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true, level: 'general' } };
+    const h = harness({ policy: bindConsultJobPolicy(general), settings: general });
+    const { jobId, panel } = await consult(h);
+    expect(h.writer.levels).toEqual(['general']);
+    const next = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(next.outside).toMatchObject({ state: 'appended', question: CLEAN_QUESTION, level: 'general' });
+
+    // Bound "general", then the file says "unnamed" at the same revision: no send.
+    const changed = harness({ policy: bindConsultJobPolicy(general), settings: { state: 'valid', settings: { ...general.settings, level: 'unnamed' } } });
+    await consult(changed);
+    expect(changed.transport.sessions.flatMap((session) => session.sends)).toEqual([]);
+    expect(changed.logs.some((line) => line.includes('outcome=authorization_refused code=settings_stale'))).toBe(true);
+  });
   test('negative triggers: outside help off, an old panel, a sufficient answer without gaps, "these items do not answer", or no verdict metadata start nothing', async () => {
     for (const [label, h, cap] of [
       ['off', harness({ policy: OFF }), 2],

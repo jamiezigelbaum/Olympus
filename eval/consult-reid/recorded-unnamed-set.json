@@ -1,0 +1,279 @@
+{
+  "source": "real-writer",
+  "model": "qwen3.5-4b-q4_k_m-e87f176 (llama.cpp b11320)",
+  "promptSha256": "c9efad9eebaa8347183c96fb1aab34e265aaa577cfd354a93891810066484fb5",
+  "recordedAt": "2026-10-07T20:57:11.101Z",
+  "level": "unnamed",
+  "outputs": {
+    "lease-notice": {
+      "kind": "questions",
+      "questions": [
+        "Does giving less notice than the lease requires allow the landlord to retain the full security deposit?",
+        "Can a landlord deduct the entire deposit when a tenant provides notice shorter than the contract specifies?",
+        "Is there a rule preventing a landlord from keeping the full deposit if the tenant leaves early due to insufficient notice?"
+      ],
+      "ms": 3135
+    },
+    "unpaid-overtime": {
+      "kind": "questions",
+      "questions": [
+        "Does a manager's signature on a timesheet automatically count as written approval for extra work?",
+        "Can an employee claim unpaid overtime if the manager signed the timesheet but never gave verbal permission?",
+        "Is there a specific rule that makes a signed timesheet binding even without prior consent?"
+      ],
+      "ms": 3076
+    },
+    "insurance-water": {
+      "kind": "questions",
+      "questions": [
+        "Does a leak lasting several weeks count as sudden or gradual damage?",
+        "What specific criteria do insurers use to classify slow leaks?",
+        "Can a corroded joint be considered sudden damage under any circumstances?"
+      ],
+      "ms": 2346
+    },
+    "medication-interaction": {
+      "kind": "questions",
+      "questions": [
+        "Does clarithromycin increase warfarin levels and require extra blood tests?",
+        "Is a doctor's check needed before starting this antibiotic with blood thinners?",
+        "What specific monitoring steps are required for this drug mix?"
+      ],
+      "ms": 2630
+    },
+    "parking-fine": {
+      "kind": "questions",
+      "questions": [
+        "Does a partially obscured entrance sign make a private parking charge unenforceable?",
+        "Can a driver avoid a private parking fine if the signage was not clearly visible?",
+        "Is a hidden sign a valid defense against a parking charge notice?"
+      ],
+      "ms": 2571
+    },
+    "divorce-pension": {
+      "kind": "questions",
+      "questions": [
+        "Does a court usually split pension money earned before the marriage?",
+        "What is the standard rule for dividing pension funds accumulated during a marriage?",
+        "How do courts typically handle pension assets built up before the couple separated?"
+      ],
+      "ms": 2410
+    },
+    "tax-home-office": {
+      "kind": "questions",
+      "questions": [
+        "Can an employee who chooses to work from home deduct a home office?",
+        "Does working three days a week change the deduction rules?",
+        "Is having a provided desk required to claim the expense?"
+      ],
+      "ms": 2257
+    },
+    "flight-delay": {
+      "kind": "questions",
+      "questions": [
+        "Does a crew shortage count as an extraordinary circumstance for flight delay compensation?",
+        "Is a meal voucher sufficient compensation for a four-hour delay caused by a crew shortage?",
+        "Can a passenger claim additional compensation when the airline admits a crew shortage caused the delay?"
+      ],
+      "ms": 2809
+    },
+    "landlord-entry": {
+      "kind": "questions",
+      "questions": [
+        "What notice period is required before a landlord can enter a rented home?",
+        "Does the lease agreement specify a different entry rule than the standard law?",
+        "Can the landlord enter without notice if an emergency or immediate safety threat exists?"
+      ],
+      "ms": 2479
+    },
+    "credit-card-fraud": {
+      "kind": "questions",
+      "questions": [
+        "Does a one time code sent to a phone make a disputed card payment the customer's liability?",
+        "Can a bank refuse a refund for a card payment approved by a one time code?",
+        "Is a customer liable for a card transaction when a one time code was sent to their phone?"
+      ],
+      "ms": 3914
+    },
+    "school-admission": {
+      "kind": "questions",
+      "questions": [
+        "Does sibling priority apply when a family moves outside the catchment area?",
+        "Can the school refuse a place if the new home is outside the catchment area despite sibling priority?",
+        "Is there an exception for families moving outside the catchment area when a sibling already attends?"
+      ],
+      "ms": 4527
+    },
+    "car-repair": {
+      "kind": "questions",
+      "questions": [
+        "Did the customer give permission for the garage to fix the brakes?",
+        "Is the customer liable for repairs they did not authorize?",
+        "Can the garage charge for work done without consent?"
+      ],
+      "ms": 4295
+    },
+    "redundancy-pay": {
+      "kind": "questions",
+      "questions": [
+        "How is statutory redundancy pay calculated for workers with over ten years of service?",
+        "Does age affect the redundancy payment amount for someone over fifty?",
+        "What is the standard redundancy payout for long-term employees with over a decade of service?"
+      ],
+      "ms": 8143
+    },
+    "mortgage-overpay": {
+      "kind": "questions",
+      "questions": [
+        "What is the current average interest rate for high-yield savings accounts?",
+        "How much extra interest would I earn if I overpay my mortgage by 10 percent?",
+        "Does my mortgage lender charge a penalty for paying off the loan early?"
+      ],
+      "ms": 13032
+    },
+    "neighbour-tree": {
+      "kind": "questions",
+      "questions": [
+        "Does a preservation order stop a homeowner from trimming overhanging branches?",
+        "Can a homeowner cut back branches that overhang their property when the tree is protected?",
+        "Is there an exception for overhanging branches in preservation orders?"
+      ],
+      "ms": 9549
+    },
+    "visa-overstay": {
+      "kind": "questions",
+      "questions": [
+        "Does a four day overstay in the Schengen area usually cause visa rejection?",
+        "Will a minor overstay affect my ability to get a new visa?",
+        "Can a short overstay be ignored by future visa officers?"
+      ],
+      "ms": 6186
+    },
+    "gym-contract": {
+      "kind": "questions",
+      "questions": [
+        "What documents does a gym accept to prove a move of 40 miles?",
+        "Is a utility bill or lease sufficient to show the new address?",
+        "Can a gym legally demand more than a simple address change for cancellation?"
+      ],
+      "ms": 5751
+    },
+    "inheritance-house": {
+      "kind": "questions",
+      "questions": [
+        "Can a co-owner force selling a shared inherited home?",
+        "Does one heir have the right to demand cash for their share?",
+        "What happens if the other owner refuses to sell?"
+      ],
+      "ms": 4659
+    },
+    "sick-leave": {
+      "kind": "questions",
+      "questions": [
+        "Can an employer begin dismissal for capability while an employee is on certified sick leave for depression?",
+        "Does a fit note for depression covering eight weeks prevent an employer from starting a capability process?",
+        "Is an employer allowed to dismiss an employee for capability reasons during certified sick leave for depression?"
+      ],
+      "ms": 5621
+    },
+    "deposit-scheme": {
+      "kind": "questions",
+      "questions": [
+        "Can a tenant claim the full deposit if it was never protected?",
+        "What specific steps must a tenant take to recover the money?",
+        "Does the landlord have to return the deposit even if they dispute the amount?"
+      ],
+      "ms": 4086
+    },
+    "warranty-laptop": {
+      "kind": "questions",
+      "questions": [
+        "Is a screen crack originating from the hinge without impact marks typically a manufacturing defect?",
+        "Does a retailer's claim of accidental damage override a manufacturer's warranty when no impact marks exist?",
+        "Can a warranty cover a screen failure caused by hinge stress even if the user did not drop the device?"
+      ],
+      "ms": 5270
+    },
+    "child-maintenance": {
+      "kind": "questions",
+      "questions": [
+        "Can a parent lower agreed child support by voluntarily choosing a lower paid job?",
+        "Does a new job with less income automatically change the support amount?",
+        "Will a court allow a parent to reduce payments after they chose a lower paid role?"
+      ],
+      "ms": 4118
+    },
+    "freelance-invoice": {
+      "kind": "questions",
+      "questions": [
+        "Can a freelancer add late fees to an invoice when a client delays payment due to their own client?",
+        "Is there a legal right to charge interest on an overdue business invoice?",
+        "What specific fees can be added to an invoice when a client refuses to pay immediately?"
+      ],
+      "ms": 4904
+    },
+    "noise-complaint": {
+      "kind": "questions",
+      "questions": [
+        "Can a resident report a bar for playing music past its licensed hours?",
+        "What steps can a tenant take when a neighbor violates a bar's noise license?",
+        "Is there a legal process for a resident to stop a bar from exceeding its sound limits?"
+      ],
+      "ms": 4605
+    },
+    "student-loan": {
+      "kind": "questions",
+      "questions": [
+        "Does a borrower living in Canada still owe repayments on a student loan from a different country?",
+        "Can a lender force a student loan repayment from a Canadian bank account?",
+        "Will a Canadian employer withhold student loan payments from a salary?"
+      ],
+      "ms": 4240
+    },
+    "pet-damage": {
+      "kind": "questions",
+      "questions": [
+        "Does allowing a pet make scratches fair wear and tear?",
+        "Can a landlord charge for pet damage if the lease permits pets?",
+        "Is refinishing cost reasonable for normal pet wear?"
+      ],
+      "ms": 3211
+    },
+    "medical-bill": {
+      "kind": "questions",
+      "questions": [
+        "Does pre-authorization guarantee payment when the provider is out of network?",
+        "Can a patient be billed for a service that was pre-approved?",
+        "Is there a rule preventing billing for pre-approved out-of-network scans?"
+      ],
+      "ms": 3811
+    },
+    "probation-notice": {
+      "kind": "questions",
+      "questions": [
+        "Does the employer owe pay for the missing notice period?",
+        "Is the one week notice rule in the offer letter still valid after five months?",
+        "Can the employee claim damages for the dismissal without notice?"
+      ],
+      "ms": 3564
+    },
+    "shared-driveway": {
+      "kind": "questions",
+      "questions": [
+        "Can a neighbor legally block a shared driveway when I have a right of way?",
+        "What legal steps can I take if a neighbor blocks my vehicle access?",
+        "Does blocking a shared driveway constitute a breach of my property rights?"
+      ],
+      "ms": 4025
+    },
+    "subscription-renewal": {
+      "kind": "questions",
+      "questions": [
+        "Does a consumer have a right to cancel an auto-renewing subscription immediately after noticing it?",
+        "Can a service provider keep the full amount of a subscription if they failed to send a reminder?",
+        "Is there a rule allowing a refund for a renewal that happened without prior notice?"
+      ],
+      "ms": 4833
+    }
+  }
+}

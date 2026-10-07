@@ -10,7 +10,7 @@
  * Content-free by construction: no question, reply, key or daemon
  * configuration is ever in the status, so none can reach the page.
  */
-import type { ConsultDomainPacks, ConsultLanguage } from '../../core/consult-gate.ts';
+import type { ConsultDomainPacks, ConsultLanguage, ConsultLevel } from '../../core/consult-gate.ts';
 import type { ZkapiConsultErrorCode } from '../../core/consult-transport-zkapi.ts';
 import { ZKAPI_RISK_ACKNOWLEDGEMENTS } from '../../core/zkapi-consult-settings.ts';
 import { escapeHtml, escapeScriptJson } from './components.ts';
@@ -74,6 +74,8 @@ export interface DashboardOutsideHelpStatus {
     readonly languages: readonly ConsultLanguage[];
     readonly domains: ConsultDomainPacks;
     readonly strict: boolean;
+    /** What zkAPI may send: "unnamed" (the situation without names) or "general" (textbook questions only). */
+    readonly level: ConsultLevel;
     readonly invalidReason?: string;
   };
   readonly route: DashboardOutsideHelpRoute;

@@ -1651,8 +1651,9 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   /** The container shows while an outside reply is on its way, or paused. */
   outsidePending: 'Looking up general background…',
   outsidePaused: 'Anonymous answers are paused.',
-  /** The collapsed disclosure that shows the question Olympus sent. */
+  /** The label over the exact question(s) sent, shown above the reply: the general level, then the unnamed level. */
   outsideAsked: 'What Olympus asked:',
+  outsideSentUnnamed: 'Sent without names:',
   /** The application-owned footer when the reply was shortened. */
   outsideShortened: 'Shortened by Olympus.',
 } as const;

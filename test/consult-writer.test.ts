@@ -16,7 +16,9 @@ import {
   CONSULT_WRITER_LIMITS,
   CONSULT_WRITER_RESPONSE_SCHEMA,
   CONSULT_WRITER_SYSTEM,
+  CONSULT_WRITER_SYSTEM_UNNAMED,
   boundConsultWriterInput,
+  consultWriterSystem,
   buildConsultWriterPrompt,
   consultWriterMemoryDecision,
   createConsultWriterServer,
@@ -26,9 +28,12 @@ import {
   type ConsultMemorySample,
   type ConsultWriterServer,
 } from '../src/core/consult-writer.ts';
+import { createHash } from 'node:crypto';
 import { llamaServerArguments } from '../src/workers/source-index/built-in-reasoning/server.ts';
 
 const GB = 1024 * 1024 * 1024;
+/** sha256 of CONSULT_WRITER_SYSTEM as it was before the unnamed level (origin/main 514db9db). */
+const GENERAL_SYSTEM_SHA256 = '96ed8cbfa207c7087302edbe065c19592046e0e089326333721bf5db29be4879';
 const NORMAL: ConsultMemorySample = { totalBytes: 24 * GB, freePercent: 40, pressure: 'normal' };
 
 const LISBON = {
@@ -69,6 +74,37 @@ describe('writer prompt', () => {
       { type: 'null' },
       { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', maxLength: 200 } },
     ]);
+  });
+
+  test('levels: "general" is the original rules, byte for byte; "unnamed" has its own; the default is general', () => {
+    // The general level's rules are unchanged by the unnamed level (owner decision 2026-10-07).
+    expect(createHash('sha256').update(CONSULT_WRITER_SYSTEM).digest('hex')).toBe(GENERAL_SYSTEM_SHA256);
+    expect(consultWriterSystem('general')).toBe(CONSULT_WRITER_SYSTEM);
+    expect(consultWriterSystem('unnamed')).toBe(CONSULT_WRITER_SYSTEM_UNNAMED);
+    expect(buildConsultWriterPrompt(LISBON)[0]!.content).toBe(CONSULT_WRITER_SYSTEM);
+    expect(buildConsultWriterPrompt(LISBON, 'general')[0]!.content).toBe(CONSULT_WRITER_SYSTEM);
+    const unnamed = buildConsultWriterPrompt(LISBON, 'unnamed');
+    expect(unnamed[0]!.content).toBe(CONSULT_WRITER_SYSTEM_UNNAMED);
+    expect(unnamed[1]!.content).toBe(buildConsultWriterPrompt(LISBON)[1]!.content);
+    // Within the same prompt bound as the general rules.
+    expect(CONSULT_WRITER_SYSTEM_UNNAMED.length).toBeLessThanOrEqual(CONSULT_WRITER_SYSTEM.length);
+  });
+
+  test('the unnamed rules: the situation and a verdict may be sent; what is always removed; what is kept; the combination rule; the same form and reply', () => {
+    const rules = CONSULT_WRITER_SYSTEM_UNNAMED;
+    expect(rules).toMatch(/ask for a verdict on it/);
+    for (const removed of [/names of people, companies, products, projects/, /employers/, /places smaller than a country/, /country only when the answer depends on it/,
+      /exact dates and years/, /exact money amounts: use bands or relative terms/, /about two months' rent/, /account, reference, phone and ID numbers/,
+      /file and document titles/, /anything quoted word for word/]) expect(rules).toMatch(removed);
+    expect(rules).toMatch(/gave 45 days' notice where the lease requires 60/);
+    expect(rules).toMatch(/health, legal, financial and relationship facts/);
+    expect(rules).toMatch(/Leave out every detail the answer does not need/);
+    expect(rules).toMatch(/Never keep a job, a rare condition and a region together unless the answer needs all three/);
+    expect(rules).toMatch(/at most 25 words: at most one short sentence of situation, then a short question of at most twelve content words/);
+    expect(rules).toMatch(/\{"questions": null\}/);
+    // The owner's example fits the form and the parser as written.
+    const example = 'A tenant gave 45 days notice where the lease requires 60. Can the landlord keep a deposit of about two months rent?';
+    expect(parseConsultWriterReply(JSON.stringify({ questions: [example] }))).toEqual({ kind: 'questions', questions: [example] });
   });
 
 });
@@ -172,6 +208,7 @@ function fakeServer(options: FakeServerOptions = {}) {
   const spawned: FakeChild[] = [];
   const args: string[][] = [];
   const requests: string[] = [];
+  const completions: Array<{ messages: Array<{ role: string; content: string }> }> = [];
   let alias = '';
   const spawnImpl = ((_command: string, argv: readonly string[], spawnOptions: { env?: Record<string, string> }) => {
     alias = spawnOptions.env?.LLAMA_ARG_ALIAS ?? '';
@@ -191,6 +228,7 @@ function fakeServer(options: FakeServerOptions = {}) {
       return options.tokens === undefined ? new Response('no', { status: 500 }) : Response.json({ tokens: new Array(options.tokens).fill(1) });
     }
     if (url.pathname === '/v1/chat/completions') {
+      completions.push(JSON.parse(String(init?.body ?? '{}')));
       const reply = options.reply ?? '{"questions": ["What passport validity do most countries require from visitors?"]}';
       const text = typeof reply === 'string' ? reply : await reply(init?.signal as AbortSignal);
       return Response.json({ choices: [{ message: { content: text } }] });
@@ -199,7 +237,7 @@ function fakeServer(options: FakeServerOptions = {}) {
   }) as typeof fetch;
   const server = createConsultWriterServer({ serverPath: '/fake/llama-server', modelPath: '/fake/model.gguf', gpu: true }, { spawnImpl, fetchImpl });
   servers.push(server);
-  return { server, spawned, args, requests, fetchImpl };
+  return { server, spawned, args, requests, completions, fetchImpl };
 }
 
 /** A completion that never answers until its signal aborts (a hung writer). */
@@ -220,6 +258,15 @@ describe('writer server lifecycle', () => {
     // Stopped with SIGKILL only, never SIGTERM.
     expect(fake.spawned[0]!.signals).toEqual(['SIGKILL']);
     expect(fake.server.pid).toBeUndefined();
+  });
+
+  test('the level option selects the rules the model is sent; none is the general level', async () => {
+    const unnamed = fakeServer({ tokens: 1_500 });
+    await runConsultWriter(LISBON, { server: unnamed.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: unnamed.fetchImpl, level: 'unnamed' });
+    expect(unnamed.completions[0]!.messages[0]).toEqual({ role: 'system', content: CONSULT_WRITER_SYSTEM_UNNAMED });
+    const general = fakeServer({ tokens: 1_500 });
+    await runConsultWriter(LISBON, { server: general.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: general.fetchImpl });
+    expect(general.completions[0]!.messages[0]).toEqual({ role: 'system', content: CONSULT_WRITER_SYSTEM });
   });
 
   test('a fresh answer kills the writer process at once (SIGKILL, no SIGTERM) and the outcome says so', async () => {
