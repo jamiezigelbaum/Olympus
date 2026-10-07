@@ -2,6 +2,41 @@
 // src/workers/source-index/built-in-embedding/litert-helper.ts
 import { dlopen, FFIType, ptr, toArrayBuffer } from "bun:ffi";
 import { closeSync, fstatSync, mkdirSync, openSync, readSync } from "fs";
+
+// src/workers/source-index/built-in-embedding/litert-isolation.ts
+var KNOWN_GOOD_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAIKADAAQAAAABAAAAIAAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAIAAgAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMACQkJCQkJEAkJEBYQEBAWHhYWFhYeJh4eHh4eJi4mJiYmJiYuLi4uLi4uLjc3Nzc3N0BAQEBASEhISEhISEhISP/bAEMBCwwMEhESHxERH0szKjNLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS//dAAQAAv/aAAwDAQACEQMRAD8A8witvatGK29q0Yrb2rRitvavZqYgzweKM6K29q0Yrb2rRitvatGK29q8+piD6/B4o//QpxW3tWjFbe1aEVt7VoxW3tWNTEHymDxRnxW3tWjFbe1aEVt7VoxWvtXn1MQfX4PFH//Z";
+
+class EngineFaultError extends Error {
+}
+function embedIsolatingPictures(indexes, hasImage, run, probeKnownGoodPicture) {
+  if (indexes.length === 0)
+    return [];
+  try {
+    run(indexes);
+    return [];
+  } catch (error) {
+    if (!(error instanceof EngineFaultError) || !indexes.some(hasImage))
+      throw error;
+  }
+  const textOnly = indexes.filter((index) => !hasImage(index));
+  if (textOnly.length > 0)
+    run(textOnly);
+  const failed = [];
+  for (const index of indexes.filter(hasImage)) {
+    try {
+      run([index]);
+    } catch (error) {
+      if (!(error instanceof EngineFaultError))
+        throw error;
+      failed.push(index);
+    }
+  }
+  if (failed.length > 0)
+    probeKnownGoodPicture();
+  return failed;
+}
+
+// src/workers/source-index/built-in-embedding/litert-helper.ts
 import { isAbsolute } from "path";
 import { createInterface } from "readline";
 var INPUT_TEXT = 0;
@@ -91,13 +126,10 @@ function readImage(path) {
 }
 function embedBatch(lib, engine, options, items) {
   const failed = new Set;
+  const unsupported = items.flatMap((item, index) => item.image && item.unsupported ? [index] : []);
   const images = items.map((item, index) => {
-    if (!item.image)
+    if (!item.image || item.unsupported)
       return;
-    if (item.unsupported) {
-      failed.add(index);
-      return;
-    }
     try {
       return readImage(item.image);
     } catch {
@@ -112,31 +144,17 @@ function embedBatch(lib, engine, options, items) {
     dimension = out.dimension;
     indexes.forEach((index, row) => results.set(index, out.vectors.subarray(row * out.dimension, (row + 1) * out.dimension)));
   };
-  const live = items.map((_, index) => index).filter((index) => !failed.has(index));
-  if (live.length > 0) {
-    try {
-      run(live);
-    } catch (error) {
-      if (!(error instanceof NativeError) || !live.some((index) => images[index]))
-        throw error;
-      const textOnly = live.filter((index) => !images[index]);
-      if (textOnly.length > 0)
-        run(textOnly);
-      for (const index of live.filter((candidate) => images[candidate])) {
-        try {
-          run([index]);
-        } catch (itemError) {
-          if (!(itemError instanceof NativeError))
-            throw itemError;
-          failed.add(index);
-        }
-      }
-    }
-  }
+  const live = items.map((_, index) => index).filter((index) => !failed.has(index) && !unsupported.includes(index));
+  const pictureFailures = embedIsolatingPictures(live, (index) => images[index] !== undefined, run, () => {
+    const probe = Buffer.from(KNOWN_GOOD_JPEG_BASE64, "base64");
+    embedRaw(lib, engine, options, [{ text: "probe", image: "known-good" }], [probe]);
+  });
+  for (const index of pictureFailures)
+    failed.add(index);
   const vectors = new Float32Array(dimension * items.length);
   for (const [index, vector] of results)
     vectors.set(vector, index * dimension);
-  return { vectors, dimension, failed: [...failed].sort((left, right) => left - right) };
+  return { vectors, dimension, failed: [...failed].sort((left, right) => left - right), unsupported };
 }
 function embedRaw(lib, engine, options, items, images) {
   const inputs = [];
@@ -197,7 +215,7 @@ function keepAlive(...values) {
   held.values = values;
 }
 
-class NativeError extends Error {
+class NativeError extends EngineFaultError {
 }
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}
@@ -246,12 +264,13 @@ function main() {
     try {
       const request = JSON.parse(line);
       id = request.id;
-      const { vectors, dimension, failed } = embedBatch(lib, engine, options, requestItems(request, vision));
+      const { vectors, dimension, failed, unsupported } = embedBatch(lib, engine, options, requestItems(request, vision));
       send({
         id,
         dimension,
         vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString("base64"),
-        ...failed.length > 0 ? { failed } : {}
+        ...failed.length > 0 ? { failed } : {},
+        ...unsupported.length > 0 ? { unsupported } : {}
       });
     } catch (error) {
       send({ id, error: error instanceof Error ? error.message : String(error), ...error instanceof NativeError ? { native: true } : {} });

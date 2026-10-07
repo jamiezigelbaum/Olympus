@@ -45,8 +45,13 @@ Nothing below names a source. Every step is shared and keyed by media type.
    images behave exactly as before. Pictures read before (OCR text only) are
    queued once more: the text lane's version for images gains the suffix
    `+image-media-2026-10-07` (`Extractor.versionFor`), and a Private store on
-   a machine that prepares pictures lists an image whose chunks carry no
-   picture as a candidate.
+   a machine that prepares pictures lists an image with no picture and no
+   `image_media_reads` row (every image reading stored since writes one) as
+   a candidate, so each is read once and tiny ones do not come back.
+   Photo text an earlier build stored in a Personal or Public store is moved
+   to the Private store once (a raised content decision and a queued move,
+   per tier set; per-item overrides stay) or, in a plain store, stripped once
+   with a `sync_runs` note (`olympus_image_content_private_only`).
 3. **Store.** `media` travels runner, sink, store and lands on the item's
    first chunk (`chunks.media_path`, `chunks.media_sha256`; additive schema
    migration v13). The chunk's `embedding_input_hash` includes the picture's
@@ -71,12 +76,15 @@ Nothing below names a source. Every step is shared and keyed by media type.
    lane passes it for a chunk with media. Only a provider with
    `imageSupport()` (the built-in LiteRT provider) reads it; every other
    provider embeds the text alone. For a picture-reading provider: while its
-   image encoder is not running, photo chunks are held (text keeps
-   embedding, and a log line says so); a picture the encoder cannot read
-   fails only its own input (`SourceEmbeddingInputsFailedError`) and is
-   recorded in `chunk_media_failures`, so it is never sent again; a chunk
-   whose cache file is gone has its picture dropped and is re-hashed, so it
-   embeds as text. The document prompt is the usual
+   image encoder is not running (or a restart brought it back without it),
+   photo chunks are held, nothing recorded (text keeps embedding, and a log
+   line says so); a picture the encoder cannot read fails only its own input
+   (`SourceEmbeddingInputsFailedError`), is counted in `chunk_media_failures`
+   and retried after 1 h and 2 h, and after three failures is dropped so the
+   photo embeds as text; a chunk whose cache file is gone has its picture
+   dropped and is re-hashed, so it embeds as text. A dropped picture comes
+   back only with the next extraction of a changed file; nothing re-queues
+   it. An engine fault is never blamed on a picture (see 5). The document prompt is the usual
    `title: {title} | text: {text}`, plus the picture, as one joint vector.
    Questions are text only.
 5. **Built-in helper.** The EmbeddingGemma 2 spec carries
@@ -88,7 +96,9 @@ Nothing below names a source. Every step is shared and keyed by media type.
    without it and reports `vision: false`. A batch a picture breaks is split
    (text alone, then each picture alone); a failing picture comes back in
    `failed` and is never treated as an engine fault, so it does not move the
-   model off the GPU. The model's identity (`configHash`,
+   model off the GPU. When pictures fail one by one, a known-good 32-pixel
+   JPEG is embedded: if that fails too the engine is at fault, the helper is
+   replaced and no picture is blamed. The model's identity (`configHash`,
    epoch) is unchanged and frozen by a test.
 6. **Tiers.** A picture, and any text read off a picture, is stored only in
    a Private store: the shared store sink refuses image content for any

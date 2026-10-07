@@ -1451,7 +1451,9 @@ import {
   chmodSync,
   existsSync as existsSync2,
   mkdirSync as mkdirSync3,
+  lstatSync as lstatSync2,
   readdirSync,
+  realpathSync,
   renameSync as renameSync2,
   rmSync as rmSync2,
   rmdirSync,
@@ -1477,10 +1479,28 @@ function isSha256(value) {
   }
   return true;
 }
-function isMediaCachePath(path, sha256, dir = mediaCacheDir()) {
-  if (!isAbsolute2(path) || !isSha256(sha256))
+function isMediaCachePath(path, sha256, dir) {
+  if (!isAbsolute2(path) || !isSha256(sha256) || resolve2(path) !== path)
     return false;
-  return resolve2(path) === join2(resolve2(dir), `${sha256}.jpg`);
+  if (basename(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename(dirname3(path))))
+    return false;
+  if (dir !== undefined && dirname3(path) !== resolve2(dir))
+    return false;
+  try {
+    const stat2 = lstatSync2(path);
+    if (!stat2.isFile())
+      return false;
+  } catch {}
+  return true;
+}
+function mediaHolderName(holder) {
+  if (holder.startsWith("staging:") || holder.startsWith("memory:"))
+    return holder;
+  try {
+    return realpathSync(holder);
+  } catch {
+    return resolve2(holder);
+  }
 }
 function retainMediaCacheFile(path, sha256, holder, dir) {
   if (!isMediaCachePath(path, sha256, dir))
@@ -1509,6 +1529,51 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
     return false;
   }
 }
+function sweepMediaCache(dir, options = {}) {
+  const maxAgeMs = options.maxAgeMs ?? MEDIA_CACHE_ORPHAN_AGE_MS;
+  const now = options.now ?? Date.now();
+  const old = (path) => {
+    try {
+      return now - statSync3(path).mtimeMs > maxAgeMs;
+    } catch {
+      return false;
+    }
+  };
+  let removed = 0;
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    const path = join2(dir, name);
+    try {
+      if (name.startsWith(".") && name.endsWith(".tmp")) {
+        if (old(path))
+          rmSync2(path, { force: true });
+        continue;
+      }
+      if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
+        continue;
+      const refs = refsDir(path);
+      if (existsSync2(refs)) {
+        for (const marker of readdirSync(refs)) {
+          if (marker.startsWith("staging-") && old(join2(refs, marker)))
+            rmSync2(join2(refs, marker), { force: true });
+        }
+        if (readdirSync(refs).length > 0)
+          continue;
+        rmdirSync(refs);
+      }
+      if (old(path)) {
+        rmSync2(path, { force: true });
+        removed += 1;
+      }
+    } catch {}
+  }
+  return removed;
+}
 function addMarker(path, holder) {
   const refs = refsDir(path);
   ensureOwnerOnlyDir(refs);
@@ -1518,17 +1583,18 @@ function refsDir(path) {
   return join2(dirname3(path), `${basename(path)}.refs`);
 }
 function holderName(holder) {
-  const digest = createHash("sha256").update(holder).digest("hex").slice(0, 32);
+  const digest = createHash("sha256").update(mediaHolderName(holder)).digest("hex").slice(0, 32);
   return holder.startsWith("staging:") ? `staging-${digest}` : digest;
 }
 function ensureOwnerOnlyDir(dir) {
   mkdirSync3(dir, { recursive: true, mode: 448 });
   chmodSync(dir, 448);
 }
-var MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", SIPS_PATH = "/usr/bin/sips", MEDIA_CACHE_ORPHAN_AGE_MS;
+var MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", SIPS_PATH = "/usr/bin/sips", MEDIA_CACHE_ORPHAN_AGE_MS, MEDIA_CACHE_DIR_NAMES;
 var init_media_cache = __esm(() => {
   init_remote_access();
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
+  MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
 // src/core/source-ingestion-policy.ts
@@ -7975,11 +8041,13 @@ var init_embeddings = __esm(() => {
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
-    constructor(failedIndexes, reason) {
+    disposition;
+    constructor(failedIndexes, reason, disposition = "failed") {
       super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
       this.name = "SourceEmbeddingInputsFailedError";
       this.failedIndexes = failedIndexes;
       this.reason = reason;
+      this.disposition = disposition;
     }
   };
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
@@ -11740,7 +11808,7 @@ var init_reactions = __esm(() => {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync as existsSync8, lstatSync as lstatSync2, mkdirSync as mkdirSync8, statSync as statSync5 } from "node:fs";
+import { existsSync as existsSync8, lstatSync as lstatSync3, mkdirSync as mkdirSync8, statSync as statSync5 } from "node:fs";
 import { dirname as dirname9 } from "node:path";
 import { Database as Database2 } from "bun:sqlite";
 function connectorStoreMigrations() {
@@ -11882,7 +11950,16 @@ function createConnectorStoreChunkMediaReleases(db) {
     CREATE TABLE IF NOT EXISTS chunk_media_failures (
       media_sha256 TEXT PRIMARY KEY,
       reason TEXT NOT NULL,
-      failed_at TEXT NOT NULL
+      failed_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 1
+    );
+    -- Images this store has stored a reading of since pictures are read: an
+    -- image without a row is read once more (a text-only reading from before),
+    -- one with a row is not listed again, whatever its picture became.
+    CREATE TABLE IF NOT EXISTS image_media_reads (
+      item_pk INTEGER PRIMARY KEY,
+      read_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
     );
     CREATE TRIGGER IF NOT EXISTS connector_store_chunk_media_release
     AFTER DELETE ON chunks
@@ -11892,6 +11969,7 @@ function createConnectorStoreChunkMediaReleases(db) {
       VALUES (OLD.media_sha256, OLD.media_path);
     END;
   `);
+  addColumnIfMissing(db, "chunk_media_failures", "attempts", "INTEGER NOT NULL DEFAULT 1");
 }
 function emptyMetadataOnlyStripSummary(corpusId, dryRun, matcher) {
   return {
@@ -12553,6 +12631,15 @@ async function assertEmbeddingProviderCanEmbed(provider) {
 }
 function usableEmbeddingVector(vector, dimension) {
   return vector.length === dimension && vector.every((value) => typeof value === "number" && Number.isFinite(value));
+}
+function sweepMediaCacheThrottled() {
+  const now = Date.now();
+  if (now - lastMediaCacheSweepMs < 60 * 60000)
+    return;
+  lastMediaCacheSweepMs = now;
+  try {
+    sweepMediaCache(mediaCacheDir());
+  } catch {}
 }
 function connectorStoreChunkEmbeddingInputHash(embeddingText, mediaSha256) {
   return mediaSha256 ? hashString2(`${embeddingText}
@@ -13261,8 +13348,9 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV11Schema(db);
   if (version === 12)
     validateConnectorStoreV12Schema(db);
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION)
-    validateConnectorStoreSchema(db);
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+    validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
 }
 function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreSchemaShape(db, CONNECTOR_STORE_V5_ITEM_COLUMNS, true, "v6");
@@ -13271,7 +13359,8 @@ function validateConnectorStoreV6Schema(db) {
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
-  assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at"], false, "v13");
+  assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
+  assertExactTableColumns(db, "image_media_reads", ["item_pk", "read_at"], false, "v13");
   assertIndexColumns(db, "idx_connector_store_chunks_media", ["media_sha256"], "v13");
   assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
 }
@@ -13728,13 +13817,13 @@ function errorMessage2(error) {
 function nowIso() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_media_cache();
@@ -13766,6 +13855,7 @@ var init_local_index = __esm(() => {
     "application/vnd.google-apps.folder"
   ]);
   CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
+  CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
     createTableSql: `
@@ -13832,7 +13922,9 @@ var init_local_index = __esm(() => {
     exclusions;
     reactionsColumnPresent = false;
     chunkMediaColumnsPresent = false;
+    imageMediaReadsPresent = false;
     mediaHolder;
+    stillImagesRead;
     tierLedgerHandle;
     tierLedgerOwned;
     tierLedgerDisabled;
@@ -13844,6 +13936,7 @@ var init_local_index = __esm(() => {
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
       this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID4()}` : this.dbPath;
+      this.stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
       this.family = options.family;
       this.trustDomain = options.trustDomain;
       this.now = options.now ?? (() => new Date);
@@ -13860,7 +13953,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store read-only mode requires an existing database path.");
       }
       if (options.readOnly === true) {
-        const stat2 = lstatSync2(this.dbPath);
+        const stat2 = lstatSync3(this.dbPath);
         if (!stat2.isFile() || stat2.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
@@ -13881,10 +13974,12 @@ var init_local_index = __esm(() => {
           refuseUnversionedConnectorStoreSchema(this.db);
           this.migrate();
           runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
+          createConnectorStoreChunkMediaReleases(this.db);
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
+        this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
       } catch (error) {
         closeSqliteStore(this.db);
         throw error;
@@ -14389,8 +14484,27 @@ var init_local_index = __esm(() => {
       this.releaseUnreferencedChunkMedia();
       return imported;
     }
-    chunkMediaFailed(mediaSha256) {
-      return Boolean(this.db.query("SELECT 1 AS failed FROM chunk_media_failures WHERE media_sha256 = ?").get(mediaSha256));
+    chunkMediaBackingOff(mediaSha256) {
+      const row = this.db.query("SELECT failed_at, attempts FROM chunk_media_failures WHERE media_sha256 = ?").get(mediaSha256);
+      if (!row)
+        return false;
+      const waitMs = CHUNK_MEDIA_RETRY_BASE_MS * 2 ** Math.max(0, row.attempts - 1);
+      return this.now().getTime() - Date.parse(row.failed_at) < waitMs;
+    }
+    recordChunkMediaFailure(mediaSha256, reason) {
+      const failedAt = this.now().toISOString();
+      this.db.query(`
+      INSERT INTO chunk_media_failures (media_sha256, reason, failed_at, attempts) VALUES (?, ?, ?, 1)
+      ON CONFLICT(media_sha256) DO UPDATE SET
+        reason = excluded.reason, failed_at = excluded.failed_at, attempts = chunk_media_failures.attempts + 1
+    `).run(mediaSha256, reason, failedAt);
+      const attempts = this.db.query("SELECT attempts FROM chunk_media_failures WHERE media_sha256 = ?").get(mediaSha256).attempts;
+      if (attempts < CHUNK_MEDIA_MAX_ATTEMPTS)
+        return;
+      const chunks = this.db.query("SELECT chunk_pk, item_pk FROM chunks WHERE media_sha256 = ?").all(mediaSha256);
+      for (const chunk of chunks)
+        this.clearChunkMedia(chunk.chunk_pk, chunk.item_pk);
+      this.db.query("DELETE FROM chunk_media_failures WHERE media_sha256 = ?").run(mediaSha256);
     }
     storedEmbeddingSeasoning(itemPk) {
       return this.db.query(`
@@ -14535,6 +14649,50 @@ var init_local_index = __esm(() => {
         return;
       const hashes = this.db.query("SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk).map((chunk) => chunk.content_hash);
       return migrationFingerprint(row.content_hash, hashes);
+    }
+    stripImageContentOutsidePrivate(options = {}) {
+      if (this.trustDomain === "secure_local")
+        return 0;
+      const rows = this.db.query(`
+      SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND LOWER(i.mime_type) LIKE 'image/%'
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+    `).all();
+      const ledger = this.tierLedger();
+      let stripped = 0;
+      try {
+        for (const row of rows) {
+          const identity = {
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+          };
+          if (options.keep?.(identity))
+            continue;
+          if (ledger?.getOverride(identity))
+            continue;
+          this.db.transaction(() => {
+            this.db.query("DELETE FROM chunk_embeddings WHERE item_pk = ?").run(row.item_pk);
+            this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+            this.refreshFtsForItem(row.item_pk);
+          })();
+          stripped += 1;
+        }
+        if (stripped > 0) {
+          const at = this.now().toISOString();
+          this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
+        `).run(`image-content-private-only-${randomUUID4()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        }
+      } finally {
+        this.releaseUnreferencedChunkMedia();
+      }
+      return stripped;
     }
     stripCopyContent(identity) {
       try {
@@ -15027,7 +15185,7 @@ var init_local_index = __esm(() => {
       const accountScope = normalizeOptionalAccountScope(options.accountScope);
       const selectedFilters = connectorStoreFilterSql(options.filters);
       let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
-      const imagesWithoutPicture = this.chunkMediaColumnsPresent && this.trustDomain === "secure_local" && stillImagePreparationAvailable();
+      const imagesWithoutPicture = this.imageMediaReadsPresent && this.trustDomain === "secure_local" && this.stillImagesRead;
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
       const query = this.db.query(`
       SELECT
@@ -15044,6 +15202,7 @@ var init_local_index = __esm(() => {
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
           ${imagesWithoutPicture ? `OR (
             LOWER(i.mime_type) LIKE 'image/%'
+            AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
             AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk AND c.media_sha256 IS NOT NULL)
           )` : ""})
         ${selectedFilters.sql}
@@ -15411,6 +15570,9 @@ var init_local_index = __esm(() => {
             continue;
           }
           if (this.itemRepresentationCoverage(record.expectation).complete) {
+            if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+              this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
+            }
             itemsUnchanged += 1;
             continue;
           }
@@ -15421,6 +15583,9 @@ var init_local_index = __esm(() => {
           const upsert = this.upsertItemWithOwner(item, sensitivity, ownerConnectorId, options.ownershipKind, syncRunId, "local_write", options.preserveStoredSearchText === true, options.preserveStoredSearchTextOwnedFacets === true);
           this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars, record.media);
           this.refreshFtsForItem(upsert.itemPk);
+          if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+            this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(upsert.itemPk, this.now().toISOString());
+          }
           chunksAwaitingEmbedding += this.db.query(`
           SELECT COUNT(*) AS count
           FROM chunks c
@@ -15474,12 +15639,16 @@ var init_local_index = __esm(() => {
       if (!this.chunkMediaColumnsPresent)
         return;
       try {
-        const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000").all();
-        for (const entry of queued) {
-          const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
-          if (!referenced)
-            releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
-          this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
+        for (;; ) {
+          const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000").all();
+          if (queued.length === 0)
+            break;
+          for (const entry of queued) {
+            const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
+            if (!referenced)
+              releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+            this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
+          }
         }
       } catch {}
     }
@@ -17185,6 +17354,7 @@ var init_local_index = __esm(() => {
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
       await options.assertAuthorized?.();
       this.releaseUnreferencedChunkMedia();
+      sweepMediaCacheThrottled();
       const limit = normalizeEmbedLimit(options.limit);
       const journalId = normalizeMaintenanceJournalId(options.journalId);
       const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(journalId, options.journalLeaseGeneration);
@@ -17319,7 +17489,7 @@ var init_local_index = __esm(() => {
           for (const row of batch) {
             if (!row.media_sha256)
               continue;
-            if (!readsImages || this.chunkMediaFailed(row.media_sha256)) {
+            if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
               skip.add(row);
             } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync8(row.media_path)) {
               this.clearChunkMedia(row.chunk_pk, row.item_pk);
@@ -17345,12 +17515,15 @@ var init_local_index = __esm(() => {
           if (!(error instanceof SourceEmbeddingInputsFailedError))
             throw error;
           const failedRows = new Set(error.failedIndexes.map((index) => batch[index]).filter((row) => row !== undefined));
-          const failedAt = nowIso();
-          for (const row of failedRows) {
-            if (row.media_sha256) {
-              this.db.query(`
-              INSERT OR REPLACE INTO chunk_media_failures (media_sha256, reason, failed_at) VALUES (?, ?, ?)
-            `).run(row.media_sha256, error.reason, failedAt);
+          if (error.disposition === "held") {
+            readsImages = false;
+            for (const row of batch)
+              if (row.media_sha256)
+                failedRows.add(row);
+          } else {
+            for (const row of failedRows) {
+              if (row.media_sha256)
+                this.recordChunkMediaFailure(row.media_sha256, error.reason);
             }
           }
           staleSkipped += failedRows.size;
@@ -18371,7 +18544,8 @@ var init_local_index = __esm(() => {
     "chunk_media_releases",
     "connector_store_chunk_media_release",
     "idx_connector_store_chunks_media",
-    "chunk_media_failures"
+    "chunk_media_failures",
+    "image_media_reads"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -19425,6 +19599,10 @@ class HelperProcess {
       return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
+    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
+      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
+      return;
+    }
     const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
     if (!message.error && failed.size === pending.count) {
       pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
@@ -19486,6 +19664,9 @@ async function startLiteRtEmbedder(options) {
           device = "cpu";
         helper = await HelperProcess.start(options, device);
       }
+      const pictures = items.flatMap((item, index) => typeof item !== "string" && item.image ? [index] : []);
+      if (pictures.length > 0 && !helper.vision)
+        throw new LiteRtImagesUnavailableError(pictures);
       return helper.embed(items);
     },
     async release() {
@@ -19521,8 +19702,16 @@ function resolveBun() {
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
-var REQUEST_TIMEOUT_MS;
+var LiteRtImagesUnavailableError, REQUEST_TIMEOUT_MS;
 var init_litert_runtime = __esm(() => {
+  LiteRtImagesUnavailableError = class LiteRtImagesUnavailableError extends Error {
+    indexes;
+    constructor(indexes) {
+      super("The built-in search model is running without its image encoder.");
+      this.name = "LiteRtImagesUnavailableError";
+      this.indexes = indexes;
+    }
+  };
   REQUEST_TIMEOUT_MS = 3 * 60000;
 });
 
@@ -19933,7 +20122,7 @@ class BuiltInSourceEmbeddingProvider {
       const text = promptText(this.spec, input, taskType);
       if (taskType !== "RETRIEVAL_DOCUMENT" || !this.spec.vision || !input.image)
         return text;
-      if (!isMediaCachePath(input.image.path, input.image.sha256, this.mediaCacheDir()))
+      if (!isMediaCachePath(input.image.path, input.image.sha256))
         refused.add(index);
       return { text, image: input.image.path };
     });
@@ -19945,6 +20134,9 @@ class BuiltInSourceEmbeddingProvider {
       try {
         vectors = await this.withSlot(taskType, () => embedder.embed(batch));
       } catch (error) {
+        if (error instanceof LiteRtImagesUnavailableError) {
+          throw new SourceEmbeddingInputsFailedError(error.indexes.map((index) => offset + index), "image_encoder_unavailable", "held");
+        }
         throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; Olympus restarts the model on the next try.");
       }
       for (const [row, vector] of vectors.entries()) {
@@ -19963,13 +20155,6 @@ class BuiltInSourceEmbeddingProvider {
       throw new SourceEmbeddingInputsFailedError([...new Set(failed)].sort((left, right) => left - right), "image_unreadable");
     }
     return out;
-  }
-  mediaCacheDir() {
-    try {
-      return mediaCacheDir(this.env);
-    } catch {
-      return;
-    }
   }
   async forward(model, batch) {
     const rows = batch.length;
@@ -20981,6 +21166,98 @@ var init_tier_rules_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-image-content-sweep.ts
+function sweepImageContentToPrivate(options) {
+  const report = { scanned: 0, raised: 0, stripped: 0, complete: true };
+  const { set } = options;
+  const ledger = set.ledger;
+  const state = readState2(ledger.readMeta(SWEEP_META_KEY2));
+  if (state.done)
+    return report;
+  const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
+  const rows = ledger.listRouted({ ...state.after ? { after: state.after } : {}, limit });
+  for (const record of rows) {
+    report.scanned += 1;
+    try {
+      if (raiseIfImage(set, record))
+        report.raised += 1;
+    } catch {}
+  }
+  if (rows.length >= limit) {
+    report.complete = false;
+    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf4(rows.at(-1)) }));
+    return report;
+  }
+  for (const domain of ["public_safe", "internal"]) {
+    const store = set.store(domain);
+    if (!store)
+      continue;
+    report.stripped += store.stripImageContentOutsidePrivate({ keep: (identity) => ledger.isRouted(identity) });
+  }
+  ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: true }));
+  return report;
+}
+function raiseIfImage(set, record) {
+  if (record.state === "moving" || record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return false;
+  if (record.contentTier === "secure")
+    return false;
+  const identity = identityOf4(record);
+  if (set.ledger.getOverride(identity))
+    return false;
+  const current = set.ledger.copies(identity).filter((copy) => copy.state === "current");
+  const content = copyServingLayer(current, "content");
+  const domain = content ? set.domainForCorpus(content.corpusId) : undefined;
+  if (!domain || domain === "secure_local")
+    return false;
+  const exported = set.store(domain)?.exportItemCopy(identity);
+  if (!exported || exported.chunks.length === 0)
+    return false;
+  const mimeType = exported.columns["mime_type"];
+  if (typeof mimeType !== "string" || !isImageMediaType(mimeType))
+    return false;
+  const decision = {
+    metadataTier: record.metadataTier,
+    contentTier: maxTier(record.contentTier, "secure"),
+    decidedBy: "default",
+    reasons: [...record.reasons.filter((reason) => !reason.startsWith("content:")), IMAGE_PRIVATE_DEFAULT_REASON],
+    state: record.metadataPending ? "pending" : "current",
+    contentRead: true,
+    metadataPending: record.metadataPending,
+    contentPending: false,
+    metadataForced: record.metadataForced,
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: UNDECIDED_TIER_SNIFFER.id
+  };
+  set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  return true;
+}
+function readState2(raw) {
+  if (!raw)
+    return { done: false };
+  try {
+    const parsed = JSON.parse(raw);
+    return { done: parsed.done === true, ...parsed.after ? { after: parsed.after } : {} };
+  } catch {
+    return { done: false };
+  }
+}
+function identityOf4(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var SWEEP_META_KEY2 = "image_content_private_sweep", DEFAULT_IMAGE_CONTENT_SWEEP_ROWS = 1000;
+var init_tier_image_content_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -20992,6 +21269,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_row_rehome();
   init_tier_rules_sweep();
+  init_tier_image_content_sweep();
 });
 
 // src/workers/connector-store/principal.ts
@@ -25379,7 +25657,7 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash19 } from "node:crypto";
-import { existsSync as existsSync14, lstatSync as lstatSync3, mkdirSync as mkdirSync13, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync14, lstatSync as lstatSync4, mkdirSync as mkdirSync13, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname20, isAbsolute as isAbsolute6 } from "node:path";
 
 // src/workers/email-source/server.ts
@@ -29697,6 +29975,7 @@ import { existsSync as existsSync13 } from "node:fs";
 init_tier_rejudge();
 init_tier_names_only_settle();
 init_tier_rules_sweep();
+init_tier_image_content_sweep();
 init_tier_ledger();
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
@@ -30040,6 +30319,12 @@ class TierSnifferService {
         const report = sweepOwnerRuleRaises({ set });
         if (report.raised > 0 || report.secrets > 0) {
           this.options.log?.(`Olympus tier rules: ${report.raised} stored item(s) raised by a new owner rule (hidden first)` + `${report.secrets ? `, ${report.secrets} made Secrets` : ""}.`);
+        }
+      } catch {}
+      try {
+        const images = sweepImageContentToPrivate({ set });
+        if (images.raised > 0 || images.stripped > 0) {
+          this.options.log?.(`Olympus photos: ${images.raised} stored photo(s) moved to Private (hidden first), ${images.stripped} photo text(s) removed from a non-Private store.`);
         }
       } catch {}
       try {
@@ -31503,7 +31788,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   }
   const directory = dirname20(readinessPath);
   mkdirSync13(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync3(directory);
+  const parent = lstatSync4(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }

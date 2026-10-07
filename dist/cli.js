@@ -8781,7 +8781,9 @@ import {
   chmodSync as chmodSync3,
   existsSync as existsSync9,
   mkdirSync as mkdirSync8,
+  lstatSync as lstatSync6,
   readdirSync,
+  realpathSync as realpathSync2,
   renameSync as renameSync3,
   rmSync as rmSync6,
   rmdirSync,
@@ -8807,10 +8809,28 @@ function isSha256(value) {
   }
   return true;
 }
-function isMediaCachePath(path, sha256, dir = mediaCacheDir()) {
-  if (!isAbsolute4(path) || !isSha256(sha256))
+function isMediaCachePath(path, sha256, dir) {
+  if (!isAbsolute4(path) || !isSha256(sha256) || resolve4(path) !== path)
     return false;
-  return resolve4(path) === join13(resolve4(dir), `${sha256}.jpg`);
+  if (basename3(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename3(dirname12(path))))
+    return false;
+  if (dir !== undefined && dirname12(path) !== resolve4(dir))
+    return false;
+  try {
+    const stat2 = lstatSync6(path);
+    if (!stat2.isFile())
+      return false;
+  } catch {}
+  return true;
+}
+function mediaHolderName(holder) {
+  if (holder.startsWith("staging:") || holder.startsWith("memory:"))
+    return holder;
+  try {
+    return realpathSync2(holder);
+  } catch {
+    return resolve4(holder);
+  }
 }
 function writeMediaCacheFile(dir, bytes, mimeType) {
   const sha256 = createHash4("sha256").update(bytes).digest("hex");
@@ -8907,18 +8927,19 @@ function refsDir(path) {
   return join13(dirname12(path), `${basename3(path)}.refs`);
 }
 function holderName(holder) {
-  const digest = createHash4("sha256").update(holder).digest("hex").slice(0, 32);
+  const digest = createHash4("sha256").update(mediaHolderName(holder)).digest("hex").slice(0, 32);
   return holder.startsWith("staging:") ? `staging-${digest}` : digest;
 }
 function ensureOwnerOnlyDir(dir) {
   mkdirSync8(dir, { recursive: true, mode: 448 });
   chmodSync3(dir, 448);
 }
-var MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", SIPS_PATH = "/usr/bin/sips", MEDIA_CACHE_ORPHAN_AGE_MS, EXTENSIONS;
+var MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", SIPS_PATH = "/usr/bin/sips", MEDIA_CACHE_ORPHAN_AGE_MS, EXTENSIONS, MEDIA_CACHE_DIR_NAMES;
 var init_media_cache = __esm(() => {
   init_remote_access();
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   EXTENSIONS = { "image/jpeg": ".jpg" };
+  MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
 // src/core/source-ingestion-policy.ts
@@ -11496,7 +11517,7 @@ __export(exports_remote_connections, {
 });
 import { Database } from "bun:sqlite";
 import { createHash as createHash7, randomBytes as randomBytes7, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
-import { chmodSync as chmodSync4, existsSync as existsSync13, lstatSync as lstatSync6, mkdirSync as mkdirSync9 } from "node:fs";
+import { chmodSync as chmodSync4, existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync9 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 import { dirname as dirname13, isAbsolute as isAbsolute5, join as join17 } from "node:path";
 function remoteConnectionsPreV2BackupPath(dbPath) {
@@ -11693,13 +11714,13 @@ function hardenPrivateDatabasePath(dbPath) {
     throw new Error("Remote connections database must live inside a dedicated private leaf directory.");
   }
   mkdirSync9(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync6(leafDir);
+  const dirStat = lstatSync7(leafDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
     throw new Error("Remote connections database leaf must be a real private directory.");
   }
   chmodSync4(leafDir, 448);
   if (existsSync13(dbPath)) {
-    const dbStat = lstatSync6(dbPath);
+    const dbStat = lstatSync7(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
       throw new Error("Remote connections database must be a regular file, not a symlink.");
     }
@@ -13479,11 +13500,13 @@ var init_embeddings = __esm(() => {
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
-    constructor(failedIndexes, reason) {
+    disposition;
+    constructor(failedIndexes, reason, disposition = "failed") {
       super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
       this.name = "SourceEmbeddingInputsFailedError";
       this.failedIndexes = failedIndexes;
       this.reason = reason;
+      this.disposition = disposition;
     }
   };
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
@@ -17379,7 +17402,7 @@ var init_manifest = __esm(() => {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync15, lstatSync as lstatSync7, mkdirSync as mkdirSync11, statSync as statSync7 } from "node:fs";
+import { existsSync as existsSync15, lstatSync as lstatSync8, mkdirSync as mkdirSync11, statSync as statSync7 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 import { Database as Database3 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
@@ -17524,7 +17547,16 @@ function createConnectorStoreChunkMediaReleases(db) {
     CREATE TABLE IF NOT EXISTS chunk_media_failures (
       media_sha256 TEXT PRIMARY KEY,
       reason TEXT NOT NULL,
-      failed_at TEXT NOT NULL
+      failed_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 1
+    );
+    -- Images this store has stored a reading of since pictures are read: an
+    -- image without a row is read once more (a text-only reading from before),
+    -- one with a row is not listed again, whatever its picture became.
+    CREATE TABLE IF NOT EXISTS image_media_reads (
+      item_pk INTEGER PRIMARY KEY,
+      read_at TEXT NOT NULL,
+      FOREIGN KEY(item_pk) REFERENCES items(item_pk) ON DELETE CASCADE
     );
     CREATE TRIGGER IF NOT EXISTS connector_store_chunk_media_release
     AFTER DELETE ON chunks
@@ -17534,6 +17566,7 @@ function createConnectorStoreChunkMediaReleases(db) {
       VALUES (OLD.media_sha256, OLD.media_path);
     END;
   `);
+  addColumnIfMissing(db, "chunk_media_failures", "attempts", "INTEGER NOT NULL DEFAULT 1");
 }
 function emptyMetadataOnlyStripSummary(corpusId, dryRun, matcher) {
   return {
@@ -18859,6 +18892,15 @@ async function assertEmbeddingProviderCanEmbed(provider) {
 function usableEmbeddingVector(vector, dimension) {
   return vector.length === dimension && vector.every((value) => typeof value === "number" && Number.isFinite(value));
 }
+function sweepMediaCacheThrottled() {
+  const now = Date.now();
+  if (now - lastMediaCacheSweepMs < 60 * 60000)
+    return;
+  lastMediaCacheSweepMs = now;
+  try {
+    sweepMediaCache(mediaCacheDir());
+  } catch {}
+}
 function connectorStoreChunkEmbeddingInputHash(embeddingText, mediaSha256) {
   return mediaSha256 ? hashString2(`${embeddingText}
 \x00image:sha256:${mediaSha256}`) : hashString2(embeddingText);
@@ -19566,8 +19608,9 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV11Schema(db);
   if (version === 12)
     validateConnectorStoreV12Schema(db);
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION)
-    validateConnectorStoreSchema(db);
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+    validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
 }
 function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreSchemaShape(db, CONNECTOR_STORE_V5_ITEM_COLUMNS, true, "v6");
@@ -19576,7 +19619,8 @@ function validateConnectorStoreV6Schema(db) {
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
-  assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at"], false, "v13");
+  assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
+  assertExactTableColumns(db, "image_media_reads", ["item_pk", "read_at"], false, "v13");
   assertIndexColumns(db, "idx_connector_store_chunks_media", ["media_sha256"], "v13");
   assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
 }
@@ -20033,13 +20077,13 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_media_cache();
@@ -20071,6 +20115,7 @@ var init_local_index = __esm(() => {
     "application/vnd.google-apps.folder"
   ]);
   CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
+  CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
     createTableSql: `
@@ -20137,7 +20182,9 @@ var init_local_index = __esm(() => {
     exclusions;
     reactionsColumnPresent = false;
     chunkMediaColumnsPresent = false;
+    imageMediaReadsPresent = false;
     mediaHolder;
+    stillImagesRead;
     tierLedgerHandle;
     tierLedgerOwned;
     tierLedgerDisabled;
@@ -20149,6 +20196,7 @@ var init_local_index = __esm(() => {
       this.corpusId = requireNonEmpty2(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty2(options.dbPath, "Connector store db path");
       this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID5()}` : this.dbPath;
+      this.stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
       this.family = options.family;
       this.trustDomain = options.trustDomain;
       this.now = options.now ?? (() => new Date);
@@ -20165,7 +20213,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store read-only mode requires an existing database path.");
       }
       if (options.readOnly === true) {
-        const stat2 = lstatSync7(this.dbPath);
+        const stat2 = lstatSync8(this.dbPath);
         if (!stat2.isFile() || stat2.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
@@ -20186,10 +20234,12 @@ var init_local_index = __esm(() => {
           refuseUnversionedConnectorStoreSchema(this.db);
           this.migrate();
           runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
+          createConnectorStoreChunkMediaReleases(this.db);
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
+        this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
       } catch (error) {
         closeSqliteStore(this.db);
         throw error;
@@ -20694,8 +20744,27 @@ var init_local_index = __esm(() => {
       this.releaseUnreferencedChunkMedia();
       return imported;
     }
-    chunkMediaFailed(mediaSha256) {
-      return Boolean(this.db.query("SELECT 1 AS failed FROM chunk_media_failures WHERE media_sha256 = ?").get(mediaSha256));
+    chunkMediaBackingOff(mediaSha256) {
+      const row = this.db.query("SELECT failed_at, attempts FROM chunk_media_failures WHERE media_sha256 = ?").get(mediaSha256);
+      if (!row)
+        return false;
+      const waitMs = CHUNK_MEDIA_RETRY_BASE_MS * 2 ** Math.max(0, row.attempts - 1);
+      return this.now().getTime() - Date.parse(row.failed_at) < waitMs;
+    }
+    recordChunkMediaFailure(mediaSha256, reason) {
+      const failedAt = this.now().toISOString();
+      this.db.query(`
+      INSERT INTO chunk_media_failures (media_sha256, reason, failed_at, attempts) VALUES (?, ?, ?, 1)
+      ON CONFLICT(media_sha256) DO UPDATE SET
+        reason = excluded.reason, failed_at = excluded.failed_at, attempts = chunk_media_failures.attempts + 1
+    `).run(mediaSha256, reason, failedAt);
+      const attempts = this.db.query("SELECT attempts FROM chunk_media_failures WHERE media_sha256 = ?").get(mediaSha256).attempts;
+      if (attempts < CHUNK_MEDIA_MAX_ATTEMPTS)
+        return;
+      const chunks = this.db.query("SELECT chunk_pk, item_pk FROM chunks WHERE media_sha256 = ?").all(mediaSha256);
+      for (const chunk of chunks)
+        this.clearChunkMedia(chunk.chunk_pk, chunk.item_pk);
+      this.db.query("DELETE FROM chunk_media_failures WHERE media_sha256 = ?").run(mediaSha256);
     }
     storedEmbeddingSeasoning(itemPk) {
       return this.db.query(`
@@ -20840,6 +20909,50 @@ var init_local_index = __esm(() => {
         return;
       const hashes = this.db.query("SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk).map((chunk) => chunk.content_hash);
       return migrationFingerprint(row.content_hash, hashes);
+    }
+    stripImageContentOutsidePrivate(options = {}) {
+      if (this.trustDomain === "secure_local")
+        return 0;
+      const rows = this.db.query(`
+      SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM items i
+      WHERE i.tombstoned = 0
+        AND LOWER(i.mime_type) LIKE 'image/%'
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+    `).all();
+      const ledger = this.tierLedger();
+      let stripped = 0;
+      try {
+        for (const row of rows) {
+          const identity = {
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+          };
+          if (options.keep?.(identity))
+            continue;
+          if (ledger?.getOverride(identity))
+            continue;
+          this.db.transaction(() => {
+            this.db.query("DELETE FROM chunk_embeddings WHERE item_pk = ?").run(row.item_pk);
+            this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+            this.refreshFtsForItem(row.item_pk);
+          })();
+          stripped += 1;
+        }
+        if (stripped > 0) {
+          const at = this.now().toISOString();
+          this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
+        `).run(`image-content-private-only-${randomUUID5()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        }
+      } finally {
+        this.releaseUnreferencedChunkMedia();
+      }
+      return stripped;
     }
     stripCopyContent(identity) {
       try {
@@ -21332,7 +21445,7 @@ var init_local_index = __esm(() => {
       const accountScope = normalizeOptionalAccountScope(options.accountScope);
       const selectedFilters = connectorStoreFilterSql(options.filters);
       let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
-      const imagesWithoutPicture = this.chunkMediaColumnsPresent && this.trustDomain === "secure_local" && stillImagePreparationAvailable();
+      const imagesWithoutPicture = this.imageMediaReadsPresent && this.trustDomain === "secure_local" && this.stillImagesRead;
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
       const query = this.db.query(`
       SELECT
@@ -21349,6 +21462,7 @@ var init_local_index = __esm(() => {
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
           ${imagesWithoutPicture ? `OR (
             LOWER(i.mime_type) LIKE 'image/%'
+            AND NOT EXISTS (SELECT 1 FROM image_media_reads r WHERE r.item_pk = i.item_pk)
             AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk AND c.media_sha256 IS NOT NULL)
           )` : ""})
         ${selectedFilters.sql}
@@ -21716,6 +21830,9 @@ var init_local_index = __esm(() => {
             continue;
           }
           if (this.itemRepresentationCoverage(record.expectation).complete) {
+            if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+              this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
+            }
             itemsUnchanged += 1;
             continue;
           }
@@ -21726,6 +21843,9 @@ var init_local_index = __esm(() => {
           const upsert = this.upsertItemWithOwner(item, sensitivity, ownerConnectorId, options.ownershipKind, syncRunId, "local_write", options.preserveStoredSearchText === true, options.preserveStoredSearchTextOwnedFacets === true);
           this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars, record.media);
           this.refreshFtsForItem(upsert.itemPk);
+          if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType)) {
+            this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(upsert.itemPk, this.now().toISOString());
+          }
           chunksAwaitingEmbedding += this.db.query(`
           SELECT COUNT(*) AS count
           FROM chunks c
@@ -21779,12 +21899,16 @@ var init_local_index = __esm(() => {
       if (!this.chunkMediaColumnsPresent)
         return;
       try {
-        const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000").all();
-        for (const entry of queued) {
-          const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
-          if (!referenced)
-            releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
-          this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
+        for (;; ) {
+          const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000").all();
+          if (queued.length === 0)
+            break;
+          for (const entry of queued) {
+            const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
+            if (!referenced)
+              releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+            this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
+          }
         }
       } catch {}
     }
@@ -23490,6 +23614,7 @@ var init_local_index = __esm(() => {
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
       await options.assertAuthorized?.();
       this.releaseUnreferencedChunkMedia();
+      sweepMediaCacheThrottled();
       const limit = normalizeEmbedLimit(options.limit);
       const journalId = normalizeMaintenanceJournalId(options.journalId);
       const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(journalId, options.journalLeaseGeneration);
@@ -23624,7 +23749,7 @@ var init_local_index = __esm(() => {
           for (const row of batch) {
             if (!row.media_sha256)
               continue;
-            if (!readsImages || this.chunkMediaFailed(row.media_sha256)) {
+            if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
               skip.add(row);
             } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync15(row.media_path)) {
               this.clearChunkMedia(row.chunk_pk, row.item_pk);
@@ -23650,12 +23775,15 @@ var init_local_index = __esm(() => {
           if (!(error instanceof SourceEmbeddingInputsFailedError))
             throw error;
           const failedRows = new Set(error.failedIndexes.map((index) => batch[index]).filter((row) => row !== undefined));
-          const failedAt = nowIso2();
-          for (const row of failedRows) {
-            if (row.media_sha256) {
-              this.db.query(`
-              INSERT OR REPLACE INTO chunk_media_failures (media_sha256, reason, failed_at) VALUES (?, ?, ?)
-            `).run(row.media_sha256, error.reason, failedAt);
+          if (error.disposition === "held") {
+            readsImages = false;
+            for (const row of batch)
+              if (row.media_sha256)
+                failedRows.add(row);
+          } else {
+            for (const row of failedRows) {
+              if (row.media_sha256)
+                this.recordChunkMediaFailure(row.media_sha256, error.reason);
             }
           }
           staleSkipped += failedRows.size;
@@ -24676,7 +24804,8 @@ var init_local_index = __esm(() => {
     "chunk_media_releases",
     "connector_store_chunk_media_release",
     "idx_connector_store_chunks_media",
-    "chunk_media_failures"
+    "chunk_media_failures",
+    "image_media_reads"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -25749,6 +25878,10 @@ class HelperProcess {
       return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
+    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
+      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
+      return;
+    }
     const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
     if (!message.error && failed.size === pending.count) {
       pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
@@ -25810,6 +25943,9 @@ async function startLiteRtEmbedder(options) {
           device = "cpu";
         helper = await HelperProcess.start(options, device);
       }
+      const pictures = items.flatMap((item, index) => typeof item !== "string" && item.image ? [index] : []);
+      if (pictures.length > 0 && !helper.vision)
+        throw new LiteRtImagesUnavailableError(pictures);
       return helper.embed(items);
     },
     async release() {
@@ -25845,8 +25981,16 @@ function resolveBun() {
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
-var REQUEST_TIMEOUT_MS;
+var LiteRtImagesUnavailableError, REQUEST_TIMEOUT_MS;
 var init_litert_runtime = __esm(() => {
+  LiteRtImagesUnavailableError = class LiteRtImagesUnavailableError extends Error {
+    indexes;
+    constructor(indexes) {
+      super("The built-in search model is running without its image encoder.");
+      this.name = "LiteRtImagesUnavailableError";
+      this.indexes = indexes;
+    }
+  };
   REQUEST_TIMEOUT_MS = 3 * 60000;
 });
 
@@ -26257,7 +26401,7 @@ class BuiltInSourceEmbeddingProvider {
       const text = promptText(this.spec, input, taskType);
       if (taskType !== "RETRIEVAL_DOCUMENT" || !this.spec.vision || !input.image)
         return text;
-      if (!isMediaCachePath(input.image.path, input.image.sha256, this.mediaCacheDir()))
+      if (!isMediaCachePath(input.image.path, input.image.sha256))
         refused.add(index);
       return { text, image: input.image.path };
     });
@@ -26269,6 +26413,9 @@ class BuiltInSourceEmbeddingProvider {
       try {
         vectors = await this.withSlot(taskType, () => embedder.embed(batch));
       } catch (error) {
+        if (error instanceof LiteRtImagesUnavailableError) {
+          throw new SourceEmbeddingInputsFailedError(error.indexes.map((index) => offset + index), "image_encoder_unavailable", "held");
+        }
         throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; Olympus restarts the model on the next try.");
       }
       for (const [row, vector] of vectors.entries()) {
@@ -26287,13 +26434,6 @@ class BuiltInSourceEmbeddingProvider {
       throw new SourceEmbeddingInputsFailedError([...new Set(failed)].sort((left, right) => left - right), "image_unreadable");
     }
     return out;
-  }
-  mediaCacheDir() {
-    try {
-      return mediaCacheDir(this.env);
-    } catch {
-      return;
-    }
   }
   async forward(model, batch) {
     const rows = batch.length;
@@ -27694,6 +27834,98 @@ var init_tier_rules_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-image-content-sweep.ts
+function sweepImageContentToPrivate(options) {
+  const report = { scanned: 0, raised: 0, stripped: 0, complete: true };
+  const { set } = options;
+  const ledger = set.ledger;
+  const state = readState2(ledger.readMeta(SWEEP_META_KEY2));
+  if (state.done)
+    return report;
+  const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
+  const rows = ledger.listRouted({ ...state.after ? { after: state.after } : {}, limit });
+  for (const record of rows) {
+    report.scanned += 1;
+    try {
+      if (raiseIfImage(set, record))
+        report.raised += 1;
+    } catch {}
+  }
+  if (rows.length >= limit) {
+    report.complete = false;
+    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf4(rows.at(-1)) }));
+    return report;
+  }
+  for (const domain of ["public_safe", "internal"]) {
+    const store = set.store(domain);
+    if (!store)
+      continue;
+    report.stripped += store.stripImageContentOutsidePrivate({ keep: (identity) => ledger.isRouted(identity) });
+  }
+  ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: true }));
+  return report;
+}
+function raiseIfImage(set, record) {
+  if (record.state === "moving" || record.contentTier === "secrets" || record.metadataTier === "secrets")
+    return false;
+  if (record.contentTier === "secure")
+    return false;
+  const identity = identityOf4(record);
+  if (set.ledger.getOverride(identity))
+    return false;
+  const current = set.ledger.copies(identity).filter((copy) => copy.state === "current");
+  const content = copyServingLayer(current, "content");
+  const domain = content ? set.domainForCorpus(content.corpusId) : undefined;
+  if (!domain || domain === "secure_local")
+    return false;
+  const exported = set.store(domain)?.exportItemCopy(identity);
+  if (!exported || exported.chunks.length === 0)
+    return false;
+  const mimeType = exported.columns["mime_type"];
+  if (typeof mimeType !== "string" || !isImageMediaType(mimeType))
+    return false;
+  const decision = {
+    metadataTier: record.metadataTier,
+    contentTier: maxTier(record.contentTier, "secure"),
+    decidedBy: "default",
+    reasons: [...record.reasons.filter((reason) => !reason.startsWith("content:")), IMAGE_PRIVATE_DEFAULT_REASON],
+    state: record.metadataPending ? "pending" : "current",
+    contentRead: true,
+    metadataPending: record.metadataPending,
+    contentPending: false,
+    metadataForced: record.metadataForced,
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: UNDECIDED_TIER_SNIFFER.id
+  };
+  set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
+  return true;
+}
+function readState2(raw) {
+  if (!raw)
+    return { done: false };
+  try {
+    const parsed = JSON.parse(raw);
+    return { done: parsed.done === true, ...parsed.after ? { after: parsed.after } : {} };
+  } catch {
+    return { done: false };
+  }
+}
+function identityOf4(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+var SWEEP_META_KEY2 = "image_content_private_sweep", DEFAULT_IMAGE_CONTENT_SWEEP_ROWS = 1000;
+var init_tier_image_content_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 import { existsSync as existsSync18 } from "node:fs";
 function tieredStoreSetLedgerPath(secureLocalStoreDbPath) {
@@ -27897,6 +28129,9 @@ class TieredStoreSet {
     } catch {}
     try {
       settleNamesOnlyItems({ set: this });
+    } catch {}
+    try {
+      sweepImageContentToPrivate({ set: this });
     } catch {}
     try {
       await rehomePrivateTierRows({ set: this });
@@ -28467,6 +28702,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_row_rehome();
   init_tier_rules_sweep();
+  init_tier_image_content_sweep();
   TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
   TIER_KEY_TRUST_DOMAIN = {
     public: "public_safe",
@@ -34813,7 +35049,7 @@ function readFileSourceScopeApproval(input) {
   if (!account) {
     return pendingSnapshot(input.sourceId, "not-connected", undefined, "not_connected");
   }
-  const read = readState2(input.statePath);
+  const read = readState3(input.statePath);
   if (read.kind === "missing") {
     return pendingSnapshot(input.sourceId, `missing:${account.generation}`, account.generation, "missing");
   }
@@ -34864,7 +35100,7 @@ function approveFileSourceScope(input) {
     if (!input.wholeAccount && selections.some((selection) => selection.key === "/" || input.sourceId === "google_drive.docs" && selection.key.toLowerCase() === "root")) {
       throw new OperationError("invalid_request", "Choose Whole account and confirm it explicitly to approve the provider root.");
     }
-    const existing = readState2(input.statePath);
+    const existing = readState3(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
     const revision = randomUUID8();
     approvals.push({
@@ -34922,7 +35158,7 @@ function matchingSelections(approval, itemScopeKeys) {
   return itemScopeKeys.map((key) => byKey.get(key)).filter((selection) => selection !== undefined);
 }
 function isSameSaveReplayed(statePath, sourceId, request) {
-  const read = readState2(statePath);
+  const read = readState3(statePath);
   if (read.kind !== "valid")
     return false;
   const approval = read.state.approvals.find((candidate) => candidate.source_id === sourceId);
@@ -34965,7 +35201,7 @@ function normalizeAncestorKeys(input) {
   }
   return [...new Set(keys)];
 }
-function readState2(path) {
+function readState3(path) {
   if (!existsSync20(path))
     return { kind: "missing" };
   let raw;
@@ -35067,7 +35303,7 @@ function readMailSourceScopeApproval(input) {
   const account = connectedMailSourceAccountGeneration(input.registry, input.pinnedHandle);
   if (!account)
     return pendingSnapshot2("not-connected", undefined, "not_connected");
-  const read = readState3(input.statePath);
+  const read = readState4(input.statePath);
   if (read.kind === "missing")
     return pendingSnapshot2(`missing:${account.generation}`, account.generation, "missing");
   if (read.kind === "malformed")
@@ -35104,7 +35340,7 @@ function approveMailSourceScope(input) {
     }
     const keptCutoff = current.status === "approved" && current.mailScope?.window === input.scope.window ? current.mailScope.contentAfter : undefined;
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
-    const existing = readState3(input.statePath);
+    const existing = readState4(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
     const revision = randomUUID9();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
@@ -35348,7 +35584,7 @@ function pendingSnapshot2(revision, accountGeneration, reason) {
     reason
   };
 }
-function readState3(path) {
+function readState4(path) {
   if (!existsSync21(path))
     return { kind: "missing" };
   let raw;
@@ -37980,7 +38216,7 @@ var init_corpus_adapter2 = __esm(() => {
 });
 // src/workers/telegram-messages/capture-spool-connector.ts
 import { createHash as createHash23 } from "node:crypto";
-import { existsSync as existsSync23, lstatSync as lstatSync8, readFileSync as readFileSync21, readdirSync as readdirSync2 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync9, readFileSync as readFileSync21, readdirSync as readdirSync2 } from "node:fs";
 import { homedir as homedir24 } from "node:os";
 import { join as join33 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
@@ -38086,7 +38322,7 @@ function readTelegramCaptureSpool(options) {
       if (admitThrough && name > admitThrough.file)
         break;
       const path = join33(options.spoolDir, name);
-      const stat2 = lstatSync8(path);
+      const stat2 = lstatSync9(path);
       if (!stat2.isFile() || stat2.isSymbolicLink()) {
         throw new Error("Telegram capture spool refuses non-regular JSONL files.");
       }
@@ -38164,7 +38400,7 @@ function mostRestrictiveTrust(observed, ...others) {
 function assertTelegramCaptureSpoolDirectory(spoolDir) {
   if (!existsSync23(spoolDir))
     throw new Error("Telegram capture spool directory does not exist.");
-  const dir = lstatSync8(spoolDir);
+  const dir = lstatSync9(spoolDir);
   if (!dir.isDirectory() || dir.isSymbolicLink()) {
     throw new Error("Telegram capture spool requires a real directory.");
   }
@@ -40363,7 +40599,7 @@ var init_connector3 = __esm(() => {
 
 // src/workers/x-bookmarks/live-control.ts
 import { createHash as createHash27, randomUUID as randomUUID10 } from "node:crypto";
-import { chmodSync as chmodSync8, lstatSync as lstatSync9, mkdirSync as mkdirSync16 } from "node:fs";
+import { chmodSync as chmodSync8, lstatSync as lstatSync10, mkdirSync as mkdirSync16 } from "node:fs";
 import { homedir as homedir28 } from "node:os";
 import { dirname as dirname25, join as join37 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
@@ -47119,7 +47355,7 @@ import { createHash as createHash34, randomUUID as randomUUID15 } from "node:cry
 import {
   chmodSync as chmodSync12,
   existsSync as existsSync27,
-  lstatSync as lstatSync11,
+  lstatSync as lstatSync12,
   mkdirSync as mkdirSync20
 } from "node:fs";
 import { homedir as homedir33 } from "node:os";
@@ -47863,13 +48099,13 @@ function hardenPrivateDatabasePath2(dbPath) {
     throw new Error("Source watch database must live inside a dedicated private leaf directory.");
   }
   mkdirSync20(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync11(leafDir);
+  const dirStat = lstatSync12(leafDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
     throw new Error("Source watch database leaf must be a real private directory.");
   }
   chmodSync12(leafDir, 448);
   if (existsSync27(dbPath)) {
-    const dbStat = lstatSync11(dbPath);
+    const dbStat = lstatSync12(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
       throw new Error("Source watch database must be a regular file, not a symlink.");
     }
@@ -49568,7 +49804,7 @@ var init_engine_children = __esm(() => {
 // src/core/engine-service.ts
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { createHash as createHash35, randomBytes as randomBytes8 } from "node:crypto";
-import { existsSync as existsSync29, lstatSync as lstatSync12, readdirSync as readdirSync5, readFileSync as readFileSync26, renameSync as renameSync9, statSync as statSync14 } from "node:fs";
+import { existsSync as existsSync29, lstatSync as lstatSync13, readdirSync as readdirSync5, readFileSync as readFileSync26, renameSync as renameSync9, statSync as statSync14 } from "node:fs";
 import { homedir as homedir34, platform as osPlatform2 } from "node:os";
 import { basename as basename7, dirname as dirname31, isAbsolute as isAbsolute9, join as join45, resolve as resolvePath } from "node:path";
 function enginePaths(homeDir) {
@@ -49982,7 +50218,7 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     let problem;
     try {
       assertManagedPathParentsSync(homeDir, dir, label);
-      const stat3 = existsSync29(dir) || isSymlink(dir) ? lstatSync12(dir) : undefined;
+      const stat3 = existsSync29(dir) || isSymlink(dir) ? lstatSync13(dir) : undefined;
       if (stat3 && (stat3.isSymbolicLink() || !stat3.isDirectory()))
         problem = `${dir} is not a real folder (a symbolic link or a file).`;
       else if (stat3 && ownerUid !== undefined && stat3.uid !== ownerUid)
@@ -50009,7 +50245,7 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     }
     if (!existsSync29(path))
       continue;
-    const stat3 = lstatSync12(path);
+    const stat3 = lstatSync13(path);
     if (!stat3.isFile() || stat3.isSymbolicLink()) {
       throw new OperationError("config_error", `Olympus cannot install here: ${path} is not a regular file.`, "Remove it by hand, then run olympus engine install again. Nothing was changed.");
     }
@@ -50093,7 +50329,7 @@ function uninstallEngine(options = {}) {
     mustSucceed(exec("launchctl", ["bootout", target]), "unload the engine agent");
   let removed = false;
   if (existsSync29(paths.plistPath)) {
-    const stat3 = lstatSync12(paths.plistPath);
+    const stat3 = lstatSync13(paths.plistPath);
     if (!stat3.isFile() || stat3.isSymbolicLink()) {
       throw new OperationError("config_error", `${paths.plistPath} is not a regular file; remove it by hand.`);
     }
@@ -50137,7 +50373,7 @@ function directoryBytes(path, budget = { entries: 20000 }) {
       break;
     const child = join45(path, name);
     try {
-      const stat3 = lstatSync12(child);
+      const stat3 = lstatSync13(child);
       if (stat3.isDirectory())
         total += directoryBytes(child, budget);
       else if (stat3.isFile())
@@ -50271,7 +50507,7 @@ function swapAppDirectories(paths) {
 function installedProgram(plistPath) {
   let text;
   try {
-    const stat3 = lstatSync12(plistPath);
+    const stat3 = lstatSync13(plistPath);
     if (!stat3.isFile() || stat3.isSymbolicLink())
       return;
     text = readFileSync26(plistPath, "utf8");
@@ -50436,7 +50672,7 @@ function defaultExec(command, args) {
 }
 function writeIfChanged(path, text) {
   if (existsSync29(path)) {
-    const stat3 = lstatSync12(path);
+    const stat3 = lstatSync13(path);
     if (!stat3.isFile() || stat3.isSymbolicLink()) {
       throw new OperationError("config_error", `${path} is not a regular file; remove it by hand.`);
     }
@@ -50468,7 +50704,7 @@ function resolveBun2(explicit) {
 }
 function isSymlink(path) {
   try {
-    return lstatSync12(path).isSymbolicLink();
+    return lstatSync13(path).isSymbolicLink();
   } catch {
     return false;
   }
@@ -56494,7 +56730,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn4, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash38, randomUUID as randomUUID16 } from "node:crypto";
-import { accessSync as accessSync3, chmodSync as chmodSync14, constants as constants3, existsSync as existsSync34, mkdirSync as mkdirSync26, mkdtempSync, readdirSync as readdirSync6, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync10, statSync as statSync15, writeFileSync as writeFileSync8 } from "node:fs";
+import { accessSync as accessSync3, chmodSync as chmodSync14, constants as constants3, existsSync as existsSync34, mkdirSync as mkdirSync26, mkdtempSync, readdirSync as readdirSync6, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync3, rmSync as rmSync10, statSync as statSync15, writeFileSync as writeFileSync8 } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir as homedir38, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter4, dirname as dirname36, isAbsolute as isAbsolute10, join as join49, resolve as resolvePath2 } from "node:path";
@@ -56649,7 +56885,7 @@ function defaultZkapiStatePath(home = homedir38()) {
 function utcDay(now) {
   return now.toISOString().slice(0, 10);
 }
-function readState4(path) {
+function readState5(path) {
   if (!existsSync34(path))
     return;
   const parsed = JSON.parse(readFileSync28(path, "utf8"));
@@ -56659,14 +56895,14 @@ function readState4(path) {
   return parsed;
 }
 function zkapiUsageToday(path, now) {
-  const state = readState4(path);
+  const state = readState5(path);
   return state && state.day === utcDay(now) ? { count: state.count, reservedMicroUsd: state.reservedMicroUsd } : { count: 0, reservedMicroUsd: 0 };
 }
 function zkapiLastSession(path) {
-  return readState4(path)?.lastSession;
+  return readState5(path)?.lastSession;
 }
 function zkapiOutstandingFences(path) {
-  return readState4(path)?.fences ?? {};
+  return readState5(path)?.fences ?? {};
 }
 function zkapiUnresolvedSession(path, scope) {
   const fences = zkapiOutstandingFences(path);
@@ -56677,7 +56913,7 @@ function zkapiWalletDirectory(env) {
   const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join49(home, "Library", "Application Support", "zkapi-clientd") : join49(env.XDG_CONFIG_HOME?.trim() || join49(home, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath2(configured);
   try {
-    return realpathSync2(absolute2);
+    return realpathSync3(absolute2);
   } catch {
     return absolute2;
   }
@@ -56706,7 +56942,7 @@ function updateState(path, now, mutate) {
   mkdirSync26(dirname36(path), { recursive: true, mode: 448 });
   return withFileLeaseSync(path, (lease) => {
     const day = utcDay(now);
-    const current = readState4(path);
+    const current = readState5(path);
     const base = current && current.day === day ? current : {
       version: 1,
       day,
@@ -56911,7 +57147,7 @@ function supervisorAlive(supervisor) {
   return supervisor.instance.mechanism !== current.mechanism || supervisor.instance.startTime === current.startTime;
 }
 async function recoverStrandedGroups(statePath, now) {
-  const running = readState4(statePath)?.running;
+  const running = readState5(statePath)?.running;
   if (!running)
     return "clear";
   if (supervisorAlive(running.supervisor))
@@ -57267,7 +57503,7 @@ async function zkapiConsultReadiness(options) {
   let fences = [];
   let stranded;
   try {
-    const state = readState4(statePath);
+    const state = readState5(statePath);
     usage = zkapiUsageToday(statePath, now);
     lastSession = zkapiLastSession(statePath);
     fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));
@@ -58352,7 +58588,7 @@ process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
   DEFAULT_EXECUTABLE_TRUST = {
-    realpath: (path) => realpathSync2(path),
+    realpath: (path) => realpathSync3(path),
     stat: (path) => statSync15(path),
     executable: (path) => {
       try {
@@ -64236,7 +64472,7 @@ function ownedByThisUser(stat3) {
 var init_owner_config_read = () => {};
 
 // src/workers/classification/tier-rules.ts
-import { chmodSync as chmodSync17, lstatSync as lstatSync16, mkdirSync as mkdirSync30 } from "node:fs";
+import { chmodSync as chmodSync17, lstatSync as lstatSync17, mkdirSync as mkdirSync30 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 import { dirname as dirname43, join as join58 } from "node:path";
 function defaultTierRulesPath() {
@@ -64415,7 +64651,7 @@ function tierDisplayName(tier) {
 }
 function tightenPermissions(path) {
   try {
-    const stat3 = lstatSync16(path);
+    const stat3 = lstatSync17(path);
     if (!stat3.isFile())
       return {};
     const mode = stat3.mode & 511;
@@ -83238,13 +83474,13 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync20, existsSync as existsSync44, lstatSync as lstatSync17, mkdirSync as mkdirSync35, readFileSync as readFileSync40, renameSync as renameSync12, writeFileSync as writeFileSync13 } from "node:fs";
+import { chmodSync as chmodSync20, existsSync as existsSync44, lstatSync as lstatSync18, mkdirSync as mkdirSync35, readFileSync as readFileSync40, renameSync as renameSync12, writeFileSync as writeFileSync13 } from "node:fs";
 import { join as join65 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync35(stateDir, { recursive: true, mode: 448 });
   const dir = join65(stateDir, "connect-relay");
   mkdirSync35(dir, { recursive: true, mode: 448 });
-  const stat3 = lstatSync17(dir);
+  const stat3 = lstatSync18(dir);
   if (!stat3.isDirectory() || stat3.isSymbolicLink() || typeof process.getuid === "function" && stat3.uid !== process.getuid()) {
     throw new Error("the connect-relay state directory must be a directory owned by this user");
   }
@@ -84284,7 +84520,7 @@ function createModelKeyReload(options) {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes13 } from "node:crypto";
-import { chmodSync as chmodSync21, lstatSync as lstatSync18, mkdirSync as mkdirSync36, readFileSync as readFileSync41 } from "node:fs";
+import { chmodSync as chmodSync21, lstatSync as lstatSync19, mkdirSync as mkdirSync36, readFileSync as readFileSync41 } from "node:fs";
 import { dirname as dirname48, join as join66 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
   return join66(dirname48(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
@@ -84296,7 +84532,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
   const path = options.path ?? dashboardSessionSecretPath(options);
   let existing = "missing";
   try {
-    const stats = lstatSync18(path);
+    const stats = lstatSync19(path);
     if (!stats.isFile() || stats.isSymbolicLink())
       existing = "invalid";
     else if (typeof process.getuid === "function" && stats.uid !== process.getuid())
@@ -91982,6 +92218,11 @@ function createFileExtractionRuntime(options) {
       throw new Error(`[file-extraction] corpus=${config2.corpusId} tier set does not hold its store.`);
     }
     const view = tierSet ? tieredExtractionView(tierSet) : undefined;
+    if (!tierSet && store.trustDomain !== "secure_local") {
+      try {
+        store.stripImageContentOutsidePrivate();
+      } catch {}
+    }
     corpora.push({
       corpusId: config2.corpusId,
       trustDomain: store.trustDomain,
@@ -105494,7 +105735,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync23, copyFileSync, existsSync as existsSync49, lstatSync as lstatSync19, mkdirSync as mkdirSync40, readFileSync as readFileSync46 } from "node:fs";
+import { chmodSync as chmodSync23, copyFileSync, existsSync as existsSync49, lstatSync as lstatSync20, mkdirSync as mkdirSync40, readFileSync as readFileSync46 } from "node:fs";
 import { dirname as dirname56 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
@@ -105602,7 +105843,7 @@ function writeSourceIngestionExclusionsFile(options) {
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
   if (existsSync49(path)) {
-    const stat6 = lstatSync19(path);
+    const stat6 = lstatSync20(path);
     if (stat6.isSymbolicLink() || !stat6.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
     }
@@ -114327,6 +114568,12 @@ class TierSnifferService {
         }
       } catch {}
       try {
+        const images = sweepImageContentToPrivate({ set: set2 });
+        if (images.raised > 0 || images.stripped > 0) {
+          this.options.log?.(`Olympus photos: ${images.raised} stored photo(s) moved to Private (hidden first), ${images.stripped} photo text(s) removed from a non-Private store.`);
+        }
+      } catch {}
+      try {
         const settled = settleNamesOnlyItems({ set: set2 });
         if (settled.settled > 0) {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
@@ -114490,6 +114737,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_rejudge();
   init_tier_names_only_settle();
   init_tier_rules_sweep();
+  init_tier_image_content_sweep();
   init_tier_ledger();
   DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
   DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
@@ -123327,7 +123575,7 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
 import { randomBytes as randomBytes18 } from "node:crypto";
-import { lstatSync as lstatSync20 } from "node:fs";
+import { lstatSync as lstatSync21 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
   if (timing.outcome === "failed")
@@ -123777,7 +124025,7 @@ class PrivateAnswerJobs {
       return gone();
     let isFile = false;
     try {
-      isFile = lstatSync20(path).isFile();
+      isFile = lstatSync21(path).isFile();
     } catch {
       isFile = false;
     }
@@ -124984,7 +125232,7 @@ __export(exports_open_target, {
   createDropboxOpenTargets: () => createDropboxOpenTargets,
   OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
 });
-import { existsSync as existsSync52, lstatSync as lstatSync21, readFileSync as readFileSync49, readdirSync as readdirSync9, realpathSync as realpathSync3, statSync as statSync23 } from "node:fs";
+import { existsSync as existsSync52, lstatSync as lstatSync22, readFileSync as readFileSync49, readdirSync as readdirSync9, realpathSync as realpathSync4, statSync as statSync23 } from "node:fs";
 import { homedir as homedir56 } from "node:os";
 import { extname as extname2, join as join83, sep as sep7 } from "node:path";
 function dropboxPreviewUrl(displayPath) {
@@ -125031,7 +125279,7 @@ function localDropboxRoots(options = {}) {
   const roots = [];
   for (const candidate of candidates) {
     try {
-      const real = realpathSync3.native(candidate);
+      const real = realpathSync4.native(candidate);
       if (statSync23(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
@@ -125064,10 +125312,10 @@ function localOpenArguments(path, roots) {
   if (!path.startsWith("/") || path.includes("\x00"))
     return;
   try {
-    const link = lstatSync21(path);
+    const link = lstatSync22(path);
     if (link.isSymbolicLink() || !link.isFile())
       return;
-    if (realpathSync3.native(path) !== path)
+    if (realpathSync4.native(path) !== path)
       return;
   } catch {
     return;
@@ -125082,7 +125330,7 @@ function localFileUnder(root, segments) {
   try {
     if (!existsSync52(path))
       return;
-    const real = realpathSync3.native(path);
+    const real = realpathSync4.native(path);
     if (!real.startsWith(root.endsWith(sep7) ? root : `${root}${sep7}`))
       return;
     return statSync23(real).isFile() ? real : undefined;
@@ -126414,7 +126662,7 @@ var init_dashboard_privacy = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync24, lstatSync as lstatSync22, mkdirSync as mkdirSync43, statSync as statSync24 } from "node:fs";
+import { chmodSync as chmodSync24, lstatSync as lstatSync23, mkdirSync as mkdirSync43, statSync as statSync24 } from "node:fs";
 import { dirname as dirname60, isAbsolute as isAbsolute18 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   const path = location.path ?? consultSettingsPath(location.env ?? process.env);
@@ -126483,7 +126731,7 @@ function writeConsultSettings(input, location = {}) {
 function ensureSettingsDirectory(directory) {
   let stats;
   try {
-    stats = lstatSync22(directory);
+    stats = lstatSync23(directory);
   } catch (error2) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
@@ -126499,7 +126747,7 @@ function ensureSettingsDirectory(directory) {
       return "directory_unavailable";
     }
     try {
-      stats = lstatSync22(directory);
+      stats = lstatSync23(directory);
     } catch {
       return "directory_unavailable";
     }
@@ -130856,7 +131104,7 @@ import {
   closeSync as closeSync9,
   existsSync as existsSync26,
   fsyncSync as fsyncSync3,
-  lstatSync as lstatSync10,
+  lstatSync as lstatSync11,
   mkdirSync as mkdirSync19,
   openSync as openSync9,
   readSync as readSync2,
@@ -131097,7 +131345,7 @@ function verifyOlympusDataExport(options) {
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
-    const stats = lstatSync10(path);
+    const stats = lstatSync11(path);
     if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== artifact.bytes || sha256File2(path) !== artifact.sha256) {
       throw new OperationError("source_index_error", `Olympus data export artifact failed verification: ${artifact.relativePath}`);
     }
@@ -131245,24 +131493,21 @@ function mediaCacheDeleteTargets(context) {
     return [];
   }
 }
-function releaseSourceMedia(storePaths, context, dryRun) {
-  let dir;
-  try {
-    dir = mediaCacheDir(envForContext(context));
-  } catch {
-    return [];
-  }
+function releaseSourceMedia(storePaths, _context, dryRun) {
   const released = [];
   for (const storePath of storePaths) {
     if (storePath === ":memory:" || !existsSync26(storePath))
       continue;
+    if (!looksLikeSqlite(storePath))
+      continue;
+    const unreadable = () => new OperationError("invalid_params", `Cannot read the picture references in ${storePath}; nothing was deleted.`, "Stop the Olympus worker (olympus worker stop) so the store is not busy, or repair the store, then retry.");
     let rows = [];
     let db;
     try {
       db = new Database7(storePath, { readonly: true });
       db.exec("PRAGMA busy_timeout = 10000;");
     } catch {
-      continue;
+      throw unreadable();
     }
     try {
       const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
@@ -131272,21 +131517,37 @@ function releaseSourceMedia(storePaths, context, dryRun) {
           WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
         `).all();
       }
-    } catch {} finally {
+    } catch {
+      throw unreadable();
+    } finally {
       closeSqliteStore(db);
     }
     for (const row of rows) {
-      if (!isMediaCachePath(row.media_path, row.media_sha256, dir))
+      if (!isMediaCachePath(row.media_path, row.media_sha256))
         continue;
       if (dryRun) {
         if (existsSync26(row.media_path))
           released.push(row.media_path);
-      } else if (releaseMediaCacheFile(row.media_path, row.media_sha256, storePath, dir)) {
+      } else if (releaseMediaCacheFile(row.media_path, row.media_sha256, storePath)) {
         released.push(row.media_path);
       }
     }
   }
   return released;
+}
+function looksLikeSqlite(path) {
+  try {
+    const fd = openSync9(path, "r");
+    try {
+      const header = Buffer.alloc(16);
+      const read = readSync2(fd, header, 0, 16, 0);
+      return read === 16 && header.toString("latin1") === "SQLite format 3\x00";
+    } finally {
+      closeSync9(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 function sourceDeleteTargets(source, context) {
   const legacyIndexPath = source.sqlitePath?.(context);
@@ -131588,7 +131849,7 @@ function assertDeleteTargetSafe(target) {
     return;
   }
   if (target.kind === "known_root") {
-    if (!lstatSync10(target.path).isDirectory()) {
+    if (!lstatSync11(target.path).isDirectory()) {
       throw new OperationError("invalid_params", `Refusing to recursively delete non-directory Olympus root: ${target.path}`);
     }
     return;
@@ -131600,7 +131861,7 @@ function assertDeleteTargetSafe(target) {
   }
 }
 function assertRegularFileTarget(path) {
-  const stat3 = lstatSync10(path);
+  const stat3 = lstatSync11(path);
   if (!stat3.isFile()) {
     throw new OperationError("invalid_params", `Refusing to delete non-file target outside an Olympus-owned root: ${path}`);
   }
@@ -131698,7 +131959,7 @@ init_version();
 init_atomic_file();
 import { createHash as createHash41 } from "node:crypto";
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync39, lstatSync as lstatSync15, mkdirSync as mkdirSync28, readFileSync as readFileSync34 } from "node:fs";
+import { existsSync as existsSync39, lstatSync as lstatSync16, mkdirSync as mkdirSync28, readFileSync as readFileSync34 } from "node:fs";
 import { homedir as homedir41, platform as osPlatform3 } from "node:os";
 import { dirname as dirname40, isAbsolute as isAbsolute12, join as join56 } from "node:path";
 
@@ -131712,7 +131973,7 @@ import {
   closeSync as closeSync12,
   existsSync as existsSync37,
   fsyncSync as fsyncSync4,
-  lstatSync as lstatSync13,
+  lstatSync as lstatSync14,
   mkdtempSync as mkdtempSync2,
   openSync as openSync12,
   readFileSync as readFileSync32,
@@ -131776,7 +132037,7 @@ function prepareWorkerUpgradeArtifact(options) {
       if (existsSync37(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
-        const existingMode = lstatSync13(workingDirectory).mode & 511;
+        const existingMode = lstatSync14(workingDirectory).mode & 511;
         if (existingMode === 365 && versionTreeDigest(workingDirectory) === expectedDigest) {
           removeStagingTree(staging);
           syncDirectorySync(versionsDir);
@@ -131813,7 +132074,7 @@ function validateArtifactPath(path) {
   }
   let stats;
   try {
-    stats = lstatSync13(trimmed2);
+    stats = lstatSync14(trimmed2);
   } catch {
     throw new OperationError("invalid_params", `Upgrade artifact does not exist: ${trimmed2}`);
   }
@@ -131890,7 +132151,7 @@ function runTar(args, action) {
 function assertRegularTree(root, budget = { bytes: 0 }) {
   for (const entry of readdirSync7(root, { withFileTypes: true })) {
     const path = join54(root, entry.name);
-    const stats = lstatSync13(path);
+    const stats = lstatSync14(path);
     if (stats.isSymbolicLink() || !stats.isDirectory() && !stats.isFile()) {
       throw new OperationError("invalid_params", `Upgrade artifact extracted an unsafe entry: ${entry.name}`);
     }
@@ -131925,7 +132186,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
   return version;
 }
 function assertManagedVersionRoot(root, artifactSha256) {
-  const stats = lstatSync13(root);
+  const stats = lstatSync14(root);
   if (!stats.isDirectory() || stats.isSymbolicLink() || basename9(root) !== artifactSha256) {
     throw new OperationError("config_error", "Managed upgrade version path is unsafe.");
   }
@@ -131944,7 +132205,7 @@ function readJsonRecord(path, label) {
 }
 function assertRegularFile(path, label) {
   try {
-    const stats = lstatSync13(path);
+    const stats = lstatSync14(path);
     if (stats.isFile() && !stats.isSymbolicLink())
       return;
   } catch {}
@@ -131992,7 +132253,7 @@ function hashVersionTree(root, relativeRoot, digest2) {
   for (const entry of entries) {
     const relativePath = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
     const path = join54(root, entry.name);
-    const stats = lstatSync13(path);
+    const stats = lstatSync14(path);
     if (stats.isDirectory() && !stats.isSymbolicLink()) {
       digest2.update(`d\x00${relativePath}\x00${stats.mode & 511}\x00`);
       hashVersionTree(path, relativePath, digest2);
@@ -132053,7 +132314,7 @@ init_atomic_file();
 init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID18 } from "node:crypto";
-import { existsSync as existsSync38, linkSync, lstatSync as lstatSync14, readFileSync as readFileSync33 } from "node:fs";
+import { existsSync as existsSync38, linkSync, lstatSync as lstatSync15, readFileSync as readFileSync33 } from "node:fs";
 import { join as join55 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
   const dir = join55(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -132120,7 +132381,7 @@ function releaseLifecycleMutationLock(lockPath, nonce) {
 }
 function readLifecycleMutationOwner(path) {
   try {
-    const stats = lstatSync14(path);
+    const stats = lstatSync15(path);
     if (!stats.isFile() || stats.isSymbolicLink())
       throw new Error("not a regular lock file");
     const value = JSON.parse(readFileSync33(path, "utf8"));
@@ -132788,7 +133049,7 @@ function validateHomeDir(value) {
 }
 function assertRegularFile2(path, label) {
   try {
-    if (lstatSync15(path).isFile())
+    if (lstatSync16(path).isFile())
       return;
   } catch {}
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);

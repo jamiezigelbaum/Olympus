@@ -1056,10 +1056,11 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/media-cache.ts
-var MEDIA_CACHE_ORPHAN_AGE_MS;
+var MEDIA_CACHE_ORPHAN_AGE_MS, MEDIA_CACHE_DIR_NAMES;
 var init_media_cache = __esm(() => {
   init_remote_access();
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
+  MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
 // src/core/source-ingestion-policy.ts
@@ -9649,7 +9650,7 @@ var init_embeddings = __esm(() => {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
+var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_media_cache();
@@ -9681,6 +9682,7 @@ var init_local_index = __esm(() => {
     "application/vnd.google-apps.folder"
   ]);
   CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
+  CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
     createTableSql: `
@@ -9988,6 +9990,10 @@ class HelperProcess {
       return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
+    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
+      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
+      return;
+    }
     const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
     if (!message.error && failed.size === pending.count) {
       pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
@@ -10047,8 +10053,16 @@ function resolveBun() {
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
-var REQUEST_TIMEOUT_MS;
+var LiteRtImagesUnavailableError, REQUEST_TIMEOUT_MS;
 var init_litert_runtime = __esm(() => {
+  LiteRtImagesUnavailableError = class LiteRtImagesUnavailableError extends Error {
+    indexes;
+    constructor(indexes) {
+      super("The built-in search model is running without its image encoder.");
+      this.name = "LiteRtImagesUnavailableError";
+      this.indexes = indexes;
+    }
+  };
   REQUEST_TIMEOUT_MS = 3 * 60000;
 });
 
@@ -10227,6 +10241,12 @@ var init_tier_rules_sweep = __esm(() => {
   init_tier_rejudge();
 });
 
+// src/workers/connector-store/tier-image-content-sweep.ts
+var init_tier_image_content_sweep = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -10238,6 +10258,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_row_rehome();
   init_tier_rules_sweep();
+  init_tier_image_content_sweep();
 });
 
 // src/workers/readwise/live-sync.ts
