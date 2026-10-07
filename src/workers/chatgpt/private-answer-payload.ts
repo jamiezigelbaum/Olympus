@@ -287,8 +287,8 @@ function fitCitation(citation: PrivateAnswerCitation): PrivateAnswerCitation {
   return out;
 }
 
-/** The first-answer fields inside their byte budgets, in the contract's key order. */
-function fitFirstAnswer(answer: { answer: string; citations: readonly PrivateAnswerCitation[]; unanswered?: readonly string[] | undefined }): {
+/** The first-answer fields inside their byte budgets, in the contract's key order: what a follow-up job retains. */
+export function fitFirstAnswer(answer: { answer: string; citations: readonly PrivateAnswerCitation[]; unanswered?: readonly string[] | undefined }): {
   answer: string;
   citations: PrivateAnswerCitation[];
   unanswered?: string[];
@@ -308,8 +308,8 @@ function fitFirstAnswer(answer: { answer: string; citations: readonly PrivateAns
   return { answer: text, citations, ...(unanswered.length > 0 ? { unanswered } : {}) };
 }
 
-/** The outside block inside its byte budget: text, then question, then route are cut; the state is always kept. */
-function fitOutsideBlock(block: PrivateAnswerOutsideBlockV1): PrivateAnswerOutsideBlockV1 {
+/** The outside block inside its byte budget (text, then question, then route are cut; the state is always kept): what a job retains. */
+export function fitOutsideBlock(block: PrivateAnswerOutsideBlockV1): PrivateAnswerOutsideBlockV1 {
   const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
   const state: PrivateAnswerOutsideBlockV1['state'] = block.state === 'pending' || block.state === 'appended' || block.state === 'paused' ? block.state : 'idle';
   const out: PrivateAnswerOutsideBlockV1 = { state };

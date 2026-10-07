@@ -112473,6 +112473,8 @@ function chatgptPrivateAnswerProgram(config2) {
   let run = 0;
   let theme = "";
   let focusAfter = "";
+  let follow = null;
+  let lockedHeight = -1;
   let nextId = 1;
   const pending = {};
   function post(message) {
@@ -112560,6 +112562,8 @@ function chatgptPrivateAnswerProgram(config2) {
       errorText = "";
       canRetry = false;
       answer = null;
+      follow = null;
+      lockedHeight = -1;
       sourcesOpen = false;
       askedOpen = false;
       notes = {};
@@ -112809,8 +112813,10 @@ function chatgptPrivateAnswerProgram(config2) {
     if (!value || typeof value !== "object" || value.v !== 1)
       return null;
     const rev = typeof value.rev === "number" && isFinite(value.rev) && value.rev >= 0 ? Math.floor(value.rev) : 0;
-    if (value.state === "withdrawn")
-      return { kind: "withdrawn", rev };
+    if (value.state === "withdrawn") {
+      const left = typeof value.followSeconds === "number" && isFinite(value.followSeconds) && value.followSeconds > 0 ? Math.floor(value.followSeconds) : 0;
+      return { kind: "withdrawn", rev, followSeconds: left };
+    }
     if (typeof value.answer !== "string")
       return null;
     const sources = [];
@@ -112973,8 +112979,12 @@ function chatgptPrivateAnswerProgram(config2) {
             fail(T.generic, false, byUser);
             return;
           }
-          if (opened.kind === "withdrawn")
-            return withdrawn(byUser);
+          if (opened.kind === "withdrawn") {
+            follow = { rev: opened.rev, until: Date.now() + opened.followSeconds * config2.secondMs };
+            withdrawn(byUser);
+            followUp(mine, jobId, keys);
+            return;
+          }
           answer = opened.answer;
           sourcesOpen = false;
           askedOpen = false;
@@ -112982,8 +112992,10 @@ function chatgptPrivateAnswerProgram(config2) {
           phase = "revealed";
           focusAfter = byUser ? "answer" : "";
           render();
-          if (answer.follow)
+          if (answer.follow) {
+            follow = { rev: answer.rev, until: Date.now() + answer.followSeconds * config2.secondMs };
             followUp(mine, jobId, keys);
+          }
           return;
         }
         if (code === 200 && status === "failed")
@@ -113030,15 +113042,14 @@ function chatgptPrivateAnswerProgram(config2) {
     render();
   }
   async function followUp(mine, jobId, keys) {
-    let until = Date.now() + (answer ? answer.followSeconds : 0) * config2.secondMs;
     for (;; ) {
-      if (mine !== run || !answer)
+      if (mine !== run || !follow)
         return;
-      const left = until - Date.now();
+      const left = follow.until - Date.now();
       if (left <= 0)
         return;
       await wait(Math.min(config2.followPollMs, left));
-      if (mine !== run || !answer)
+      if (mine !== run || !follow)
         return;
       const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
       let response;
@@ -113064,7 +113075,7 @@ function chatgptPrivateAnswerProgram(config2) {
       } catch {
         continue;
       }
-      if (mine !== run || !answer)
+      if (mine !== run || !follow)
         return;
       const code = response.status;
       if (code === 410 || code === 404 || code === 409)
@@ -113077,14 +113088,21 @@ function chatgptPrivateAnswerProgram(config2) {
       } catch {
         opened = null;
       }
-      if (mine !== run || !answer || !opened)
+      if (mine !== run || !follow || !opened)
         continue;
-      if (opened.kind === "withdrawn")
-        return withdrawn(false);
+      if (opened.kind === "withdrawn") {
+        follow.until = Date.now() + opened.followSeconds * config2.secondMs;
+        if (opened.rev >= follow.rev)
+          follow.rev = opened.rev;
+        if (phase !== "withdrawn")
+          withdrawn(false);
+        continue;
+      }
       if (!opened.answer.follow)
         continue;
-      until = Date.now() + opened.answer.followSeconds * config2.secondMs;
-      if (opened.answer.rev >= answer.rev) {
+      follow.until = Date.now() + opened.answer.followSeconds * config2.secondMs;
+      if (answer && opened.answer.rev >= follow.rev) {
+        follow.rev = opened.answer.rev;
         answer.rev = opened.answer.rev;
         answer.followSeconds = opened.answer.followSeconds;
         answer.outside = opened.answer.outside;
@@ -113320,14 +113338,14 @@ function chatgptPrivateAnswerProgram(config2) {
   function outsideView(shown) {
     const box = el("section", "outside");
     box.setAttribute("aria-label", T.outsideTitle);
-    box.style.height = config2.outsideHeightPx + "px";
+    box.style.height = config2.outsideHeightPx - config2.outsideGapPx + "px";
     const head = el("div", "out-head");
     head.appendChild(el("h3", "out-title", T.outsideTitle));
     head.appendChild(el("p", "out-note", T.outsideNote));
     box.appendChild(head);
     const body = el("div", "out-body");
-    const state = shown.outside.state;
-    if (state === "appended") {
+    const state = shown ? shown.outside.state : "idle";
+    if (shown && state === "appended") {
       const text = el("div", "out-text");
       text.setAttribute("data-key", "outside");
       text.textContent = shown.outside.text;
@@ -113397,6 +113415,8 @@ function chatgptPrivateAnswerProgram(config2) {
       root.appendChild(revealed ? revealedView(answer) : cardView(info));
       if (revealed && answer.follow)
         root.appendChild(outsideView(answer));
+      else if (phase === "withdrawn" && follow)
+        root.appendChild(outsideView(null));
     }
     if (!focusAfter && had)
       focusAfter = had;
@@ -113424,7 +113444,11 @@ function chatgptPrivateAnswerProgram(config2) {
   function frameHeight() {
     const card2 = cardHeight();
     if (phase === "revealed" && answer && answer.follow) {
-      return Math.min(card2 + config2.outsideHeightPx, config2.frameCapPx);
+      lockedHeight = Math.min(card2 + config2.outsideHeightPx, config2.frameCapPx);
+      return lockedHeight;
+    }
+    if (phase === "withdrawn" && follow) {
+      return lockedHeight >= 0 ? lockedHeight : Math.min(card2 + config2.outsideHeightPx, config2.frameCapPx);
     }
     return card2;
   }
@@ -113529,6 +113553,7 @@ function chatgptPrivateAnswerPageHtml(options) {
     capability: CHATGPT_PRIVATE_ANSWER_CAPABILITY,
     followPollMs: options.followPollMs ?? CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS,
     outsideHeightPx: CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX,
+    outsideGapPx: CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX,
     frameCapPx: CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX,
     outsideLines: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES,
     outsideLineChars: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS,
@@ -113555,7 +113580,7 @@ function chatgptPrivateAnswerPageHtml(options) {
 function scriptJson2(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_CAPABILITY = 2, CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS = 30000, CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX = 176, CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX = 640, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES = 40, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS = 240, CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES = 4096, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
+var CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS, CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250000, CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS = 20000, CHATGPT_PRIVATE_ANSWER_KEY_STORE, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_CAPABILITY = 2, CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS = 30000, CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX = 176, CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX = 8, CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX = 640, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES = 40, CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS = 240, CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES = 4096, CARD_LIGHT, CARD_DARK, CHATGPT_PRIVATE_ANSWER_CSS;
 var init_private_answer2 = __esm(() => {
   init_vocabulary();
   init_private_answer_contract();
@@ -113585,7 +113610,7 @@ html:root>body #panel{display:block!important;height:auto!important;min-height:0
 html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
 html:root>body #panel>.card.follow{max-height:464px!important;overflow:auto!important}
 .card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
-.outside{display:block;box-sizing:border-box;margin:0.5rem 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);overflow:auto;overflow-wrap:anywhere}
+.outside{display:block;box-sizing:border-box;margin:8px 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);overflow:auto;overflow-wrap:anywhere}
 .out-head{position:sticky;top:0;z-index:1;padding:0.625rem 0.875rem 0.375rem;background:var(--tint);border-bottom:1px solid var(--hair)}
 .out-title{margin:0;font-size:0.8125rem;font-weight:600;line-height:1.35}
 .out-note{margin:0.0625rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
@@ -117254,36 +117279,49 @@ class PrivateAnswerJobs {
     return { status: 200, body: { status: "ready", v: 1, ...outcome.sealed } };
   }
   async followUpResponse(job, panelKey) {
-    if (job.outcome?.kind === "retained")
-      await this.stillReleasable(job);
-    if (this.jobs.get(job.id) !== job)
-      return gone();
     const at = this.now();
-    if (job.firstDeliveredAt === undefined) {
-      job.firstDeliveredAt = at;
-      job.followUntil = Math.min(at + this.followUpWindowMs, job.expiresAt);
-    }
-    job.lastCollectedAt = at;
-    let sealed;
-    for (let attempt = 0;attempt < 2 && this.jobs.get(job.id) === job; attempt += 1) {
+    const followUntil = job.followUntil ?? Math.min(at + this.followUpWindowMs, job.expiresAt);
+    for (let attempt = 0;; attempt += 1) {
+      await this.guardFollowUp(job);
+      if (this.jobs.get(job.id) !== job)
+        return gone();
+      if (attempt >= FOLLOW_UP_SEAL_ATTEMPTS)
+        this.withdraw(job);
       const rev = job.rev;
-      const state = job.outcome?.kind;
-      const plaintext = this.envelopeFor(job);
+      const kind = job.outcome?.kind;
+      const plaintext = this.envelopeFor(job, followUntil);
       if (plaintext === undefined)
         return gone();
-      sealed = await sealPrivateAnswer(job.id, panelKey, plaintext);
-      if (job.rev === rev && job.outcome?.kind === state)
-        break;
+      const sealed = await sealPrivateAnswer(job.id, panelKey, plaintext);
+      await this.guardFollowUp(job);
+      if (this.jobs.get(job.id) !== job)
+        return gone();
+      if (job.rev !== rev || job.outcome?.kind !== kind)
+        continue;
+      if (job.firstDeliveredAt === undefined) {
+        job.firstDeliveredAt = at;
+        job.followUntil = followUntil;
+      }
+      job.lastCollectedAt = at;
+      return { status: 200, body: { status: "ready", v: 1, ...sealed } };
     }
-    if (this.jobs.get(job.id) !== job || !sealed)
-      return gone();
-    return { status: 200, body: { status: "ready", v: 1, ...sealed } };
   }
-  envelopeFor(job) {
+  async guardFollowUp(job) {
+    const kind = job.outcome?.kind;
+    const items = job.guardItems ?? [];
+    const ok = await checkPrivateEvidence(this.options.eligible, items);
+    const current = job.outcome?.kind;
+    if (kind !== "retained" || current !== "retained")
+      return;
+    if (job.guardItems !== undefined && ok.every(Boolean))
+      return;
+    this.withdraw(job);
+  }
+  envelopeFor(job, followUntil) {
     const outcome = job.outcome;
     if (!outcome || outcome.kind !== "retained" && outcome.kind !== "withdrawn")
       return;
-    const followSeconds = Math.max(0, Math.ceil(((job.followUntil ?? 0) - this.now()) / 1000));
+    const followSeconds = Math.max(0, Math.ceil((followUntil - this.now()) / 1000));
     const envelope = () => job.outcome?.kind === "retained" ? { v: 1, rev: job.rev, state: "answer", answer: job.outcome.answer.answer, citations: [...job.outcome.answer.citations], ...job.outcome.answer.unanswered ? { unanswered: [...job.outcome.answer.unanswered] } : {}, followSeconds, outside: { ...job.outside } } : { v: 1, rev: job.rev, state: "withdrawn", followSeconds, outside: { state: "idle" } };
     try {
       return padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope(envelope()));
@@ -117304,6 +117342,7 @@ class PrivateAnswerJobs {
       return;
     job.outcome = { kind: "withdrawn" };
     job.outside = { state: "idle" };
+    job.question = undefined;
     job.sealedItems = undefined;
     job.opens = undefined;
     job.rev += 1;
@@ -117341,14 +117380,12 @@ class PrivateAnswerJobs {
     if (!check.ok)
       return check;
     const job = check.job;
-    if (job.followUntil === undefined || this.now() > job.followUntil)
-      return { ok: false, reason: "window_closed" };
-    job.outside = {
+    job.outside = fitOutsideBlock({
       state: "appended",
       text: typeof block.text === "string" ? block.text : "",
       ...typeof block.question === "string" ? { question: block.question } : {},
       ...typeof block.route === "string" ? { route: block.route } : {}
-    };
+    });
     job.rev += 1;
     return { ok: true, rev: job.rev };
   }
@@ -117359,8 +117396,10 @@ class PrivateAnswerJobs {
       return { ok: false, reason: "unknown" };
     if (job.outcome?.kind === "withdrawn")
       return { ok: false, reason: "withdrawn" };
-    if (job.outcome?.kind !== "retained" || job.firstDeliveredAt === undefined)
+    if (job.outcome?.kind !== "retained" || job.firstDeliveredAt === undefined || job.followUntil === undefined)
       return { ok: false, reason: "not_delivered" };
+    if (this.now() > job.followUntil)
+      return { ok: false, reason: "window_closed" };
     if (job.outside.state === "appended")
       return { ok: false, reason: "already_appended" };
     if (job.rev !== expectedRev)
@@ -117435,6 +117474,7 @@ class PrivateAnswerJobs {
     job.outside = { state: "idle" };
     job.opens = undefined;
     job.sealedItems = undefined;
+    job.guardItems = undefined;
     this.jobs.delete(id);
   }
   bindPolicy() {
@@ -117761,6 +117801,7 @@ class PrivateAnswerJobs {
     const run = async () => {
       const refresh = job.refresh;
       const question = job.question ?? "";
+      job.question = undefined;
       job.evidence = undefined;
       job.refresh = undefined;
       const refreshStarted = this.now();
@@ -117828,8 +117869,10 @@ class PrivateAnswerJobs {
             timing.precomputed = precomputed;
             timing.waitAtClaimMs = this.now() - claimedAt;
             job.sealedItems = result.usedItems;
-            if (outcome.kind === "retained")
+            if (outcome.kind === "retained") {
+              job.guardItems = result.usedItems;
               job.rev = 1;
+            }
             settle(outcome);
             return;
           }
@@ -118019,10 +118062,11 @@ function preparedAnswer(result) {
   };
 }
 function retainedAnswer(plaintext) {
+  const fitted = fitFirstAnswer(plaintext);
   return Object.freeze({
-    answer: plaintext.answer,
-    citations: Object.freeze(plaintext.citations.map((citation) => ({ ...citation }))),
-    unanswered: plaintext.unanswered && plaintext.unanswered.length > 0 ? Object.freeze([...plaintext.unanswered]) : undefined
+    answer: fitted.answer,
+    citations: Object.freeze(fitted.citations),
+    unanswered: fitted.unanswered && fitted.unanswered.length > 0 ? Object.freeze(fitted.unanswered) : undefined
   });
 }
 function isPrivateAnswerRequest(request) {
@@ -118098,7 +118142,7 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_QUESTION_CHARS = 4000, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, OUTSIDE_HELP_OFF, defaultAudit = (event) => {
+}, MAX_QUESTION_CHARS = 4000, FOLLOW_UP_SEAL_ATTEMPTS = 8, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, OUTSIDE_HELP_OFF, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 }, IDENTITY_FIELDS;
 var init_private_answer_jobs = __esm(() => {

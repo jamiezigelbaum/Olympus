@@ -805,17 +805,47 @@ the protocol the consult will ride on, and the limits it needs.
   first reveal, after the window ends and on reopen; the card scrolls
   inside 464 px when taller. The notifications (initialize, resend, load,
   fallback, ResizeObserver) keep firing and always report `H`. Hide reports
-  the hidden card; Show returns to `H`. Residual, as designed: a withdrawal
-  reports the withdrawn card, which plaintext `failed` already showed.
-- **Timing (design §A.5.4):** phase-2 responses share one code path; a
-  measured test compares response-time medians across idle, pending,
-  appended, paused and withdrawn jobs with a stated tolerance
-  (`test/chatgpt-private-follow-up.test.ts`). No fixed response-time floor
-  was needed at this stage.
+  the hidden card; Show returns to `H`. `R` is the outside box plus the gap
+  above it (168 + 8 px). A withdrawal clears the answer, its sources, gaps
+  and outside text at once but keeps the reserved container, keeps
+  reporting the `H` last reported for the revealed answer (on a reopen that
+  never showed it, the same rule over the withdrawn card), and keeps polling
+  at the cadence for the rest of the server's window (`followSeconds` is
+  read from withdrawn envelopes too), so neither the host nor the relay
+  learns of it. The design's earlier withdrawal-on-resize residual is
+  closed by the locked height.
+- **Timing (design §A.5.4):** phase-2 responses share one code path and
+  do the same work in every state: the live guard before the seal, the
+  seal of the fixed-size envelope, the guard again after it (a withdrawn
+  job keeps its item identities so the same call is made and its result
+  discarded), then the release check. A measured test
+  (`test/chatgpt-private-follow-up.test.ts`) compares response-time medians
+  across idle, pending, appended, paused and withdrawn jobs carrying the
+  heaviest payloads the contract allows, with three guards: an immediate
+  map, a store-shaped guard (one asynchronous hop per item, as the live
+  guard's content-serving check), and a slow store (3 ms per call), plus a
+  second idle job as the A/A noise floor. Measured 2026-10-07 on the
+  remote build lane (medians, ms; idle / pending / appended / paused /
+  withdrawn): immediate 5.34 / 5.58 / 4.50 / 4.72 / 4.49; store-shaped
+  18.19 / 18.19 / 18.05 / 17.98 / 16.59; slow store 19.52 / 18.27 / 20.13
+  / 20.88 / 19.55; a second run with the A/A control gave an idle-versus-
+  control difference of 0.9 / 1.1 / 0.6 ms for the three guards. The
+  largest difference from idle (1.6 ms, withdrawn under the store-shaped
+  guard) is the size of that noise floor and of the spread between the
+  non-withdrawn states themselves, so no fixed response-time floor is
+  added; the test's tolerance is the larger of 2 ms, half the idle median
+  and twice the A/A noise, and a future regression fails it.
 - **C4b seams** on `PrivateAnswerJobs`: `outsideSeam(jobId)` (clocks and
   states, no text), `markOutside(jobId, rev, state)` and
-  `appendOutsideBlock(jobId, rev, block)`, both compare-and-set on `rev`,
-  append at most once, refused for withdrawn jobs and after the window.
+  `appendOutsideBlock(jobId, rev, block)`. Both share one condition: a
+  delivered follow-up job in state `answer`, inside its follow-up window,
+  not yet appended, at the expected revision (compare-and-set); append at
+  most once. The block is normalized and budgeted before it is retained
+  (fitted fields and `cut` only), as is the retained first answer, so a job
+  holds at most the envelope's bytes whatever it was given. Delivery
+  clocks (`firstDeliveredAt`, `followUntil`, `lastCollectedAt`) are
+  published only with a `ready` actually returned: a seal that fails
+  leaves no window and no writable state.
 
 ### Relay
 

@@ -82,8 +82,9 @@ export interface ChatGptPrivateAnswerConfig {
   capability: number;
   /** Follow-up collection: the cadence of the uniform request after first reveal. */
   followPollMs: number;
-  /** The outside container's fixed height (R), and the frame cap, in px. */
+  /** The outside container's reserved allocation (R, its gap above included), the gap itself, and the frame cap, in px. */
   outsideHeightPx: number;
+  outsideGapPx: number;
   frameCapPx: number;
   /** The outside text's line policy. */
   outsideLines: number;
@@ -125,8 +126,9 @@ export const CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-
 export const CHATGPT_PRIVATE_ANSWER_CAPABILITY = 2;
 /** Follow-up polling cadence: far below the engine's and relay's rate limits. */
 export const CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS = 30_000;
-/** The outside container (R) and the frame cap, design §A.5.5. */
+/** The outside container's reserved allocation (R, design §A.5.5): its box plus the gap above it; and the frame cap. */
 export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX = 176;
+export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX = 8;
 export const CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX = 640;
 /** The outside text's line policy (design §A.6), mirrored from the engine's payload contract. */
 export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES = 40;
@@ -169,7 +171,13 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   // `follow`: a follow-up envelope (the plaintext carried an outside block):
   // the reserved container, the geometry rule and the polling apply.
   type Answer = { text: string; sources: Source[]; unanswered: string[]; follow: boolean; rev: number; followSeconds: number; outside: Outside };
-  type Opened = { kind: 'answer'; answer: Answer } | { kind: 'withdrawn'; rev: number };
+  type Opened = { kind: 'answer'; answer: Answer } | { kind: 'withdrawn'; rev: number; followSeconds: number };
+  // Follow-up collection for the current job, independent of what is shown:
+  // the polling deadline and the revision, kept through a withdrawal and on
+  // reopen, so neither the relay (polls) nor the host (height) learns of it.
+  let follow: { rev: number; until: number } | null = null;
+  // The height last reported for a revealed follow-up answer; a withdrawal keeps reporting it.
+  let lockedHeight = -1;
 
   // ---- host bridge -------------------------------------------------------
   let nextId = 1;
@@ -261,6 +269,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       errorText = '';
       canRetry = false;
       answer = null;
+      follow = null;
+      lockedHeight = -1;
       sourcesOpen = false;
       askedOpen = false;
       notes = {};
@@ -518,7 +528,10 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   function readAnswer(value: Any): Opened | null {
     if (!value || typeof value !== 'object' || value.v !== 1) return null;
     const rev = typeof value.rev === 'number' && isFinite(value.rev) && value.rev >= 0 ? Math.floor(value.rev) : 0;
-    if (value.state === 'withdrawn') return { kind: 'withdrawn', rev };
+    if (value.state === 'withdrawn') {
+      const left = typeof value.followSeconds === 'number' && isFinite(value.followSeconds) && value.followSeconds > 0 ? Math.floor(value.followSeconds) : 0;
+      return { kind: 'withdrawn', rev, followSeconds: left };
+    }
     if (typeof value.answer !== 'string') return null;
     const sources: Source[] = [];
     const seen: Record<string, boolean> = {};
@@ -684,7 +697,12 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
             fail(T.generic, false, byUser);
             return;
           }
-          if (opened.kind === 'withdrawn') return withdrawn(byUser);
+          if (opened.kind === 'withdrawn') {
+            follow = { rev: opened.rev, until: Date.now() + opened.followSeconds * config.secondMs };
+            withdrawn(byUser);
+            void followUp(mine, jobId, keys);
+            return;
+          }
           answer = opened.answer;
           sourcesOpen = false;
           askedOpen = false;
@@ -692,7 +710,10 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
           phase = 'revealed';
           focusAfter = byUser ? 'answer' : '';
           render();
-          if (answer.follow) void followUp(mine, jobId, keys);
+          if (answer.follow) {
+            follow = { rev: answer.rev, until: Date.now() + answer.followSeconds * config.secondMs };
+            void followUp(mine, jobId, keys);
+          }
           return;
         }
         if (code === 200 && status === 'failed') return fail(T.failed, false, byUser);
@@ -723,7 +744,12 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     return { v: 1, publicKey, cap: config.capability };
   }
 
-  /** The answer was withdrawn on the Mac (an item is no longer eligible): it is gone from here too. */
+  /**
+   * The answer was withdrawn on the Mac (an item is no longer eligible): its
+   * text, sources, gaps and outside block are gone from here at once. The
+   * follow-up polling and the reported geometry carry on exactly as before,
+   * so the withdrawal is not told to the relay or the host.
+   */
   function withdrawn(byUser: boolean): void {
     answer = null;
     sourcesOpen = false;
@@ -745,13 +771,12 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
    * first answer and its sources are never replaced.
    */
   async function followUp(mine: number, jobId: string, keys: { publicKey: string; privateKey: CryptoKey }): Promise<void> {
-    let until = Date.now() + (answer ? answer.followSeconds : 0) * config.secondMs;
     for (;;) {
-      if (mine !== run || !answer) return;
-      const left = until - Date.now();
+      if (mine !== run || !follow) return;
+      const left = follow.until - Date.now();
       if (left <= 0) return;
       await wait(Math.min(config.followPollMs, left));
-      if (mine !== run || !answer) return;
+      if (mine !== run || !follow) return;
       const controller = typeof (window as Any).AbortController === 'function' ? new (window as Any).AbortController() as AbortController : null;
       let response: Response;
       let body: Any = null;
@@ -775,7 +800,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       } catch {
         continue;
       }
-      if (mine !== run || !answer) return;
+      if (mine !== run || !follow) return;
       const code = response.status;
       // The job is gone (expired or evicted), or claimed by another key: nothing more will come.
       if (code === 410 || code === 404 || code === 409) return;
@@ -786,11 +811,17 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       } catch {
         opened = null;
       }
-      if (mine !== run || !answer || !opened) continue;
-      if (opened.kind === 'withdrawn') return withdrawn(false);
+      if (mine !== run || !follow || !opened) continue;
+      if (opened.kind === 'withdrawn') {
+        follow.until = Date.now() + opened.followSeconds * config.secondMs;
+        if (opened.rev >= follow.rev) follow.rev = opened.rev;
+        if (phase !== 'withdrawn') withdrawn(false);
+        continue;
+      }
       if (!opened.answer.follow) continue;
-      until = Date.now() + opened.answer.followSeconds * config.secondMs;
-      if (opened.answer.rev >= answer.rev) {
+      follow.until = Date.now() + opened.answer.followSeconds * config.secondMs;
+      if (answer && opened.answer.rev >= follow.rev) {
+        follow.rev = opened.answer.rev;
         answer.rev = opened.answer.rev;
         answer.followSeconds = opened.answer.followSeconds;
         answer.outside = opened.answer.outside;
@@ -1035,17 +1066,18 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
    * the body scrolls. The body is one text node; nothing in it is markup, a
    * link or a heading, whatever the text says.
    */
-  function outsideView(shown: Answer): HTMLElement {
+  function outsideView(shown: Answer | null): HTMLElement {
     const box = el('section', 'outside');
     box.setAttribute('aria-label', T.outsideTitle);
-    box.style.height = config.outsideHeightPx + 'px';
+    // The box plus its gap above (CSS .outside margin-top) is exactly the reserved allocation R.
+    box.style.height = (config.outsideHeightPx - config.outsideGapPx) + 'px';
     const head = el('div', 'out-head');
     head.appendChild(el('h3', 'out-title', T.outsideTitle));
     head.appendChild(el('p', 'out-note', T.outsideNote));
     box.appendChild(head);
     const body = el('div', 'out-body');
-    const state = shown.outside.state;
-    if (state === 'appended') {
+    const state = shown ? shown.outside.state : 'idle';
+    if (shown && state === 'appended') {
       const text = el('div', 'out-text');
       text.setAttribute('data-key', 'outside');
       text.textContent = shown.outside.text;
@@ -1111,6 +1143,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       const revealed = phase === 'revealed' && answer;
       root.appendChild(revealed ? revealedView(answer!) : cardView(info));
       if (revealed && answer!.follow) root.appendChild(outsideView(answer!));
+      else if (phase === 'withdrawn' && follow) root.appendChild(outsideView(null));
     }
     if (!focusAfter && had) focusAfter = had;
     if (focusAfter) {
@@ -1143,13 +1176,20 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
    * `H = min(A + R, cap)` where `A` is the first-answer card alone (the
    * outside container is never measured, so `H` never depends on what a
    * consult did) and `R` the container's fixed height. The card itself
-   * scrolls inside `cap − R` when it is taller (CSS). Every other state
-   * reports the card as before; Hide reports the hidden card.
+   * scrolls inside `cap − R` when it is taller (CSS). A withdrawal keeps
+   * reporting the height last reported for the revealed answer (or, on a
+   * reopen that never showed it, the same rule over the withdrawn card), so
+   * the host sees no change. Every other state reports the card as before;
+   * Hide reports the hidden card.
    */
   function frameHeight(): number {
     const card = cardHeight();
     if (phase === 'revealed' && answer && answer.follow) {
-      return Math.min(card + config.outsideHeightPx, config.frameCapPx);
+      lockedHeight = Math.min(card + config.outsideHeightPx, config.frameCapPx);
+      return lockedHeight;
+    }
+    if (phase === 'withdrawn' && follow) {
+      return lockedHeight >= 0 ? lockedHeight : Math.min(card + config.outsideHeightPx, config.frameCapPx);
     }
     return card;
   }
@@ -1258,7 +1298,7 @@ html:root>body #panel{display:block!important;height:auto!important;min-height:0
 html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
 html:root>body #panel>.card.follow{max-height:464px!important;overflow:auto!important}
 .card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
-.outside{display:block;box-sizing:border-box;margin:0.5rem 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);overflow:auto;overflow-wrap:anywhere}
+.outside{display:block;box-sizing:border-box;margin:8px 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);overflow:auto;overflow-wrap:anywhere}
 .out-head{position:sticky;top:0;z-index:1;padding:0.625rem 0.875rem 0.375rem;background:var(--tint);border-bottom:1px solid var(--hair)}
 .out-title{margin:0;font-size:0.8125rem;font-weight:600;line-height:1.35}
 .out-note{margin:0.0625rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
@@ -1324,6 +1364,7 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     capability: CHATGPT_PRIVATE_ANSWER_CAPABILITY,
     followPollMs: options.followPollMs ?? CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS,
     outsideHeightPx: CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX,
+    outsideGapPx: CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX,
     frameCapPx: CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX,
     outsideLines: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES,
     outsideLineChars: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS,

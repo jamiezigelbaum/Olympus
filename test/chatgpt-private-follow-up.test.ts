@@ -297,10 +297,15 @@ describe('two phases', () => {
     const late = begin(h);
     const other = await generatePanelKeyPair();
     await envelope(late, other, await deliver(h, late, other));
-    h.clock.now += PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS + 1;
-    expect(h.jobs.appendOutsideBlock(late, 1, { text: 'too late' })).toEqual({ ok: false, reason: 'window_closed' });
+    h.clock.now += PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS;
+    // At the boundary both seams still write; one millisecond later neither does.
+    expect(h.jobs.markOutside(late, 1, 'pending')).toEqual({ ok: true, rev: 2 });
+    expect(h.jobs.markOutside(late, 2, 'idle')).toEqual({ ok: true, rev: 3 });
+    h.clock.now += 1;
+    expect(h.jobs.markOutside(late, 3, 'pending')).toEqual({ ok: false, reason: 'window_closed' });
+    expect(h.jobs.appendOutsideBlock(late, 3, { text: 'too late' })).toEqual({ ok: false, reason: 'window_closed' });
     const closed = (await envelope(late, other, await h.jobs.claim(late, other.publicKey, 2))).parsed;
-    expect(closed).toMatchObject({ rev: 1, state: 'answer', followSeconds: 0, outside: { state: 'idle' } });
+    expect(closed).toMatchObject({ rev: 3, state: 'answer', followSeconds: 0, outside: { state: 'idle' } });
     expect(utf8Bytes(JSON.stringify(closed))).toBeLessThan(PRIVATE_ANSWER_ENVELOPE_BYTES);
   });
 
@@ -319,6 +324,162 @@ describe('two phases', () => {
     h.clock.now += 6 * 60_000;
     expect((await h.jobs.claim(jobId, panel.publicKey, 2)).status).toBe(410);
   });
+});
+
+describe('race rules around the seal (design §A.5.3)', () => {
+  /** A guard whose n-th call runs `act` first: a state change between the engine's checks and its seal. */
+  function interleaving(h: Harness, acts: Record<number, () => void>): { calls: number } {
+    const counter = { calls: 0 };
+    (h.jobs as unknown as { options: { eligible: (items: readonly unknown[]) => Promise<boolean[]> } }).options.eligible = async (items) => {
+      counter.calls += 1;
+      acts[counter.calls]?.();
+      return items.map(() => !h.eligible.refuse);
+    };
+    return counter;
+  }
+
+  test('an outside write that lands while the envelope is sealed is never handed out stale: the response carries the newer revision', async () => {
+    const h = harness();
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    await envelope(jobId, panel, await deliver(h, jobId, panel));
+    // Per phase-2 request the guard runs before and after each seal: calls 1 and 2 belong to the first seal.
+    const counter = interleaving(h, { 2: () => { expect(h.jobs.markOutside(jobId, 1, 'pending')).toEqual({ ok: true, rev: 2 }); } });
+    const { parsed } = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(parsed).toMatchObject({ rev: 2, state: 'answer', outside: { state: 'pending' } });
+    // Two seals: four guard calls.
+    expect(counter.calls).toBe(4);
+  });
+
+  test('a withdrawal during the second seal wins: the response is the withdrawn envelope, never the stale ciphertext', async () => {
+    const h = harness();
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    await envelope(jobId, panel, await deliver(h, jobId, panel));
+    h.jobs.appendOutsideBlock(jobId, 1, { text: SECRET_OUTSIDE });
+    const counter = interleaving(h, {
+      2: () => { expect(h.jobs.markOutside(jobId, 2, 'pending')).toEqual({ ok: false, reason: 'already_appended' }); (h.jobs as unknown as { jobs: Map<string, { rev: number }> }).jobs.get(jobId)!.rev += 1; },
+      4: () => { h.eligible.refuse = true; },
+    });
+    const response = await h.jobs.claim(jobId, panel.publicKey, 2);
+    const { parsed, plaintext } = await envelope(jobId, panel, response);
+    expect(parsed.state).toBe('withdrawn');
+    expect(plaintext).not.toContain('SENTINEL');
+    expect(counter.calls).toBe(6);
+    expect(h.jobs.outsideSeam(jobId)).toMatchObject({ state: 'withdrawn', outside: 'idle' });
+  });
+
+  test('a state that keeps moving past the retry budget withdraws the job and returns that, never a stale ciphertext', async () => {
+    const h = harness();
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    await envelope(jobId, panel, await deliver(h, jobId, panel));
+    const live = (h.jobs as unknown as { jobs: Map<string, { rev: number; outcome?: { kind: string } }> }).jobs.get(jobId)!;
+    const counter = { calls: 0 };
+    (h.jobs as unknown as { options: { eligible: (items: readonly unknown[]) => Promise<boolean[]> } }).options.eligible = async (items) => {
+      counter.calls += 1;
+      // Every post-seal check finds the revision moved, until the job is withdrawn.
+      if (counter.calls % 2 === 0 && live.outcome?.kind === 'retained') live.rev += 1;
+      return items.map(() => true);
+    };
+    const { parsed } = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(parsed.state).toBe('withdrawn');
+    expect(counter.calls).toBeLessThanOrEqual(2 * 10);
+    expect(h.jobs.outsideSeam(jobId)!.state).toBe('withdrawn');
+  });
+
+  test('the same guard work on every request whatever the state: two calls per seal, withdrawn jobs included', async () => {
+    const h = harness();
+    const panel = await generatePanelKeyPair();
+    const ids = { idle: begin(h), appended: begin(h), withdrawn: begin(h) };
+    for (const id of Object.values(ids)) await envelope(id, panel, await deliver(h, id, panel));
+    h.jobs.appendOutsideBlock(ids.appended, 1, { text: SECRET_OUTSIDE });
+    h.eligible.refuse = true;
+    await h.jobs.claim(ids.withdrawn, panel.publicKey, 2);
+    h.eligible.refuse = false;
+    const counter = interleaving(h, {});
+    for (const id of Object.values(ids)) {
+      counter.calls = 0;
+      await h.jobs.claim(id, panel.publicKey, 2);
+      expect(counter.calls).toBe(2);
+    }
+  });
+
+  test('a seal that throws leaves no delivery window; the next request delivers and fixes it then', async () => {
+    const h = harness();
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    await h.jobs.claim(jobId, panel.publicKey, 2);
+    await settled(h.jobs);
+    const subtle = globalThis.crypto.subtle;
+    const encrypt = subtle.encrypt;
+    subtle.encrypt = () => Promise.reject(new Error('seal failed'));
+    try {
+      await expect(h.jobs.claim(jobId, panel.publicKey, 2)).rejects.toThrow('seal failed');
+    } finally {
+      subtle.encrypt = encrypt;
+    }
+    expect(h.jobs.outsideSeam(jobId)).toMatchObject({ state: 'answer', firstDeliveredAt: undefined, followUntil: undefined, lastCollectedAt: undefined });
+    expect(h.jobs.markOutside(jobId, 1, 'pending')).toEqual({ ok: false, reason: 'not_delivered' });
+    h.clock.now += 60_000;
+    const { parsed } = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(parsed.followSeconds).toBe(1_200);
+    expect(h.jobs.outsideSeam(jobId)).toMatchObject({ firstDeliveredAt: h.clock.now, followUntil: h.clock.now + PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, lastCollectedAt: h.clock.now });
+  });
+});
+
+describe('what a job retains', () => {
+  type LiveJob = { question?: string; outcome?: { kind: string; answer?: unknown }; outside: unknown; opens?: unknown; sealedItems?: unknown; guardItems?: unknown; evidence?: unknown; refresh?: unknown };
+  const live = (h: Harness, id: string) => (h.jobs as unknown as { jobs: Map<string, LiveJob> }).jobs.get(id)!;
+
+  test('the question leaves the job once the claim has read it; a withdrawal clears everything but the item identities', async () => {
+    const h = harness();
+    const jobId = begin(h);
+    expect(live(h, jobId).question).toBe('When does the lease end?');
+    const panel = await generatePanelKeyPair();
+    const first = await envelope(jobId, panel, await deliver(h, jobId, panel));
+    const job = live(h, jobId);
+    expect(job.question).toBeUndefined();
+    expect(job.evidence).toBeUndefined();
+    expect(job.refresh).toBeUndefined();
+    expect(job.outcome?.kind).toBe('retained');
+    expect(job.opens).toBeDefined();
+    h.jobs.appendOutsideBlock(jobId, 1, { text: SECRET_OUTSIDE, question: 'How do leases renew?' });
+    h.eligible.refuse = true;
+    await h.jobs.claim(jobId, panel.publicKey, 2);
+    expect(job.outcome).toEqual({ kind: 'withdrawn' });
+    expect(job.outside).toEqual({ state: 'idle' });
+    expect(job.question).toBeUndefined();
+    expect(job.opens).toBeUndefined();
+    expect(job.sealedItems).toBeUndefined();
+    expect(job.guardItems).toEqual([{ trust_domain: 'secure_local' }]);
+    expect(JSON.stringify(job)).not.toContain('SENTINEL');
+    expect(JSON.stringify(job)).not.toContain('lease');
+    expect(first.parsed.answer).toBe(SECRET_ANSWER);
+  });
+
+  test('a job holds only the fitted first answer and the fitted outside block: 200 jobs with maximal blocks stay inside 200 envelopes', async () => {
+    const h = harness(ON, { maxJobs: 200, claimRate: { capacity: 10_000, refillPerSecond: 0 } });
+    const panel = await generatePanelKeyPair();
+    const huge = Array.from({ length: 3_000 }, (_, index) => `line ${index} ${'日本語'.repeat(200)}`).join('\n');
+    const ids: string[] = [];
+    for (let index = 0; index < 200; index += 1) {
+      const id = begin(h);
+      ids.push(id);
+      await envelope(id, panel, await deliver(h, id, panel));
+      expect(h.jobs.appendOutsideBlock(id, 1, { text: huge, question: huge, route: huge })).toEqual({ ok: true, rev: 2 });
+    }
+    let total = 0;
+    for (const id of ids) {
+      const job = live(h, id);
+      const retained = utf8Bytes(JSON.stringify(job.outcome?.answer)) + utf8Bytes(JSON.stringify(job.outside));
+      expect(utf8Bytes(JSON.stringify(job.outside))).toBeLessThanOrEqual(6_144);
+      expect((job.outside as { cut?: boolean }).cut).toBe(true);
+      expect(Object.keys(job.outside as object).sort()).toEqual(['cut', 'question', 'route', 'state', 'text']);
+      total += retained;
+    }
+    expect(total).toBeLessThanOrEqual(200 * 35_328);
+  }, 60_000);
 });
 
 describe('mixed versions and jobs outside the protocol keep today\'s behavior', () => {
@@ -428,28 +589,45 @@ describe('timing (design §A.5.4, measured)', () => {
    * extra guard call costs well over that). If a future change fails this,
    * the design says to add a fixed response-time floor and record it.
    */
-  test('phase-2 response times do not differ by outcome beyond the stated tolerance', async () => {
-    const outcomes = ['idle', 'pending', 'appended', 'paused', 'withdrawn'] as const;
+  // `control` is a second idle job: the A/A noise floor of the measurement itself.
+  const OUTCOMES = ['idle', 'control', 'pending', 'appended', 'paused', 'withdrawn'] as const;
+
+  /**
+   * Five jobs, one per outcome, with the heaviest payloads the contract
+   * allows (a full answer, four citations, four gaps, a maximal outside
+   * block), measured with the given guard: interleaved rounds so drift
+   * affects every outcome alike, medians compared against the idle one.
+   */
+  async function measure(label: string, guard: (items: readonly unknown[]) => Promise<readonly boolean[]>): Promise<Record<string, number>> {
+    const heavy = (units: number) => '日本語テキスト"\\😀'.repeat(units).slice(0, units);
+    const model = readyModel({
+      answerPrivately: async () => ({
+        answer: heavy(2_700),
+        citations: Array.from({ length: 4 }, (_, index) => ({ title: heavy(300), source: heavy(300), date: heavy(32), url: `https://example.com/${'p'.repeat(2_000 + index)}` })),
+        unanswered: Array.from({ length: 4 }, () => heavy(300)),
+      }),
+    });
     // The test clock never advances, so the claim bucket never refills: give it room for every sample.
-    const h = harness(ON, { maxJobs: 50, claimRate: { capacity: 10_000, refillPerSecond: 0 } });
+    const h = harness(ON, { maxJobs: 50, claimRate: { capacity: 10_000, refillPerSecond: 0 }, model: () => model });
+    const refusing = { now: false };
+    (h.jobs as unknown as { options: { eligible: typeof guard } }).options.eligible = async (items) => (refusing.now ? items.map(() => false) : guard(items));
     const panel = await generatePanelKeyPair();
     const jobs = new Map<string, string>();
-    for (const outcome of outcomes) {
+    for (const outcome of OUTCOMES) {
       const id = begin(h);
       await envelope(id, panel, await deliver(h, id, panel));
       if (outcome === 'pending' || outcome === 'paused') h.jobs.markOutside(id, 1, outcome);
-      if (outcome === 'appended') h.jobs.appendOutsideBlock(id, 1, { text: SECRET_OUTSIDE.repeat(20), question: 'q', route: 'zkAPI' });
+      if (outcome === 'appended') h.jobs.appendOutsideBlock(id, 1, { text: Array.from({ length: 60 }, () => heavy(400)).join('\n'), question: heavy(2_000), route: heavy(200) });
       if (outcome === 'withdrawn') {
-        h.eligible.refuse = true;
+        refusing.now = true;
         await h.jobs.claim(id, panel.publicKey, 2);
-        h.eligible.refuse = false;
+        refusing.now = false;
       }
       jobs.set(outcome, id);
     }
-    const samples = new Map<string, number[]>(outcomes.map((outcome) => [outcome, []]));
-    // Warm-up, then interleaved rounds so drift affects every outcome alike.
+    const samples = new Map<string, number[]>(OUTCOMES.map((outcome) => [outcome, []]));
     for (let round = 0; round < 45; round += 1) {
-      for (const outcome of outcomes) {
+      for (const outcome of OUTCOMES) {
         const started = Bun.nanoseconds();
         const response = await h.jobs.claim(jobs.get(outcome)!, panel.publicKey, 2);
         const elapsed = (Bun.nanoseconds() - started) / 1e6;
@@ -458,12 +636,33 @@ describe('timing (design §A.5.4, measured)', () => {
       }
     }
     const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
-    const medians = Object.fromEntries(outcomes.map((outcome) => [outcome, median(samples.get(outcome)!)]));
-    const baseline = medians.idle!;
-    const tolerance = Math.max(2, baseline * 0.5);
-    console.log(`[follow-up timing] medians ms: ${JSON.stringify(Object.fromEntries(Object.entries(medians).map(([k, v]) => [k, Number(v.toFixed(3))])))} tolerance=${tolerance.toFixed(3)}`);
-    for (const outcome of outcomes) expect(Math.abs(medians[outcome]! - baseline), `${outcome} median ${medians[outcome]} vs idle ${baseline}`).toBeLessThanOrEqual(tolerance);
-  }, 60_000);
+    const medians = Object.fromEntries(OUTCOMES.map((outcome) => [outcome, median(samples.get(outcome)!)]));
+    console.log(`[follow-up timing] ${label}: medians ms ${JSON.stringify(Object.fromEntries(Object.entries(medians).map(([k, v]) => [k, Number(v.toFixed(3))])))}`);
+    return medians;
+  }
+
+  /**
+   * The guards: an immediate map (the noise floor of the code path alone), a
+   * store-shaped guard (one asynchronous hop per item, as the live guard's
+   * content-serving check makes), and a slow store (a 3 ms wait per call,
+   * as a loaded index under the live guard's content retrieval).
+   */
+  const GUARDS: Array<[string, (items: readonly unknown[]) => Promise<readonly boolean[]>]> = [
+    ['immediate', async (items) => items.map(() => true)],
+    ['store-shaped', async (items) => Promise.all(items.map(async () => { await Bun.sleep(0); return true; }))],
+    ['slow store (3 ms per call)', async (items) => { await Bun.sleep(3); return items.map(() => true); }],
+  ];
+
+  for (const [label, guard] of GUARDS) {
+    test(`phase-2 response times do not differ by outcome beyond the stated tolerance (${label})`, async () => {
+      const medians = await measure(label, guard);
+      const baseline = medians.idle!;
+      const noise = Math.abs(medians.control! - baseline);
+      // Tolerance: the larger of 2 ms, half the idle median and twice the A/A noise floor.
+      const tolerance = Math.max(2, baseline * 0.5, noise * 2);
+      for (const outcome of OUTCOMES) expect(Math.abs(medians[outcome]! - baseline), `${label}: ${outcome} median ${medians[outcome]} vs idle ${baseline} (noise ${noise})`).toBeLessThanOrEqual(tolerance);
+    }, 90_000);
+  }
 
   test('first-reveal cost: sealing the 36 KiB envelope against today\'s first bucket, measured and logged', async () => {
     const panel = await generatePanelKeyPair();

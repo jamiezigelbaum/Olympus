@@ -26,6 +26,7 @@ import {
   CHATGPT_PRIVATE_ANSWER_CAPABILITY,
   CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS,
   CHATGPT_PRIVATE_ANSWER_FRAME_CAP_PX,
+  CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX,
   CHATGPT_PRIVATE_ANSWER_OUTSIDE_HEIGHT_PX,
 } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
@@ -353,7 +354,7 @@ describe('follow-up polling', () => {
     expect(host.doc.querySelector('.sub.warn')).toBeNull();
   });
 
-  test('a withdrawal replaces the answer: nothing of it remains, no button, polling stops', async () => {
+  test('a withdrawal replaces the answer at once; the polling cadence and the reported height carry on unchanged', async () => {
     const host = mount({
       followPollMs: 15,
       replies: [
@@ -363,21 +364,35 @@ describe('follow-up polling', () => {
     });
     await reveal(host);
     expect(host.outside()!.querySelector('.out-text')?.textContent).toBe(OUTSIDE_TEXT);
+    const revealedHeight = host.heights().at(-1);
+    expect(revealedHeight).toBe(300 + R);
     await host.until(() => host.text().includes(W.withdrawn), 'the withdrawn sentence');
     expect(host.doc.querySelector('.card .sub.warn')?.textContent).toBe(W.withdrawn);
     expect(host.buttons()).toHaveLength(0);
-    expect(host.outside()).toBeNull();
+    // The reserved container stays, empty; nothing of the answer or the outside block remains.
+    expect(host.outside()).not.toBeNull();
+    expect(host.outside()!.querySelector('.out-text')).toBeNull();
     for (const gone of ['31 March', 'Orchard', OUTSIDE_TEXT, QUESTION, 'monthly rent']) expect(host.text()).not.toContain(gone);
+    // Polling continues at the cadence for the rest of the window, with the same body.
     const count = host.fetched.length;
-    await sleep(80);
-    expect(host.fetched.length).toBe(count);
+    await host.until(() => host.fetched.length >= count + 3, 'polls after the withdrawal');
+    const key = host.fetched[0]!.body.publicKey;
+    for (const call of host.fetched) expect(call.body).toEqual({ v: 1, publicKey: key, cap: 2 });
+    // The host was told nothing new: every height is still the revealed one.
+    await sleep(30);
+    expect(host.heights().filter((height) => height !== 0 && height !== 300).every((height) => height === revealedHeight)).toBe(true);
+    expect(host.heights().at(-1)).toBe(revealedHeight);
   });
 
-  test('a withdrawal in the first response is the same sentence', async () => {
-    const host = mount({ replies: [{ envelope: { state: 'withdrawn', answer: undefined, citations: undefined, unanswered: undefined } }] });
+  test('a withdrawal in the first response is the same sentence, keeps the window, and reports the same rule', async () => {
+    const host = mount({ followPollMs: 15, replies: [{ envelope: { state: 'withdrawn', followSeconds: 400, answer: undefined, citations: undefined, unanswered: undefined } }] });
     host.push(ready());
     await host.until(() => host.text().includes(W.withdrawn), 'the withdrawn sentence');
     expect(host.buttons()).toHaveLength(0);
+    await host.until(() => host.fetched.length >= 3, 'polls after a withdrawn first response');
+    await sleep(20);
+    expect(host.heights().at(-1)).toBe(Math.min(300 + R, CAP));
+    expect(host.outside()).not.toBeNull();
   });
 
   test('410 during follow-up (expiry or eviction) stops the polling and keeps what is shown', async () => {
@@ -426,6 +441,16 @@ describe('follow-up polling', () => {
     expect(after.fetched).toHaveLength(1);
     expect(after.outside()!.querySelector('.out-text')?.textContent).toBe(OUTSIDE_TEXT);
     expect(after.heights().at(-1)).toBe(Math.min(300 + R, CAP));
+    await after.close();
+    hosts.pop();
+
+    // Reopened after a withdrawal, inside the window: the sentence, the same polling, the same rule.
+    const withdrawn = mount({ idb, claim, followPollMs: 15, replies: [{ envelope: { rev: 3, state: 'withdrawn', followSeconds: 200, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] });
+    withdrawn.push(ready());
+    await withdrawn.until(() => withdrawn.text().includes(W.withdrawn), 'the withdrawn sentence');
+    expect(withdrawn.fetched[0]!.body.publicKey).toBe(first.fetched[0]!.body.publicKey);
+    await withdrawn.until(() => withdrawn.fetched.length >= 3, 'polling continues after a withdrawn reopen');
+    expect(withdrawn.heights().at(-1)).toBe(Math.min(300 + R, CAP));
   });
 });
 
@@ -439,6 +464,8 @@ describe('fixed reported geometry (host transcript)', () => {
     { name: 'idle then appended', replies: [{ envelope: { followSeconds: 120 } }, { envelope: { rev: 2, followSeconds: 60, outside: { state: 'appended', text: OUTSIDE_TEXT } } }] },
     { name: 'follow-up expiry (followSeconds 0)', replies: [{ envelope: { followSeconds: 0, outside: { state: 'appended', text: OUTSIDE_TEXT } } }] },
     { name: '410 after reveal', replies: [{ envelope: { followSeconds: 120 } }, { status: 410, body: { status: 'gone' } }] },
+    { name: 'withdrawn after reveal', replies: [{ envelope: { followSeconds: 120, outside: { state: 'appended', text: OUTSIDE_TEXT } } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 60, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] },
+    { name: 'withdrawn after pending', replies: [{ envelope: { followSeconds: 120, outside: { state: 'pending' } } }, { envelope: { rev: 2, state: 'withdrawn', followSeconds: 60, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } }] },
   ];
 
   async function transcript(scenario: Scenario, options: MountOptions = {}): Promise<{ heights: number[]; sizes: unknown[] }> {
@@ -447,12 +474,9 @@ describe('fixed reported geometry (host transcript)', () => {
     // The handshake's forced resend fires first (height 0), so what follows is the card's own story.
     await sleep(50);
     await reveal(host);
-    // Let the follow-up polls run through the scripted outcomes, a width/font/hide-show cycle included.
+    // Let the follow-up polls run through the scripted outcomes, then a load event.
     await sleep(120);
     host.win.dispatchEvent(new host.win.Event('load'));
-    host.button(W.hide).click();
-    await sleep(20);
-    host.button(W.show).click();
     await sleep(40);
     return { heights: host.heights(), sizes: host.sizes() };
   }
@@ -462,7 +486,7 @@ describe('fixed reported geometry (host transcript)', () => {
       const H = Math.min(cardHeight + R, CAP);
       const baseline = await transcript(outcomes[0]!, { cardHeight, width });
       expect(baseline.heights).toContain(H);
-      // Working card (A), revealed (H), hidden (A), shown again (H): never a measured total.
+      // Working card (A), then revealed (H), whatever follows: never a measured total, never a change on withdrawal.
       expect(baseline.heights.every((height) => height === 0 || height === cardHeight || height === H)).toBe(true);
       expect(baseline.sizes.every((size: any) => size.height === 0 || size.height === cardHeight || size.height === H)).toBe(true);
       expect(baseline.sizes.filter((size: any) => size.height === H).every((size: any) => size.width === width)).toBe(true);
@@ -480,11 +504,24 @@ describe('fixed reported geometry (host transcript)', () => {
     await sleep(30);
     expect(host.doc.querySelector('section.card.follow')).not.toBeNull();
     expect(host.heights().at(-1)).toBe(CAP);
-    expect(host.outside()!.style.height).toBe(`${R}px`);
     const html = privateAnswerResourceHtml();
     expect(html).toContain('html:root>body #panel>.card.follow{max-height:464px!important;overflow:auto!important}');
     expect(html).toContain('.out-head{position:sticky;top:0;');
     expect(CAP - R).toBe(464);
+  });
+
+  test('the reserved allocation R is the outside box plus its gap above, from the CSS constants', async () => {
+    // happy-dom does no layout, so the bound is asserted from what the CSS and the inline style say.
+    const host = mount({ replies: [{ envelope: { followSeconds: 0 } }] });
+    await reveal(host);
+    const box = host.outside()!;
+    const boxHeight = Number.parseInt(box.style.height, 10);
+    const margin = /\.outside\{[^}]*margin:(\d+)px 0 0;/.exec(privateAnswerResourceHtml())![1];
+    expect(boxHeight + Number(margin)).toBe(R);
+    expect(CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX).toBe(Number(margin));
+    expect(boxHeight).toBe(R - CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX);
+    // Padding stays off the box itself, so the inline height is the whole border box (box-sizing: border-box).
+    expect(privateAnswerResourceHtml()).toMatch(/\.outside\{[^}]*box-sizing:border-box;[^}]*padding:0;/);
   });
 
   test('a delayed handshake and the fallback both report H, never a measured total', async () => {
@@ -499,16 +536,25 @@ describe('fixed reported geometry (host transcript)', () => {
     expect(silent.heights().every((height) => height === 300 + R)).toBe(true);
   });
 
-  test('a withdrawal reports the withdrawn card (the stated residual), the same for a withdrawal from any prior outcome', async () => {
+  test('a withdrawal from any prior outcome keeps reporting H, through a later load event and a width change', async () => {
     const withdrawnReply: Reply = { envelope: { rev: 5, state: 'withdrawn', followSeconds: 100, answer: undefined, citations: undefined, unanswered: undefined, outside: { state: 'idle' } } };
     const runs: number[][] = [];
     for (const prior of [{ state: 'idle' }, { state: 'pending' }, { state: 'appended', text: OUTSIDE_TEXT }] as Outside[]) {
       const host = mount({ followPollMs: 15, replies: [{ envelope: { followSeconds: 300, outside: prior } }, withdrawnReply] });
+      await sleep(50);
       await reveal(host);
       await host.until(() => host.text().includes(W.withdrawn), 'the withdrawal');
       await sleep(30);
+      // A later notification, and a width change that shrinks the withdrawn card: still H.
+      host.win.dispatchEvent(new host.win.Event('load'));
+      const proto = (host.win as any).HTMLElement.prototype;
+      Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: any) { return this.classList?.contains('card') ? 60 : 0; } });
+      host.win.dispatchEvent(new host.win.Event('load'));
+      await sleep(20);
       runs.push(host.heights());
-      expect(host.heights().at(-1)).toBe(300);
+      expect(host.heights().at(-1)).toBe(300 + R);
+      expect(host.heights()).not.toContain(60);
+      expect(host.heights()).not.toContain(60 + R);
     }
     expect(runs[1]).toEqual(runs[0]);
     expect(runs[2]).toEqual(runs[0]);
@@ -558,7 +604,7 @@ describe('hostile outside text (eval B4)', () => {
     // The geometry is exactly the benign transcript.
     expect(host.heights()).toEqual(benign.heights());
     expect(host.sizes()).toEqual(benign.sizes());
-    expect(outside.style.height).toBe(`${R}px`);
+    expect(outside.style.height).toBe(`${R - CHATGPT_PRIVATE_ANSWER_OUTSIDE_GAP_PX}px`);
     // Nothing reached the host but the handshake and sizes.
     expect(new Set(host.sent.map((m) => m.method))).toEqual(new Set(['ui/initialize', 'ui/notifications/initialized', 'ui/notifications/size-changed']));
     expect(host.calls.map(([name]) => name).filter((name) => name !== 'notifyIntrinsicHeight')).toEqual([]);

@@ -123,6 +123,8 @@ import {
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
 import {
   PRIVATE_ANSWER_PAYLOAD_LIMITS,
+  fitFirstAnswer,
+  fitOutsideBlock,
   padPrivateAnswerEnvelope,
   preparePrivateAnswer,
   serializePrivateAnswerEnvelope,
@@ -355,7 +357,13 @@ interface Job {
   /** Follow-up state: the revision only increases; the outside block lives here until it is sealed. */
   rev: number;
   outside: PrivateAnswerOutsideBlockV1;
-  /** Server-owned clocks (design §A.5.6): set when the first `ready` goes to the claiming key. */
+  /**
+   * The identities (never text) of the items a follow-up job's answer read,
+   * kept through withdrawal so every phase-2 request makes the same guard
+   * call; `sealedItems` is the releasable copy, cleared by a withdrawal.
+   */
+  guardItems?: readonly PrivateEvidenceItem[] | undefined;
+  /** Server-owned clocks (design §A.5.6): published only with the first `ready` actually returned to the claiming key. */
   firstDeliveredAt?: number;
   followUntil?: number;
   /** The last collection by the claiming key (the recent-activity input of final authorization, C4b). */
@@ -384,6 +392,8 @@ export interface ClaimResponse {
 }
 
 const MAX_QUESTION_CHARS = 4_000;
+/** Seals one phase-2 response may make over a state that keeps changing before the job is withdrawn instead. */
+const FOLLOW_UP_SEAL_ATTEMPTS = 8;
 /** A source-open token: 32 random bytes, base64url. */
 const OPEN_TOKEN_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_LIMITS.openTokenChars}}$`);
 const MAX_EVIDENCE_ITEMS = 50;
@@ -657,36 +667,65 @@ export class PrivateAnswerJobs {
 
   /**
    * The uniform phase-2 response: a freshly sealed, exactly-sized envelope
-   * carrying the job's current state (design §A.5.3 race rules).
+   * carrying the job's current state (design §A.5.3 race rules). Every
+   * request, whatever the job's state, does the same work: the live guard
+   * before the seal, the seal, the live guard again after it, the release
+   * check. A withdrawn job runs the guard too (its result is discarded), so
+   * the work a request costs does not depend on the outcome.
    *
    * 1. Read the revision and the state.
    * 2. Run the eligibility guard (a withdrawal is terminal, in-envelope).
    * 3. Seal.
-   * 4. Re-read before handing out: withdrawn meanwhile, seal the withdrawn
-   *    envelope instead; revision advanced, re-seal once with the newer state.
+   * 4. Run the guard again, then re-read the revision and the state. A
+   *    ciphertext sealed over a state that has since changed is never handed
+   *    out: the loop seals again over the current state. A withdrawal always
+   *    wins, and is stable, so the loop ends; a state that keeps moving past
+   *    the retry budget withdraws the job (fail closed) and returns that.
+   * 5. Only then are the delivery clocks published: first delivery is the
+   *    first `ready` actually returned, never a seal that failed.
    */
   private async followUpResponse(job: Job, panelKey: CryptoKey): Promise<ClaimResponse> {
-    if (job.outcome?.kind === 'retained') await this.stillReleasable(job);
-    if (this.jobs.get(job.id) !== job) return gone();
     const at = this.now();
-    if (job.firstDeliveredAt === undefined) {
-      // First delivery: the transition into phase 2, and the one moment the
-      // follow-up window is fixed. A remount later never moves it.
-      job.firstDeliveredAt = at;
-      job.followUntil = Math.min(at + this.followUpWindowMs, job.expiresAt);
-    }
-    job.lastCollectedAt = at;
-    let sealed: SealedPrivateAnswer | undefined;
-    for (let attempt = 0; attempt < 2 && this.jobs.get(job.id) === job; attempt += 1) {
+    // The window the envelope reports, fixed at the first successful delivery.
+    const followUntil = job.followUntil ?? Math.min(at + this.followUpWindowMs, job.expiresAt);
+    for (let attempt = 0; ; attempt += 1) {
+      await this.guardFollowUp(job);
+      if (this.jobs.get(job.id) !== job) return gone();
+      if (attempt >= FOLLOW_UP_SEAL_ATTEMPTS) this.withdraw(job);
       const rev = job.rev;
-      const state = job.outcome?.kind;
-      const plaintext = this.envelopeFor(job);
+      const kind = job.outcome?.kind;
+      const plaintext = this.envelopeFor(job, followUntil);
       if (plaintext === undefined) return gone();
-      sealed = await sealPrivateAnswer(job.id, panelKey, plaintext);
-      if (job.rev === rev && job.outcome?.kind === state) break;
+      const sealed = await sealPrivateAnswer(job.id, panelKey, plaintext);
+      // Final release checks, after the seal and immediately before the hand-out.
+      await this.guardFollowUp(job);
+      if (this.jobs.get(job.id) !== job) return gone();
+      if (job.rev !== rev || job.outcome?.kind !== kind) continue;
+      if (job.firstDeliveredAt === undefined) {
+        // First delivery: the transition into phase 2, and the one moment the
+        // follow-up window is fixed. A remount later never moves it.
+        job.firstDeliveredAt = at;
+        job.followUntil = followUntil;
+      }
+      job.lastCollectedAt = at;
+      return { status: 200, body: { status: 'ready', v: 1, ...sealed } };
     }
-    if (this.jobs.get(job.id) !== job || !sealed) return gone();
-    return { status: 200, body: { status: 'ready', v: 1, ...sealed } };
+  }
+
+  /**
+   * The live guard over the items the answer read, on every phase-2 request
+   * whatever the state: a retained answer whose item is refused is withdrawn
+   * (terminal); a withdrawn job keeps the identities (never text) so the
+   * same call is made and its result discarded.
+   */
+  private async guardFollowUp(job: Job): Promise<void> {
+    const kind = job.outcome?.kind;
+    const items = job.guardItems ?? [];
+    const ok = await checkPrivateEvidence(this.options.eligible, items);
+    const current = (job.outcome as Job['outcome'])?.kind;
+    if (kind !== 'retained' || current !== 'retained') return;
+    if (job.guardItems !== undefined && ok.every(Boolean)) return;
+    this.withdraw(job);
   }
 
   /**
@@ -695,10 +734,10 @@ export class PrivateAnswerJobs {
    * and fails closed: the outside block is dropped; if it still does not
    * fit, the answer is withdrawn.
    */
-  private envelopeFor(job: Job): string | undefined {
+  private envelopeFor(job: Job, followUntil: number): string | undefined {
     const outcome = job.outcome;
     if (!outcome || (outcome.kind !== 'retained' && outcome.kind !== 'withdrawn')) return undefined;
-    const followSeconds = Math.max(0, Math.ceil(((job.followUntil ?? 0) - this.now()) / 1000));
+    const followSeconds = Math.max(0, Math.ceil((followUntil - this.now()) / 1000));
     const envelope = (): PrivateAnswerEnvelopeV1 => (job.outcome?.kind === 'retained'
       ? { v: 1, rev: job.rev, state: 'answer', answer: job.outcome.answer.answer, citations: [...job.outcome.answer.citations], ...(job.outcome.answer.unanswered ? { unanswered: [...job.outcome.answer.unanswered] } : {}), followSeconds, outside: { ...job.outside } }
       : { v: 1, rev: job.rev, state: 'withdrawn', followSeconds, outside: { state: 'idle' } });
@@ -719,11 +758,16 @@ export class PrivateAnswerJobs {
     }
   }
 
-  /** Terminal: the answer, the outside block, the tokens and the items are gone; the revision moves once more. */
+  /**
+   * Terminal: the answer, the outside block, the question and the tokens are
+   * gone; the revision moves once more. The item identities (no text) stay
+   * so every later request still makes the same guard call.
+   */
   private withdraw(job: Job): void {
     if (job.outcome?.kind === 'withdrawn') return;
     job.outcome = { kind: 'withdrawn' };
     job.outside = { state: 'idle' };
+    job.question = undefined;
     job.sealedItems = undefined;
     job.opens = undefined;
     job.rev += 1;
@@ -756,7 +800,8 @@ export class PrivateAnswerJobs {
   /**
    * Moves the outside block to `pending` or `paused`, or back to `idle`, by a
    * compare-and-set on the revision (C4b seam). Only a delivered follow-up
-   * job in state `answer` whose block is not yet appended accepts it.
+   * job in state `answer`, inside its follow-up window, whose block is not
+   * yet appended accepts it.
    */
   markOutside(jobId: string, expectedRev: number, state: 'idle' | 'pending' | 'paused'): OutsideSeamResult {
     const check = this.outsideWritable(jobId, expectedRev);
@@ -771,31 +816,33 @@ export class PrivateAnswerJobs {
    * Appends the outside reply to a delivered follow-up job (C4b seam): a
    * synchronous compare-and-set on the revision, only while the job is in
    * state `answer`, at most once per job, never after the follow-up window.
-   * The text is bounded by the payload contract when the envelope is built;
-   * `cut` reports whether it will be shortened. A reply for a withdrawn,
+   * The block is normalized and budgeted by the payload contract before it
+   * is retained (only the fitted fields and `cut` are kept), so what a job
+   * holds is bounded whatever the reply was. A reply for a withdrawn,
    * expired or evicted job is discarded: nothing restores a withdrawn job.
    */
   appendOutsideBlock(jobId: string, expectedRev: number, block: { text: string; question?: string; route?: string }): OutsideSeamResult {
     const check = this.outsideWritable(jobId, expectedRev);
     if (!check.ok) return check;
     const job = check.job;
-    if (job.followUntil === undefined || this.now() > job.followUntil) return { ok: false, reason: 'window_closed' };
-    job.outside = {
+    job.outside = fitOutsideBlock({
       state: 'appended',
       text: typeof block.text === 'string' ? block.text : '',
       ...(typeof block.question === 'string' ? { question: block.question } : {}),
       ...(typeof block.route === 'string' ? { route: block.route } : {}),
-    };
+    });
     job.rev += 1;
     return { ok: true, rev: job.rev };
   }
 
+  /** The shared condition of both outside seams, the follow-up window included. */
   private outsideWritable(jobId: string, expectedRev: number): { ok: true; job: Job } | (OutsideSeamResult & { ok: false }) {
     this.sweep();
     const job = this.jobs.get(jobId);
     if (!job || !job.followUp) return { ok: false, reason: 'unknown' };
     if (job.outcome?.kind === 'withdrawn') return { ok: false, reason: 'withdrawn' };
-    if (job.outcome?.kind !== 'retained' || job.firstDeliveredAt === undefined) return { ok: false, reason: 'not_delivered' };
+    if (job.outcome?.kind !== 'retained' || job.firstDeliveredAt === undefined || job.followUntil === undefined) return { ok: false, reason: 'not_delivered' };
+    if (this.now() > job.followUntil) return { ok: false, reason: 'window_closed' };
     if (job.outside.state === 'appended') return { ok: false, reason: 'already_appended' };
     if (job.rev !== expectedRev) return { ok: false, reason: 'stale_rev' };
     return { ok: true, job };
@@ -878,6 +925,7 @@ export class PrivateAnswerJobs {
     job.outside = { state: 'idle' };
     job.opens = undefined;
     job.sealedItems = undefined;
+    job.guardItems = undefined;
     this.jobs.delete(id);
   }
 
@@ -1226,6 +1274,8 @@ export class PrivateAnswerJobs {
     const run = async () => {
       const refresh = job.refresh;
       const question = job.question ?? '';
+      // The claim's computation holds the question from here; the job does not.
+      job.question = undefined;
       job.evidence = undefined;
       job.refresh = undefined;
       const refreshStarted = this.now();
@@ -1274,6 +1324,7 @@ export class PrivateAnswerJobs {
             // Follow-up collection keeps the bounded plaintext and seals it
             // afresh per request; the envelope must fit the fixed size now
             // (it always does after budgeting; a rejection fails the job).
+            // Retained in its fitted form: exactly the fields and bytes the envelope carries.
             const retained = retainedAnswer(plaintext);
             try {
               padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope({
@@ -1302,7 +1353,10 @@ export class PrivateAnswerJobs {
             timing.precomputed = precomputed;
             timing.waitAtClaimMs = this.now() - claimedAt;
             job.sealedItems = result.usedItems;
-            if (outcome.kind === 'retained') job.rev = 1;
+            if (outcome.kind === 'retained') {
+              job.guardItems = result.usedItems;
+              job.rev = 1;
+            }
             settle(outcome);
             return;
           }
@@ -1531,12 +1585,13 @@ function preparedAnswer(result: { answer: unknown; citations?: unknown; unanswer
   };
 }
 
-/** The first answer a follow-up job retains: the plaintext's fields, frozen. */
+/** The first answer a follow-up job retains: the plaintext's fields in their budgeted form, frozen. */
 function retainedAnswer(plaintext: PrivateAnswerPlaintextV1): RetainedAnswer {
+  const fitted = fitFirstAnswer(plaintext);
   return Object.freeze({
-    answer: plaintext.answer,
-    citations: Object.freeze(plaintext.citations.map((citation) => ({ ...citation }))),
-    unanswered: plaintext.unanswered && plaintext.unanswered.length > 0 ? Object.freeze([...plaintext.unanswered]) : undefined,
+    answer: fitted.answer,
+    citations: Object.freeze(fitted.citations),
+    unanswered: fitted.unanswered && fitted.unanswered.length > 0 ? Object.freeze(fitted.unanswered) : undefined,
   });
 }
 
