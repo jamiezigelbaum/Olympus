@@ -62,6 +62,23 @@ describe('the Privacy editor page', () => {
     expect(html).not.toContain('Public');
   });
 
+  test('broad words in the saved description bring the follow-up questions, pre-filled from its sentences', () => {
+    const html = privacyPage();
+    // "health" and "money" in the preview's description: their questions, every choice at its default.
+    expect(html).toContain('<div class="pquestions" data-privacy-questions="family,health,money"><h3 class="sect">A few quick questions</h3>');
+    expect(html).toContain('<h4 class="pqtitle" id="privacy-q-money">Which money things are private?</h4>');
+    expect(html).toContain('<div class="pqopt" role="radiogroup" aria-labelledby="privacy-q-money privacy-q-money-tax"><span class="pqlabel" id="privacy-q-money-tax">Tax and payroll papers</span>');
+    expect(html).toContain('<label class="pqchoice"><input type="radio" name="privacy-q-money-tax" value="private" data-privacy-topic="money" data-privacy-option="tax" checked><span>Private</span></label>');
+    const saved = renderDashboardPrivacyPage(buildDashboardPreviewView('review'), {
+      now: NOW, format: 'fragment', controlMode: 'native', canWrite: true,
+      privacySettings: { configured: true, description: 'my family\nAbout family: private — Alumni, contact and address lists.', pendingCount: 0, revision: 'r', rules: [] },
+    });
+    expect(saved).toContain('name="privacy-q-family-contacts" value="private" data-privacy-topic="family" data-privacy-option="contacts" checked>');
+    expect(saved).toContain('name="privacy-q-family-history" value="share" data-privacy-topic="family" data-privacy-option="history" checked>');
+    const none = privacyPage('review-unconfigured');
+    expect(none).toContain('<div class="pquestions" data-privacy-questions="" hidden></div>');
+  });
+
   test('an unset profile starts empty, and a source that is not signed in says why its Add is unavailable', () => {
     const html = privacyPage('review-unconfigured');
     expect(html).toContain('placeholder="For example: my health and therapy, money and taxes, anything about my kids, my divorce"></textarea>');
@@ -423,6 +440,97 @@ describe('the Privacy editor in the browser', () => {
     click('[data-privacy-confirm-yes]');
     await settle();
     expect(sent[0]).toMatchObject({ description: 'My health and money', confirm: true, revision: 'rev-1' });
+    abort.abort();
+  });
+
+  test('follow-up questions: a choice too long to add changes nothing, keeps the radio, and says why', async () => {
+    const owner = `my family ${'x'.repeat(1_900)}`;
+    const { root, abort } = mount(async () => ok(), { ...BASE_SETTINGS, description: owner });
+    const field = root.querySelector('textarea[name="description"]') as HTMLTextAreaElement;
+    const choice = (option: string, side: string) => root.querySelector(
+      `input[data-privacy-topic="family"][data-privacy-option="${option}"][value="${side}"]`) as HTMLInputElement;
+    const share = choice('medical', 'share');
+    share.checked = true;
+    share.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(field.value).toBe(owner);
+    expect(choice('medical', 'private').checked).toBe(true);
+    expect(choice('medical', 'share').checked).toBe(false);
+    const note = root.querySelector('[data-privacy-questions-message]')!;
+    expect(note.getAttribute('role')).toBe('alert');
+    expect(note.textContent).toBe('Your description is too long to add this answer. Shorten your own words, then choose again.');
+    expect((root.querySelector('form[data-privacy-form]') as HTMLFormElement).dataset.dirty).toBeUndefined();
+    // Shortening the words clears the note; the choice then goes in.
+    field.value = 'my family';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(root.querySelector('[data-privacy-questions-message]')).toBeNull();
+    choice('medical', 'share').checked = true;
+    choice('medical', 'share').dispatchEvent(new Event('change', { bubbles: true }));
+    expect(field.value).toContain('fine to share — Family members\' medical records');
+    abort.abort();
+  });
+
+  test('follow-up questions: a sentence edited by hand redraws the radios; an owner line that looks like one is left alone', async () => {
+    const owner = 'About family: never share anything about my kids.\nmy family stuff';
+    const { root, abort } = mount(async () => ok(), { ...BASE_SETTINGS, description: owner });
+    const field = root.querySelector('textarea[name="description"]') as HTMLTextAreaElement;
+    const choice = (option: string, side: string) => root.querySelector(
+      `input[data-privacy-topic="family"][data-privacy-option="${option}"][value="${side}"]`) as HTMLInputElement;
+    choice('contacts', 'private').checked = true;
+    choice('contacts', 'private').dispatchEvent(new Event('change', { bubbles: true }));
+    expect(field.value.split('\n').slice(0, 2)).toEqual(owner.split('\n'));
+    expect(field.value.split('\n')[2]).toStartWith('About family: private — ');
+    // Moving "Alumni …" to the shared part by hand: same areas, new answer, radios follow.
+    field.value = field.value.replace(', Alumni, contact and address lists;', ';').replace('fine to share — ', 'fine to share — Alumni, contact and address lists, ');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(choice('contacts', 'share').checked).toBe(true);
+    abort.abort();
+  });
+
+  test('follow-up questions: "family" asks them, a choice rewrites the description, and Save sends the refined words', async () => {
+    const sent: OlympusDashboardControlParams[] = [];
+    const owner = 'I want my family stuff to stay private';
+    const { root, click, submit, controller, reads, abort } = mount(async (params) => { sent.push(params); return ok(); }, { ...BASE_SETTINGS, description: owner });
+    const holder = root.querySelector('[data-privacy-questions]') as HTMLElement;
+    expect(holder.hidden).toBe(false);
+    expect(holder.textContent).toContain('A few quick questions');
+    expect(holder.querySelector('h3')!.textContent).toBe('A few quick questions');
+    expect(holder.querySelector('h4')!.textContent).toBe('Which family things are private?');
+    const rows = [...holder.querySelectorAll('[role="radiogroup"]')];
+    expect(rows.map((row) => row.getAttribute('aria-labelledby')!.split(' ').map((id) => root.querySelector(`#${id}`)!.textContent).join(' / '))).toEqual([
+      'Family members\' medical records', 'Family legal and money papers (divorce, custody, trusts)', 'Private family conversations and journals',
+      'School plans and family logistics', 'Alumni, contact and address lists', 'Family history and photos']
+      .map((label) => `Which family things are private? / ${label}`));
+    const choice = (option: string, side: string) => holder.ownerDocument.querySelector(
+      `input[data-privacy-topic="family"][data-privacy-option="${option}"][value="${side}"]`) as HTMLInputElement;
+    expect(choice('contacts', 'share').checked).toBe(true);
+    expect(choice('contacts', 'share').closest('label')!.textContent).toBe('Fine to share');
+    // A choice writes its sentence under the owner's words and holds the poll off like typing.
+    const contacts = choice('contacts', 'private');
+    contacts.checked = true;
+    contacts.dispatchEvent(new Event('change', { bubbles: true }));
+    const field = root.querySelector('textarea[name="description"]') as HTMLTextAreaElement;
+    expect(field.value.split('\n')[0]).toBe(owner);
+    expect(field.value.split('\n')[1]).toContain('Alumni, contact and address lists; fine to share — School plans and family logistics');
+    expect(choice('contacts', 'private').checked).toBe(true);
+    expect(document.activeElement).toBe(choice('contacts', 'private'));
+    await controller.refresh();
+    expect(reads).toEqual([]);
+    // Typing a new broad word asks about it too.
+    field.value = `${field.value}\nand my health`;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    expect([...root.querySelectorAll('[data-privacy-questions] h4')].map((node) => node.textContent))
+      .toEqual(['Which family things are private?', 'Which health things are private?']);
+    expect(choice('contacts', 'private').checked).toBe(true);
+    // A changed description lowers protection: confirmed first, then sent as shown.
+    await submit();
+    expect(sent).toEqual([]);
+    expect(root.querySelector('[data-privacy-confirm]')!.textContent)
+      .toContain('This changes your description, which decides what Olympus keeps private.');
+    click('[data-privacy-confirm-yes]');
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: 'save_privacy', description: field.value.trim(), confirm: true, revision: 'rev-1' });
+    expect((sent[0] as { description: string }).description).toContain('About family: private —');
     abort.abort();
   });
 

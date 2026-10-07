@@ -445,6 +445,16 @@ export const DASHBOARD_PRIVACY_CSS = `
 .plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
 .ptext { display: block; width: 100%; min-height: 120px; resize: vertical; background: var(--bg); border: 1px solid var(--field); border-radius: 8px; color: var(--t1); font: inherit; font-size: var(--fs-row); padding: 10px 12px; }
 .ptext:focus-visible, .ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+/* The follow-up questions: one row per choice, its name and a Private / Fine to share radio pair. */
+.pquestions .pnote { margin: 6px 0 0; }
+.pqtopic { margin: 14px 0 0; }
+.pqtitle { font-size: var(--fs-body); font-weight: 600; color: var(--t1); margin: 0 0 4px; }
+.pqopt { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 16px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.pqlabel { flex: 1 1 240px; min-width: 0; color: var(--t1); }
+.pqchoices { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.pqchoice { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; cursor: pointer; color: var(--t1); }
+.pqchoice input { width: 16px; height: 16px; margin: 0; accent-color: var(--link); }
+.pqchoice input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .privacy .sect { margin-top: 24px; }
 .prule.removed .sline { text-decoration: line-through; color: var(--t3); }
 .pempty { margin: 8px 0 0; }
