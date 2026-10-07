@@ -151,6 +151,62 @@ export const LLAMA_SERVER_RUNTIME: LlamaServerRuntimeSpec = {
   ],
 };
 
+/**
+ * The built-in transcription model: a speech-recognition model with its audio
+ * projector, run by the same pinned llama-server as the reasoning model.
+ * Owner decision 2026-10-07: Qwen3-ASR 0.6B, on the machine, never cloud ASR.
+ *
+ * Sources (verified 2026-10-07 against the Hugging Face API tree listing at
+ * the pinned commit, whose LFS object ids are the SHA-256 of each file, and by
+ * downloading both files and hashing them):
+ * - Qwen/Qwen3-ASR-0.6B: Apache-2.0.
+ * - ggml-org/Qwen3-ASR-0.6B-GGUF @ 928ab95 (convert_hf_to_gguf.py output).
+ * llama.cpp b11320 lists Qwen3-ASR in docs/multimodal.md, and its
+ * llama-server loads this pair and transcribes with it (checked on an
+ * Apple-silicon Mac, 2026-10-07; see docs/design/built-in-transcription.md).
+ */
+export interface BuiltInTranscriptionModelSpec {
+  modelId: string;
+  displayName: string;
+  baseRepository: string;
+  license: string;
+  repository: string;
+  revision: string;
+  /** The language model (first) and its audio projector (second). */
+  files: readonly [PinnedReasoningFile, PinnedReasoningFile];
+  /** Physical memory the machine needs before the built-in transcriber is used. */
+  minimumMemoryBytes: number;
+  /** Context per request: one audio chunk plus its transcript. */
+  contextTokens: number;
+}
+
+const QWEN3_ASR_06B_REVISION = '928ab958557df9aa2ef1c93e0e83c7ad0933fae2';
+
+function ggmlOrgAsrFile(name: string, bytes: number, sha256: string): PinnedReasoningFile {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256,
+  };
+}
+
+/** Qwen3-ASR 0.6B, Q8_0 weights and Q8_0 audio projector (about 1 GB together). */
+export const QWEN3_ASR_06B: BuiltInTranscriptionModelSpec = {
+  modelId: 'qwen3-asr-0.6b-q8_0-928ab95',
+  displayName: 'Qwen3-ASR 0.6B',
+  baseRepository: 'Qwen/Qwen3-ASR-0.6B',
+  license: 'Apache-2.0',
+  repository: 'ggml-org/Qwen3-ASR-0.6B-GGUF',
+  revision: QWEN3_ASR_06B_REVISION,
+  files: [
+    ggmlOrgAsrFile('Qwen3-ASR-0.6B-Q8_0.gguf', 804_749_248, 'bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971'),
+    ggmlOrgAsrFile('mmproj-Qwen3-ASR-0.6B-Q8_0.gguf', 214_392_480, '41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d'),
+  ],
+  minimumMemoryBytes: 7 * GIB,
+  contextTokens: 4_096,
+};
+
 /** The size the owner asked for, or `auto` (pick by this machine's memory). */
 export type BuiltInReasoningModelChoice = 'auto' | BuiltInReasoningSizeClass | string;
 

@@ -29,6 +29,7 @@ import {
   runtimeArchiveFor,
   type BuiltInReasoningModelSpec,
   type LlamaServerRuntimeSpec,
+  type PinnedReasoningFile,
   type PinnedRuntimeArchive,
 } from './manifest.ts';
 
@@ -72,6 +73,8 @@ export interface BuiltInReasoningPaths {
   runtimeDir: string;
   statusPath: string;
   lockPath: string;
+  /** Guards the shared llama.cpp runtime, which every built-in model uses. */
+  runtimeLockPath: string;
 }
 
 export interface InstalledBuiltInReasoning {
@@ -80,8 +83,8 @@ export interface InstalledBuiltInReasoning {
   gpu: boolean;
 }
 
-export interface BuiltInReasoningInstallerOptions {
-  model: BuiltInReasoningModelSpec;
+/** The knobs every pinned-model install shares (the reasoning and transcription models alike). */
+export interface PinnedInstallTuning {
   env?: Record<string, string | undefined>;
   runtime?: LlamaServerRuntimeSpec;
   /** `${platform}-${arch}`; defaults to this process. */
@@ -111,7 +114,39 @@ export interface BuiltInReasoningInstallerOptions {
   writeChunk?: (fd: number, chunk: Uint8Array) => void;
 }
 
+export interface BuiltInReasoningInstallerOptions extends PinnedInstallTuning {
+  model: BuiltInReasoningModelSpec;
+}
+
+/**
+ * One installable model: every file it needs (a GGUF, and for an audio or
+ * vision model its projector), each pinned by URL, size and SHA-256.
+ */
+export interface PinnedModelBundle {
+  modelId: string;
+  displayName: string;
+  files: readonly PinnedReasoningFile[];
+}
+
+/** Where a bundle lives, and the words its status file uses ("built-in private model"). */
+export interface PinnedModelLayout extends BuiltInReasoningPaths {
+  noun: string;
+}
+
+export interface InstalledPinnedModel {
+  /** One path per bundle file, in the bundle's order. */
+  filePaths: string[];
+  serverPath: string;
+  gpu: boolean;
+}
+
+export interface PinnedModelInstallerOptions extends PinnedInstallTuning {
+  bundle: PinnedModelBundle;
+  layout: PinnedModelLayout;
+}
+
 export const BUILT_IN_REASONING_DIR_ENV = 'OLYMPUS_BUILT_IN_REASONING_DIR';
+const REASONING_NOUN = 'built-in private model';
 /**
  * A lock whose holder has not refreshed it for this long is abandoned even if
  * its PID is alive (the PID was reused, or the holder is wedged). A holder
@@ -155,17 +190,45 @@ export function builtInReasoningPaths(
   runtime: LlamaServerRuntimeSpec = LLAMA_SERVER_RUNTIME,
   platform = currentPlatform(),
 ): BuiltInReasoningPaths {
-  const configured = env[BUILT_IN_REASONING_DIR_ENV]?.trim();
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share');
-  const root = configured || join(dataRoot, 'openclaw', 'olympus', 'models', 'built-in-reasoning');
-  if (!isAbsolute(root)) throw new TypeError('The built-in reasoning directory must be an absolute path.');
+  const root = builtInReasoningRoot(env);
   return {
     root,
     modelDir: join(root, model.modelId),
-    runtimeDir: join(root, `llama.cpp-${runtime.release}-${platform}`),
+    runtimeDir: llamaServerRuntimeDir(env, runtime, platform),
     statusPath: join(root, 'status.json'),
     lockPath: join(root, 'install.lock'),
+    runtimeLockPath: join(root, 'runtime.lock'),
   };
+}
+
+function builtInReasoningRoot(env: Record<string, string | undefined>): string {
+  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join(olympusModelsDir(env), 'built-in-reasoning');
+  if (!isAbsolute(root)) throw new TypeError('The built-in reasoning directory must be an absolute path.');
+  return root;
+}
+
+/** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models`. */
+export function olympusModelsDir(env: Record<string, string | undefined> = process.env): string {
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share');
+  return join(dataRoot, 'openclaw', 'olympus', 'models');
+}
+
+/**
+ * The one llama.cpp runtime every built-in model runs on. It lives beside the
+ * reasoning model (where the first release put it), is installed once, and is
+ * guarded by its own lock, so a second model never downloads it again.
+ */
+export function llamaServerRuntimeDir(
+  env: Record<string, string | undefined> = process.env,
+  runtime: LlamaServerRuntimeSpec = LLAMA_SERVER_RUNTIME,
+  platform = currentPlatform(),
+): string {
+  return join(builtInReasoningRoot(env), `llama.cpp-${runtime.release}-${platform}`);
+}
+
+/** The shared runtime's lock file. */
+export function llamaServerRuntimeLockPath(env: Record<string, string | undefined> = process.env): string {
+  return join(builtInReasoningRoot(env), 'runtime.lock');
 }
 
 export function currentPlatform(): string {
@@ -177,18 +240,23 @@ export function readBuiltInReasoningStatus(
   model: Pick<BuiltInReasoningModelSpec, 'modelId'>,
   env: Record<string, string | undefined> = process.env,
 ): BuiltInReasoningStatus {
+  return readPinnedModelStatus(builtInReasoningPaths(model, env).statusPath, model.modelId, REASONING_NOUN);
+}
+
+/** The last status written to `statusPath` for `modelId`, or `not_started`. Never throws. */
+export function readPinnedModelStatus(statusPath: string, modelId: string, noun: string): BuiltInReasoningStatus {
   const fallback: BuiltInReasoningStatus = {
     state: 'not_started',
-    modelId: model.modelId,
+    modelId,
     percent: 0,
-    label: 'Built-in private model not downloaded yet',
+    label: `${capitalize(noun)} not downloaded yet`,
     bytesDone: 0,
     bytesTotal: 0,
     updatedAt: new Date(0).toISOString(),
   };
   try {
-    const parsed = JSON.parse(readFileSync(builtInReasoningPaths(model, env).statusPath, 'utf8')) as BuiltInReasoningStatus;
-    return parsed && typeof parsed === 'object' && parsed.modelId === model.modelId ? parsed : fallback;
+    const parsed = JSON.parse(readFileSync(statusPath, 'utf8')) as BuiltInReasoningStatus;
+    return parsed && typeof parsed === 'object' && parsed.modelId === modelId ? parsed : fallback;
   } catch {
     return fallback;
   }
@@ -202,54 +270,78 @@ export function readBuiltInReasoningStatus(
 export async function installBuiltInReasoning(
   options: BuiltInReasoningInstallerOptions,
 ): Promise<InstalledBuiltInReasoning> {
-  const model = options.model;
+  const { model, ...tuning } = options;
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform = options.platform ?? currentPlatform();
-  const paths = builtInReasoningPaths(model, options.env, runtime, platform);
-  const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
-  const modelPath = join(paths.modelDir, model.file.name);
+  const installed = await installPinnedModel({
+    ...tuning,
+    bundle: { modelId: model.modelId, displayName: model.displayName, files: [model.file] },
+    layout: { ...builtInReasoningPaths(model, options.env, runtime, platform), noun: REASONING_NOUN },
+  });
+  return { modelPath: installed.filePaths[0]!, serverPath: installed.serverPath, gpu: installed.gpu };
+}
+
+/**
+ * Installs one pinned bundle and the shared runtime: verify what is on disk,
+ * download (resuming) what is missing, check every byte against the manifest,
+ * and report each stage to the bundle's status file. The reasoning and the
+ * transcription models both go through here.
+ */
+export async function installPinnedModel(options: PinnedModelInstallerOptions): Promise<InstalledPinnedModel> {
+  const { bundle, layout: paths } = options;
+  const noun = paths.noun;
+  const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
+  const platform = options.platform ?? currentPlatform();
+  const reporter = new ProgressReporter(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
+  const files = bundle.files.map((file) => ({ file, path: join(paths.modelDir, file.name) }));
+  const filesPresent = (): boolean => files.every(({ path }) => existsSync(path));
   const log = options.log ?? ((line: string) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS,
     verifyTimeoutMs: options.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS,
   };
+  const lockWaitMs = options.lockWaitMs ?? STALE_LOCK_MS;
+  const lockRefreshMs = options.lockRefreshMs ?? LOCK_REFRESH_MS;
   const stage = async <T>(name: string, run: () => Promise<T> | T): Promise<T> => {
     const started = Date.now();
-    log(`${LOG_PREFIX} model=${model.modelId} stage=${name} started`);
+    log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} started`);
     try {
       const result = await run();
-      log(`${LOG_PREFIX} model=${model.modelId} stage=${name} done ms=${Date.now() - started}`);
+      log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} done ms=${Date.now() - started}`);
       return result;
     } catch (error) {
       const reason = error instanceof BuiltInReasoningInstallError ? error.reason : 'disk_write_failed';
-      log(`${LOG_PREFIX} model=${model.modelId} stage=${name} failed reason=${reason} ms=${Date.now() - started}`);
+      log(`${LOG_PREFIX} model=${bundle.modelId} stage=${name} failed reason=${reason} ms=${Date.now() - started}`);
       throw error;
     }
+  };
+  const verifyAll = async (): Promise<void> => {
+    for (const { file, path } of files) await verifyPinnedFile(path, file, noun, reporter, timing.verifyTimeoutMs);
   };
   // The install has finished only when the status file says so. Leaving the
   // last stage's "verifying" behind kept every later boot reading the model
   // as not ready, and nothing ever moved it on (owner fresh install,
   // 2026-10-01). The server itself starts on demand and reports "loading"
   // while it does.
-  const finished = (): void => reporter.set('ready', 'Built-in private model ready', 100);
+  const finished = (): void => reporter.set('ready', `${capitalize(noun)} ready`, 100);
 
   try {
     const archive = runtimeArchiveFor(platform, runtime);
     if (!archive) {
       throw new BuiltInReasoningInstallError(
         'unsupported_platform',
-        `The built-in private model does not run on ${platform}.`,
+        `The ${noun} does not run on ${platform}.`,
       );
     }
     ensureDirectory(paths.root);
-    const installed = (): InstalledBuiltInReasoning => ({
-      modelPath,
+    const installed = (): InstalledPinnedModel => ({
+      filePaths: files.map(({ path }) => path),
       serverPath: findServerBinary(paths.runtimeDir),
       gpu: archive.gpu,
     });
 
-    if (existsSync(modelPath) && runtimeInstalled(paths.runtimeDir, archive)) {
-      await stage('verify', () => verifyModelFile(modelPath, model, reporter, timing.verifyTimeoutMs));
+    if (filesPresent() && runtimeInstalled(paths.runtimeDir, archive)) {
+      await stage('verify', verifyAll);
       finished();
       return installed();
     }
@@ -257,7 +349,7 @@ export async function installBuiltInReasoning(
     // The disk ran out during an earlier attempt: wait out the backoff
     // instead of re-downloading into a disk that just filled up.
     const now = (options.now ?? (() => new Date()))();
-    const previous = readBuiltInReasoningStatus(model, options.env);
+    const previous = readPinnedModelStatus(paths.statusPath, bundle.modelId, noun);
     if (previous.state === 'failed' && previous.failure?.reason === 'insufficient_space'
       && previous.failure.retryAfter && Date.parse(previous.failure.retryAfter) > now.getTime()) {
       throw new BuiltInReasoningInstallError('insufficient_space', previous.failure.message, {
@@ -267,36 +359,46 @@ export async function installBuiltInReasoning(
       });
     }
 
-    const space = {
+    const space: SpacePolicy = {
+      noun,
       freeBytes: options.freeBytes ?? volumeFreeBytes,
       headroomBytes: options.spaceHeadroomBytes ?? BUILT_IN_REASONING_SPACE_HEADROOM_BYTES,
       backoffMs: options.spaceBackoffMs ?? SPACE_BACKOFF_MS,
       now: () => (options.now ?? (() => new Date()))(),
       write: options.writeChunk ?? ((fd: number, chunk: Uint8Array) => { writeSync(fd, chunk); }),
     };
-    await stage('install', () => withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, options.lockRefreshMs ?? LOCK_REFRESH_MS, async () => {
-      if (existsSync(modelPath) && runtimeInstalled(paths.runtimeDir, archive)) return;
+    await stage('install', () => withInstallLock(paths.lockPath, lockWaitMs, lockRefreshMs, noun, async () => {
+      if (filesPresent() && runtimeInstalled(paths.runtimeDir, archive)) return;
       const fetchImpl = options.fetchImpl ?? fetch;
-      const needModel = !existsSync(modelPath);
+      const missing = files.filter(({ path }) => !existsSync(path));
       const needRuntime = !runtimeInstalled(paths.runtimeDir, archive);
       // Before any byte is fetched or any partial file is re-hashed: is there
       // room for what is left, plus headroom?
-      const partialBytes = needModel ? fileSize(`${modelPath}.partial`) : 0;
+      const missingBytes = missing.reduce(
+        (total, { file, path }) => total + Math.max(0, file.bytes - fileSize(`${path}.partial`)),
+        0,
+      );
       assertSpaceFor(paths.root, space,
-        (needModel ? Math.max(0, model.file.bytes - partialBytes) : 0)
-        + (needRuntime ? archive.bytes * RUNTIME_UNPACK_FACTOR : 0));
-      reporter.begin((needModel ? model.file.bytes : 0) + (needRuntime ? archive.bytes : 0));
+        missingBytes + (needRuntime ? archive.bytes * RUNTIME_UNPACK_FACTOR : 0));
+      reporter.begin(missing.reduce((total, { file }) => total + file.bytes, 0) + (needRuntime ? archive.bytes : 0));
       if (needRuntime) {
-        await stage('runtime', () => installRuntime(fetchImpl, paths.runtimeDir, archive, reporter,
-          options.extractArchive ?? extractWithTar, timing.downloadStallMs, space));
+        // The runtime is shared by every built-in model, so it has its own
+        // lock: a second model never unpacks over a runtime another installed.
+        await stage('runtime', () => withInstallLock(paths.runtimeLockPath, lockWaitMs, lockRefreshMs, noun, async () => {
+          if (runtimeInstalled(paths.runtimeDir, archive)) return;
+          await installRuntime(fetchImpl, paths.runtimeDir, archive, reporter,
+            options.extractArchive ?? extractWithTar, timing.downloadStallMs, space);
+        }));
       }
-      if (needModel) {
+      if (missing.length > 0) {
         ensureDirectory(paths.modelDir);
-        await stage('download', () => downloadVerified(fetchImpl, model.file.url, modelPath, model.file.bytes, model.file.sha256,
-          reporter, `Downloading the built-in private model (${model.displayName})`, timing.downloadStallMs, space));
+        for (const { file, path } of missing) {
+          await stage('download', () => downloadVerified(fetchImpl, file.url, path, file.bytes, file.sha256,
+            reporter, `Downloading the ${noun} (${bundle.displayName})`, timing.downloadStallMs, space));
+        }
       }
     }));
-    await stage('verify', () => verifyModelFile(modelPath, model, reporter, timing.verifyTimeoutMs));
+    await stage('verify', verifyAll);
     if (!runtimeInstalled(paths.runtimeDir, archive)) {
       throw new BuiltInReasoningInstallError('runtime_load_failed', 'The built-in model server did not install completely.');
     }
@@ -312,6 +414,8 @@ export async function installBuiltInReasoning(
 }
 
 interface SpacePolicy {
+  /** What the messages call the model being installed. */
+  noun: string;
   freeBytes: (path: string) => number | undefined;
   headroomBytes: number;
   backoffMs: number;
@@ -341,7 +445,7 @@ function spaceShortfallError(space: SpacePolicy, bytesNeeded: number, bytesFree:
   const retryAfter = new Date(space.now().getTime() + space.backoffMs).toISOString();
   return new BuiltInReasoningInstallError(
     'insufficient_space',
-    `Not enough free disk space for the built-in private model: it needs ${formatGb(bytesNeeded)} free and the disk has ${formatGb(bytesFree)}${cause ? ` (${cause})` : ''}. Free up space; Olympus tries again after ${retryAfter}.`,
+    `Not enough free disk space for the ${space.noun}: it needs ${formatGb(bytesNeeded)} free and the disk has ${formatGb(bytesFree)}${cause ? ` (${cause})` : ''}. Free up space; Olympus tries again after ${retryAfter}.`,
     { bytesNeeded, bytesFree, retryAfter },
   );
 }
@@ -364,6 +468,10 @@ function formatGb(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
+function capitalize(text: string): string {
+  return text.length > 0 ? `${text[0]!.toUpperCase()}${text.slice(1)}` : text;
+}
+
 /** Marks the lane loading, ready or failed once the server is (being) started. */
 export function reportBuiltInReasoningState(
   options: Pick<BuiltInReasoningInstallerOptions, 'env' | 'model' | 'now' | 'onProgress'>,
@@ -371,9 +479,19 @@ export function reportBuiltInReasoningState(
   failure?: { reason: BuiltInReasoningFailureReason; message: string },
 ): void {
   const paths = builtInReasoningPaths(options.model, options.env);
-  const reporter = new ProgressReporter(paths.statusPath, options.model.modelId, options.now, options.onProgress);
+  reportPinnedModelState({ statusPath: paths.statusPath, modelId: options.model.modelId, noun: REASONING_NOUN,
+    ...(options.now ? { now: options.now } : {}), ...(options.onProgress ? { onProgress: options.onProgress } : {}) }, state, failure);
+}
+
+/** The same, for any pinned bundle's status file. */
+export function reportPinnedModelState(
+  target: { statusPath: string; modelId: string; noun: string; now?: () => Date; onProgress?: BuiltInReasoningProgressListener },
+  state: 'loading' | 'ready' | 'failed',
+  failure?: { reason: BuiltInReasoningFailureReason; message: string },
+): void {
+  const reporter = new ProgressReporter(target.statusPath, target.modelId, target.noun, target.now, target.onProgress);
   if (state === 'failed' && failure) reporter.fail(failure.reason, failure.message);
-  else reporter.set(state, state === 'ready' ? 'Built-in private model ready' : 'Starting the built-in private model', 100);
+  else reporter.set(state, state === 'ready' ? `${capitalize(target.noun)} ready` : `Starting the ${target.noun}`, 100);
 }
 
 function findServerBinary(runtimeDir: string): string {
@@ -386,25 +504,27 @@ function findServerBinary(runtimeDir: string): string {
 // every bundle that merely imports a type from it.
 let verifiedThisProcess: Set<string> | undefined;
 
-async function verifyModelFile(
+async function verifyPinnedFile(
   path: string,
-  model: BuiltInReasoningModelSpec,
+  file: PinnedReasoningFile,
+  noun: string,
   reporter: ProgressReporter,
   timeoutMs: number,
 ): Promise<void> {
-  const key = `${path}:${model.file.sha256}`;
+  const key = `${path}:${file.sha256}`;
   verifiedThisProcess ??= new Set<string>();
   if (verifiedThisProcess.has(key)) return;
   const size = statSync(path).size;
-  reporter.verifying('Checking the built-in private model', 0, model.file.bytes);
-  const digest = size === model.file.bytes
-    ? await sha256File(path, timeoutMs, (done) => reporter.verifying('Checking the built-in private model', done, model.file.bytes))
+  const label = `Checking the ${noun}`;
+  reporter.verifying(label, 0, file.bytes);
+  const digest = size === file.bytes
+    ? await sha256File(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes))
     : undefined;
-  if (digest !== model.file.sha256) {
+  if (digest !== file.sha256) {
     rmSync(path, { force: true });
     throw new BuiltInReasoningInstallError(
       'checksum_mismatch',
-      `${model.file.name} did not match its pinned checksum and was removed; it will download again.`,
+      `${file.name} did not match its pinned checksum and was removed; it will download again.`,
     );
   }
   verifiedThisProcess.add(key);
@@ -577,7 +697,7 @@ async function downloadVerified(
     disarmStall();
     throw new BuiltInReasoningInstallError(
       'download_failed',
-      `Could not reach the download server for the built-in private model (${error instanceof Error ? error.message : String(error)}).`,
+      `Could not reach the download server for the ${space.noun} (${error instanceof Error ? error.message : String(error)}).`,
     );
   }
   if (received > 0 && response.status !== 206) {
@@ -593,7 +713,7 @@ async function downloadVerified(
     await response.body?.cancel().catch(() => undefined);
     throw new BuiltInReasoningInstallError(
       'download_failed',
-      `The built-in private model download failed (HTTP ${response.status}).`,
+      `The ${space.noun} download failed (HTTP ${response.status}).`,
     );
   }
   reporter.set('downloading', label);
@@ -657,7 +777,7 @@ async function downloadVerified(
     // Keep the partial file: the next attempt resumes from it.
     throw new BuiltInReasoningInstallError(
       'download_failed',
-      `The built-in private model download was interrupted (${error instanceof Error ? error.message : String(error)}).`,
+      `The ${space.noun} download was interrupted (${error instanceof Error ? error.message : String(error)}).`,
     );
   }
   disarmStall();
@@ -723,13 +843,13 @@ async function sha256File(path: string, timeoutMs: number, onProgress?: (bytesDo
 // ---------------------------------------------------------------------------
 // Cross-process install lock
 
-async function withInstallLock(lockPath: string, waitMs: number, refreshMs: number, run: () => Promise<void>): Promise<void> {
+async function withInstallLock(lockPath: string, waitMs: number, refreshMs: number, noun: string, run: () => Promise<void>): Promise<void> {
   const deadline = Date.now() + waitMs;
   const token = randomUUID();
   for (;;) {
     if (tryAcquireLock(lockPath, token)) break;
     if (Date.now() > deadline) {
-      throw new BuiltInReasoningInstallError('download_failed', 'Another Olympus process is still installing the built-in private model.');
+      throw new BuiltInReasoningInstallError('download_failed', `Another Olympus process is still installing the ${noun}.`);
     }
     await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
   }
@@ -824,6 +944,7 @@ function ensureDirectory(path: string): void {
 class ProgressReporter {
   private readonly statusPath: string;
   private readonly modelId: string;
+  private readonly noun: string;
   private readonly now: () => Date;
   private readonly listener: BuiltInReasoningProgressListener | undefined;
   private status: BuiltInReasoningStatus;
@@ -832,11 +953,13 @@ class ProgressReporter {
   constructor(
     statusPath: string,
     modelId: string,
+    noun: string,
     now: (() => Date) | undefined,
     listener: BuiltInReasoningProgressListener | undefined,
   ) {
     this.statusPath = statusPath;
     this.modelId = modelId;
+    this.noun = noun;
     this.now = now ?? (() => new Date());
     this.listener = listener;
     this.lastWriteMs = 0;
@@ -853,7 +976,7 @@ class ProgressReporter {
 
   begin(bytesTotal: number): void {
     this.status = { ...this.status, bytesTotal, bytesDone: 0 };
-    this.set('downloading', 'Downloading the built-in private model', 0);
+    this.set('downloading', `Downloading the ${this.noun}`, 0);
   }
 
   advance(bytes: number, label: string): void {
@@ -885,8 +1008,8 @@ class ProgressReporter {
       ...this.status,
       state: 'failed',
       label: reason === 'insufficient_space'
-        ? 'Waiting for free disk space to download the built-in private model'
-        : 'The built-in private model could not be installed',
+        ? `Waiting for free disk space to download the ${this.noun}`
+        : `The ${this.noun} could not be installed`,
       failure: { reason, message, ...(shortfall ?? {}) },
     };
     this.emit(true);

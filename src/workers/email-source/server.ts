@@ -70,6 +70,7 @@ import {
   workerAuthTokenFromEnv,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
+import { runningBuiltInTranscriber, sharedBuiltInTranscriber } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
   answerPrivately,
   builtInAnalystEnabled,
@@ -2674,9 +2675,13 @@ export async function main(): Promise<void> {
       },
     },
     extractors: {
+      // An owner-configured command wins; otherwise audio is read by the
+      // built-in on-device transcriber where it runs (Apple silicon by default).
       ...(process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
         ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } }
-        : {}),
+        : sharedBuiltInTranscriber(process.env)
+          ? { transcription: { builtIn: sharedBuiltInTranscriber(process.env)! } }
+          : {}),
       ...(fileExtractionPdfTextCommand !== undefined || fileExtractionPdfTextTimeoutMs !== undefined
         || fileExtractionMaxBoundedTextChars !== undefined
         ? {
@@ -4799,6 +4804,8 @@ export async function main(): Promise<void> {
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
     stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
+    // The built-in transcriber's server, if this process started one.
+    stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();
