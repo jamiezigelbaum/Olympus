@@ -11,6 +11,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
+import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { Window } from 'happy-dom';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
@@ -416,7 +417,9 @@ async function controlSession(fetcher: (request: Request) => Promise<Response>):
 
 /** The local-only mint: a loopback browser presenting no bearer. */
 async function localSession(fetcher: (request: Request) => Promise<Response>): Promise<{ cookie: string; csrf: string }> {
-  const mint = await fetcher(new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } }));
+  const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
+  recordRequestPeer(request, '127.0.0.1');
+  const mint = await fetcher(request);
   expect(mint.status).toBe(200);
   return { cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, csrf: ((await mint.json()) as { csrf_token: string }).csrf_token };
 }
@@ -806,6 +809,39 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     // Once the disk cooperates the same save goes through, atomically.
     expect((await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-05' })).ok).toBe(true);
     expect((JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig).modelProfiles['zkapi-consult']?.zkapi?.fundingDate).toBe('2026-10-05');
+  });
+
+  test('a failure after the policy publish is not a pre-publish failure: the published policy is applied (restart asked), or reported as uncertain', async () => {
+    const home = tempHome();
+    const { backend, path, reloads } = adapter({ home, profileOverrides: { acknowledgements: { version: 0, accepted: [] } } });
+    // A directory-flush or mode failure right after the rename: the file is the new policy, so it is applied.
+    __sovereigntyFileTestHooks.afterPublish = () => { throw new Error('directory flush failed'); };
+    let saved;
+    try {
+      saved = await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-05' });
+    } finally {
+      __sovereigntyFileTestHooks.afterPublish = undefined;
+    }
+    expect(saved).toMatchObject({ ok: true, restarting: true });
+    expect(reloads).toEqual([1]);
+    expect((JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig).modelProfiles['zkapi-consult']?.zkapi?.fundingDate).toBe('2026-10-05');
+    expect((await backend.status()).route).toMatchObject({ acknowledgements: { complete: true }, fundingDate: '2026-10-05' });
+    // The file no longer reads as the new policy after the rename (clobbered in that instant): uncertain, no restart, the view follows the file.
+    __sovereigntyFileTestHooks.afterPublish = (file) => {
+      const clobbered = JSON.parse(readFileSync(file, 'utf8')) as SovereigntyConfig;
+      (clobbered.modelProfiles['zkapi-consult'] as { zkapi?: { fundingDate?: string } }).zkapi!.fundingDate = '2026-10-06';
+      writeFileSync(file, JSON.stringify(clobbered), { mode: 0o600 });
+      throw new Error('directory flush failed');
+    };
+    let uncertain;
+    try {
+      uncertain = await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-07' });
+    } finally {
+      __sovereigntyFileTestHooks.afterPublish = undefined;
+    }
+    expect(uncertain).toMatchObject({ ok: false, httpStatus: 500, code: 'policy_uncertain' });
+    expect(reloads).toEqual([1]);
+    expect((await backend.status()).route).toMatchObject({ fundingDate: '2026-10-06' });
   });
 
   test('recover runs the recovery session only for a held fence of this wallet, with confirmation, and reports settlement honestly', async () => {

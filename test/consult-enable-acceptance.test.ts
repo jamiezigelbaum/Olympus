@@ -17,6 +17,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
+import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { privateEvidencePack } from '../src/core/analyst-built-in.ts';
 import { bindConsultJobPolicy, readConsultSettings } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultReadiness, ZkapiConsultReply, ZkapiConsultSession, ZkapiOpenControl, ZkapiOpenSessionResult, ZkapiSendControl } from '../src/core/consult-transport-zkapi.ts';
@@ -119,7 +120,9 @@ function dashboard(home: string) {
 
 /** The local-only mint: the one session grade the consult routes take (a loopback browser, no bearer). */
 async function controlSession(fetcher: (request: Request) => Promise<Response>): Promise<Record<string, string>> {
-  const mint = await fetcher(new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } }));
+  const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
+  recordRequestPeer(request, '127.0.0.1');
+  const mint = await fetcher(request);
   expect(mint.status).toBe(200);
   const csrf = ((await mint.json()) as { csrf_token: string }).csrf_token;
   return { Cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, Origin: ORIGIN, 'X-Olympus-CSRF': csrf };

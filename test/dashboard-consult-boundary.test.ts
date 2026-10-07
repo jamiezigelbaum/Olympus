@@ -8,7 +8,9 @@
  *
  * Full sequences, against the real HTTP boundary with a recording handler.
  */
+import { createHmac } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
+import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 import {
   DASHBOARD_CONSULT_CONTROL_PATHS,
@@ -61,8 +63,22 @@ async function launchSession(f: ReturnType<typeof fixture>): Promise<{ cookie: s
   return { cookie: cookieOf(redeemed), csrf: ((await redeemed.json()) as { csrf_token: string }).csrf_token };
 }
 
-async function localSession(f: ReturnType<typeof fixture>, origin = ORIGIN, headers: Record<string, string> = {}): Promise<Response> {
-  return f.fetch(new Request(`${origin}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: origin, ...headers } }));
+/** The local mint as a loopback browser makes it: same origin, and the socket peer the server recorded is loopback. */
+async function localSession(f: ReturnType<typeof fixture>, origin = ORIGIN, headers: Record<string, string> = {}, peer: string | null = '127.0.0.1'): Promise<Response> {
+  const request = new Request(`${origin}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: origin, ...headers } });
+  // `null`: no peer recorded at all (a request the server never saw the socket of).
+  if (peer !== null) recordRequestPeer(request, peer);
+  return f.fetch(request);
+}
+
+/** The cookie re-signed as the bearer could compute it, were sessions keyed by the bearer (they are not). */
+function bearerSigned(cookie: string, grade: 'b' | 'l'): string {
+  const [name, value] = cookie.split('=') as [string, string];
+  const [nonce, issued, originTag] = value.split('.') as [string, string, string, string, string];
+  const gradeWord = grade === 'b' ? 'bearer' : 'local';
+  const mac = createHmac('sha256', TOKEN).update('olympus-dashboard-control-session-v3');
+  for (const part of [nonce, issued, originTag, gradeWord]) mac.update('\0').update(part);
+  return `${name}=${[nonce, issued, originTag, grade, mac.digest('base64url')].join('.')}`;
 }
 
 describe('consult authority is not reachable from the worker bearer', () => {
@@ -101,12 +117,35 @@ describe('consult authority is not reachable from the worker bearer', () => {
       const flipped = cookie.replace(/\.b\.([A-Za-z0-9_-]{43})$/, '.l.$1');
       expect(flipped).not.toBe(cookie);
       expect((await f.fetch(post(path, { Cookie: flipped, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }))).status).toBe(401);
+      // Re-signing the flipped cookie with the known bearer does not help: sessions are
+      // keyed by a worker-private secret the bearer never sees (P1-a). Nor can the bearer
+      // re-sign its own bearer-grade cookie by hand.
+      expect((await f.fetch(post(path, { Cookie: bearerSigned(cookie, 'l'), Origin: ORIGIN, 'X-Olympus-CSRF': csrf }))).status).toBe(401);
+      expect((await f.fetch(post('/dashboard/privacy', { Cookie: bearerSigned(cookie, 'b'), Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(401);
     }
     expect(f.seen).toEqual([]);
+  });
+
+  test('the signing secret is per worker start: a cookie from another worker instance with the same bearer is no session', async () => {
+    const first = fixture();
+    const { cookie, csrf } = await bearerSession(first);
+    const second = fixture();
+    expect((await second.fetch(post('/dashboard/privacy', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(401);
+    expect(second.seen).toEqual([]);
   });
 });
 
 describe('the local-only mint', () => {
+  test('requires a recorded loopback socket peer: a non-loopback peer with loopback Host and Origin, and a missing peer, are refused', async () => {
+    const f = fixture();
+    expect((await localSession(f, ORIGIN, {}, '203.0.113.9')).status).toBe(403);
+    expect((await localSession(f, ORIGIN, {}, '::ffff:198.51.100.4')).status).toBe(403);
+    expect((await localSession(f, ORIGIN, {}, null)).status).toBe(403);
+    expect((await localSession(f, ORIGIN, {}, '::1')).status).toBe(200);
+    expect((await localSession(f, ORIGIN, {}, '::ffff:127.0.0.1')).status).toBe(200);
+    expect(f.seen).toEqual([]);
+  });
+
   test('refuses any Authorization header, a non-loopback or missing Origin, a cross-origin page and proxied requests', async () => {
     const f = fixture();
     expect((await localSession(f, ORIGIN, { Authorization: `Bearer ${TOKEN}` })).status).toBe(403);
