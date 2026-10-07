@@ -159,12 +159,12 @@ test('credential activation schedules one supervised reload after the response, 
   expect(createModelKeyReload({ managed: false, shutdown: () => { throw new Error('must not stop'); }, exit: () => { throw new Error('must not exit'); } })()).toBe(false);
 });
 
-test('a worker restarts itself under the generated unit and under the native service (Gateway or engine host), never when started by hand', () => {
-  expect(workerRestartsItself({ OLYMPUS_MANAGED_WORKER: '1' })).toBe(true);
-  // The engine host's LaunchAgent sets OLYMPUS_ENGINE_HOST on the host; its
-  // supervised worker child carries the native service instance id.
-  expect(workerRestartsItself({ OLYMPUS_ENGINE_HOST: '1', OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '0f8fad5b-d9cb-469f-a165-70867728950e' })).toBe(true);
-  expect(workerRestartsItself({ OLYMPUS_ENGINE_HOST: '1' })).toBe(false);
-  expect(workerRestartsItself({ OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '  ' })).toBe(false);
-  expect(workerRestartsItself({})).toBe(false);
+test('a worker restarts itself only after a validated native-service launch or under the generated unit, never on an ambient marker', () => {
+  expect(workerRestartsItself({ nativeServiceSupervised: true }, {})).toBe(true);
+  expect(workerRestartsItself({}, { OLYMPUS_MANAGED_WORKER: '1' })).toBe(true);
+  // A foreground worker that inherited (or loaded from worker.env) a stale
+  // native-service marker is not supervised: it must not exit 75 and stay down.
+  expect(workerRestartsItself({}, { OLYMPUS_ENGINE_HOST: '1', OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '0f8fad5b-d9cb-469f-a165-70867728950e' })).toBe(false);
+  expect(workerRestartsItself({ nativeServiceSupervised: false }, { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '0f8fad5b-d9cb-469f-a165-70867728950e' })).toBe(false);
+  expect(workerRestartsItself({}, {})).toBe(false);
 });

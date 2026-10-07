@@ -307,7 +307,7 @@ describe('follow-up polling', () => {
     const outside = host.outside()!;
     expect(outside.getAttribute('aria-label')).toBe(W.outsideTitle);
     expect(outside.firstElementChild!.className).toBe('out-head');
-    expect(outside.querySelector('.out-title')?.textContent).toBe('Outside background — not from your documents');
+    expect(outside.querySelector('.out-title')?.textContent).toBe('Anonymous answer · zkAPI');
     expect(outside.querySelector('.out-note')?.textContent).toBe('General information from an outside model. It did not read your documents and has not been checked.');
     const text = outside.querySelector('.out-text')!;
     expect(text.textContent).toBe(OUTSIDE_TEXT);
@@ -322,7 +322,7 @@ describe('follow-up polling', () => {
     // Hide folds the outside container with the answer; Show brings both back, with no new request.
     host.button(W.hide).click();
     expect(host.outside()).toBeNull();
-    expect(host.text()).not.toContain('Outside background');
+    expect(host.text()).not.toContain('Anonymous answer · zkAPI');
     host.button(W.show).click();
     expect(host.outside()!.querySelector('.out-text')?.textContent).toBe(OUTSIDE_TEXT);
     expect(host.fetched.length).toBe(count);

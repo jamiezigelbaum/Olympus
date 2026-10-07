@@ -51469,11 +51469,11 @@ var init_vocabulary = __esm(() => {
     openFailed: "Couldn't open it on your Mac",
     unanswered: "Not found in your private items: {list}",
     withdrawn: "This private answer is no longer available from your Mac.",
-    outsideTitle: "Outside background — not from your documents",
+    outsideTitle: "Anonymous answer · zkAPI",
     outsideNote: "General information from an outside model. It did not read your documents and has not been checked.",
     outsidePending: "Looking up general background…",
-    outsidePaused: "Outside help is paused.",
-    outsideAsked: "What Olympus asked",
+    outsidePaused: "Anonymous answers are paused.",
+    outsideAsked: "Sent without names:",
     outsideShortened: "Shortened by Olympus."
   };
   DASHBOARD_PICKER_COPY = {
@@ -51669,51 +51669,65 @@ var init_vocabulary = __esm(() => {
     undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
   };
   DASHBOARD_OUTSIDE_HELP_COPY = {
-    crumb: "Outside help",
-    title: "Outside help",
-    experimental: "Experimental · network route not verified on macOS",
-    intro: "Olympus does not upload the evidence pack. With outside help enabled, it may send a short question derived from your private answer; that question can still reveal private information.",
+    crumb: "Anonymous answers",
+    title: "Anonymous answers · zkAPI",
+    sectionTitle: "Private answers",
+    row: {
+      off: "Anonymous answers (zkAPI): off",
+      on: "Anonymous answers (zkAPI): on",
+      invalid: "Anonymous answers (zkAPI): off · settings file damaged",
+      route_not_configured: "Anonymous answers (zkAPI): off · not set up",
+      fence_held: "Anonymous answers (zkAPI): paused · unfinished payment"
+    },
+    experimental: "Experimental: on macOS, Olympus can't yet confirm the connection is anonymous (network route not verified).",
+    intro: "When the answer from your Mac is missing something, Olympus can ask a top AI model through zkAPI, paid anonymously, so no one can tell the question came from you. Names and identifying details are removed first; the AI provider reads the question.",
+    privacy: "Your files and private answer stay on this Mac. The outside model sees only the short question, and that question could still hint at private things.",
     state: {
-      off: "Outside help is off.",
-      on: "Outside help is on.",
-      invalid: "Outside help is off: the settings file on this computer is damaged.",
-      route_not_configured: "Outside help is off: no zkAPI route is set up yet.",
-      fence_held: "Consults are paused: an earlier request has not been seen to settle."
+      off: "Anonymous answers are off.",
+      on: "Anonymous answers are on.",
+      invalid: "Anonymous answers are off: the settings file on this computer is damaged.",
+      route_not_configured: "Anonymous answers are off: zkAPI is not set up yet.",
+      fence_held: "Paused: an earlier question has not finished paying yet."
     },
     restartPending: "Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.",
-    routeReady: "Route ready.",
-    routeReadyNoTor: "Route ready, without Tor.",
+    routeReady: "Ready to ask.",
+    routeReadyNoTor: "Ready to ask.",
+    addressVisible: "Your network address will be visible to the provider.",
     routeNotReady: "Not ready: {reason}",
     routeMore: "(+{n} more below)",
-    routeUnknown: "Olympus could not check the route right now.",
-    routeMissingShort: "Not ready: no zkAPI route is set up.",
-    usageNone: "No consults today",
-    usageOne: "1 consult today",
-    usageMany: "{n} consults today",
-    usageSpent: "at most ${usd} spent",
+    routeUnknown: "Olympus could not check zkAPI right now.",
+    routeMissingShort: "Not ready: zkAPI is not set up yet.",
+    usageNone: "No questions today",
+    usageOne: "1 question today",
+    usageMany: "{n} questions today",
+    usageCounted: "(counted as up to ${usd} against your limits)",
     usageExpiry: "balance expires about {date} ({days} days left)",
     usageExpired: "balance past its estimated expiry",
     usageExpiryUnknown: "balance expiry unknown",
-    holdNote: "Each consult holds up to $6 of your zkAPI balance while it runs; the unused part comes back when it settles. A short question usually costs cents or less. Olympus counts the full $6 against your limits, so its numbers are a worst case.",
+    costLines: [
+      "Each question usually costs a few cents or less.",
+      "While it runs, up to $6 is held from your balance; the unused part comes back.",
+      "Olympus counts each question as the full $6 when checking your limits."
+    ],
     problemsTitle: "To fix",
     disclosureTitle: "Before you turn this on",
     disclosureShort: [
-      "It sends automatically: when a private answer in ChatGPT is incomplete, Olympus may send one short question out. There is no approval step.",
-      "Each consult holds up to $6 of your zkAPI balance while it runs.",
-      "The provider reads the question; zkAPI hides who paid."
+      "It asks automatically: when a private answer in ChatGPT is missing something, Olympus may send one short question. There is no approval step.",
+      "Each question usually costs a few cents or less; up to $6 is held while it runs, and the unused part comes back.",
+      "The outside model reads the question; zkAPI hides who paid."
     ],
     disclosureMore: "Everything to know first",
     disclosure: [
-      "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. Each holds up to $6 of your zkAPI balance while it runs and the unused part comes back when it settles; Olympus counts the full $6 against your limits.",
+      "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. A short question usually costs a few cents or less. While it runs, up to $6 of your zkAPI balance is held and the unused part comes back when it settles; Olympus counts the full $6 against your limits.",
       "A question is sent only if the panel was recently active, but closing the panel does not guarantee nothing is sent in that window.",
       "There is no daily limit unless you set one. Your deposit is the hard limit.",
       "Depositing and withdrawing are each an expensive on-chain transaction (about $7 at review), paid separately. An unwithdrawn balance becomes claimable by the operator after about 30 days. There is no top-up: each deposit is a new note with its own fee and clock.",
       "The outside provider reads the question; zkAPI hides who paid. The route is experimental and its network path is not verified on macOS.",
       "There is no approval step: consults are automatic while this is on. Turn it off here at any time."
     ],
-    routeMissing: "No zkAPI route is set up. Add it, then follow Set up the zkAPI route below.",
+    routeMissing: "zkAPI is not set up. Add it, then follow Set up zkAPI below.",
     policyNotFile: "Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.",
-    addRoute: "Add the zkAPI route",
+    addRoute: "Add zkAPI to Olympus",
     addRouteConfirm: "This adds a consult-only zkAPI route to your privacy policy and restarts the Olympus worker. No money moves. Continue?",
     detailsTitle: "Details",
     facts: {
@@ -51734,26 +51748,26 @@ var init_vocabulary = __esm(() => {
     routeLabel: "Route: {label}.",
     lastSession: "Last consult: {at}, {result}.",
     blockers: {
-      daemon_not_found: "zkapi-clientd is not installed. Install it: see Set up the zkAPI route.",
-      daemon_version_unsupported: "This zkapi-clientd version has not been reviewed. Install 0.1.5 or 0.1.6.",
-      tor_not_found: "Tor is not installed. Install it: see Set up the zkAPI route.",
-      daemon_api_key_missing: "Olympus does not have the zkAPI API key yet. Add it: see Set up the zkAPI route.",
+      daemon_not_found: "The zkAPI app is not installed on this Mac. See Set up zkAPI.",
+      daemon_version_unsupported: "This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6: see Set up zkAPI.",
+      tor_not_found: "The program that hides your network address is not installed. See Set up zkAPI.",
+      daemon_api_key_missing: "Olympus does not have your zkAPI access key yet. See Set up zkAPI.",
       acknowledgements_incomplete: "The cost and risk statements are not all accepted. Tick them under Cost and risk.",
-      funding_date_missing: "Enter the funding date under Balance and limits, so Olympus can estimate when the balance expires.",
-      funding_date_invalid: "The funding date is in the future. Fix it under Balance and limits.",
-      note_expired: "By your funding date, the balance is past its estimated 30-day expiry.",
-      unresolved_session: "An earlier request has not been seen to settle. Use Recover under Held request.",
-      unresolved_session_other_wallet: "A held request belongs to another wallet folder. Recover it there, or abandon it under Held request.",
-      stranded_processes: "Programs from an earlier consult could not be confirmed stopped.",
-      daemon_already_running: "Another zkapi-clientd is already running. Stop it; Olympus starts its own for each consult.",
-      tor_port_busy: "Something else is using the Tor port. Olympus needs it free to start its own Tor.",
-      daily_cap_reached: "Today's consult limit is reached. Raise or remove it under Balance and limits.",
-      spend_cap_reached: "Another consult would pass today's spending limit. Raise or remove it under Balance and limits.",
-      state_unavailable: "The consult record on this computer could not be read.",
-      key_reuse_on: "zkapi-clientd's key-reuse window is on. Run: zkapi-clientd config --key-reuse-window-seconds 0"
+      funding_date_missing: "Enter the day you paid in under Balance and limits, so Olympus can tell when the balance expires.",
+      funding_date_invalid: "The day you paid in is in the future. Fix it under Balance and limits.",
+      note_expired: "Your balance is past its estimated 30-day expiry.",
+      unresolved_session: "An earlier question has not finished paying. Use Recover under Unfinished payment.",
+      unresolved_session_other_wallet: "An unfinished payment belongs to another zkAPI wallet. Finish it there, or abandon it under Unfinished payment.",
+      stranded_processes: "Programs from an earlier question may still be running.",
+      daemon_already_running: "Another copy of the zkAPI app is already running. Close it; Olympus starts its own for each question.",
+      tor_port_busy: "Another program is using the connection Olympus needs to hide your network address.",
+      daily_cap_reached: "Today's question limit is reached. Raise or remove it under Balance and limits.",
+      spend_cap_reached: "Another question would pass today's spending limit. Raise or remove it under Balance and limits.",
+      state_unavailable: "Olympus could not read its record of questions on this Mac.",
+      key_reuse_on: "The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off: see Set up zkAPI."
     },
-    blockerOther: "The route is not ready ({code}).",
-    stepsTitle: "Set up the zkAPI route",
+    blockerOther: "Not ready yet ({code}).",
+    stepsTitle: "Set up zkAPI",
     stepsIntro: "In Terminal, in this order. This is the order that worked live.",
     steps: [
       "Install zkapi-clientd (version 0.1.5 or 0.1.6) and Tor.",
@@ -51771,27 +51785,28 @@ var init_vocabulary = __esm(() => {
     notAcknowledged: "Not yet accepted.",
     limitsTitle: "Balance and limits",
     limitsNone: "No daily limit",
-    limitsRequests: "{n} consults a day",
+    limitsRequests: "{n} questions a day",
     limitsUsd: "${usd} a day",
-    fundedOn: "funded {date}",
-    notFunded: "funding date not set",
+    fundedOn: "paid in on {date}",
+    notFunded: "payment date not set",
+    limitsToday: "Questions today: {n}, counted as up to ${usd} against your limits.",
     fundingDate: "Funding date: the day your deposit was confirmed (YYYY-MM-DD)",
-    capRequests: "Daily consult limit (optional)",
-    capUsd: "Daily spending limit in dollars, counted at $6 per consult (optional)",
+    capRequests: "Daily question limit (optional)",
+    capUsd: "Daily spending limit in dollars, counted at $6 per question (optional)",
     noLimitIntro: "There is no default limit: your deposit is the hard limit.",
     removeLimits: "No daily limit",
     removeLimitsHint: "Clears both limits.",
     saveRestarts: "Saving restarts Olympus to apply it.",
     saveRoute: "Save",
-    fenceTitle: "Held request",
-    fenceIntro: "An earlier request has not been seen to settle. Until it does, no consult is sent.",
+    fenceTitle: "Unfinished payment",
+    fenceIntro: "An earlier question has not been confirmed as paid. Until it is, no question is sent.",
     fenceThis: "Held since {at} (this wallet)",
     fenceOther: "Held since {at} (another wallet folder)",
     recover: "Recover",
-    recoverHint: "Sends one fixed request with no content and reserves up to $6.",
+    recoverHint: "Sends one empty request to finish it; up to $6 is held while it runs.",
     recoverConfirm: "Recovery sends one fixed request with no content through the same route and reserves up to $6. Continue?",
     abandon: "Abandon",
-    abandonHint: "Stops the block without settling; the unsettled request may later link two sessions.",
+    abandonHint: "Stops waiting without finishing it; the unfinished payment may later link two sessions.",
     abandonConfirm: "Abandoning means the unsettled request may later settle under another session's network identity, linking the two. It stops blocking consults and stays in the ledger as a record. Continue?",
     languagesTitle: "Languages",
     languagesIntro: "The outside question may use these languages. Only languages with a word pack installed on this computer can be chosen.",
@@ -51807,21 +51822,21 @@ var init_vocabulary = __esm(() => {
       medicines: "medicine names",
       medicineBrands: "medicine brand names"
     },
-    turnOn: "Turn on outside help",
-    turnOff: "Turn off outside help",
-    replaceFile: "Replace the damaged settings file (outside help stays off)",
-    enableBlockedRoute: "Add the zkAPI route first.",
+    turnOn: "Turn on anonymous answers",
+    turnOff: "Turn off anonymous answers",
+    replaceFile: "Replace the damaged settings file (anonymous answers stay off)",
+    enableBlockedRoute: "Add zkAPI first.",
     enableBlockedAcks: "Accept the cost and risk statements first.",
     edit: "Edit",
     setUp: "Set up",
     saving: "Saving…",
     saveFailed: "Olympus could not save this. Try again.",
     restarting: "Restarting Olympus to apply it…",
-    locked: "Unlock dashboard controls in Setup to see and change outside help.",
-    unlockIntro: "Changing outside help needs a session opened on this Mac itself, not one an agent or the launch link opened. One click, in this browser.",
-    unlock: "Unlock outside help on this Mac",
-    native: "Outside help is set up on this computer's own dashboard only, never from an agent or ChatGPT.",
-    unavailable: "Outside help is not available from this worker."
+    locked: "Unlock dashboard controls in Setup to see and change anonymous answers.",
+    unlockIntro: "Changing anonymous answers needs a session opened on this Mac itself, not one an agent or the launch link opened. One click, in this browser.",
+    unlock: "Unlock anonymous answers on this Mac",
+    native: "Anonymous answers are set up on this computer's own dashboard only, never from an agent or ChatGPT.",
+    unavailable: "Anonymous answers are not available from this worker."
   };
 });
 
@@ -55985,6 +56000,7 @@ __export(exports_consult_transport_zkapi, {
   zkapiFenceScope: () => zkapiFenceScope,
   zkapiConsultReadiness: () => zkapiConsultReadiness,
   validZkapiConsultQuestion: () => validZkapiConsultQuestion,
+  trustedFallbackExecutable: () => trustedFallbackExecutable,
   standardExecutableDirectories: () => standardExecutableDirectories,
   sendZkapiConsult: () => sendZkapiConsult,
   resolveExecutable: () => resolveExecutable,
@@ -56002,7 +56018,8 @@ __export(exports_consult_transport_zkapi, {
   ZKAPI_SUPPORTED_DAEMON_VERSIONS: () => ZKAPI_SUPPORTED_DAEMON_VERSIONS,
   ZKAPI_STAGE_LABELS: () => ZKAPI_STAGE_LABELS,
   ZKAPI_SESSION_READY_TIMEOUT_MS: () => ZKAPI_SESSION_READY_TIMEOUT_MS,
-  ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD
+  ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD,
+  DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn4, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash37, randomUUID as randomUUID15 } from "node:crypto";
@@ -56489,18 +56506,55 @@ function standardExecutableDirectories(env, platform2 = process.platform) {
     return [...local, "/usr/local/bin"];
   return local;
 }
-function resolveExecutable(name, explicit, env, platform2 = process.platform) {
-  const directories = [
-    ...(env.PATH ?? "").split(delimiter4).filter(Boolean),
-    ...standardExecutableDirectories(env, platform2)
-  ].filter((dir, index, all) => all.indexOf(dir) === index);
-  const candidates = explicit ? [explicit] : directories.map((dir) => join48(dir, name));
+function trustedChain(path, probe, uid) {
+  for (let current = path;; current = dirname35(current)) {
+    const stats = probe.stat(current);
+    if (current !== path && !stats.isDirectory())
+      return false;
+    if (stats.uid !== uid && stats.uid !== 0)
+      return false;
+    if ((stats.mode & 18) !== 0)
+      return false;
+    if (dirname35(current) === current)
+      return true;
+  }
+}
+function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) {
+  const uid = probe.uid();
+  if (uid === undefined)
+    return;
+  try {
+    const real = probe.realpath(candidate);
+    const target = probe.stat(real);
+    if (!target.isFile() || !probe.executable(real))
+      return;
+    if (!trustedChain(real, probe, uid))
+      return;
+    if (!trustedChain(probe.realpath(dirname35(candidate)), probe, uid))
+      return;
+    return real;
+  } catch {
+    return;
+  }
+}
+function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
+  const pathDirectories = (env.PATH ?? "").split(delimiter4).filter(Boolean);
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join48(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync3(candidate, constants3.X_OK);
       if (statSync14(candidate).isFile())
         return candidate;
     } catch {}
+  }
+  if (explicit)
+    return;
+  for (const dir of standardExecutableDirectories(env, platform2)) {
+    if (pathDirectories.includes(dir))
+      continue;
+    const found = trustedFallbackExecutable(join48(dir, name), trust);
+    if (found)
+      return found;
   }
   return;
 }
@@ -57661,7 +57715,7 @@ const resolver = () => new Promise((resolve) => {
   const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
   process.stdout.write(JSON.stringify(result));
 })();
-`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES;
+`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, DEFAULT_EXECUTABLE_TRUST, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES;
 var init_consult_transport_zkapi = __esm(() => {
   init_atomic_file();
   init_file_lease();
@@ -57826,6 +57880,19 @@ process.stdin.on('data', (chunk) => { received += chunk; if (!child && !cleaning
 process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
+  DEFAULT_EXECUTABLE_TRUST = {
+    realpath: (path) => realpathSync2(path),
+    stat: (path) => statSync14(path),
+    executable: (path) => {
+      try {
+        accessSync3(path, constants3.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    uid: () => typeof process.getuid === "function" ? process.getuid() : undefined
+  };
   SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomplete"]);
 });
 
@@ -83721,8 +83788,8 @@ var init_model_setup = __esm(() => {
 });
 
 // src/core/model-key-reload.ts
-function workerRestartsItself(env) {
-  return env.OLYMPUS_MANAGED_WORKER === "1" || Boolean(env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim());
+function workerRestartsItself(launch, env) {
+  return launch.nativeServiceSupervised === true || env.OLYMPUS_MANAGED_WORKER === "1";
 }
 function createModelKeyReload(options) {
   let requested = false;
@@ -100335,6 +100402,7 @@ function renderOutsideHelpCard(status, input) {
   parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
   parts.push(`<p class="ohlabel">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`);
   parts.push(`<p class="pintro">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>`);
+  parts.push(`<p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>`);
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
   if (canUnlock) {
@@ -100342,7 +100410,12 @@ function renderOutsideHelpCard(status, input) {
   }
   parts.push(renderStatusBlock(status, summary, canEdit));
   parts.push(renderProblems(status, canEdit));
-  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>` + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</summary>` + `<ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul></details>`);
+  const shortList = `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
+  const fullList = `<ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
+  const on = status.settings.state === "on";
+  if (!on) {
+    parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div>${shortList}` + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</summary>${fullList}</details>`);
+  }
   if (route.state === "configured")
     parts.push(renderAcknowledgements(route, canEdit));
   const more = [];
@@ -100354,6 +100427,8 @@ function renderOutsideHelpCard(status, input) {
   more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, route.state === "not_configured" || blockers.some((code) => SETUP_BLOCKERS.has(code))));
   if (route.state === "configured")
     more.push(renderDetails(route));
+  if (on)
+    more.push(renderSection({ id: "disclosure", title: DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore, summary: "", open: false, body: `<div data-outside-disclosure-more>${shortList}${fullList}</div>` }));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const config2 = {
     csrfToken: input.csrfToken ?? "",
@@ -100375,7 +100450,7 @@ function renderStatusBlock(status, summary, canEdit) {
   const lines = [renderRouteLine(route)];
   if (route.state === "configured" && route.readiness)
     lines.push(`<p class="ohline" data-outside-usage>${escapeHtml2(usageLine(route.readiness))}</p>`);
-  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">` + head + lines.join("") + `<p class="ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.holdNote)}</p>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">` + head + lines.join("") + `<p class="ohsmall" data-outside-cost>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLines.join(" "))}</p>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function renderRouteLine(route) {
   if (route.state === "not_configured")
@@ -100384,18 +100459,18 @@ function renderRouteLine(route) {
     return `<p class="ohline attn" data-outside-route="unknown">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown)}</p>`;
   const ready = route.readiness;
   if (ready.ready) {
-    return ready.torMode === "off" ? `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReadyNoTor)} <span class="attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff)}.</span></p>` : `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReady)}</p>`;
+    return ready.torMode === "off" ? `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReadyNoTor)} <span class="attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</span></p>` : `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReady)}</p>`;
   }
   const first = ready.blockers[0];
   const reason = first ? outsideHelpBlockerWords(first) : DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown;
   const more = ready.blockers.length > 1 ? ` ${fill(DASHBOARD_OUTSIDE_HELP_COPY.routeMore, { n: String(ready.blockers.length - 1) })}` : "";
-  return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeNotReady, { reason }))}${escapeHtml2(more)}</p>` + (ready.torMode === "off" ? `<p class="ohline attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff)}.</p>` : "");
+  return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeNotReady, { reason }))}${escapeHtml2(more)}</p>` + (ready.torMode === "off" ? `<p class="ohline attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "");
 }
 function usageLine(ready) {
   const count2 = ready.requestsToday.count;
   const pieces = [count2 === 0 ? DASHBOARD_OUTSIDE_HELP_COPY.usageNone : count2 === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.usageOne : fill(DASHBOARD_OUTSIDE_HELP_COPY.usageMany, { n: String(count2) })];
-  if (count2 > 0)
-    pieces.push(fill(DASHBOARD_OUTSIDE_HELP_COPY.usageSpent, { usd: ready.spendToday.reservedUsd.toFixed(0) }));
+  const head = count2 > 0 ? `${pieces[0]} ${fill(DASHBOARD_OUTSIDE_HELP_COPY.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}` : pieces[0];
+  pieces.splice(0, 1, head);
   pieces.push(ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.usageExpired : DASHBOARD_OUTSIDE_HELP_COPY.usageExpiryUnknown);
   return pieces.join(" · ");
 }
@@ -100452,7 +100527,8 @@ function renderLimits(route, blockers, canEdit) {
   const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
   const needed = blockers.some((code) => LIMIT_BLOCKERS.has(code));
   const noLimit = capped ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>`;
-  const body = noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
+  const body = today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, open: needed, attn: needed, body });
 }
 function renderFence(ready, canEdit) {
@@ -100620,7 +100696,7 @@ function renderOutsideHelpSection(summary, basePath) {
     return "";
   const href = outsideHelpHref(basePath);
   const label = summary.state === "route_not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.setUp : DASHBOARD_OUTSIDE_HELP_COPY.edit;
-  return `<div class="sect" id="outside-help">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</div>` + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml2(outsideHelpStateLine(summary))}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a></div></div></div>`;
+  return `<div class="sect" id="outside-help">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.sectionTitle)}</div>` + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a></div></div></div>`;
 }
 var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS2, LIMIT_BLOCKERS, SETUP_BLOCKERS;
 var init_outside_help = __esm(() => {
@@ -125117,7 +125193,7 @@ function createDashboardConsultAdapter(options) {
     async setEnabled(update) {
       const enabled = update.enabled;
       if (typeof enabled !== "boolean")
-        return invalid3("Say whether outside help should be on or off.");
+        return invalid3("Say whether anonymous answers should be on or off.");
       const revision = update.revision;
       if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
         return invalid3(MESSAGES2.needsRevision, "needs_revision");
@@ -125320,10 +125396,10 @@ var init_dashboard_consult = __esm(() => {
   ACKNOWLEDGEMENT_IDS = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);
   MESSAGES2 = {
     needsRevision: "This change needs the settings revision the page was built from. Reload the page and try again.",
-    conflict: "Outside help was changed somewhere else since this page loaded. Reload the page to see the current setting.",
+    conflict: "Anonymous answers were changed somewhere else since this page loaded. Reload the page to see the current setting.",
     invalidCurrent: "The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.",
-    routeMissing: "Add the zkAPI route before turning outside help on.",
-    acknowledgementsIncomplete: "Read and tick every statement about cost and risk before turning outside help on.",
+    routeMissing: "Add zkAPI before turning anonymous answers on.",
+    acknowledgementsIncomplete: "Read and tick every statement about cost and risk before turning anonymous answers on.",
     languageMissing: "A chosen language has no vocabulary pack installed on this computer.",
     languagesEmpty: "Choose at least one language.",
     noHome: "Olympus cannot find your home folder, so it cannot write the settings file.",
@@ -125343,8 +125419,8 @@ var init_dashboard_consult = __esm(() => {
     noFence: "There is no held request to recover.",
     otherWallet: "The held request belongs to another wallet folder. Recover it there, or abandon it.",
     scope: "Name which held request to abandon.",
-    turnedOn: "Outside help is on. When a private answer in ChatGPT is incomplete, Olympus may send one outside question for it.",
-    turnedOff: "Outside help is off. No outside question is sent.",
+    turnedOn: "Anonymous answers are on. When a private answer in ChatGPT is missing something, Olympus may ask one anonymous question for it.",
+    turnedOff: "Anonymous answers are off. No question is sent.",
     routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
     routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
     routeAdded: "The zkAPI route is added. Put the daemon's API key in the worker environment file, then finish the steps below.",
@@ -125361,6 +125437,7 @@ __export(exports_server2, {
   validateSecureVeniceAnalystProfileAtConstruction: () => validateSecureVeniceAnalystProfileAtConstruction,
   trustedAnalystAssistTimeoutMs: () => trustedAnalystAssistTimeoutMs,
   stopBuiltInModelOnShutdown: () => stopBuiltInModelOnShutdown,
+  startWorkerWithLaunch: () => startWorkerWithLaunch,
   startApprovedSourceRun: () => startApprovedSourceRun,
   sovereigntyAnalystRoutePlan: () => sovereigntyAnalystRoutePlan,
   sourceIndexTelegramAccountFromEnv: () => sourceIndexTelegramAccountFromEnv,
@@ -126294,6 +126371,10 @@ function createFileExtractionLocalVlmClientFromEnv(env) {
       timeoutMs: parseOptionalTimeoutSecondsOrNone(env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS")
     } : {}
   }) : undefined;
+}
+async function startWorkerWithLaunch(launch) {
+  workerLaunch = { ...launch };
+  await main();
 }
 async function main() {
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? "8010");
@@ -128320,7 +128401,7 @@ async function main() {
     server.stop();
   };
   requestModelReload = createModelKeyReload({
-    managed: workerRestartsItself(process.env),
+    managed: workerRestartsItself(workerLaunch, process.env),
     shutdown: async () => {
       shutdown("SIGTERM");
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
@@ -128825,7 +128906,7 @@ function mergeConnectorStores(stores) {
   }
   return [...byCorpusId.values()];
 }
-var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES;
+var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
 var init_server5 = __esm(async () => {
   init_package_root();
   init_messaging_capture();
@@ -128948,6 +129029,7 @@ var init_server5 = __esm(async () => {
     [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
     [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }]
   ]);
+  workerLaunch = {};
   if (false) {}
 });
 
@@ -133563,8 +133645,8 @@ async function runWorkerForeground(options = {}) {
       throw new OperationError("config_error", "Native worker service invocation identity does not match its finalized environment.");
     }
   }
-  const startWorker = options.startWorker ?? (await init_server5().then(() => exports_server2)).main;
-  await startWorker();
+  const startWorker = options.startWorker ?? (await init_server5().then(() => exports_server2)).startWorkerWithLaunch;
+  await startWorker({ nativeServiceSupervised: managedInstanceId !== undefined });
 }
 async function readWorkerHttpState() {
   const config2 = loadConfig();

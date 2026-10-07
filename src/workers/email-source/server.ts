@@ -10,7 +10,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { createModelKeyReload, workerRestartsItself } from '../../core/model-key-reload.ts';
+import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
@@ -1774,6 +1774,18 @@ export function createFileExtractionLocalVlmClientFromEnv(
           : {}),
       })
     : undefined;
+}
+
+/** How this process was launched; set only by startWorkerWithLaunch from the validated entry point. */
+let workerLaunch: WorkerLaunch = {};
+
+/**
+ * The CLI's entry: the launch state runWorkerForeground validated (never an
+ * ambient variable) rides into main() for the restart decision.
+ */
+export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void> {
+  workerLaunch = { ...launch };
+  await main();
 }
 
 export async function main(): Promise<void> {
@@ -4805,7 +4817,7 @@ export async function main(): Promise<void> {
     void server.stop();
   };
   requestModelReload = createModelKeyReload({
-    managed: workerRestartsItself(process.env),
+    managed: workerRestartsItself(workerLaunch, process.env),
     shutdown: async () => { shutdown('SIGTERM'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });

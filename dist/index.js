@@ -16640,18 +16640,68 @@ function standardExecutableDirectories(env, platform2 = process.platform) {
     return [...local, "/usr/local/bin"];
   return local;
 }
-function resolveExecutable(name, explicit, env, platform2 = process.platform) {
-  const directories = [
-    ...(env.PATH ?? "").split(delimiter5).filter(Boolean),
-    ...standardExecutableDirectories(env, platform2)
-  ].filter((dir, index, all) => all.indexOf(dir) === index);
-  const candidates = explicit ? [explicit] : directories.map((dir) => join20(dir, name));
+var DEFAULT_EXECUTABLE_TRUST = {
+  realpath: (path) => realpathSync(path),
+  stat: (path) => statSync11(path),
+  executable: (path) => {
+    try {
+      accessSync3(path, constants2.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  uid: () => typeof process.getuid === "function" ? process.getuid() : undefined
+};
+function trustedChain(path, probe, uid) {
+  for (let current = path;; current = dirname16(current)) {
+    const stats = probe.stat(current);
+    if (current !== path && !stats.isDirectory())
+      return false;
+    if (stats.uid !== uid && stats.uid !== 0)
+      return false;
+    if ((stats.mode & 18) !== 0)
+      return false;
+    if (dirname16(current) === current)
+      return true;
+  }
+}
+function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) {
+  const uid = probe.uid();
+  if (uid === undefined)
+    return;
+  try {
+    const real = probe.realpath(candidate);
+    const target = probe.stat(real);
+    if (!target.isFile() || !probe.executable(real))
+      return;
+    if (!trustedChain(real, probe, uid))
+      return;
+    if (!trustedChain(probe.realpath(dirname16(candidate)), probe, uid))
+      return;
+    return real;
+  } catch {
+    return;
+  }
+}
+function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
+  const pathDirectories = (env.PATH ?? "").split(delimiter5).filter(Boolean);
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join20(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync3(candidate, constants2.X_OK);
       if (statSync11(candidate).isFile())
         return candidate;
     } catch {}
+  }
+  if (explicit)
+    return;
+  for (const dir of standardExecutableDirectories(env, platform2)) {
+    if (pathDirectories.includes(dir))
+      continue;
+    const found = trustedFallbackExecutable(join20(dir, name), trust);
+    if (found)
+      return found;
   }
   return;
 }

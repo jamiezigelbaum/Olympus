@@ -170,6 +170,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
   parts.push(`<p class="ohlabel">${escapeHtml(W.experimental)}</p>`);
   parts.push(`<p class="pintro">${escapeHtml(W.intro)}</p>`);
+  parts.push(`<p class="pnote" data-outside-privacy>${escapeHtml(W.privacy)}</p>`);
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
   if (canUnlock) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml(W.unlockIntro)}</p>`
@@ -183,11 +184,16 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   // 2. Problems, one list, each line with its fix.
   parts.push(renderProblems(status, canEdit));
 
-  // 3. The disclosure (design §A.10: up front): three short lines, the rest one click away.
-  parts.push(`<div class="sect">${escapeHtml(W.disclosureTitle)}</div>`
-    + `<ul class="ohshort" data-outside-disclosure>${W.disclosureShort.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`
-    + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml(W.disclosureMore)}</summary>`
-    + `<ul class="ohlist">${W.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></details>`);
+  // 3. The disclosure (design §A.10: up front) while outside help is off:
+  // three short lines, the rest one click away. Once it is on, the same
+  // content moves into its own collapsed section below.
+  const shortList = `<ul class="ohshort" data-outside-disclosure>${W.disclosureShort.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
+  const fullList = `<ul class="ohlist">${W.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
+  const on = status.settings.state === 'on';
+  if (!on) {
+    parts.push(`<div class="sect">${escapeHtml(W.disclosureTitle)}</div>${shortList}`
+      + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml(W.disclosureMore)}</summary>${fullList}</details>`);
+  }
 
   // 4. Cost and risk: the eight acknowledgements, collapsed once accepted.
   if (route.state === 'configured') parts.push(renderAcknowledgements(route, canEdit));
@@ -199,6 +205,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   if (route.state === 'configured') more.push(renderLimits(route, blockers, canEdit));
   more.push(renderSetupSteps(route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, route.state === 'not_configured' || blockers.some((code) => SETUP_BLOCKERS.has(code))));
   if (route.state === 'configured') more.push(renderDetails(route));
+  if (on) more.push(renderSection({ id: 'disclosure', title: W.disclosureMore, summary: '', open: false, body: `<div data-outside-disclosure-more>${shortList}${fullList}</div>` }));
   parts.push(`<div class="ohmore">${more.join('')}</div>`);
 
   const config = {
@@ -235,7 +242,7 @@ function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: Dashboar
   if (route.state === 'configured' && route.readiness) lines.push(`<p class="ohline" data-outside-usage>${escapeHtml(usageLine(route.readiness))}</p>`);
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="${invalid ? 'yes' : 'no'}">`
     + head + lines.join('')
-    + `<p class="ohsmall">${escapeHtml(W.holdNote)}</p>`
+    + `<p class="ohsmall" data-outside-cost>${escapeHtml(W.costLines.join(' '))}</p>`
     + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 
@@ -246,22 +253,23 @@ function renderRouteLine(route: DashboardOutsideHelpRoute): string {
   if (ready.ready) {
     // Tor off is said where the reader looks first: the provider sees the address.
     return ready.torMode === 'off'
-      ? `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReadyNoTor)} <span class="attn">${escapeHtml(W.facts.torOff)}.</span></p>`
+      ? `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReadyNoTor)} <span class="attn">${escapeHtml(W.addressVisible)}</span></p>`
       : `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReady)}</p>`;
   }
   const first = ready.blockers[0];
   const reason = first ? outsideHelpBlockerWords(first) : W.routeUnknown;
   const more = ready.blockers.length > 1 ? ` ${fill(W.routeMore, { n: String(ready.blockers.length - 1) })}` : '';
   return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml(fill(W.routeNotReady, { reason }))}${escapeHtml(more)}</p>`
-    + (ready.torMode === 'off' ? `<p class="ohline attn">${escapeHtml(W.facts.torOff)}.</p>` : '');
+    + (ready.torMode === 'off' ? `<p class="ohline attn">${escapeHtml(W.addressVisible)}</p>` : '');
 }
 
 function usageLine(ready: DashboardOutsideHelpReadiness): string {
   const count = ready.requestsToday.count;
   const pieces = [count === 0 ? W.usageNone : count === 1 ? W.usageOne : fill(W.usageMany, { n: String(count) })];
-  // The ledger records the $6 reservation per consult, never the settled
-  // price, so the day's spend is said as its ceiling.
-  if (count > 0) pieces.push(fill(W.usageSpent, { usd: ready.spendToday.reservedUsd.toFixed(0) }));
+  // The ledger records the $6 hold per question, never the settled price, so
+  // the day's figure is what counts against limits, never money spent.
+  const head = count > 0 ? `${pieces[0]} ${fill(W.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}` : pieces[0]!;
+  pieces.splice(0, 1, head);
   pieces.push(ready.expiry.state === 'active' && ready.expiry.expiryDate
     ? fill(W.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? '') })
     : ready.expiry.state === 'expired' ? W.usageExpired : W.usageExpiryUnknown);
@@ -344,7 +352,10 @@ function renderLimits(route: ConfiguredRoute, blockers: readonly string[], canEd
       + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(W.removeLimits)}</button><span class="hint">${escapeHtml(W.removeLimitsHint)}</span></div>`
       + `<span class="actmsg" data-action-message role="status"></span></form>`
     : `<p class="pnote">${escapeHtml(W.noLimitIntro)}</p>`;
-  const body = noLimit
+  const today = route.readiness && route.readiness.requestsToday.count > 0
+    ? `<p class="pnote" data-outside-limits-today>${escapeHtml(fill(W.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>`
+    : '';
+  const body = today + noLimit
     + `<form class="ohform" data-outside-form="route">`
     + `<label class="plabel" for="outside-funding-date">${escapeHtml(W.fundingDate)}</label>`
     + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml(route.fundingDate ?? '')}"${disabled}>`
@@ -548,7 +559,7 @@ export function renderOutsideHelpSection(summary: DashboardOutsideHelpSummary | 
   if (!summary) return '';
   const href = outsideHelpHref(basePath);
   const label = summary.state === 'route_not_configured' ? W.setUp : W.edit;
-  return `<div class="sect" id="outside-help">${escapeHtml(W.title)}</div>`
-    + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml(outsideHelpStateLine(summary))}</p></div>`
+  return `<div class="sect" id="outside-help">${escapeHtml(W.sectionTitle)}</div>`
+    + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml(W.row[summary.state])}</p></div>`
     + `<div class="sact"><a class="btn" href="${escapeHtml(href)}">${escapeHtml(label)}</a></div></div></div>`;
 }
