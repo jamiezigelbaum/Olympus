@@ -2,14 +2,17 @@
 // track Z, tranche Z1).
 //
 // One consult = one supervised session, strictly one at a time across every
-// Olympus process (a cross-process file lease is held for the whole session):
+// Olympus process (a cross-process file lease is held for the whole session,
+// from `open` through `finished`):
 //
-//   throwaway Tor client (fresh data directory) on the owner's relay port
-//   -> `zkapi-clientd serve`, network-confined where the platform allows it
-//   -> verify -> warm the model policy -> reserve the worst case and set the
-//   unresolved-session fence -> one stateless chat request -> wait for the
-//   daemon's correlated key and settlement -> stop Tor -> secondary probe ->
-//   stop every owned process group.
+//   open:     throwaway Tor client (fresh data directory) on the owner's relay
+//             port -> `zkapi-clientd serve`, network-confined where the
+//             platform allows it -> verify -> warm the model policy
+//   send:     the caller's final authorization -> reserve the worst case and
+//             set the unresolved-session fence -> one stateless chat request
+//             -> the reply is handed over as soon as the completion is in hand
+//   finished: wait for the daemon's correlated key and settlement -> stop Tor
+//             -> secondary probe -> stop every owned process group.
 //
 // The Tor and daemon sequencing is ported from Vitalik Buterin's reference
 // wrapper scripts in ethereum/zkapi pull request #16 (commit
@@ -144,6 +147,8 @@ export type ZkapiConsultErrorCode =
   | 'daemon_error'
   | 'transport_failed'
   | 'teardown_incomplete'
+  | 'authorization_refused'
+  | 'session_spent'
   | 'internal_error';
 
 /**
@@ -205,7 +210,8 @@ export interface ZkapiSessionReceipt {
   confinementSelfTest: 'passed' | 'failed' | 'not_run';
   /** Secondary signal only: what the daemon's model list did once Tor stopped. */
   postStopProbe: 'route_lost' | 'still_reachable' | 'inconclusive' | 'not_run';
-  settlement: 'confirmed' | 'not_confirmed' | 'no_lease';
+  /** `pending`: only on the receipt a session hands over with its reply, before settlement is known. */
+  settlement: 'confirmed' | 'not_confirmed' | 'no_lease' | 'pending';
   fence: 'clear' | 'held';
   daemonVersion?: string;
   network?: 'mainnet' | 'sepolia';
@@ -234,12 +240,16 @@ export interface ZkapiStageTimings {
   daemonVerifyMs?: number;
   /** Polling the model list until the reviewed policy is listed. */
   policyWarmMs?: number;
-  /** The ledger reservation and fence, and the ownership check before dispatch. */
+  /** Session start until the route is ready for a question: everything above, waiting for nothing. */
+  warmTotalMs?: number;
+  /** The ownership check, the caller's final authorization, and the ledger reservation and fence before dispatch. */
   reservationMs?: number;
   /** Request dispatch until the response headers arrive. */
   dispatchToFirstByteMs?: number;
   /** Response headers until the body is read. */
   firstByteToCompletionMs?: number;
+  /** Session start until the reply was handed to the caller, before settlement (replies only). */
+  replyHandedOverAtMs?: number;
   /** Waiting for the daemon log to correlate this request and its key. */
   correlationWaitMs?: number;
   /** Waiting for the daemon to report the key settled. */
@@ -262,9 +272,11 @@ export const ZKAPI_STAGE_LABELS: ReadonlyArray<readonly [keyof ZkapiStageTimings
   ['daemonReadyMs', 'daemon start to ready'],
   ['daemonVerifyMs', 'daemon verification'],
   ['policyWarmMs', 'models/policy warm'],
+  ['warmTotalMs', 'warm total'],
   ['reservationMs', 'reservation'],
   ['dispatchToFirstByteMs', 'dispatch to first byte'],
   ['firstByteToCompletionMs', 'first byte to completion'],
+  ['replyHandedOverAtMs', 'reply handed over at'],
   ['correlationWaitMs', 'request correlation wait'],
   ['settlementWaitMs', 'settlement wait'],
   ['torStopMs', 'Tor stop'],
@@ -428,6 +440,8 @@ const MESSAGES: Record<ZkapiConsultErrorCode, string> = {
   daemon_error: 'The zkAPI daemon returned an error.',
   transport_failed: 'The request to the zkAPI daemon failed.',
   teardown_incomplete: 'The session\'s processes could not be confirmed stopped; the next session will not start until they are.',
+  authorization_refused: 'The final authorization immediately before dispatch refused the consult; nothing was reserved or sent.',
+  session_spent: 'This zkAPI session has already sent, was cancelled, or has ended; each session sends at most once.',
   internal_error: 'The zkAPI session failed inside Olympus.',
 };
 
@@ -459,10 +473,14 @@ export function zkapiRouteLabel(receipt: ZkapiSessionReceipt): string {
     return 'payment privacy only: the daemon still reached the network after Tor stopped (Tor bypass observed)';
   }
   const confined = receipt.confinementSelfTest === 'passed' ? receipt.confinement : 'none';
-  if (confined === 'loopback_filtered' && receipt.freshTorClient && receipt.settlement !== 'not_confirmed') {
+  if (confined === 'loopback_filtered' && receipt.freshTorClient && receipt.settlement !== 'not_confirmed' && receipt.settlement !== 'pending') {
     return 'anonymous route (payment, key and network identity hidden)';
   }
-  const unsettled = receipt.settlement === 'not_confirmed' ? '; lease settlement not confirmed' : '';
+  const unsettled = receipt.settlement === 'not_confirmed'
+    ? '; lease settlement not confirmed'
+    : receipt.settlement === 'pending'
+      ? '; lease settlement pending'
+      : '';
   return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
 }
 
@@ -1579,17 +1597,146 @@ export async function zkapiConsultReadiness(
 }
 
 // ---------------------------------------------------------------------------
-// Send and recover
+// Sessions: open, send, finished (design §A.8, stage C2)
+//
+// One consult is one supervised session with a one-shot state machine:
+//
+//   open    opening → ready       lease held; confinement self-test, Tor, the
+//                                 daemon, its verification and the policy warm
+//                                 all run before any question exists
+//   send    ready → authorizing → dispatched → replied
+//   finished                    → finished    settlement, Tor stop, post-stop
+//                                 probe, teardown; the lease is released here
+//   cancel  before dispatch     → cancelled   nothing reserved, fenced or counted
+//           after dispatch                    the caller is detached; the
+//                                             session's own cleanup continues
+//
+// Dispatch order is the money boundary: the transport's awaited checks run
+// first, then the caller's final authorization, then the reservation, the
+// fence and the start of the fetch with no await between them. A cancellation
+// that lands before that synchronous block wins; one after it is ignored by
+// the fetch, which only the session's own completion timeout or a process
+// exit can stop.
 
 // In-process fast path; the cross-process session lease is the real guard.
 let zkapiConsultInFlight = false;
 
+export type ZkapiConsultSessionState = 'opening' | 'ready' | 'authorizing' | 'dispatched' | 'replied' | 'finished' | 'cancelled';
+
+export interface ZkapiOpenControl {
+  /** Cancels the session at any await before dispatch; detached after dispatch. */
+  signal?: AbortSignal | undefined;
+  /** How long `open` may take to reach `ready`; past it the session is refused with `timeout`, nothing reserved. */
+  deadlineMs?: number | undefined;
+}
+
+export interface ZkapiSendControl {
+  /** Cancels before dispatch; after dispatch only stops the caller's wait for the reply. */
+  signal?: AbortSignal | undefined;
+  /**
+   * The caller's final authorization (settings revision, liveness, deadlines,
+   * eligibility, gate), run immediately before the synchronous reservation
+   * and fetch. `false` refuses the consult with nothing reserved.
+   */
+  authorize?: ((signal: AbortSignal) => boolean | Promise<boolean>) | undefined;
+  /** The send must dispatch within this many ms of the call, or it is refused with nothing reserved. */
+  deadlineMs?: number | undefined;
+}
+
 /**
- * Send one approved consult question through a freshly supervised session.
- * The only inputs that reach the daemon are `question` and `options.model`,
- * inside a fixed body: one user message, no system text, no tools, no
- * history, no streaming. A failure is returned, never retried, and this module
- * knows no other transport.
+ * What `send` resolves with as soon as the completion is in hand, before
+ * settlement: a reply whose receipt says `settlement: 'pending'` and
+ * `fence: 'held'`, or the completion's failure. `finished` carries the final
+ * receipt.
+ */
+export type ZkapiConsultReply =
+  | {
+    kind: 'reply';
+    text: string;
+    routeLabel: string;
+    networkIdentity: ZkapiNetworkIdentity;
+    receipt: ZkapiSessionReceipt;
+    providerVerification?: 'verified' | 'verifier-unavailable';
+    elapsedMs: number;
+  }
+  | { kind: 'failed'; error: ZkapiConsultError };
+
+export interface ZkapiConsultSession {
+  readonly state: ZkapiConsultSessionState;
+  /** One shot: a second call, or a call after cancellation, is refused with `session_spent`. */
+  send(question: string, control?: ZkapiSendControl): Promise<ZkapiConsultReply>;
+  /** Before dispatch: full teardown, nothing reserved. After dispatch: detaches the caller only. */
+  cancel(): void;
+  /** Resolves after settlement, Tor stop, the post-stop probe and teardown; the lease is released then. */
+  readonly finished: Promise<ZkapiConsultResult>;
+}
+
+export type ZkapiOpenSessionResult =
+  | { ok: true; session: ZkapiConsultSession }
+  | { ok: false; error: ZkapiConsultError };
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly settled: () => boolean;
+}
+
+function deferred<T>(): Deferred<T> {
+  let settled = false;
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = (value) => {
+      if (settled) return;
+      settled = true;
+      done(value);
+    };
+  });
+  return { promise, resolve, settled: () => settled };
+}
+
+interface DispatchRequest {
+  question: string;
+  signal: AbortSignal | undefined;
+  authorize: ZkapiSendControl['authorize'];
+  deadlineMs: number | undefined;
+}
+
+type CancelReason = 'cancel' | 'deadline';
+
+/** The caller's half of a session and the machine's half meet here. */
+interface SessionBridge {
+  state: ZkapiConsultSessionState;
+  readonly openSignal: AbortSignal | undefined;
+  /** A cancellation asked for before the machine registered its handler. */
+  cancelRequested: CancelReason | undefined;
+  /** Registered by the machine. Before dispatch it aborts the session; after dispatch it detaches the caller. */
+  cancel: ((reason: CancelReason) => void) | undefined;
+  readonly ready: Deferred<void>;
+  readonly dispatch: Deferred<DispatchRequest>;
+  readonly reply: Deferred<ZkapiConsultReply>;
+}
+
+/**
+ * Warm a consult route before the question exists: take the session lease,
+ * self-test the confinement, start Tor and the daemon, verify them and warm
+ * the model policy. Resolves with a ready session, or with a failure once
+ * everything it started is stopped and the lease released. Until `send`
+ * dispatches, the session has reserved, fenced and counted nothing.
+ */
+export async function openZkapiConsultSession(
+  options: ZkapiConsultTransportOptions,
+  control: ZkapiOpenControl = {},
+): Promise<ZkapiOpenSessionResult> {
+  return openSession(options, control, false);
+}
+
+/**
+ * Send one approved consult question through a freshly supervised session and
+ * return after settlement and teardown: `open`, `send` and `finished` in one
+ * call. The only inputs that reach the daemon are `question` and
+ * `options.model`, inside a fixed body: one user message, no system text, no
+ * tools, no history, no streaming. A failure is returned, never retried, and
+ * this module knows no other transport.
  */
 export async function sendZkapiConsult(
   question: string,
@@ -1600,7 +1747,7 @@ export async function sendZkapiConsult(
   if (typeof question !== 'string' || !validQuestion(question)) {
     return failure('invalid_question', 'not_sent', initialIdentity);
   }
-  return exclusiveSession(question, false, options, control.signal);
+  return oneShot(question, false, options, control.signal);
 }
 
 /**
@@ -1614,15 +1761,38 @@ export async function recoverZkapiSession(
   options: ZkapiConsultTransportOptions,
   control: { signal?: AbortSignal } = {},
 ): Promise<ZkapiConsultResult> {
-  return exclusiveSession(RECOVERY_QUESTION, true, options, control.signal);
+  return oneShot(RECOVERY_QUESTION, true, options, control.signal);
 }
 
-async function exclusiveSession(
+/** Codes that describe the session's own end and are never replaced by the caller's cancellation. */
+const SESSION_OWNED_FAILURES: ReadonlySet<ZkapiConsultErrorCode> = new Set(['session_process_exited', 'teardown_incomplete']);
+
+async function oneShot(
   question: string,
   recovery: boolean,
   options: ZkapiConsultTransportOptions,
   signal: AbortSignal | undefined,
 ): Promise<ZkapiConsultResult> {
+  const opened = await openSession(options, { signal }, recovery);
+  if (!opened.ok) return opened;
+  await opened.session.send(question, { signal });
+  const result = await opened.session.finished;
+  // The one-call contract: a caller that cancelled gets a typed cancellation,
+  // outcome unknown, with the session's final receipt. The session itself
+  // kept the reply and settled as usual.
+  if (signal?.aborted && (result.ok || (result.error.outcome !== 'not_sent' && !SESSION_OWNED_FAILURES.has(result.error.code)))) {
+    const receipt = result.ok ? result.receipt : result.error.receipt;
+    const identity = result.ok ? result.networkIdentity : result.error.networkIdentity;
+    return failure('aborted', 'unknown', identity, receipt ? { receipt } : {});
+  }
+  return result;
+}
+
+async function openSession(
+  options: ZkapiConsultTransportOptions,
+  control: ZkapiOpenControl,
+  recovery: boolean,
+): Promise<ZkapiOpenSessionResult> {
   const initialIdentity: ZkapiNetworkIdentity = options.settings.tor === 'off' ? 'visible' : 'not_verified';
   if (zkapiConsultInFlight) return failure('busy', 'not_sent', initialIdentity);
   zkapiConsultInFlight = true;
@@ -1631,45 +1801,103 @@ async function exclusiveSession(
   // Timing never throws and never changes control flow: a failed or
   // non-finite clock sample just leaves that measurement out.
   const clock = options.clock ?? (() => performance.now());
-  let startedAt: number | undefined;
+  const startedAt = sampleClock(clock);
+  const bridge: SessionBridge = {
+    state: 'opening',
+    openSignal: control.signal,
+    cancelRequested: undefined,
+    cancel: undefined,
+    ready: deferred<void>(),
+    dispatch: deferred<DispatchRequest>(),
+    reply: deferred<ZkapiConsultReply>(),
+  };
+  const requestCancel = (reason: CancelReason): void => {
+    if (bridge.cancel) bridge.cancel(reason);
+    else bridge.cancelRequested ??= reason;
+  };
+  const openDeadline = control.deadlineMs !== undefined
+    ? setTimeout(() => {
+      if (bridge.state === 'opening') requestCancel('deadline');
+    }, control.deadlineMs)
+    : undefined;
   let leaseHeld = false;
-  try {
-    startedAt = sampleClock(clock);
-    mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
-    const result = await withFileLease(
-      `${statePath}.session`,
-      () => {
-        leaseHeld = true;
-        return runSession(question, recovery, options, statePath, signal, sent, clock, startedAt);
-      },
-      { acquireTimeoutMs: 50 },
-    );
-    // A refusal before any process started never reaches teardown; its total ends here.
-    const receipt = result.ok ? result.receipt : result.error.receipt;
-    if (receipt && receipt.stageMs?.totalMs === undefined) {
-      receipt.stageMs = withTiming(receipt.stageMs ?? {}, 'totalMs', elapsedMs(clock, startedAt));
-      if (Object.keys(receipt.stageMs).length === 0) delete receipt.stageMs;
+  const finished = (async (): Promise<ZkapiConsultResult> => {
+    try {
+      mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
+      const result = await withFileLease(
+        `${statePath}.session`,
+        () => {
+          leaseHeld = true;
+          return runSession(recovery, options, statePath, bridge, sent, clock, startedAt);
+        },
+        { acquireTimeoutMs: 50 },
+      );
+      // A refusal before any process started never reaches teardown; its total ends here.
+      const receipt = result.ok ? result.receipt : result.error.receipt;
+      if (receipt && receipt.stageMs?.totalMs === undefined) {
+        receipt.stageMs = withTiming(receipt.stageMs ?? {}, 'totalMs', elapsedMs(clock, startedAt));
+        if (Object.keys(receipt.stageMs).length === 0) delete receipt.stageMs;
+      }
+      return result;
+    } catch (error) {
+      // No receipt exists on this path; the timings ride on the error instead.
+      const total = elapsedMs(clock, startedAt);
+      let stageMs = withTiming({}, 'totalMs', total);
+      if (!leaseHeld) stageMs = withTiming(stageMs, 'leaseAcquireMs', total);
+      const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
+      if (error instanceof FileLeaseBusyError) return failure('busy', 'not_sent', initialIdentity, timed);
+      return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity, timed);
+    } finally {
+      zkapiConsultInFlight = false;
     }
+  })().then((result) => {
+    // The lease is released by now. A send still waiting (the session ended
+    // before dispatch) learns the outcome here.
+    clearTimeout(openDeadline);
+    bridge.state = sent.dispatched ? 'finished' : 'cancelled';
+    if (!result.ok) bridge.reply.resolve({ kind: 'failed', error: result.error });
     return result;
-  } catch (error) {
-    // No receipt exists on this path; the timings ride on the error instead.
-    const total = elapsedMs(clock, startedAt);
-    let stageMs = withTiming({}, 'totalMs', total);
-    if (!leaseHeld) stageMs = withTiming(stageMs, 'leaseAcquireMs', total);
-    const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
-    if (error instanceof FileLeaseBusyError) return failure('busy', 'not_sent', initialIdentity, timed);
-    return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity, timed);
-  } finally {
-    zkapiConsultInFlight = false;
+  });
+  const session: ZkapiConsultSession = {
+    get state() {
+      return bridge.state;
+    },
+    finished,
+    cancel: () => requestCancel('cancel'),
+    send: async (question, sendControl = {}) => {
+      if (typeof question !== 'string' || !validQuestion(question)) {
+        return { kind: 'failed', error: failure('invalid_question', 'not_sent', initialIdentity).error };
+      }
+      if (bridge.state !== 'ready') {
+        return { kind: 'failed', error: failure('session_spent', 'not_sent', initialIdentity).error };
+      }
+      bridge.state = 'authorizing';
+      bridge.dispatch.resolve({
+        question,
+        signal: sendControl.signal,
+        authorize: sendControl.authorize,
+        deadlineMs: sendControl.deadlineMs,
+      });
+      return bridge.reply.promise;
+    },
+  };
+  const ready = await Promise.race([
+    bridge.ready.promise.then(() => true),
+    finished.then(() => false),
+  ]);
+  if (ready) {
+    clearTimeout(openDeadline);
+    return { ok: true, session };
   }
+  const result = await finished;
+  return result.ok ? failure('internal_error', 'unknown', result.networkIdentity, { receipt: result.receipt }) : result;
 }
 
 async function runSession(
-  question: string,
   recovery: boolean,
   options: ZkapiConsultTransportOptions,
   statePath: string,
-  signal: AbortSignal | undefined,
+  bridge: SessionBridge,
   sent: { dispatched: boolean },
   clock: () => number,
   startedAt: number | undefined,
@@ -1678,8 +1906,10 @@ async function runSession(
   // loop. Sampling never throws; a missing sample omits that stage.
   let timings: ZkapiStageTimings = withTiming({}, 'leaseAcquireMs', elapsedMs(clock, startedAt));
   let openStage: { key: keyof ZkapiStageTimings; at: number | undefined } | undefined;
+  let lastSampleAt: number | undefined;
   const stage = (key: keyof ZkapiStageTimings | undefined): void => {
     const at = sampleClock(clock);
+    lastSampleAt = at;
     if (openStage) timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
     openStage = key ? { key, at } : undefined;
   };
@@ -1707,10 +1937,39 @@ async function runSession(
   const snapshot = (): ZkapiSessionReceipt => (
     Object.keys(timings).length > 0 ? { ...receipt, stageMs: { ...timings } } : { ...receipt }
   );
+  /** The receipt as it stands between dispatch and settlement. */
+  const pendingSnapshot = (): ZkapiSessionReceipt => ({ ...snapshot(), settlement: 'pending', fence: 'held' });
   const identity = (): ZkapiNetworkIdentity => (perConsultTor ? networkIdentityFor(receipt) : 'visible');
   const fail = (code: ZkapiConsultErrorCode, extra: Partial<Pick<ZkapiConsultError, 'daemonCode' | 'httpStatus'>> = {}): ZkapiConsultResult => (
     failure(code, sent.dispatched ? (extra.httpStatus ? 'sent_failed' : 'unknown') : 'not_sent', identity(), { ...extra, receipt: snapshot() })
   );
+
+  // One signal for the whole session: a caller's cancellation or deadline
+  // before dispatch, or any owned process exiting when Olympus did not stop it
+  // on purpose. After dispatch the caller is detached and only the latter
+  // remains.
+  const sessionAbort = new AbortController();
+  const sessionSignal = sessionAbort.signal;
+  let abortCause: 'aborted' | 'timeout' = 'aborted';
+  const cancelBeforeDispatch = (reason: CancelReason): void => {
+    if (sessionSignal.aborted) return;
+    abortCause = reason === 'deadline' ? 'timeout' : 'aborted';
+    sessionAbort.abort();
+  };
+  let detachCaller: (() => void) | undefined;
+  bridge.cancel = (reason) => {
+    if (sent.dispatched) detachCaller?.();
+    else cancelBeforeDispatch(reason);
+  };
+  const onCallerAbort = (): void => bridge.cancel!('cancel');
+  bridge.openSignal?.addEventListener('abort', onCallerAbort, { once: true });
+  if (bridge.openSignal?.aborted) cancelBeforeDispatch('cancel');
+  if (bridge.cancelRequested) cancelBeforeDispatch(bridge.cancelRequested);
+  let sendSignal: AbortSignal | undefined;
+  const cleanupCallerSignals = (): void => {
+    bridge.openSignal?.removeEventListener('abort', onCallerAbort);
+    sendSignal?.removeEventListener('abort', onCallerAbort);
+  };
 
   // --- Preconditions: nothing starts until all hold. The ledger's fences are
   // read first, so every refusal's receipt reflects them.
@@ -1719,39 +1978,46 @@ async function runSession(
   try {
     fences = zkapiOutstandingFences(statePath);
   } catch {
+    cleanupCallerSignals();
     return fail('state_unavailable');
   }
   const fenced = Boolean(fences[scope]);
   const fencedElsewhere = Object.keys(fences).some((key) => key !== scope);
   if (fenced || fencedElsewhere) receipt.fence = 'held';
   if (fenced) receipt.settlement = 'not_confirmed';
+  const refuse = (code: ZkapiConsultErrorCode): ZkapiConsultResult => {
+    cleanupCallerSignals();
+    return fail(code);
+  };
   const blocked = settingsBlockers(zkapiMoneyStatus(settings, now()))[0];
-  if (blocked) return fail(blocked);
-  if (!options.apiKey) return fail('daemon_api_key_missing');
+  if (blocked) return refuse(blocked);
+  if (!options.apiKey) return refuse('daemon_api_key_missing');
   const daemonExecutable = resolveExecutable('zkapi-clientd', settings.daemonExecutable, env);
-  if (!daemonExecutable) return fail('daemon_not_found');
+  if (!daemonExecutable) return refuse('daemon_not_found');
   const torExecutable = perConsultTor ? resolveExecutable('tor', settings.torExecutable, env) : undefined;
-  if (perConsultTor && !torExecutable) return fail('tor_not_found');
+  if (perConsultTor && !torExecutable) return refuse('tor_not_found');
   try {
     const stranded = await recoverStrandedGroups(statePath, now());
-    if (stranded === 'busy') return fail('busy');
-    if (stranded === 'stranded') return fail('stranded_processes');
+    if (stranded === 'busy') return refuse('busy');
+    if (stranded === 'stranded') return refuse('stranded_processes');
     // Any outstanding fence blocks a consult; a fence that is not this
     // wallet's can only be recovered from its own wallet, or abandoned.
-    if (!recovery && fenced) return fail('unresolved_session');
-    if (fencedElsewhere && !fenced) return fail('unresolved_session_other_wallet');
-    if (!fenced && recovery) return fail('no_unresolved_session');
+    if (!recovery && fenced) return refuse('unresolved_session');
+    if (fencedElsewhere && !fenced) return refuse('unresolved_session_other_wallet');
+    if (!fenced && recovery) return refuse('no_unresolved_session');
     const usage = zkapiUsageToday(statePath, now());
     const limit = ownerLimits(settings);
-    if (limit.requestCap !== undefined && usage.count >= limit.requestCap) return fail('daily_cap_reached');
+    if (limit.requestCap !== undefined && usage.count >= limit.requestCap) return refuse('daily_cap_reached');
     if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
-      return fail('spend_cap_reached');
+      return refuse('spend_cap_reached');
     }
   } catch {
-    return fail('state_unavailable');
+    return refuse('state_unavailable');
   }
-  if (await portAnswers(daemonPort)) return fail('daemon_already_running');
-  if (perConsultTor && await portAnswers(settings.torSocksPort)) return fail('tor_port_busy');
+  if (await portAnswers(daemonPort)) return refuse('daemon_already_running');
+  if (perConsultTor && await portAnswers(settings.torSocksPort)) return refuse('tor_port_busy');
+  // A cancellation that already landed starts nothing.
+  if (sessionSignal.aborted) return refuse(abortCause);
 
   // --- The session. Every exit path below goes through the cleanup after it.
   const sessionId = randomUUID();
@@ -1763,18 +2029,12 @@ async function runSession(
   let tor: Supervised | undefined;
   let daemon: Supervised | undefined;
   let result: ZkapiConsultResult = failure('internal_error', 'not_sent', 'not_verified');
-  // One signal for the whole session: the caller's cancel, or any owned
-  // process exiting when Olympus did not stop it on purpose.
-  const sessionAbort = new AbortController();
-  const onCallerAbort = (): void => sessionAbort.abort();
-  signal?.addEventListener('abort', onCallerAbort, { once: true });
-  if (signal?.aborted) sessionAbort.abort();
-  const sessionSignal = sessionAbort.signal;
   const unexpectedExit = (): boolean => groups.some((group) => (group.leaderExited || group.childExited) && !group.deliberate);
   const onChildExit = (handle: Supervised): void => {
     if (!handle.deliberate) sessionAbort.abort();
   };
-  const interrupted = (): ZkapiConsultErrorCode => (unexpectedExit() ? 'session_process_exited' : 'aborted');
+  const interrupted = (): ZkapiConsultErrorCode => (unexpectedExit() ? 'session_process_exited' : abortCause);
+  let sendDeadline: ReturnType<typeof setTimeout> | undefined;
   result = await (async (): Promise<ZkapiConsultResult> => {
   try {
     writeFileSync(watchdog, WATCHDOG_SCRIPT, { mode: 0o600 });
@@ -1807,6 +2067,7 @@ async function runSession(
         receipt.confinementSelfTest = 'failed';
         return (result = fail('confinement_self_test_failed'));
       }
+      if (sessionSignal.aborted) return (result = fail(interrupted()));
       // zkapi-serve-tor.sh: a throwaway client with a fresh data directory, so
       // fresh guards and circuits; bound to Olympus's lifetime.
       const torDataDir = join(workDir, 'tor');
@@ -1925,8 +2186,45 @@ async function runSession(
     if (listing.allowance === undefined) return (result = fail('model_unavailable'));
     receipt.listedAllowanceUsd = listing.allowance / 1_000_000;
 
-    let reservation: ReturnType<typeof reserveZkapiRequest>;
+    // --- Ready: the route is warm and nothing is reserved. Wait for the
+    // question; a cancellation or a process exit ends the wait.
+    stage(undefined);
+    timings = withTiming(timings, 'warmTotalMs', durationMs(startedAt, lastSampleAt));
+    bridge.state = 'ready';
+    bridge.ready.resolve();
+    const dispatch = await Promise.race([
+      bridge.dispatch.promise,
+      new Promise<undefined>((resolve) => {
+        if (sessionSignal.aborted) resolve(undefined);
+        else sessionSignal.addEventListener('abort', () => resolve(undefined), { once: true });
+      }),
+    ]);
+    if (!dispatch || sessionSignal.aborted) return (result = fail(interrupted()));
+
+    // --- Dispatch. Step 1: the transport's awaited checks. Step 2: the
+    // caller's final authorization. Step 3: the reservation, the fence and the
+    // start of the fetch, with no await between them.
     stage('reservationMs');
+    sendSignal = dispatch.signal;
+    sendSignal?.addEventListener('abort', onCallerAbort, { once: true });
+    if (sendSignal?.aborted) cancelBeforeDispatch('cancel');
+    if (dispatch.deadlineMs !== undefined) sendDeadline = setTimeout(() => cancelBeforeDispatch('deadline'), dispatch.deadlineMs);
+    problem = await guard();
+    if (problem) return (result = fail(problem));
+    let authorized = true;
+    if (dispatch.authorize) {
+      try {
+        authorized = await dispatch.authorize(sessionSignal);
+      } catch {
+        return (result = fail('internal_error'));
+      }
+    }
+    if (sessionSignal.aborted) return (result = fail(interrupted()));
+    if (!authorized) return (result = fail('authorization_refused'));
+    if (anyExited()) return (result = fail('session_process_exited'));
+    clearTimeout(sendDeadline);
+
+    let reservation: ReturnType<typeof reserveZkapiRequest>;
     try {
       reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
         scope,
@@ -1940,15 +2238,52 @@ async function runSession(
     if (!reservation.reserved) return (result = fail(reservation.reason));
     receipt.reservedUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD / 1_000_000;
     receipt.fence = 'held';
-    problem = await guard();
-    if (problem) return (result = fail(problem));
-
     const requestsBefore = new Set(facts.requests.keys());
     sent.dispatched = true;
-    const completion = await sendCompletion(question, options, origin, sessionSignal, stage);
+    bridge.state = 'dispatched';
+    // From here the caller's signals only end its wait for the reply.
+    detachCaller = () => bridge.reply.resolve({ kind: 'failed', error: failure('aborted', 'unknown', identity(), { receipt: pendingSnapshot() }).error });
+    const completion = await sendCompletion(dispatch.question, options, origin, sessionSignal, stage);
+
+    if (!completion.ok && completion.error.outcome === 'not_sent') {
+      // Proven never to have left the process (the fetch threw before it
+      // returned a promise): the reservation, the count and the fence roll
+      // back, and the session records a lifecycle receipt.
+      try {
+        releaseZkapiReservation(statePath, scope, fences[scope], now());
+        delete receipt.reservedUsd;
+        receipt.fence = fenced || fencedElsewhere ? 'held' : 'clear';
+        sent.dispatched = false;
+      } catch {
+        // The ledger could not be written: the reservation stands and the fence stays held.
+      }
+      return (result = fail(completion.error.code));
+    }
+
+    // --- Replied: hand the completion over before settlement.
+    if (completion.ok) timings = withTiming(timings, 'replyHandedOverAtMs', durationMs(startedAt, lastSampleAt));
+    bridge.state = 'replied';
+    bridge.reply.resolve(completion.ok
+      ? {
+        kind: 'reply',
+        text: completion.text,
+        routeLabel: zkapiRouteLabel(pendingSnapshot()),
+        networkIdentity: identity(),
+        receipt: pendingSnapshot(),
+        ...(completion.providerVerification ? { providerVerification: completion.providerVerification } : {}),
+        elapsedMs: completion.elapsedMs,
+      }
+      : {
+        kind: 'failed',
+        error: failure(completion.error.code, completion.error.outcome, identity(), {
+          ...(completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {}),
+          ...(completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {}),
+          receipt: pendingSnapshot(),
+        }).error,
+      });
 
     // Correlate this request's own log lines, then wait for its key to settle.
-    // Runs to completion even if the caller cancelled; stops if a process died.
+    // Runs to completion whatever the caller did; stops if a process died.
     stage('correlationWaitMs');
     const correlated = await waitFor(() => {
       const ours = [...facts.requests.entries()].filter(([id, request]) => !requestsBefore.has(id) && request.route === '/v1/chat/completions');
@@ -2013,7 +2348,6 @@ async function runSession(
     }
 
     if (unexpectedExit()) return (result = fail('session_process_exited'));
-    if (signal?.aborted) return (result = fail('aborted'));
     if (!completion.ok) {
       result = failure(completion.error.code, completion.error.outcome, identity(), {
         ...(completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {}),
@@ -2039,7 +2373,8 @@ async function runSession(
   // Cleanup runs after the outcome is known, and can still change it: a
   // session whose processes cannot be confirmed stopped is not a success.
   // Each step on its own: one failure never skips the next.
-  signal?.removeEventListener('abort', onCallerAbort);
+  clearTimeout(sendDeadline);
+  cleanupCallerSignals();
   // Closes a stage the session ended in, and starts timing teardown.
   stage('teardownMs');
   let allStopped = true;
@@ -2080,6 +2415,26 @@ async function runSession(
     // The ledger stays as last written; the next session refuses if it is unreadable.
   }
   return final;
+}
+
+/**
+ * Undo one reservation made moments ago under the session lease, for a
+ * request proven never to have left the process. The fence returns to what it
+ * was before the reservation: absent for a consult, the earlier record for a
+ * recovery session. Never applied to a request that may have been sent.
+ */
+function releaseZkapiReservation(path: string, scope: string, earlierFence: ZkapiFence | undefined, now: Date): void {
+  updateState(path, now, (state) => {
+    const { [scope]: _ours, ...others } = state.fences ?? {};
+    const fences = earlierFence ? { ...others, [scope]: earlierFence } : others;
+    const { fences: _all, ...rest } = state;
+    return {
+      ...rest,
+      count: Math.max(0, state.count - 1),
+      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - ZKAPI_MAX_ALLOWANCE_MICRO_USD),
+      ...(Object.keys(fences).length > 0 ? { fences } : {}),
+    };
+  });
 }
 
 /** One clock sample, or undefined when the clock throws or returns a non-finite value. */
@@ -2146,8 +2501,10 @@ async function sendCompletion(
   try {
     let response: Response;
     stage('dispatchToFirstByteMs');
+    let pending: Promise<Response>;
     try {
-      response = await fetchImpl(`${origin}/v1/chat/completions`, {
+      // A fetch that throws before returning a promise never left the process.
+      pending = Promise.resolve(fetchImpl(`${origin}/v1/chat/completions`, {
         method: 'POST',
         redirect: 'error',
         signal: controller.signal,
@@ -2161,7 +2518,12 @@ async function sendCompletion(
           messages: [{ role: 'user', content: question }],
           stream: false,
         }),
-      });
+      }));
+    } catch {
+      return bad('transport_failed', 'not_sent');
+    }
+    try {
+      response = await pending;
     } catch (error) {
       if (timedOut) return bad('timeout', 'unknown');
       if (controller.signal.aborted) return bad('aborted', 'unknown');
