@@ -16301,7 +16301,7 @@ import { createHash as createHash6, randomUUID as randomUUID7 } from "node:crypt
 import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync11, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, realpathSync, rmSync as rmSync3, statSync as statSync11, writeFileSync as writeFileSync4 } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir as homedir13, tmpdir as tmpdir2 } from "node:os";
-import { delimiter as delimiter5, dirname as dirname16, join as join20, resolve as resolvePath2 } from "node:path";
+import { delimiter as delimiter5, dirname as dirname16, isAbsolute as isAbsolute12, join as join20, resolve as resolvePath2 } from "node:path";
 var DAY_MS = 24 * 60 * 60 * 1000;
 var PROBE_MAX_BYTES = 64 * 1024;
 var MAX_QUESTION_BYTES = 8 * 1024;
@@ -16631,14 +16631,77 @@ function childEnvironment(env) {
   }
   return out;
 }
-function resolveExecutable(name, explicit, env) {
-  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter5).filter(Boolean).map((dir) => join20(dir, name));
+function standardExecutableDirectories(env, platform2 = process.platform) {
+  const home = env.HOME?.trim();
+  const local = home && isAbsolute12(home) ? [join20(home, ".local", "bin")] : [];
+  if (platform2 === "darwin")
+    return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
+  if (platform2 === "linux")
+    return [...local, "/usr/local/bin"];
+  return local;
+}
+var DEFAULT_EXECUTABLE_TRUST = {
+  realpath: (path) => realpathSync(path),
+  stat: (path) => statSync11(path),
+  executable: (path) => {
+    try {
+      accessSync3(path, constants2.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  uid: () => typeof process.getuid === "function" ? process.getuid() : undefined
+};
+function trustedChain(path, probe, uid) {
+  for (let current = path;; current = dirname16(current)) {
+    const stats = probe.stat(current);
+    if (current !== path && !stats.isDirectory())
+      return false;
+    if (stats.uid !== uid && stats.uid !== 0)
+      return false;
+    if ((stats.mode & 18) !== 0)
+      return false;
+    if (dirname16(current) === current)
+      return true;
+  }
+}
+function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) {
+  const uid = probe.uid();
+  if (uid === undefined)
+    return;
+  try {
+    const real = probe.realpath(candidate);
+    const target = probe.stat(real);
+    if (!target.isFile() || !probe.executable(real))
+      return;
+    if (!trustedChain(real, probe, uid))
+      return;
+    if (!trustedChain(probe.realpath(dirname16(candidate)), probe, uid))
+      return;
+    return real;
+  } catch {
+    return;
+  }
+}
+function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
+  const pathDirectories = (env.PATH ?? "").split(delimiter5).filter(Boolean);
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join20(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync3(candidate, constants2.X_OK);
       if (statSync11(candidate).isFile())
         return candidate;
     } catch {}
+  }
+  if (explicit)
+    return;
+  for (const dir of standardExecutableDirectories(env, platform2)) {
+    if (pathDirectories.includes(dir))
+      continue;
+    const found = trustedFallbackExecutable(join20(dir, name), trust);
+    if (found)
+      return found;
   }
   return;
 }

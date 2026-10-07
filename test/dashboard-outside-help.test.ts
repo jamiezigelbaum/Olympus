@@ -159,9 +159,14 @@ const LEGACY = /\b(Full ingestion|Metadata only|metadata only|invisible|Public)\
 describe('the Outside help page: states and copy', () => {
   test('off, route ready, acknowledged: the disclosure, the steps, the languages and Turn on', () => {
     const html = page(status());
-    expect(html).toContain('<title>Olympus / Outside help</title>');
+    expect(html).toContain('<title>Olympus / Anonymous answers</title>');
     expect(html).toContain(`data-outside-state="off">${W.state.off}<`);
+    // What it is, then the plain privacy line; no "evidence pack" on the page.
     expect(html).toContain(W.intro.replace(/'/g, '&#39;'));
+    expect(html).toContain(W.privacy);
+    expect(visibleText(html)).not.toContain('evidence pack');
+    // The honesty label keeps "network route not verified".
+    expect(visibleText(html)).toContain('network route not verified');
     for (const line of W.disclosure) expect(html).toContain(line.replace(/'/g, '&#39;'));
     expect(html).toContain('data-outside-route="ready"');
     for (const step of W.steps) expect(visibleText(html)).toContain(step.replace('{secretRef}', 'env:OLYMPUS_ZKAPI_API_KEY').slice(0, 40));
@@ -191,15 +196,42 @@ describe('the Outside help page: states and copy', () => {
     expect(text).toContain('There is no approval step');
     // The revision rides on the card for compare-and-swap.
     expect(html).toContain('data-revision="0"');
-    // Facts, plain.
+    // The status block: route health in one line and today's usage, the $6 said as a hold.
+    expect(html).toContain(`data-outside-route="ready">${W.routeReady}<`);
+    // Never "spent": only the $6 hold per question is recorded.
+    expect(text).toContain('2 questions today (counted as up to $12 against your limits) · balance expires about 31 Oct (24 days left)');
+    expect(html.match(/data-outside-usage>([^<]*)</)?.[1]).not.toContain('spent');
+    // Cost: the real cost first, then the hold, then how limits count it.
+    expect(text).toContain(W.costLines.join(' '));
+    expect(W.costLines[0]).toBe('Each question usually costs a few cents or less.');
+    // The required disclosures stay on the page: automatic, $6 worst case, fee buffer, key-reuse 0, required key, expiry, route not verified.
+    for (const needle of ['There is no approval step', 'Olympus counts the full $6', 'fee buffer', '--key-reuse-window-seconds 0', '--require-api-key', 'balance estimated to expire', 'network path is not verified on macOS']) expect(text).toContain(needle);
+    // Three short lines first; the full statements one click away.
+    expect(html.match(/<ul class="ohshort" data-outside-disclosure>(.*?)<\/ul>/)?.[1]?.match(/<li>/g)?.length).toBe(3);
+    expect(html).toContain('<details class="howto" data-outside-disclosure-more>');
+    // Accepted at the current wording: one line, the statements behind Review.
+    expect(html).toContain(`data-outside-acknowledged="yes">You accepted the 8 cost and risk statements.<`);
+    expect(html).toContain('data-outside-ack-review');
+    // Nothing to fix: no problem list; secondary sections closed.
+    expect(html).not.toContain('data-outside-blockers');
+    for (const id of ['languages', 'limits', 'steps', 'details']) expect(html).toContain(`<details class="ohsect" data-outside-section="${id}"><summary>`);
+    expect(text).toContain('No daily limit · paid in on 1 Oct');
+    // Technical facts, inside Details only.
     expect(text).toContain('zkapi-clientd 0.1.6 found');
-    expect(text).toContain('2 requests today ($12 reserved)');
+    expect(text).toContain('2 requests today ($12 counted at $6 each)');
     expect(text).toContain('balance estimated to expire 2026-10-31 (24 days left)');
+    const details = html.slice(html.indexOf('data-outside-section="details"'));
+    expect(details).toContain('Route: payment privacy; route not verified.');
+    expect(html.slice(0, html.indexOf('data-outside-section="details"'))).not.toContain('Route: payment privacy');
   });
 
   test('on: Turn off; the chosen languages are checked; revision carried', () => {
     const html = page(status({ settings: { state: 'on', revision: 3, languages: ['en', 'pt-BR'] } }));
     expect(html).toContain(`data-outside-state="on">${W.state.on}<`);
+    // On: "Before you turn this on" is gone from the first view; its content sits in a collapsed section.
+    expect(visibleText(html)).not.toContain(W.disclosureTitle);
+    expect(html).toContain('<details class="ohsect" data-outside-section="disclosure"><summary>');
+    for (const line of [...W.disclosureShort, ...W.disclosure]) expect(html).toContain(line.replace(/'/g, '&#39;'));
     expect(html).toContain(`<button type="submit" class="btn" data-outside-enabled="false">${W.turnOff}</button>`);
     expect(html).toContain('name="languages" value="pt-BR" checked>');
     expect(html).toContain('name="languages" value="fr">');
@@ -221,7 +253,7 @@ describe('the Outside help page: states and copy', () => {
     expect(html).toContain(`data-outside-form="add-route"`);
     expect(html).toContain(W.addRoute);
     expect(html).toContain(W.enableBlockedRoute);
-    expect(html).toContain('<button type="button" class="btn primary" disabled aria-disabled="true">Turn on outside help</button>');
+    expect(html).toContain(`<button type="button" class="btn primary" disabled aria-disabled="true">${W.turnOn}</button>`);
     // The policy-not-a-file case offers no button and says why.
     const inline = page(status({ route: { state: 'not_configured', policyWritable: false } }));
     expect(inline).not.toContain('data-outside-form="add-route"');
@@ -234,11 +266,21 @@ describe('the Outside help page: states and copy', () => {
     const html = page(status({ route: configuredRoute({ complete: false, ready: blocked }) }));
     expect(html).toContain('data-outside-route="blocked"');
     const text = visibleText(html);
-    expect(text).toContain('The zkapi-clientd program is not installed.');
-    expect(text).toContain('Tor is not installed.');
-    expect(text).toContain('The daemon\'s API key is not configured in Olympus.');
-    expect(text).toContain('Enter the funding date below');
+    // One list, a line each with its fix; the status line names the first and counts the rest.
+    expect(html.match(/<ul class="ohfix" data-outside-blockers>(.*?)<\/ul>/)?.[1]?.match(/<li>/g)?.length).toBe(5);
+    expect(text).toContain(W.blockers.daemon_not_found);
+    expect(text).toContain(W.blockers.tor_not_found);
+    expect(text).toContain(W.blockers.daemon_api_key_missing);
+    expect(text).toContain('Enter the day you paid in under Balance and limits');
+    expect(text).toContain(`Not ready: ${W.blockers.daemon_not_found} (+4 more below)`);
+    // Setup steps and Balance and limits open because they hold the fixes; Details stays closed.
+    expect(html).toContain('<details class="ohsect" data-outside-section="steps" open>');
+    expect(html).toContain('<details class="ohsect" data-outside-section="limits" open>');
+    expect(html).toContain('<details class="ohsect" data-outside-section="details"><summary>');
     expect(text).toContain('zkapi-clientd not installed');
+    // Not accepted: the eight statements are shown expanded, not behind Review.
+    expect(html).not.toContain('data-outside-ack-review');
+    expect(html.match(/name="acknowledged"/g)?.length).toBe(8);
     expect(html).toContain('data-outside-acknowledged="no"');
     expect(html.match(/name="acknowledged" value="[a-z_0-9]+" checked/g)).toBeNull();
     expect(html).toContain(W.enableBlockedAcks);
@@ -247,7 +289,7 @@ describe('the Outside help page: states and copy', () => {
     for (const code of ['key_reuse_on', 'daemon_version_unsupported', 'unresolved_session', 'tor_port_busy', 'daemon_already_running', 'spend_cap_reached', 'daily_cap_reached', 'note_expired', 'stranded_processes', 'state_unavailable'] as const) {
       expect(outsideHelpBlockerWords(code)).not.toContain(code);
     }
-    expect(outsideHelpBlockerWords('internal_error')).toBe('The route is not ready (internal_error).');
+    expect(outsideHelpBlockerWords('internal_error')).toBe('Not ready yet (internal_error).');
   });
 
   test('a held fence: the paused state, Recover (confirm, $6) and Abandon (its privacy consequence), each its own form', () => {
@@ -276,11 +318,71 @@ describe('the Outside help page: states and copy', () => {
     expect(html).toContain(`data-outside-restart-pending>${W.restartPending}<`);
   });
 
+  test('limits left on: Balance and limits names them, opens when one is reached, and offers No daily limit in one click', () => {
+    const capped = readiness({ blockers: ['daily_cap_reached'], requestsToday: { count: 10, cap: 10 }, spendToday: { reservedUsd: 60, capUsd: 10 } });
+    const route = { ...configuredRoute({ ready: capped }), dailyRequestCap: 10, dailySpendCapUsd: 10 } as DashboardOutsideHelpStatus['route'];
+    const html = page(status({ route }));
+    const text = visibleText(html);
+    expect(html).toContain('<details class="ohsect" data-outside-section="limits" open>');
+    expect(text).toContain('10 questions a day, $10 a day · paid in on 1 Oct');
+    expect(text).toContain('Questions today: 10, counted as up to $60 against your limits.');
+    expect(html).toContain(`data-outside-form="route" data-outside-nolimit><div class="pbuttons"><button type="submit" class="btn primary">${W.removeLimits}</button>`);
+    expect(text).toContain(W.blockers.daily_cap_reached);
+    // No limit set: no button, the plain statement instead, and the section stays closed.
+    const free = page(status());
+    expect(free).not.toContain('<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>');
+    expect(visibleText(free)).toContain(W.noLimitIntro);
+  });
+
+  test('the card\'s script: No daily limit clears both caps with the recorded acknowledgements; turning on posts the language boxes and says on at once', async () => {
+    const route = { ...configuredRoute(), dailyRequestCap: 10, dailySpendCapUsd: 10 } as DashboardOutsideHelpStatus['route'];
+    const html = page(status({ settings: { state: 'off', revision: 4, languages: ['en', 'fr'] }, route }));
+    const window = new Window({ url: 'http://127.0.0.1:8010/dashboard?outside-help' });
+    const document = window.document;
+    const body = html.slice(html.indexOf('<body'), html.lastIndexOf('</body>'));
+    document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script>[\s\S]*?<\/script>/g, '');
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
+    const posts: Array<{ url: string; init: { headers: Record<string, string>; body: string } }> = [];
+    const fetchStub = async (url: string, init: { headers: Record<string, string>; body: string }) => {
+      posts.push({ url, init });
+      return { ok: true, json: async () => (url.endsWith('/dashboard/consult') ? { ok: true, status_message: 'on', revision: 5 } : { ok: true, status_message: 'saved', restarting: false }) };
+    };
+    const timers: Array<() => void> = [];
+    // Run the card's own controller against the parsed card; reloads are recorded, never run.
+    new Function('window', 'document', 'fetch', 'setTimeout', script)(
+      { confirm: () => true, location: { href: 'http://127.0.0.1:8010/dashboard?outside-help', reload: () => timers.push(() => undefined) } },
+      document,
+      fetchStub,
+      (run: () => void) => { timers.push(run); },
+    );
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+    const noLimit = document.querySelector('form[data-outside-nolimit]')!;
+    noLimit.dispatchEvent(new window.Event('submit', { cancelable: true }));
+    await settle();
+    expect(posts[0]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.route);
+    expect(posts[0]!.init.headers['X-Olympus-CSRF']).toBe('csrf');
+    expect(JSON.parse(posts[0]!.init.body)).toEqual({ acknowledged: ALL_IDS, daily_request_cap: null, daily_spend_cap_usd: null });
+    // Turn on: the switch sits in the status block; the language boxes sit in their section.
+    const enable = document.querySelector('form[data-outside-form="enable"]')!;
+    const event = new window.Event('submit', { cancelable: true }) as unknown as { submitter?: unknown };
+    event.submitter = document.querySelector('[data-outside-enabled="true"]');
+    enable.dispatchEvent(event as never);
+    await settle();
+    expect(posts[1]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.enable);
+    expect(JSON.parse(posts[1]!.init.body)).toEqual({ enabled: true, revision: 4, languages: ['en', 'fr'] });
+    // The state line says on before the reload redraws the card.
+    expect(document.querySelector('[data-outside-state-text]')!.textContent).toBe(W.state.on);
+    expect(document.querySelector('[data-outside-state-text]')!.getAttribute('data-outside-state')).toBe('on');
+    expect(document.querySelector('[data-outside-help]')!.getAttribute('data-revision')).toBe('5');
+  });
+
   test('Tor off: the route is said to be direct with the network address visible, whether or not a tor binary exists', () => {
     const off = readiness({ tor: 'off', torPort: 'not_used' });
     const html = page(status({ route: configuredRoute({ ready: off }) }));
     const text = visibleText(html);
     expect(text).toContain('Tor off: the route is direct and your network address is visible to the provider');
+    // The status block says it plainly; the Tor wording is in Details.
+    expect(html).toContain(`<span class="attn">${W.addressVisible}</span>`);
     expect(text).not.toContain('Tor found');
     const { torExecutable: _t, ...noBinary } = readiness({ tor: 'off', torPort: 'not_used' });
     expect(visibleText(page(status({ route: configuredRoute({ ready: noBinary as ZkapiConsultReadiness }) })))).toContain('Tor off: the route is direct');
@@ -354,7 +456,8 @@ describe('Setup\'s Outside help row', () => {
     const view = buildDashboardPreviewView('review');
     const html = renderDashboardSetupPage(view, { now: NOW, controlSessionCsrfToken: 'csrf', privacy: { configured: true, pendingCount: 0, ruleCount: 1 }, outsideHelpSummary: { state: 'off' } });
     expect(html).toContain('data-outside-help-row');
-    expect(html).toContain(`<p class="sline strong">${W.state.off}</p>`);
+    expect(html).toContain(`<p class="sline strong">${W.row.off}</p>`);
+    expect(html).toContain(`id="outside-help">${W.sectionTitle}</div>`);
     expect(html).toContain('href="/dashboard?outside-help">Edit</a>');
     expect(html.indexOf('id="privacy"')).toBeLessThan(html.indexOf('id="outside-help"'));
     expect(renderDashboardSetupPage(view, { now: NOW, controlSessionCsrfToken: 'csrf' })).not.toContain('data-outside-help-row');
@@ -510,7 +613,7 @@ describe('the worker serves the card only inside a local control session', () =>
     calls.push('status');
     // Setup reads the one-word summary only.
     const setup = await (await fetcher(new Request(`${ORIGIN}/dashboard?setup`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
-    expect(setup).toContain(`<p class="sline strong">${W.state.on}</p>`);
+    expect(setup).toContain(`<p class="sline strong">${W.row.on}</p>`);
     expect(calls).toEqual(['status', 'summary']);
     // The bearer's own GET has write authority elsewhere, but this card needs the control session.
     const bearer = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
@@ -636,13 +739,13 @@ describe('the adapter: turning outside help on and off', () => {
     const home = tempHome();
     const { backend, env } = adapter({ home });
     const on = await backend.setEnabled({ enabled: true, revision: 0, languages: ['en', 'pt-BR'] });
-    expect(on).toEqual({ ok: true, status_message: expect.stringContaining('Outside help is on'), revision: 1 });
+    expect(on).toEqual({ ok: true, status_message: expect.stringContaining('Anonymous answers are on'), revision: 1 });
     const read = readConsultSettings({ env });
     expect(read).toMatchObject({ state: 'valid', settings: { v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false } });
     expect(read.state === 'valid' && read.settings.domains).toMatchObject({ places: true, technical: true, countries: true, medicineBrands: false });
     expect(backend.summary()).toEqual({ state: 'on' });
     const off = await backend.setEnabled({ enabled: false, revision: 1 });
-    expect(off).toEqual({ ok: true, status_message: expect.stringContaining('Outside help is off'), revision: 2 });
+    expect(off).toEqual({ ok: true, status_message: expect.stringContaining('Anonymous answers are off'), revision: 2 });
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 2, enabled: false, languages: ['en', 'pt-BR'] } });
   });
 

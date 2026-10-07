@@ -1,4 +1,5 @@
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
+import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
 import { olympusPackageRoot } from './core/package-root.ts';
@@ -1600,7 +1601,7 @@ export async function runWorkerForeground(options: {
   managedInstanceId?: string;
   env?: Record<string, string | undefined>;
   applySetupEnv?: () => void;
-  startWorker?: () => void | Promise<void>;
+  startWorker?: (launch: WorkerLaunch) => void | Promise<void>;
 } = {}): Promise<void> {
   const env = options.env ?? process.env;
   const managedInstanceId = options.managedInstanceId;
@@ -1619,8 +1620,9 @@ export async function runWorkerForeground(options: {
     }
   }
   const startWorker = options.startWorker
-    ?? (await import('./workers/email-source/server.ts')).main;
-  await startWorker();
+    ?? (await import('./workers/email-source/server.ts')).startWorkerWithLaunch;
+  // Only the validated native-service launch is supervised; never an ambient marker.
+  await startWorker({ nativeServiceSupervised: managedInstanceId !== undefined });
 }
 
 async function readWorkerHttpState(): Promise<Record<string, unknown>> {
