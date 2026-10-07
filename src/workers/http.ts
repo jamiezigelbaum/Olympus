@@ -195,6 +195,9 @@ export function withWorkerBearerAuth(
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      // Outside help: control session only, never the bearer (see
+      // DASHBOARD_CONSULT_CONTROL_PATHS).
+      if (isDashboardConsultControlRoute(request)) return dashboardConsultMacOnlyResponse();
       // The Gateway bridge holds the bearer for every operator it serves, so
       // its mints share one budget.
       if (isAgentMintRoute(request) && !agentMintAllowed('bearer')) return agentMintLimitedResponse();
@@ -241,7 +244,10 @@ export function withWorkerBearerAuth(
         if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed(`session:${authorization.sessionId}`)) {
           return remoteAccessToggleLimitedResponse();
         }
-        return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
+        // The consult routes carry the proof into the worker: the handler
+        // refuses without this header, and nothing else can set it.
+        const proven = isDashboardConsultControlRoute(request) ? withDashboardControlContextHeader(request, authorization.csrfToken) : request;
+        return withRenewedDashboardControlCookie(await fetchHandler(proven), authorization, now());
       }
       if (authorization.status === 'origin_mismatch' || authorization.status === 'csrf_mismatch') {
         return dashboardControlForbiddenResponse(authorization.status);
@@ -472,8 +478,44 @@ function agentMintLimitedResponse(): Response {
   });
 }
 
+/**
+ * The Outside help card's routes (dashboard/outside-help.ts): accepted from
+ * an authenticated local control session only. The Gateway bearer, which
+ * every other control route also takes, is refused here, because that bearer
+ * is held by the OpenClaw bridge for the agents it serves, and a hosted agent
+ * must never switch on egress (design frontier-consult-lane.md §A.9). The
+ * worker's handler additionally requires the control-session context header,
+ * which this boundary strips from every incoming request and injects only
+ * after the cookie, same origin and CSRF token have been proven.
+ */
+export const DASHBOARD_CONSULT_CONTROL_PATHS: readonly string[] = [
+  '/dashboard/consult',
+  '/dashboard/consult/route',
+  '/dashboard/consult/route/add',
+  '/dashboard/consult/recover',
+  '/dashboard/consult/abandon',
+];
+
+export function isDashboardConsultControlRoute(request: Request): boolean {
+  return request.method === 'POST' && DASHBOARD_CONSULT_CONTROL_PATHS.includes(new URL(request.url).pathname);
+}
+
+function dashboardConsultMacOnlyResponse(): Response {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: 'mac_dashboard_only',
+      message: 'Outside help can be changed only from the dashboard on this computer, in an unlocked browser.',
+    },
+  }), {
+    status: 403,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
 function isDashboardControlRoute(request: Request): boolean {
   if (request.method !== 'POST') return false;
+  if (isDashboardConsultControlRoute(request)) return true;
   return new Set([
     '/dashboard/dispositions',
     '/dashboard/connect/oauth/start',

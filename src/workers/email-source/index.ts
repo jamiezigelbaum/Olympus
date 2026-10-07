@@ -157,6 +157,7 @@ import {
 import { dashboardHtmlRoutePage, renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
 import type { DashboardModelInstalls } from '../dashboard/source-rows.ts';
 import type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
+import type { DashboardConsultBackend } from './dashboard-consult.ts';
 
 export type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 import {
@@ -169,6 +170,7 @@ import {
 } from '../../control-ui-contract.ts';
 import { parseMailScopeDraft } from '../../core/mail-source-scope.ts';
 import {
+  DASHBOARD_CONSULT_CONTROL_PATHS,
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
@@ -500,6 +502,14 @@ export interface EmailSourceWorkerOptions {
       read(): Promise<DashboardPrivacyOutcome>;
       save(update: Record<string, unknown>): Promise<DashboardPrivacyOutcome>;
     };
+    /**
+     * Outside help (consults): the Mac dashboard card's backend
+     * (dashboard-consult.ts), the one caller of the settings writer. Absent:
+     * no Outside help row, the page says it is unavailable, and the routes
+     * answer 501. Its routes are served only inside an authenticated local
+     * control session (workers/http.ts), never to the Gateway bearer.
+     */
+    consult?: DashboardConsultBackend;
     /** The built-in models' installs, for the Models row (status only). */
     modelInstalls?: () => DashboardModelInstalls;
     /** Starts a built-in model's failed install again; false when that model is not built in here. */
@@ -1379,6 +1389,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const privacyRead = sourceDashboard.privacy && dashboardPage === 'privacy' && writeAuthority
             ? await sourceDashboard.privacy.read().catch(() => undefined)
             : undefined;
+          // Outside help: the card's facts only for the standalone page with
+          // the control session (never the native Control UI, whose readers
+          // cannot reach the card); Setup's one-word row for standalone Setup.
+          const outsideHelp = sourceDashboard.consult && !dashboardUi && dashboardPage === 'outside_help' && controlSessionCsrfToken !== undefined
+            ? await sourceDashboard.consult.status().catch(() => undefined)
+            : undefined;
+          const outsideHelpSummary = sourceDashboard.consult && !dashboardUi && dashboardPage === 'setup'
+            ? safeOutsideHelpSummary(sourceDashboard.consult)
+            : undefined;
           let modelInstalls: DashboardModelInstalls | undefined;
           try {
             modelInstalls = sourceDashboard.modelInstalls?.();
@@ -1391,6 +1410,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ? { privacy: privacySummary?.ok ? privacySummary.summary : 'unreadable' as const }
               : {}),
             ...(privacyRead?.ok ? { privacySettings: privacyRead.settings } : {}),
+            ...(outsideHelp ? { outsideHelp } : {}),
+            ...(outsideHelpSummary ? { outsideHelpSummary } : {}),
             embeddingRuntime,
             backgroundRuntime,
             ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
@@ -1831,6 +1852,37 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }, 409);
           }
           return json({ ok: true, settings: outcome.settings, status_message: 'Privacy saved.' });
+        }
+
+        // Outside help (consults), the Mac dashboard card's five routes. Every
+        // one requires the control-session context header, which the HTTP
+        // boundary strips from incoming requests and injects only for these
+        // paths after proving the cookie, the origin and the CSRF token; the
+        // Gateway bearer is refused there. So an agent tool, the relay, the
+        // ChatGPT surface and a bare bearer holder can never reach the writer.
+        if (request.method === 'POST' && (DASHBOARD_CONSULT_CONTROL_PATHS as readonly string[]).includes(url.pathname)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)) {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Outside help can be changed only from the dashboard on this computer, in an unlocked browser.' } }, 403);
+          }
+          if (!sourceDashboard?.consult) {
+            throw new EmailSourceWorkerError(501, 'consult_not_supported', 'This worker does not support outside help.');
+          }
+          const record = await parseObjectBody(request);
+          const backend = sourceDashboard.consult;
+          const outcome = url.pathname === '/dashboard/consult' ? await backend.setEnabled(record)
+            : url.pathname === '/dashboard/consult/route' ? await backend.saveRoute(record)
+            : url.pathname === '/dashboard/consult/route/add' ? await backend.addRoute(record)
+            : url.pathname === '/dashboard/consult/recover' ? await backend.recover(record)
+            : await backend.abandon(record);
+          if (!outcome.ok) {
+            return json({ ok: false, error: { code: outcome.code, message: outcome.message }, ...(outcome.revision !== undefined ? { revision: outcome.revision } : {}) }, outcome.httpStatus);
+          }
+          return json({
+            ok: true,
+            status_message: outcome.status_message,
+            ...(outcome.restarting !== undefined ? { restarting: outcome.restarting } : {}),
+            ...(outcome.revision !== undefined ? { revision: outcome.revision } : {}),
+          });
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/retry') {
@@ -3591,6 +3643,14 @@ async function retrySqliteBusy<T>(operation: () => T | Promise<T>): Promise<T> {
     }
   }
   throw lastError;
+}
+
+function safeOutsideHelpSummary(backend: DashboardConsultBackend): ReturnType<DashboardConsultBackend['summary']> | undefined {
+  try {
+    return backend.summary();
+  } catch {
+    return undefined;
+  }
 }
 
 function sqliteBusyRetryDelays(): readonly number[] {

@@ -43,6 +43,7 @@ import {
   type DashboardActionInput,
 } from '../components.ts';
 import type { DashboardPageOptions } from './home.ts';
+import { renderOutsideHelpSection } from '../outside-help.ts';
 import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
 import { DASHBOARD_SOURCE_ROWS_CSS } from '../static-styles.ts';
 import {
@@ -128,6 +129,9 @@ export function renderDashboardSetupPage(
       copyButtonLabel: CONNECTOR_SHEET_COPY_LABEL,
     }),
     dashboardPrivacySection(rowOptions),
+    // The Mac-only Outside help row: never on the native surfaces, whose
+    // readers cannot reach the card (design §A.9).
+    options?.controlMode === 'native' ? '' : renderOutsideHelpSection(options?.outsideHelpSummary, basePath),
     dashboardModelsSection(states, view),
     ...(options?.agents
       ? [renderDashboardAgentsSection({ view: options.agents, now: new Date(view.generated_at) })]

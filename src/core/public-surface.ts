@@ -230,6 +230,14 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/agents/keys' },
   { method: 'POST', path: '/dashboard/agents/revoke' },
   { method: 'POST', path: '/dashboard/agents/remote-access' },
+  // Outside help (the Mac dashboard card, stage C5): the one place consults
+  // are turned on. Control session only; the Gateway bearer is refused at the
+  // HTTP boundary (workers/http.ts DASHBOARD_CONSULT_CONTROL_PATHS).
+  { method: 'POST', path: '/dashboard/consult' },
+  { method: 'POST', path: '/dashboard/consult/route' },
+  { method: 'POST', path: '/dashboard/consult/route/add' },
+  { method: 'POST', path: '/dashboard/consult/recover' },
+  { method: 'POST', path: '/dashboard/consult/abandon' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [

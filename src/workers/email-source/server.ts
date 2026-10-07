@@ -4193,6 +4193,17 @@ export async function main(): Promise<void> {
               read: () => dashboardPrivacy.read(),
               save: (update) => dashboardPrivacy.save(update),
             },
+            // Outside help (consults): the Mac dashboard card's backend, the
+            // one caller of the settings writer; bound late like privacy.
+            consult: {
+              summary: () => dashboardConsult.summary(),
+              status: () => dashboardConsult.status(),
+              setEnabled: (update) => dashboardConsult.setEnabled(update),
+              saveRoute: (update) => dashboardConsult.saveRoute(update),
+              addRoute: (update) => dashboardConsult.addRoute(update),
+              recover: (update) => dashboardConsult.recover(update),
+              abandon: (update) => dashboardConsult.abandon(update),
+            },
             modelInstalls: () => {
               const embedding = chatgptEmbeddingState();
               const privateModel = chatgptPrivateModelState();
@@ -4559,6 +4570,31 @@ export async function main(): Promise<void> {
     backend: chatgptSetup,
     readSettings: (pending) => readChatGptPrivacySettings(process.env, pending),
     pendingCount: pendingClassificationCount,
+  });
+  // Outside help (consults, stage C5): the Mac dashboard card's backend
+  // (dashboard-consult.ts) and, through it, the only caller of the
+  // outside-help settings writer. Wired here at the composition root so the
+  // worker module itself never imports the writer; its routes are served
+  // only inside an authenticated local control session (workers/http.ts).
+  const { createDashboardConsultAdapter } = await import('./dashboard-consult.ts');
+  const dashboardConsult = createDashboardConsultAdapter({
+    sovereignty: {
+      config: sovereigntyEngine.config,
+      source: sovereigntyEngine.source,
+      ...(sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}),
+    },
+    // Presence from the same environment the Models row reads, so a key just
+    // written to worker.env reads as present before the restart applies it.
+    resolveSecret: (secretRef) => {
+      if (!secretRef) return undefined;
+      try {
+        return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...(readWorkerSetupEnv() ?? {}) } })?.trim() || undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    requestReload: () => requestModelReload(),
+    env: process.env,
   });
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
   // source_answer needs an Analyst the Mac can actually run; without one,
