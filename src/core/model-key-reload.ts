@@ -1,3 +1,14 @@
+/**
+ * Whether something restarts this worker when it exits: the generated
+ * LaunchAgent/systemd unit (OLYMPUS_MANAGED_WORKER), or the native worker
+ * service that the OpenClaw Gateway and the standalone engine host both run,
+ * which hands its child a validated instance id and restarts it with backoff.
+ * A worker started by hand in a terminal has neither and cannot restart itself.
+ */
+export function workerRestartsItself(env: Record<string, string | undefined>): boolean {
+  return env.OLYMPUS_MANAGED_WORKER === '1' || Boolean(env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim());
+}
+
 /** One deliberate credential reload, after the HTTP save response can finish. */
 export function createModelKeyReload(options: {
   managed: boolean;

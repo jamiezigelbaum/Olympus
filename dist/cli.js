@@ -51680,24 +51680,42 @@ var init_vocabulary = __esm(() => {
       route_not_configured: "Outside help is off: no zkAPI route is set up yet.",
       fence_held: "Consults are paused: an earlier request has not been seen to settle."
     },
-    restartPending: "A change is saved but not applied: ask your agent to restart the managed Olympus worker.",
+    restartPending: "Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.",
+    routeReady: "Route ready.",
+    routeReadyNoTor: "Route ready, without Tor.",
+    routeNotReady: "Not ready: {reason}",
+    routeMore: "(+{n} more below)",
+    routeUnknown: "Olympus could not check the route right now.",
+    routeMissingShort: "Not ready: no zkAPI route is set up.",
+    usageNone: "No consults today",
+    usageOne: "1 consult today",
+    usageMany: "{n} consults today",
+    usageSpent: "at most ${usd} spent",
+    usageExpiry: "balance expires about {date} ({days} days left)",
+    usageExpired: "balance past its estimated expiry",
+    usageExpiryUnknown: "balance expiry unknown",
+    holdNote: "Each consult holds up to $6 of your zkAPI balance while it runs; the unused part comes back when it settles. A short question usually costs cents or less. Olympus counts the full $6 against your limits, so its numbers are a worst case.",
+    problemsTitle: "To fix",
     disclosureTitle: "Before you turn this on",
+    disclosureShort: [
+      "It sends automatically: when a private answer in ChatGPT is incomplete, Olympus may send one short question out. There is no approval step.",
+      "Each consult holds up to $6 of your zkAPI balance while it runs.",
+      "The provider reads the question; zkAPI hides who paid."
+    ],
+    disclosureMore: "Everything to know first",
     disclosure: [
-      "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. Each can cost up to $6 from your zkAPI balance; Olympus counts the full $6.",
+      "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. Each holds up to $6 of your zkAPI balance while it runs and the unused part comes back when it settles; Olympus counts the full $6 against your limits.",
       "A question is sent only if the panel was recently active, but closing the panel does not guarantee nothing is sent in that window.",
       "There is no daily limit unless you set one. Your deposit is the hard limit.",
       "Depositing and withdrawing are each an expensive on-chain transaction (about $7 at review), paid separately. An unwithdrawn balance becomes claimable by the operator after about 30 days. There is no top-up: each deposit is a new note with its own fee and clock.",
       "The outside provider reads the question; zkAPI hides who paid. The route is experimental and its network path is not verified on macOS.",
       "There is no approval step: consults are automatic while this is on. Turn it off here at any time."
     ],
-    routeTitle: "zkAPI route",
-    routeMissing: "No zkAPI route is set up. Add it here, then follow the steps below in Terminal.",
+    routeMissing: "No zkAPI route is set up. Add it, then follow Set up the zkAPI route below.",
     policyNotFile: "Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.",
     addRoute: "Add the zkAPI route",
     addRouteConfirm: "This adds a consult-only zkAPI route to your privacy policy and restarts the Olympus worker. No money moves. Continue?",
-    ready: "The route is ready to send.",
-    blocked: "The route is not ready yet:",
-    readinessUnavailable: "Olympus could not check the route right now.",
+    detailsTitle: "Details",
     facts: {
       daemon: "zkapi-clientd {version} found",
       versionUnknown: "(version unknown)",
@@ -51707,34 +51725,35 @@ var init_vocabulary = __esm(() => {
       torMissing: "Tor not installed",
       key: "API key configured",
       keyMissing: "API key not configured",
-      today: "{n} requests today (${usd} reserved)",
-      todayOne: "1 request today (${usd} reserved)",
+      today: "{n} requests today (${usd} counted at $6 each)",
+      todayOne: "1 request today (${usd} counted at $6 each)",
       expiry: "balance estimated to expire {date} ({days} days left)",
       expired: "balance past its estimated expiry",
       expiryUnknown: "balance expiry unknown until you enter the funding date"
     },
     routeLabel: "Route: {label}.",
+    lastSession: "Last consult: {at}, {result}.",
     blockers: {
-      daemon_not_found: "The zkapi-clientd program is not installed.",
-      daemon_version_unsupported: "This zkapi-clientd version is not one Olympus has reviewed (0.1.5 or 0.1.6).",
-      tor_not_found: "Tor is not installed.",
-      daemon_api_key_missing: "The daemon's API key is not configured in Olympus. Put it where the route's key reference points, then restart the worker.",
-      acknowledgements_incomplete: "The cost and risk statements below are not all acknowledged.",
-      funding_date_missing: "Enter the funding date below so Olympus can estimate when the balance expires.",
-      funding_date_invalid: "The funding date you entered is in the future.",
-      note_expired: "By the funding date you gave, the balance is past its estimated 30-day expiry.",
-      unresolved_session: "An earlier request has not been seen to settle. Use Recover below.",
-      unresolved_session_other_wallet: "A held request belongs to another wallet folder. Recover it there, or abandon it below.",
-      stranded_processes: "Programs from an earlier session could not be confirmed stopped.",
-      daemon_already_running: "Something is already serving on the zkAPI port. Stop your own zkapi-clientd serve; Olympus runs its own for each consult.",
-      tor_port_busy: "Something already listens on the Tor port. Olympus needs it free to start a fresh Tor client.",
-      daily_cap_reached: "Today's request limit you set is reached.",
-      spend_cap_reached: "Another request would exceed today's spending limit you set.",
-      state_unavailable: "The consult ledger on this computer could not be read.",
-      key_reuse_on: "The daemon's key-reuse window is on; run zkapi-clientd config --key-reuse-window-seconds 0."
+      daemon_not_found: "zkapi-clientd is not installed. Install it: see Set up the zkAPI route.",
+      daemon_version_unsupported: "This zkapi-clientd version has not been reviewed. Install 0.1.5 or 0.1.6.",
+      tor_not_found: "Tor is not installed. Install it: see Set up the zkAPI route.",
+      daemon_api_key_missing: "Olympus does not have the zkAPI API key yet. Add it: see Set up the zkAPI route.",
+      acknowledgements_incomplete: "The cost and risk statements are not all accepted. Tick them under Cost and risk.",
+      funding_date_missing: "Enter the funding date under Balance and limits, so Olympus can estimate when the balance expires.",
+      funding_date_invalid: "The funding date is in the future. Fix it under Balance and limits.",
+      note_expired: "By your funding date, the balance is past its estimated 30-day expiry.",
+      unresolved_session: "An earlier request has not been seen to settle. Use Recover under Held request.",
+      unresolved_session_other_wallet: "A held request belongs to another wallet folder. Recover it there, or abandon it under Held request.",
+      stranded_processes: "Programs from an earlier consult could not be confirmed stopped.",
+      daemon_already_running: "Another zkapi-clientd is already running. Stop it; Olympus starts its own for each consult.",
+      tor_port_busy: "Something else is using the Tor port. Olympus needs it free to start its own Tor.",
+      daily_cap_reached: "Today's consult limit is reached. Raise or remove it under Balance and limits.",
+      spend_cap_reached: "Another consult would pass today's spending limit. Raise or remove it under Balance and limits.",
+      state_unavailable: "The consult record on this computer could not be read.",
+      key_reuse_on: "zkapi-clientd's key-reuse window is on. Run: zkapi-clientd config --key-reuse-window-seconds 0"
     },
     blockerOther: "The route is not ready ({code}).",
-    stepsTitle: "How to set up the zkAPI route",
+    stepsTitle: "Set up the zkAPI route",
     stepsIntro: "In Terminal, in this order. This is the order that worked live.",
     steps: [
       "Install zkapi-clientd (version 0.1.5 or 0.1.6) and Tor.",
@@ -51746,13 +51765,23 @@ var init_vocabulary = __esm(() => {
       "Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
     ],
     costTitle: "Cost and risk",
-    costIntro: "Read and tick every statement once. They are recorded with the route; the wording version moves when a statement changes, and you are asked again.",
-    acknowledged: "All statements acknowledged.",
-    notAcknowledged: "Not yet acknowledged.",
+    costIntro: "Tick each statement once. They are recorded with the route; if the wording changes, you are asked again.",
+    acknowledged: "You accepted the {n} cost and risk statements.",
+    acknowledgedReview: "Review",
+    notAcknowledged: "Not yet accepted.",
+    limitsTitle: "Balance and limits",
+    limitsNone: "No daily limit",
+    limitsRequests: "{n} consults a day",
+    limitsUsd: "${usd} a day",
+    fundedOn: "funded {date}",
+    notFunded: "funding date not set",
     fundingDate: "Funding date: the day your deposit was confirmed (YYYY-MM-DD)",
-    capRequests: "Daily request limit (optional)",
+    capRequests: "Daily consult limit (optional)",
     capUsd: "Daily spending limit in dollars, counted at $6 per consult (optional)",
-    saveRestarts: "Saving restarts the Olympus worker to apply it.",
+    noLimitIntro: "There is no default limit: your deposit is the hard limit.",
+    removeLimits: "No daily limit",
+    removeLimitsHint: "Clears both limits.",
+    saveRestarts: "Saving restarts Olympus to apply it.",
     saveRoute: "Save",
     fenceTitle: "Held request",
     fenceIntro: "An earlier request has not been seen to settle. Until it does, no consult is sent.",
@@ -51765,7 +51794,7 @@ var init_vocabulary = __esm(() => {
     abandonHint: "Stops the block without settling; the unsettled request may later link two sessions.",
     abandonConfirm: "Abandoning means the unsettled request may later settle under another session's network identity, linking the two. It stops blocking consults and stays in the ledger as a record. Continue?",
     languagesTitle: "Languages",
-    languagesIntro: "The outside question may use these languages. Only languages with a vocabulary pack installed on this computer can be chosen.",
+    languagesIntro: "The outside question may use these languages. Only languages with a word pack installed on this computer can be chosen.",
     packMissing: "pack not installed",
     domainsOn: "Besides everyday words in these languages, a question may use: {list}.",
     domainsOff: "Not admitted: {list}.",
@@ -51778,19 +51807,18 @@ var init_vocabulary = __esm(() => {
       medicines: "medicine names",
       medicineBrands: "medicine brand names"
     },
-    automatic: "While on, consults run automatically when a private answer in ChatGPT is incomplete. Only this computer can change this setting.",
     turnOn: "Turn on outside help",
     turnOff: "Turn off outside help",
     replaceFile: "Replace the damaged settings file (outside help stays off)",
     enableBlockedRoute: "Add the zkAPI route first.",
-    enableBlockedAcks: "Tick and save every cost and risk statement first.",
+    enableBlockedAcks: "Accept the cost and risk statements first.",
     edit: "Edit",
     setUp: "Set up",
     saving: "Saving…",
     saveFailed: "Olympus could not save this. Try again.",
-    restarting: "Restarting the worker…",
+    restarting: "Restarting Olympus to apply it…",
     locked: "Unlock dashboard controls in Setup to see and change outside help.",
-    unlockIntro: "Changing outside help needs a session opened from this computer itself, not one an agent or the launch link could open. One click, in this browser, on this Mac.",
+    unlockIntro: "Changing outside help needs a session opened on this Mac itself, not one an agent or the launch link opened. One click, in this browser.",
     unlock: "Unlock outside help on this Mac",
     native: "Outside help is set up on this computer's own dashboard only, never from an agent or ChatGPT.",
     unavailable: "Outside help is not available from this worker."
@@ -55957,6 +55985,7 @@ __export(exports_consult_transport_zkapi, {
   zkapiFenceScope: () => zkapiFenceScope,
   zkapiConsultReadiness: () => zkapiConsultReadiness,
   validZkapiConsultQuestion: () => validZkapiConsultQuestion,
+  standardExecutableDirectories: () => standardExecutableDirectories,
   sendZkapiConsult: () => sendZkapiConsult,
   resolveExecutable: () => resolveExecutable,
   reserveZkapiRequest: () => reserveZkapiRequest,
@@ -55980,7 +56009,7 @@ import { createHash as createHash37, randomUUID as randomUUID15 } from "node:cry
 import { accessSync as accessSync3, chmodSync as chmodSync13, constants as constants3, existsSync as existsSync33, mkdirSync as mkdirSync25, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync9, statSync as statSync14, writeFileSync as writeFileSync7 } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir as homedir38, tmpdir as tmpdir3 } from "node:os";
-import { delimiter as delimiter4, dirname as dirname35, join as join48, resolve as resolvePath2 } from "node:path";
+import { delimiter as delimiter4, dirname as dirname35, isAbsolute as isAbsolute9, join as join48, resolve as resolvePath2 } from "node:path";
 function zkapiStageRows(timings) {
   if (!timings)
     return [];
@@ -56451,8 +56480,21 @@ function childEnvironment(env) {
   }
   return out;
 }
-function resolveExecutable(name, explicit, env) {
-  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter4).filter(Boolean).map((dir) => join48(dir, name));
+function standardExecutableDirectories(env, platform2 = process.platform) {
+  const home = env.HOME?.trim();
+  const local = home && isAbsolute9(home) ? [join48(home, ".local", "bin")] : [];
+  if (platform2 === "darwin")
+    return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
+  if (platform2 === "linux")
+    return [...local, "/usr/local/bin"];
+  return local;
+}
+function resolveExecutable(name, explicit, env, platform2 = process.platform) {
+  const directories = [
+    ...(env.PATH ?? "").split(delimiter4).filter(Boolean),
+    ...standardExecutableDirectories(env, platform2)
+  ].filter((dir, index, all) => all.indexOf(dir) === index);
+  const candidates = explicit ? [explicit] : directories.map((dir) => join48(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync3(candidate, constants3.X_OK);
@@ -66957,7 +66999,7 @@ var init_embedding_runtime = __esm(() => {
 // src/core/native-embedding-drain-service.ts
 import { randomUUID as randomUUID18 } from "node:crypto";
 import { readFileSync as readFileSync38, statSync as statSync18 } from "node:fs";
-import { delimiter as delimiter5, dirname as dirname46, isAbsolute as isAbsolute11, join as join61 } from "node:path";
+import { delimiter as delimiter5, dirname as dirname46, isAbsolute as isAbsolute12, join as join61 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
@@ -67002,7 +67044,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   const runtimePath = resolveBunRuntimePath(drain.runtimePath, env);
   const executablePath = assertUsableFile(fileURLToPath8(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
   const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
-  if (!isAbsolute11(reportPath)) {
+  if (!isAbsolute12(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join61(dirname46(reportPath), READINESS_FILE);
@@ -67052,7 +67094,7 @@ function resolveBunRuntimePath(configured, env) {
     ...(env.PATH ?? "").split(delimiter5).filter(Boolean).map((dir) => join61(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute11(candidate))
+    if (!candidate || !isAbsolute12(candidate))
       continue;
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
@@ -67064,7 +67106,7 @@ function resolveBunRuntimePath(configured, env) {
   throw new NativeProcessConfigurationError("Olympus source embedding drain could not resolve an absolute Bun runtime path.");
 }
 function assertUsableFile(path, label) {
-  if (!isAbsolute11(path)) {
+  if (!isAbsolute12(path)) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
@@ -67177,7 +67219,7 @@ var init_native_embedding_drain_service = __esm(() => {
 // src/core/native-worker-service.ts
 import { randomUUID as randomUUID19 } from "node:crypto";
 import { statSync as statSync19 } from "node:fs";
-import { basename as basename9, delimiter as delimiter6, isAbsolute as isAbsolute12, join as join62 } from "node:path";
+import { basename as basename9, delimiter as delimiter6, isAbsolute as isAbsolute13, join as join62 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 function createNativeWorkerService(options) {
   let readyChild;
@@ -67354,7 +67396,7 @@ function resolveBunRuntimePath2(configured, env) {
     ...(env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join62(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!isAbsolute12(candidate) || !isBunExecutableName2(candidate))
+    if (!isAbsolute13(candidate) || !isBunExecutableName2(candidate))
       continue;
     try {
       if (statSync19(candidate).isFile())
@@ -67368,7 +67410,7 @@ function resolveWorkerExecutablePath(configured, moduleUrl) {
   return assertExecutableFile(candidate, "worker executable");
 }
 function assertExecutableFile(path, label) {
-  if (!isAbsolute12(path))
+  if (!isAbsolute13(path))
     throw new Error(`Olympus ${label} path must be absolute.`);
   try {
     if (statSync19(path).isFile())
@@ -83679,6 +83721,9 @@ var init_model_setup = __esm(() => {
 });
 
 // src/core/model-key-reload.ts
+function workerRestartsItself(env) {
+  return env.OLYMPUS_MANAGED_WORKER === "1" || Boolean(env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim());
+}
 function createModelKeyReload(options) {
   let requested = false;
   return () => {
@@ -89779,10 +89824,10 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID21 } from "node:crypto";
 import { homedir as homedir50 } from "node:os";
-import { dirname as dirname50, isAbsolute as isAbsolute13, join as join71 } from "node:path";
+import { dirname as dirname50, isAbsolute as isAbsolute14, join as join71 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir50(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute13(configuredRoot) ? configuredRoot : join71(homeDir, ".cache");
+  const cacheRoot = configuredRoot && isAbsolute14(configuredRoot) ? configuredRoot : join71(homeDir, ".cache");
   return join71(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
@@ -92111,14 +92156,51 @@ details.models .modelsbody { margin-top: 12px; }
 .pprompt p { margin: 0; color: var(--t1); }
 `, DASHBOARD_OUTSIDE_HELP_CSS = `
 .outside .ohlabel { color: var(--t3); font-size: var(--fs-caption); margin: -2px 0 10px; }
-.outside .ohstate { font-weight: 600; color: var(--t1); margin: 0 0 12px; }
-.outside .ohready { color: var(--good, var(--t1)); font-weight: 600; margin: 0 0 8px; }
+/* The status block: the switch, the route in one line, today's usage. */
+.outside .ohpanel { margin: 0 0 8px; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
+.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; margin: 0 0 4px; }
+.outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
+.outside .dot.on { background: var(--good); }
+.outside .dot.off { background: transparent; border: 2px solid var(--off); }
+.outside .dot.attn { background: var(--warn-fill); }
+.outside .ohline { margin: 0 0 0 20px; color: var(--t2); }
+.outside .ohline.good { color: var(--good); font-weight: 600; }
+.outside .ohline.attn, .outside .ohline .attn { color: var(--warn); font-weight: 600; }
+.outside .ohline .attn { font-weight: 500; }
+.outside .ohpanel .ohsmall { margin: 4px 0 0 20px; }
+.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
 .outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+/* Problems: one tinted list, a line each, the fix in the line. */
+.outside .ohfix { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
+.outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
+.outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.outside .ohfix .ohform { margin: 0; }
+.outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
+.outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
 .outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
-.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; }
+.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; overflow-wrap: anywhere; }
 .outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
-.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); }
+.outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
+/* Secondary sections: one line each (title and a short summary), open only when they need attention. */
+.outside details.ohsect { border-top: 1px solid var(--line); }
+.outside .ohmore { margin: 28px 0 0; }
+.outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
+.outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
+.outside details.ohsect > summary::-webkit-details-marker { display: none; }
+.outside details.ohsect > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
+.outside details.ohsect[open] > summary::before { content: '\\25BE'; }
+.outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.outside .ohsect-title.attn { color: var(--warn); }
+.outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
+.outside .ohsect-sum:empty { display: none; }
+.outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
+.outside .ohsect-body { padding: 0 0 16px 18px; }
+.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0 16px; margin: 0 0 8px; }
 .outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
+.outside .ohform.ohinline { margin: 0 0 12px; }
+.outside .ohform .keyfield { width: 100%; max-width: 220px; }
 .outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
 .outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
 .outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
@@ -92127,6 +92209,15 @@ details.models .modelsbody { margin-top: 12px; }
 .outside .ohfence .ohform { grid-template-columns: auto 1fr; align-items: center; }
 .outside .ohfence .ohform .actmsg { grid-column: 1 / -1; }
 .outside .actmsg[data-state="error"] { color: var(--bad); }
+.outside .ohunlock { margin: 0 0 12px; padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohunlock .pnote { margin: 0; color: var(--t1); }
+@media (max-width: 700px) {
+  .outside .ohpanel { padding: 14px; }
+  .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
+  .outside .ohline, .outside .ohpanel .ohsmall { margin-left: 0; }
+  .outside .btn { white-space: normal; text-align: left; }
+  .outside .ohsect-body { padding-left: 0; }
+}
 `;
 
 // src/control-ui/browser-controller.ts
@@ -100229,80 +100320,149 @@ function summaryOf(status) {
 function outsideHelpBlockerWords(code) {
   return DASHBOARD_OUTSIDE_HELP_COPY.blockers[code] ?? fill(DASHBOARD_OUTSIDE_HELP_COPY.blockerOther, { code });
 }
+function shortDate(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  const month = match ? MONTHS2[Number(match[2]) - 1] : undefined;
+  return match && month ? `${Number(match[3])} ${month}` : iso;
+}
 function renderOutsideHelpCard(status, input) {
   const summary = summaryOf(status);
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
-  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const blockers = route.state === "configured" && route.readiness ? route.readiness.blockers : [];
   const parts = [];
   parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
   parts.push(`<p class="ohlabel">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`);
   parts.push(`<p class="pintro">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>`);
-  parts.push(`<p class="ohstate" data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</p>`);
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
   if (canUnlock) {
-    parts.push(`<form class="ohform" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
-  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div><ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`);
-  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeTitle)}</div>`);
-  if (route.state === "not_configured") {
-    parts.push(`<p class="pnote" data-outside-route="not_configured">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing)}</p>`);
-    if (route.policyWritable) {
-      parts.push(`<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}">` + `<button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-    } else {
-      parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile)}</p>`);
-    }
-  } else {
-    parts.push(renderReadiness(route));
-  }
-  parts.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`));
-  if (route.state === "configured") {
+  parts.push(renderStatusBlock(status, summary, canEdit));
+  parts.push(renderProblems(status, canEdit));
+  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>` + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</summary>` + `<ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul></details>`);
+  if (route.state === "configured")
     parts.push(renderAcknowledgements(route, canEdit));
-  }
-  if (route.state === "configured" && route.readiness && route.readiness.fences.length > 0) {
-    parts.push(renderFence(route.readiness, canEdit));
-  }
-  parts.push(renderEnable(status, summary, canEdit));
-  const config2 = { csrfToken: input.csrfToken ?? "", paths: DASHBOARD_OUTSIDE_HELP_PATHS, copy: { saving: DASHBOARD_OUTSIDE_HELP_COPY.saving, failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed, restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting } };
+  const more = [];
+  if (route.state === "configured" && route.readiness && route.readiness.fences.length > 0)
+    more.push(renderFence(route.readiness, canEdit));
+  more.push(renderLanguages(status, canEdit));
+  if (route.state === "configured")
+    more.push(renderLimits(route, blockers, canEdit));
+  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, route.state === "not_configured" || blockers.some((code) => SETUP_BLOCKERS.has(code))));
+  if (route.state === "configured")
+    more.push(renderDetails(route));
+  parts.push(`<div class="ohmore">${more.join("")}</div>`);
+  const config2 = {
+    csrfToken: input.csrfToken ?? "",
+    paths: DASHBOARD_OUTSIDE_HELP_PATHS,
+    copy: { saving: DASHBOARD_OUTSIDE_HELP_COPY.saving, failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed, restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting, on: DASHBOARD_OUTSIDE_HELP_COPY.state.on, off: DASHBOARD_OUTSIDE_HELP_COPY.state.off }
+  };
   const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config2)}</script>` : "";
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
 }
-function renderReadiness(route) {
-  if (route.readinessUnavailable || !route.readiness) {
-    return `<p class="pnote ohwarn" data-outside-route="unknown">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.readinessUnavailable)}</p>`;
-  }
-  const ready = route.readiness;
-  const facts = [
-    ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
-    ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
-    ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
-    fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
-    ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown
-  ];
-  const blockers = ready.blockers.map((code) => `<li>${escapeHtml2(outsideHelpBlockerWords(code))}</li>`).join("");
-  const head = ready.ready ? `<p class="ohready" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.ready)}</p>` : `<p class="pnote ohwarn" data-outside-route="blocked">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.blocked)}</p><ul class="ohlist" data-outside-blockers>${blockers}</ul>`;
-  return `${head}<ul class="ohfacts">${facts.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>` + `<p class="pnote ohsmall">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }))}</p>`;
+function renderStatusBlock(status, summary, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const route = status.route;
+  const on = status.settings.state === "on";
+  const invalid2 = status.settings.state === "invalid";
+  const blockedReason = invalid2 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
+  const button = invalid2 ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const tone = summary.state === "on" ? "on" : summary.state === "off" ? "off" : "attn";
+  const head = `<div class="ohhead"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + `<div class="pbuttons">${button}</div></div>`;
+  const lines = [renderRouteLine(route)];
+  if (route.state === "configured" && route.readiness)
+    lines.push(`<p class="ohline" data-outside-usage>${escapeHtml2(usageLine(route.readiness))}</p>`);
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">` + head + lines.join("") + `<p class="ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.holdNote)}</p>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
-function renderSetupSteps(secretRef) {
+function renderRouteLine(route) {
+  if (route.state === "not_configured")
+    return `<p class="ohline attn" data-outside-route="not_configured">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeMissingShort)}</p>`;
+  if (route.readinessUnavailable || !route.readiness)
+    return `<p class="ohline attn" data-outside-route="unknown">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown)}</p>`;
+  const ready = route.readiness;
+  if (ready.ready) {
+    return ready.torMode === "off" ? `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReadyNoTor)} <span class="attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff)}.</span></p>` : `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReady)}</p>`;
+  }
+  const first = ready.blockers[0];
+  const reason = first ? outsideHelpBlockerWords(first) : DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown;
+  const more = ready.blockers.length > 1 ? ` ${fill(DASHBOARD_OUTSIDE_HELP_COPY.routeMore, { n: String(ready.blockers.length - 1) })}` : "";
+  return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeNotReady, { reason }))}${escapeHtml2(more)}</p>` + (ready.torMode === "off" ? `<p class="ohline attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff)}.</p>` : "");
+}
+function usageLine(ready) {
+  const count2 = ready.requestsToday.count;
+  const pieces = [count2 === 0 ? DASHBOARD_OUTSIDE_HELP_COPY.usageNone : count2 === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.usageOne : fill(DASHBOARD_OUTSIDE_HELP_COPY.usageMany, { n: String(count2) })];
+  if (count2 > 0)
+    pieces.push(fill(DASHBOARD_OUTSIDE_HELP_COPY.usageSpent, { usd: ready.spendToday.reservedUsd.toFixed(0) }));
+  pieces.push(ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.usageExpired : DASHBOARD_OUTSIDE_HELP_COPY.usageExpiryUnknown);
+  return pieces.join(" · ");
+}
+function renderProblems(status, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const route = status.route;
+  const items = [];
+  if (route.state === "not_configured") {
+    const action = route.policyWritable ? `<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}">` + `<button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
+    items.push(`<li data-outside-route-missing><span>${escapeHtml2(route.policyWritable ? DASHBOARD_OUTSIDE_HELP_COPY.routeMissing : DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile)}</span>${action}</li>`);
+  } else if (route.readinessUnavailable || !route.readiness) {
+    items.push(`<li><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown)}</span></li>`);
+  } else {
+    for (const code of route.readiness.blockers)
+      items.push(`<li><span>${escapeHtml2(outsideHelpBlockerWords(code))}</span></li>`);
+  }
+  if (items.length === 0)
+    return "";
+  return `<div class="sect attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}</div><ul class="ohfix" data-outside-blockers>${items.join("")}</ul>`;
+}
+function renderSection(input) {
+  return `<details class="ohsect" data-outside-section="${escapeHtml2(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title${input.attn ? " attn" : ""}">${escapeHtml2(input.title)}</span><span class="ohsect-sum">${escapeHtml2(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
+}
+function renderSetupSteps(secretRef, needed) {
   const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => fill(step, { secretRef }));
-  return `<details class="howto" data-outside-steps><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle)}</summary>` + `<p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></details>`;
+  return renderSection({
+    id: "steps",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
+    summary: "",
+    open: needed,
+    attn: needed,
+    body: `<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
+  });
 }
 function renderAcknowledgements(route, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  const accepted = new Set(route.acknowledgements.complete ? route.acknowledgements.accepted : []);
+  const complete = route.acknowledgements.complete;
+  const accepted = new Set(complete ? route.acknowledgements.accepted : []);
   const boxes = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<label class="ohack"><input type="checkbox" name="acknowledged" value="${escapeHtml2(entry.id)}"` + `${accepted.has(entry.id) ? " checked" : ""}${disabled}><span>${escapeHtml2(entry.statement)}</span></label>`).join("");
-  const state = route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.acknowledged : DASHBOARD_OUTSIDE_HELP_COPY.notAcknowledged;
-  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>` + `<p class="pnote" data-outside-acknowledged="${route.acknowledgements.complete ? "yes" : "no"}">${escapeHtml2(state)}</p>` + `<form class="ohform" data-outside-form="route">${boxes}` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</p>` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></div></form>`;
+  const form = `<form class="ohform" data-outside-form="route">${boxes}` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const head = `<div class="sect${complete ? "" : " attn"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div>`;
+  if (complete) {
+    return head + `<p class="pnote" data-outside-acknowledged="yes">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.acknowledged, { n: String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length) }))}</p>` + `<details class="howto" data-outside-ack-review><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.acknowledgedReview)}</summary>${form}</details>`;
+  }
+  return head + `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>` + `<p class="pnote" data-outside-acknowledged="no">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.notAcknowledged)}</p>` + form;
+}
+function renderLimits(route, blockers, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const capped = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
+  const limit = capped ? [
+    ...route.dailyRequestCap !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsRequests, { n: String(route.dailyRequestCap) })] : [],
+    ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
+  ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
+  const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
+  const needed = blockers.some((code) => LIMIT_BLOCKERS.has(code));
+  const noLimit = capped ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>`;
+  const body = noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, open: needed, attn: needed, body });
 }
 function renderFence(ready, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const mine = ready.fences.some((fence) => fence.thisWallet);
   const rows = ready.fences.map((fence) => `<li>${escapeHtml2(fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: fence.at.slice(0, 16).replace("T", " ") }))}</li>`).join("");
-  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceTitle)}</div><p class="pnote ohwarn" data-outside-fence>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceIntro)}</p><ul class="ohlist">${rows}</ul>` + `<div class="ohfence">` + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary"${mine ? "" : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}</span><span class="actmsg" data-action-message role="status"></span></form>` + ready.fences.map((fence) => `<form class="ohform" data-outside-form="abandon" data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join("") + `</div>`;
+  const body = `<p class="pnote ohwarn" data-outside-fence>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceIntro)}</p><ul class="ohlist">${rows}</ul>` + `<div class="ohfence">` + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary"${mine ? "" : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}</span><span class="actmsg" data-action-message role="status"></span></form>` + ready.fences.map((fence) => `<form class="ohform" data-outside-form="abandon" data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join("") + `</div>`;
+  return renderSection({ id: "fence", title: DASHBOARD_OUTSIDE_HELP_COPY.fenceTitle, summary: "", open: true, attn: true, body });
 }
-function renderEnable(status, summary, canEdit) {
+function renderLanguages(status, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const chosen = new Set(status.settings.languages);
   const languages = status.languages.map((entry) => {
@@ -100310,16 +100470,39 @@ function renderEnable(status, summary, canEdit) {
     const off = !entry.installed;
     return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled}>` + `<span>${escapeHtml2(name)}${off ? ` <span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
   }).join("");
-  const on = status.settings.state === "on";
-  const route = status.route;
-  const blockedReason = status.settings.state === "invalid" ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const invalid2 = status.settings.state === "invalid";
-  const button = invalid2 ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
-  const domainsOn = Object.entries(status.settings.domains).filter(([, on2]) => on2).map(([key]) => domainNames[key] ?? key);
-  const domainsOff = Object.entries(status.settings.domains).filter(([, on2]) => !on2).map(([key]) => domainNames[key] ?? key);
-  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on2]) => on2).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
-  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p>${domains}` + `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">${languages}` + `<div class="pfooter"><p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.automatic)}</p><div class="pbuttons">${button}</div>` + `<span class="actmsg" data-action-message role="status"></span></div></form>` + (summary.state === "fence_held" ? "" : "");
+  const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => domainNames[key] ?? key);
+  const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key]) => domainNames[key] ?? key);
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
+  const named = status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => LANGUAGE_NAMES[entry.language]);
+  return renderSection({
+    id: "languages",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle,
+    summary: named.join(", "),
+    open: false,
+    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
+  });
+}
+function renderDetails(route) {
+  if (route.readinessUnavailable || !route.readiness)
+    return "";
+  const ready = route.readiness;
+  const facts = [
+    ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
+    ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
+    ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
+    fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
+    ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown,
+    fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }),
+    ...ready.lastSession ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.lastSession, { at: ready.lastSession.at.slice(0, 16).replace("T", " "), result: ready.lastSession.result })] : []
+  ];
+  return renderSection({
+    id: "details",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.detailsTitle,
+    summary: "",
+    open: false,
+    body: `<ul class="ohfacts" data-outside-facts>${facts.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>`
+  });
 }
 function outsideHelpClientScript(config2) {
   return `(function () {
@@ -100338,26 +100521,49 @@ function outsideHelpClientScript(config2) {
     var n = Number(trimmed);
     return isFinite(n) ? n : NaN;
   }
+  function checked(name) {
+    return Array.prototype.map.call(root.querySelectorAll('input[name="' + name + '"]:checked'), function (input) { return input.value; });
+  }
+  function field(name) {
+    var input = root.querySelector('[name="' + name + '"]');
+    return input ? input.value : '';
+  }
+  // Each post carries the whole card's state for its route, wherever on the
+  // card the fields sit: the switch reads the language boxes, and every route
+  // save reads the acknowledgements, the funding date and both limits.
   function bodyFor(form, kind, submitter) {
-    var data = new FormData(form);
     if (kind === 'enable') {
       var invalid = form.getAttribute('data-outside-invalid') === 'yes';
       var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
-      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: data.getAll('languages') };
+      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
       if (invalid) body.replace_invalid = true;
       return body;
     }
     if (kind === 'route') {
+      if (form.hasAttribute('data-outside-nolimit')) {
+        return { acknowledged: checked('acknowledged'), daily_request_cap: null, daily_spend_cap_usd: null };
+      }
       return {
-        acknowledged: data.getAll('acknowledged'),
-        funding_date: String(data.get('funding_date') || ''),
-        daily_request_cap: numberOrNull(data.get('daily_request_cap')),
-        daily_spend_cap_usd: numberOrNull(data.get('daily_spend_cap_usd')),
+        acknowledged: checked('acknowledged'),
+        funding_date: String(field('funding_date') || ''),
+        daily_request_cap: numberOrNull(field('daily_request_cap')),
+        daily_spend_cap_usd: numberOrNull(field('daily_spend_cap_usd')),
       };
     }
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
+  }
+  // After a restart the worker is briefly away: wait for it to answer, then reload.
+  function reloadWhenBack(delay) {
+    var tries = 0;
+    function poll() {
+      tries += 1;
+      fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+        if (response.ok || tries > 40) window.location.reload(); else setTimeout(poll, 1500);
+      }, function () { if (tries > 40) window.location.reload(); else setTimeout(poll, 1500); });
+    }
+    setTimeout(poll, delay);
   }
   var paths = { unlock: config.paths.unlock, enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
   root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
@@ -100372,12 +100578,13 @@ function outsideHelpClientScript(config2) {
       try {
         // The local unlock presents no credential at all: the boundary wants a
         // loopback browser and nothing else. Every other form carries the CSRF token.
+        var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var response = await fetch(paths[kind], kind === 'unlock'
           ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
           : {
             method: 'POST', credentials: 'same-origin', cache: 'no-store',
             headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
-            body: JSON.stringify(bodyFor(form, kind, event.submitter)),
+            body: JSON.stringify(body),
           });
         var result = {};
         try { result = await response.json(); } catch (error) { result = {}; }
@@ -100387,11 +100594,18 @@ function outsideHelpClientScript(config2) {
           return;
         }
         message(form, result.status_message || '', false);
+        if (kind === 'enable' && body && !body.replace_invalid) {
+          // Say the new state at once, before the reload that redraws the card.
+          var line = root.querySelector('[data-outside-state-text]');
+          if (line) line.textContent = body.enabled ? config.copy.on : config.copy.off;
+          if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
+          if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
+        }
         if (result.restarting) {
           message(form, (result.status_message || '') + ' ' + config.copy.restarting, false);
-          setTimeout(function () { window.location.reload(); }, 6000);
+          reloadWhenBack(4000);
         } else {
-          setTimeout(function () { window.location.reload(); }, 1200);
+          setTimeout(function () { window.location.reload(); }, 900);
         }
       } catch (error) {
         message(form, config.copy.failed, true);
@@ -100408,7 +100622,7 @@ function renderOutsideHelpSection(summary, basePath) {
   const label = summary.state === "route_not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.setUp : DASHBOARD_OUTSIDE_HELP_COPY.edit;
   return `<div class="sect" id="outside-help">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</div>` + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml2(outsideHelpStateLine(summary))}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a></div></div></div>`;
 }
-var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES;
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS2, LIMIT_BLOCKERS, SETUP_BLOCKERS;
 var init_outside_help = __esm(() => {
   init_zkapi_consult_settings();
   init_components();
@@ -100432,6 +100646,9 @@ var init_outside_help = __esm(() => {
     de: "German",
     it: "Italian"
   };
+  MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  LIMIT_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid", "note_expired", "daily_cap_reached", "spend_cap_reached"]);
+  SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on"]);
 });
 
 // src/workers/dashboard/pages/setup.ts
@@ -101885,7 +102102,7 @@ function whenText(recordedAt, now) {
 }
 function utcStamp(at) {
   const day = at.getUTCDate();
-  const month = MONTHS2[at.getUTCMonth()] ?? "";
+  const month = MONTHS3[at.getUTCMonth()] ?? "";
   const hours = String(at.getUTCHours()).padStart(2, "0");
   const minutes = String(at.getUTCMinutes()).padStart(2, "0");
   return `${day} ${month} ${at.getUTCFullYear()}, ${hours}:${minutes} UTC`;
@@ -101893,7 +102110,7 @@ function utcStamp(at) {
 function plural3(count2, one, many) {
   return count2 === 1 ? one : many;
 }
-var DEFAULT_BASE_PATH6 = "/dashboard", BACKGROUND_QUERY_PARAM3 = "background", MONTHS2, EMBEDDING_LEDGER_CSS = `.ledgerback { margin-bottom: 10px; font-size: 12px; }
+var DEFAULT_BASE_PATH6 = "/dashboard", BACKGROUND_QUERY_PARAM3 = "background", MONTHS3, EMBEDDING_LEDGER_CSS = `.ledgerback { margin-bottom: 10px; font-size: 12px; }
 .ledgerback a { color: var(--t3); text-decoration: none; }
 .ledgerback a:hover { color: var(--t1); }
 .ledgerwarn { background: var(--panel); border: 1px solid var(--warn); border-radius: 9px; padding: 10px 14px; margin-bottom: 10px; color: var(--warn); font-size: 12px; line-height: 1.5; }
@@ -101915,7 +102132,7 @@ var init_embedding_ledger2 = __esm(() => {
   init_nav();
   init_components();
   init_vocabulary();
-  MONTHS2 = [
+  MONTHS3 = [
     "Jan",
     "Feb",
     "Mar",
@@ -107444,12 +107661,12 @@ import {
   writeSync as writeSync3
 } from "node:fs";
 import { homedir as homedir54 } from "node:os";
-import { dirname as dirname53, isAbsolute as isAbsolute14, join as join75 } from "node:path";
+import { dirname as dirname53, isAbsolute as isAbsolute15, join as join75 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const configured = env[BUILT_IN_REASONING_DIR_ENV]?.trim();
   const dataRoot = env.XDG_DATA_HOME?.trim() || join75(env.HOME?.trim() || homedir54(), ".local", "share");
   const root = configured || join75(dataRoot, "openclaw", "olympus", "models", "built-in-reasoning");
-  if (!isAbsolute14(root))
+  if (!isAbsolute15(root))
     throw new TypeError("The built-in reasoning directory must be an absolute path.");
   return {
     root,
@@ -124642,10 +124859,10 @@ var init_dashboard_privacy = __esm(() => {
 
 // src/core/consult-settings-writer.ts
 import { chmodSync as chmodSync23, lstatSync as lstatSync22, mkdirSync as mkdirSync42, statSync as statSync23 } from "node:fs";
-import { dirname as dirname57, isAbsolute as isAbsolute15 } from "node:path";
+import { dirname as dirname57, isAbsolute as isAbsolute16 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   const path = location.path ?? consultSettingsPath(location.env ?? process.env);
-  if (path === undefined || !isAbsolute15(path))
+  if (path === undefined || !isAbsolute16(path))
     return { ok: false, reason: "no_home" };
   const nextRevision = input.expectedRevision + 1;
   const candidate = parseConsultSettings({
@@ -125187,7 +125404,7 @@ __export(exports_server2, {
 });
 import { execFile } from "node:child_process";
 import { existsSync as existsSync51 } from "node:fs";
-import { dirname as dirname58, isAbsolute as isAbsolute16, join as join80 } from "node:path";
+import { dirname as dirname58, isAbsolute as isAbsolute17, join as join80 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -128103,7 +128320,7 @@ async function main() {
     server.stop();
   };
   requestModelReload = createModelKeyReload({
-    managed: process.env.OLYMPUS_MANAGED_WORKER === "1",
+    managed: workerRestartsItself(process.env),
     shutdown: async () => {
       shutdown("SIGTERM");
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
@@ -128560,7 +128777,7 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!dbPath || !corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
-  if (!isAbsolute16(dbPath)) {
+  if (!isAbsolute17(dbPath)) {
     throw new Error("Connector store dbPath must be absolute.");
   }
   if (!isDeclarableSourceFamily(family)) {
@@ -129857,7 +130074,7 @@ import { createHash as createHash40 } from "node:crypto";
 import { spawnSync as spawnSync8 } from "node:child_process";
 import { existsSync as existsSync38, lstatSync as lstatSync15, mkdirSync as mkdirSync27, readFileSync as readFileSync34 } from "node:fs";
 import { homedir as homedir41, platform as osPlatform3 } from "node:os";
-import { dirname as dirname39, isAbsolute as isAbsolute10, join as join55 } from "node:path";
+import { dirname as dirname39, isAbsolute as isAbsolute11, join as join55 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
@@ -129880,7 +130097,7 @@ import {
   writeFileSync as writeFileSync9
 } from "node:fs";
 import { tmpdir as tmpdir4 } from "node:os";
-import { basename as basename8, isAbsolute as isAbsolute9, join as join53 } from "node:path";
+import { basename as basename8, isAbsolute as isAbsolute10, join as join53 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
 var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
@@ -129965,7 +130182,7 @@ function assertVersionParentSafety(homeDir, workingDirectory) {
 }
 function validateArtifactPath(path) {
   const trimmed2 = path.trim();
-  if (!trimmed2 || !isAbsolute9(trimmed2) || /[\0\r\n]/.test(trimmed2)) {
+  if (!trimmed2 || !isAbsolute10(trimmed2) || /[\0\r\n]/.test(trimmed2)) {
     throw new OperationError("invalid_params", "olympus worker upgrade requires an absolute --artifact path.");
   }
   let stats;
@@ -130763,7 +130980,7 @@ function restoreManagedFile(homeDir, path, backupPath, previousPresent, expected
   writePrivateFileAtomicSync(path, text);
 }
 function isRecordedManagedPath(value) {
-  return typeof value === "string" && value.trim() !== "" && isAbsolute10(value) && !/[\0\r\n]/.test(value);
+  return typeof value === "string" && value.trim() !== "" && isAbsolute11(value) && !/[\0\r\n]/.test(value);
 }
 function transactionPaths(homeDir) {
   const dir = join55(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -130850,7 +131067,7 @@ function validateWorkerReadinessPort(value) {
 }
 function defaultWorkerReadinessProbe(url, bunBin) {
   const executable = bunBin ?? (typeof Bun !== "undefined" ? Bun.which("bun") : null) ?? process.execPath;
-  if (!executable || !isAbsolute10(executable))
+  if (!executable || !isAbsolute11(executable))
     return false;
   const script = [
     "const url = process.argv.at(-1);",
@@ -130938,7 +131155,7 @@ function normalizeLifecyclePlatform(value) {
 }
 function validateHomeDir(value) {
   const trimmed2 = value.trim();
-  if (!trimmed2 || !isAbsolute10(trimmed2) || /[\0\r\n]/.test(trimmed2)) {
+  if (!trimmed2 || !isAbsolute11(trimmed2) || /[\0\r\n]/.test(trimmed2)) {
     throw new OperationError("invalid_params", "Olympus lifecycle requires an absolute home directory.");
   }
   return trimmed2;

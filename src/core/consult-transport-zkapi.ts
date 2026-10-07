@@ -52,7 +52,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve as resolvePath } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import {
   FileLeaseBusyError,
@@ -1218,13 +1218,40 @@ function childEnvironment(env: Record<string, string | undefined>): NodeJS.Proce
   return out;
 }
 
-/** An absolute executable path, or the first match on PATH. */
+/**
+ * Where installers put these programs when PATH does not say so: a service
+ * manager starts the worker with a minimal PATH (the engine's LaunchAgent has
+ * only Bun's directory and the system ones), so a Homebrew `tor` or a
+ * `~/.local/bin/zkapi-clientd` would otherwise read as not installed. Searched
+ * after PATH, in this order. HOME comes from the passed environment.
+ */
+export function standardExecutableDirectories(
+  env: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const home = env.HOME?.trim();
+  const local = home && isAbsolute(home) ? [join(home, '.local', 'bin')] : [];
+  if (platform === 'darwin') return [...local, '/opt/homebrew/bin', '/usr/local/bin'];
+  if (platform === 'linux') return [...local, '/usr/local/bin'];
+  return local;
+}
+
+/**
+ * An explicit executable path (only that path), or the first match on PATH and
+ * then in the standard install directories. The readiness probe and the real
+ * session both resolve through here, so they always agree.
+ */
 export function resolveExecutable(
   name: string,
   explicit: string | undefined,
   env: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
 ): string | undefined {
-  const candidates = explicit ? [explicit] : (env.PATH ?? '').split(delimiter).filter(Boolean).map((dir) => join(dir, name));
+  const directories = [
+    ...(env.PATH ?? '').split(delimiter).filter(Boolean),
+    ...standardExecutableDirectories(env, platform),
+  ].filter((dir, index, all) => all.indexOf(dir) === index);
+  const candidates = explicit ? [explicit] : directories.map((dir) => join(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync(candidate, constants.X_OK);

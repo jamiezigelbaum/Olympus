@@ -22,7 +22,10 @@ import {
   openZkapiConsultSession,
   recoverZkapiSession,
   reserveZkapiRequest,
+  resolveExecutable,
   sendZkapiConsult,
+  standardExecutableDirectories,
+  zkapiConsultReadiness,
   abandonZkapiFence,
   zkapiFenceScope,
   zkapiOutstandingFences,
@@ -2315,4 +2318,56 @@ describe('doctor: zkapi_consult_transport', () => {
       squatter.stop(true);
     }
   }, SLOW);
+});
+
+describe('zkAPI consult transport: finding the programs', () => {
+  test('after PATH, the standard install folders: ~/.local/bin, then Homebrew and /usr/local/bin on macOS; ~/.local/bin and /usr/local/bin on Linux', () => {
+    expect(standardExecutableDirectories({ HOME: '/Users/me' }, 'darwin')).toEqual(['/Users/me/.local/bin', '/opt/homebrew/bin', '/usr/local/bin']);
+    expect(standardExecutableDirectories({ HOME: '/home/me' }, 'linux')).toEqual(['/home/me/.local/bin', '/usr/local/bin']);
+    // No HOME, or a relative one: no home folder is guessed.
+    expect(standardExecutableDirectories({}, 'darwin')).toEqual(['/opt/homebrew/bin', '/usr/local/bin']);
+    expect(standardExecutableDirectories({ HOME: 'relative' }, 'linux')).toEqual(['/usr/local/bin']);
+  });
+
+  test('a program in ~/.local/bin is found under a service manager\'s minimal PATH; PATH still wins; an explicit path is the only candidate', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-zkapi-home-'));
+    const pathDir = mkdtempSync(join(tmpdir(), 'olympus-zkapi-path-'));
+    try {
+      const local = join(home, '.local', 'bin');
+      mkdirSync(local, { recursive: true });
+      for (const dir of [local, pathDir]) {
+        writeFileSync(join(dir, 'zkapi-clientd'), '#!/bin/sh\n');
+        chmodSync(join(dir, 'zkapi-clientd'), 0o755);
+      }
+      // A non-executable file is not a match.
+      writeFileSync(join(local, 'tor'), 'not a program');
+      chmodSync(join(local, 'tor'), 0o644);
+      for (const platform of ['darwin', 'linux'] as const) {
+        expect(resolveExecutable('zkapi-clientd', undefined, { HOME: home, PATH: '/usr/bin:/bin' }, platform)).toBe(join(local, 'zkapi-clientd'));
+        expect(resolveExecutable('zkapi-clientd', undefined, { HOME: home, PATH: `/usr/bin:${pathDir}` }, platform)).toBe(join(pathDir, 'zkapi-clientd'));
+      }
+      expect(resolveExecutable('tor', undefined, { HOME: home, PATH: '' }, 'linux')).toBe(existsSync('/usr/local/bin/tor') ? '/usr/local/bin/tor' : undefined);
+      // An explicit path is honoured exactly: a missing one is not replaced by a search.
+      expect(resolveExecutable('zkapi-clientd', join(home, 'missing'), { HOME: home, PATH: pathDir }, 'darwin')).toBeUndefined();
+      expect(resolveExecutable('zkapi-clientd', join(pathDir, 'zkapi-clientd'), { HOME: home, PATH: '' }, 'darwin')).toBe(join(pathDir, 'zkapi-clientd'));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(pathDir, { recursive: true, force: true });
+    }
+  });
+
+  test('the readiness probe finds zkapi-clientd and tor in ~/.local/bin with the LaunchAgent\'s PATH, so neither reads as not installed', async () => {
+    const local = join(root, '.local', 'bin');
+    mkdirSync(local, { recursive: true });
+    for (const name of ['tor', 'zkapi-clientd']) {
+      writeFileSync(join(local, name), readFileSync(join(binDir, name)));
+      chmodSync(join(local, name), 0o755);
+    }
+    const { daemonExecutable: _d, torExecutable: _t, ...unpinned } = settings();
+    const ready = await zkapiConsultReadiness({ ...transport({ settings: unpinned as ZkapiConsultSettings }), env: { HOME: root, PATH: '/usr/bin:/bin:/usr/sbin:/sbin', ZKAPI_CLIENTD_CONFIG_DIR: configDir } });
+    expect(ready.daemonExecutable).toBe(join(local, 'zkapi-clientd'));
+    expect(ready.torExecutable).toBe(join(local, 'tor'));
+    expect(ready.blockers).not.toContain('daemon_not_found');
+    expect(ready.blockers).not.toContain('tor_not_found');
+  });
 });

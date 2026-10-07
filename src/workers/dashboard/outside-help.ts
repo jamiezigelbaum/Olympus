@@ -128,10 +128,33 @@ export function outsideHelpBlockerWords(code: ZkapiConsultErrorCode): string {
   return (W.blockers as Readonly<Record<string, string>>)[code] ?? fill(W.blockerOther, { code });
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "2026-11-06" → "6 Nov"; anything else is shown as given. */
+function shortDate(iso: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  const month = match ? MONTHS[Number(match[2]) - 1] : undefined;
+  return match && month ? `${Number(match[3])} ${month}` : iso;
+}
+
+type ConfiguredRoute = Extract<DashboardOutsideHelpRoute, { state: 'configured' }>;
+
+/** Blockers the Balance and limits section fixes: it opens when one is present. */
+const LIMIT_BLOCKERS: ReadonlySet<string> = new Set(['funding_date_missing', 'funding_date_invalid', 'note_expired', 'daily_cap_reached', 'spend_cap_reached']);
+/** Blockers the setup steps fix. */
+const SETUP_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'daemon_version_unsupported', 'tor_not_found', 'daemon_api_key_missing', 'key_reuse_on']);
+
 /**
  * The card body. `csrfToken` present means the reader holds the controls;
  * without it the card is read-only text (the worker also refuses every write
  * without the control session, so this is presentation, not the boundary).
+ *
+ * Layout (owner redesign, 2026-10-07): one status block (the switch, route
+ * health in one line, today's usage), one list of problems each with its fix,
+ * three short lines before turning on with the full statements behind a
+ * disclosure, the acknowledgements collapsed once accepted, and the secondary
+ * sections (languages, balance and limits, a held request, setup, details)
+ * collapsed unless they need attention.
  */
 export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; localSession?: boolean; basePath?: string }): string {
   const summary = summaryOf(status);
@@ -142,109 +165,203 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
-  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+  const blockers = route.state === 'configured' && route.readiness ? route.readiness.blockers : [];
   const parts: string[] = [];
   parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
   parts.push(`<p class="ohlabel">${escapeHtml(W.experimental)}</p>`);
   parts.push(`<p class="pintro">${escapeHtml(W.intro)}</p>`);
-  parts.push(`<p class="ohstate" data-outside-state="${escapeHtml(summary.state)}">${escapeHtml(outsideHelpStateLine(summary))}</p>`);
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
   if (canUnlock) {
-    parts.push(`<form class="ohform" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml(W.unlockIntro)}</p>`
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml(W.unlockIntro)}</p>`
       + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button></div>`
       + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
 
-  // 1. The disclosure, always visible (design §A.10: up front).
-  parts.push(`<div class="sect">${escapeHtml(W.disclosureTitle)}</div><ul class="ohlist">${W.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`);
+  // 1. The status block: the switch, the route in one line, today's usage.
+  parts.push(renderStatusBlock(status, summary, canEdit));
 
-  // 2. The route and its readiness.
-  parts.push(`<div class="sect">${escapeHtml(W.routeTitle)}</div>`);
-  if (route.state === 'not_configured') {
-    parts.push(`<p class="pnote" data-outside-route="not_configured">${escapeHtml(W.routeMissing)}</p>`);
-    if (route.policyWritable) {
-      parts.push(`<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml(W.addRouteConfirm)}">`
-        + `<button type="submit" class="btn"${disabled}>${escapeHtml(W.addRoute)}</button>`
-        + `<span class="actmsg" data-action-message role="status"></span></form>`);
-    } else {
-      parts.push(`<p class="pnote">${escapeHtml(W.policyNotFile)}</p>`);
-    }
-  } else {
-    parts.push(renderReadiness(route));
-  }
-  parts.push(renderSetupSteps(route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`));
+  // 2. Problems, one list, each line with its fix.
+  parts.push(renderProblems(status, canEdit));
 
-  // 3. Cost and risk: the eight acknowledgements, the funding date, the optional caps.
-  if (route.state === 'configured') {
-    parts.push(renderAcknowledgements(route, canEdit));
-  }
+  // 3. The disclosure (design §A.10: up front): three short lines, the rest one click away.
+  parts.push(`<div class="sect">${escapeHtml(W.disclosureTitle)}</div>`
+    + `<ul class="ohshort" data-outside-disclosure>${W.disclosureShort.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`
+    + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml(W.disclosureMore)}</summary>`
+    + `<ul class="ohlist">${W.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></details>`);
 
-  // 4. A held request: Recover and Abandon, each explicit.
-  if (route.state === 'configured' && route.readiness && route.readiness.fences.length > 0) {
-    parts.push(renderFence(route.readiness, canEdit));
-  }
+  // 4. Cost and risk: the eight acknowledgements, collapsed once accepted.
+  if (route.state === 'configured') parts.push(renderAcknowledgements(route, canEdit));
 
-  // 5. Languages and the switch.
-  parts.push(renderEnable(status, summary, canEdit));
+  // 5. Secondary sections, collapsed unless they need attention.
+  const more: string[] = [];
+  if (route.state === 'configured' && route.readiness && route.readiness.fences.length > 0) more.push(renderFence(route.readiness, canEdit));
+  more.push(renderLanguages(status, canEdit));
+  if (route.state === 'configured') more.push(renderLimits(route, blockers, canEdit));
+  more.push(renderSetupSteps(route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, route.state === 'not_configured' || blockers.some((code) => SETUP_BLOCKERS.has(code))));
+  if (route.state === 'configured') more.push(renderDetails(route));
+  parts.push(`<div class="ohmore">${more.join('')}</div>`);
 
-  const config = { csrfToken: input.csrfToken ?? '', paths: DASHBOARD_OUTSIDE_HELP_PATHS, copy: { saving: W.saving, failed: W.saveFailed, restarting: W.restarting } };
+  const config = {
+    csrfToken: input.csrfToken ?? '',
+    paths: DASHBOARD_OUTSIDE_HELP_PATHS,
+    copy: { saving: W.saving, failed: W.saveFailed, restarting: W.restarting, on: W.state.on, off: W.state.off },
+  };
   const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config)}</script>` : '';
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}`;
 }
 
-function renderReadiness(route: Extract<DashboardOutsideHelpRoute, { state: 'configured' }>): string {
-  if (route.readinessUnavailable || !route.readiness) {
-    return `<p class="pnote ohwarn" data-outside-route="unknown">${escapeHtml(W.readinessUnavailable)}</p>`;
-  }
-  const ready = route.readiness;
-  const facts = [
-    ready.daemonFound ? fill(W.facts.daemon, { version: ready.daemonVersion ?? W.facts.versionUnknown }) : W.facts.daemonMissing,
-    ready.torMode === 'off' ? W.facts.torOff : ready.torFound ? W.facts.tor : W.facts.torMissing,
-    ready.apiKeyConfigured ? W.facts.key : W.facts.keyMissing,
-    fill(ready.requestsToday.count === 1 ? W.facts.todayOne : W.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
-    ready.expiry.state === 'active' && ready.expiry.expiryDate
-      ? fill(W.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? '') })
-      : ready.expiry.state === 'expired' ? W.facts.expired : W.facts.expiryUnknown,
-  ];
-  const blockers = ready.blockers.map((code) => `<li>${escapeHtml(outsideHelpBlockerWords(code))}</li>`).join('');
-  const head = ready.ready
-    ? `<p class="ohready" data-outside-route="ready">${escapeHtml(W.ready)}</p>`
-    : `<p class="pnote ohwarn" data-outside-route="blocked">${escapeHtml(W.blocked)}</p><ul class="ohlist" data-outside-blockers>${blockers}</ul>`;
-  return `${head}<ul class="ohfacts">${facts.map((fact) => `<li>${escapeHtml(fact)}</li>`).join('')}</ul>`
-    + `<p class="pnote ohsmall">${escapeHtml(fill(W.routeLabel, { label: ready.routeLabel }))}</p>`;
-}
-
-function renderSetupSteps(secretRef: string): string {
-  const steps = W.steps.map((step) => fill(step, { secretRef }));
-  return `<details class="howto" data-outside-steps><summary>${escapeHtml(W.stepsTitle)}</summary>`
-    + `<p>${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></details>`;
-}
-
-function renderAcknowledgements(route: Extract<DashboardOutsideHelpRoute, { state: 'configured' }>, canEdit: boolean): string {
+function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: DashboardOutsideHelpSummary, canEdit: boolean): string {
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
-  const accepted = new Set(route.acknowledgements.complete ? route.acknowledgements.accepted : []);
+  const route = status.route;
+  const on = status.settings.state === 'on';
+  const invalid = status.settings.state === 'invalid';
+  const blockedReason = invalid
+    ? undefined
+    : route.state === 'not_configured'
+      ? W.enableBlockedRoute
+      : !route.acknowledgements.complete ? W.enableBlockedAcks : undefined;
+  const button = invalid
+    ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml(W.replaceFile)}</button>`
+    : on
+      ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml(W.turnOff)}</button>`
+      : blockedReason
+        ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml(W.turnOn)}</button><span class="hint">${escapeHtml(blockedReason)}</span></span>`
+        : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml(W.turnOn)}</button>`;
+  const tone = summary.state === 'on' ? 'on' : summary.state === 'off' ? 'off' : 'attn';
+  const head = `<div class="ohhead"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>`
+    + `<span data-outside-state-text data-outside-state="${escapeHtml(summary.state)}">${escapeHtml(outsideHelpStateLine(summary))}</span></p>`
+    + `<div class="pbuttons">${button}</div></div>`;
+  const lines: string[] = [renderRouteLine(route)];
+  if (route.state === 'configured' && route.readiness) lines.push(`<p class="ohline" data-outside-usage>${escapeHtml(usageLine(route.readiness))}</p>`);
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="${invalid ? 'yes' : 'no'}">`
+    + head + lines.join('')
+    + `<p class="ohsmall">${escapeHtml(W.holdNote)}</p>`
+    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+
+function renderRouteLine(route: DashboardOutsideHelpRoute): string {
+  if (route.state === 'not_configured') return `<p class="ohline attn" data-outside-route="not_configured">${escapeHtml(W.routeMissingShort)}</p>`;
+  if (route.readinessUnavailable || !route.readiness) return `<p class="ohline attn" data-outside-route="unknown">${escapeHtml(W.routeUnknown)}</p>`;
+  const ready = route.readiness;
+  if (ready.ready) {
+    // Tor off is said where the reader looks first: the provider sees the address.
+    return ready.torMode === 'off'
+      ? `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReadyNoTor)} <span class="attn">${escapeHtml(W.facts.torOff)}.</span></p>`
+      : `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReady)}</p>`;
+  }
+  const first = ready.blockers[0];
+  const reason = first ? outsideHelpBlockerWords(first) : W.routeUnknown;
+  const more = ready.blockers.length > 1 ? ` ${fill(W.routeMore, { n: String(ready.blockers.length - 1) })}` : '';
+  return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml(fill(W.routeNotReady, { reason }))}${escapeHtml(more)}</p>`
+    + (ready.torMode === 'off' ? `<p class="ohline attn">${escapeHtml(W.facts.torOff)}.</p>` : '');
+}
+
+function usageLine(ready: DashboardOutsideHelpReadiness): string {
+  const count = ready.requestsToday.count;
+  const pieces = [count === 0 ? W.usageNone : count === 1 ? W.usageOne : fill(W.usageMany, { n: String(count) })];
+  // The ledger records the $6 reservation per consult, never the settled
+  // price, so the day's spend is said as its ceiling.
+  if (count > 0) pieces.push(fill(W.usageSpent, { usd: ready.spendToday.reservedUsd.toFixed(0) }));
+  pieces.push(ready.expiry.state === 'active' && ready.expiry.expiryDate
+    ? fill(W.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? '') })
+    : ready.expiry.state === 'expired' ? W.usageExpired : W.usageExpiryUnknown);
+  return pieces.join(' · ');
+}
+
+function renderProblems(status: DashboardOutsideHelpStatus, canEdit: boolean): string {
+  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+  const route = status.route;
+  const items: string[] = [];
+  if (route.state === 'not_configured') {
+    const action = route.policyWritable
+      ? `<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml(W.addRouteConfirm)}">`
+        + `<button type="submit" class="btn"${disabled}>${escapeHtml(W.addRoute)}</button>`
+        + `<span class="actmsg" data-action-message role="status"></span></form>`
+      : '';
+    items.push(`<li data-outside-route-missing><span>${escapeHtml(route.policyWritable ? W.routeMissing : W.policyNotFile)}</span>${action}</li>`);
+  } else if (route.readinessUnavailable || !route.readiness) {
+    items.push(`<li><span>${escapeHtml(W.routeUnknown)}</span></li>`);
+  } else {
+    for (const code of route.readiness.blockers) items.push(`<li><span>${escapeHtml(outsideHelpBlockerWords(code))}</span></li>`);
+  }
+  if (items.length === 0) return '';
+  return `<div class="sect attn">${escapeHtml(W.problemsTitle)}</div><ul class="ohfix" data-outside-blockers>${items.join('')}</ul>`;
+}
+
+function renderSection(input: { id: string; title: string; summary: string; open: boolean; body: string; attn?: boolean }): string {
+  return `<details class="ohsect" data-outside-section="${escapeHtml(input.id)}"${input.open ? ' open' : ''}>`
+    + `<summary><span class="ohsect-title${input.attn ? ' attn' : ''}">${escapeHtml(input.title)}</span><span class="ohsect-sum">${escapeHtml(input.summary)}</span></summary>`
+    + `<div class="ohsect-body">${input.body}</div></details>`;
+}
+
+function renderSetupSteps(secretRef: string, needed: boolean): string {
+  const steps = W.steps.map((step) => fill(step, { secretRef }));
+  return renderSection({
+    id: 'steps',
+    title: W.stepsTitle,
+    summary: '',
+    open: needed,
+    attn: needed,
+    body: `<div data-outside-steps><p class="pnote">${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>`,
+  });
+}
+
+function renderAcknowledgements(route: ConfiguredRoute, canEdit: boolean): string {
+  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+  const complete = route.acknowledgements.complete;
+  const accepted = new Set(complete ? route.acknowledgements.accepted : []);
   const boxes = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<label class="ohack"><input type="checkbox" name="acknowledged" value="${escapeHtml(entry.id)}"`
     + `${accepted.has(entry.id) ? ' checked' : ''}${disabled}><span>${escapeHtml(entry.statement)}</span></label>`).join('');
-  const state = route.acknowledgements.complete ? W.acknowledged : W.notAcknowledged;
-  return `<div class="sect">${escapeHtml(W.costTitle)}</div><p class="pnote">${escapeHtml(W.costIntro)}</p>`
-    + `<p class="pnote" data-outside-acknowledged="${route.acknowledgements.complete ? 'yes' : 'no'}">${escapeHtml(state)}</p>`
-    + `<form class="ohform" data-outside-form="route">${boxes}`
+  const form = `<form class="ohform" data-outside-form="route">${boxes}`
+    + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(W.saveRoute)}</button>`
+    + `<span class="hint">${escapeHtml(W.saveRestarts)}</span></div>`
+    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const head = `<div class="sect${complete ? '' : ' attn'}">${escapeHtml(W.costTitle)}</div>`;
+  if (complete) {
+    // Accepted at the current wording: one line, the statements one click away.
+    return head + `<p class="pnote" data-outside-acknowledged="yes">${escapeHtml(fill(W.acknowledged, { n: String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length) }))}</p>`
+      + `<details class="howto" data-outside-ack-review><summary>${escapeHtml(W.acknowledgedReview)}</summary>${form}</details>`;
+  }
+  return head + `<p class="pnote">${escapeHtml(W.costIntro)}</p>`
+    + `<p class="pnote" data-outside-acknowledged="no">${escapeHtml(W.notAcknowledged)}</p>` + form;
+}
+
+function renderLimits(route: ConfiguredRoute, blockers: readonly string[], canEdit: boolean): string {
+  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+  const capped = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
+  const limit = capped
+    ? [
+      ...(route.dailyRequestCap !== undefined ? [fill(W.limitsRequests, { n: String(route.dailyRequestCap) })] : []),
+      ...(route.dailySpendCapUsd !== undefined ? [fill(W.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []),
+    ].join(', ')
+    : W.limitsNone;
+  const funded = route.fundingDate ? fill(W.fundedOn, { date: shortDate(route.fundingDate) }) : W.notFunded;
+  const needed = blockers.some((code) => LIMIT_BLOCKERS.has(code));
+  // The one-click "no daily limit": clears both caps through the same
+  // transactional policy write as Save.
+  const noLimit = capped
+    ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>`
+      + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(W.removeLimits)}</button><span class="hint">${escapeHtml(W.removeLimitsHint)}</span></div>`
+      + `<span class="actmsg" data-action-message role="status"></span></form>`
+    : `<p class="pnote">${escapeHtml(W.noLimitIntro)}</p>`;
+  const body = noLimit
+    + `<form class="ohform" data-outside-form="route">`
     + `<label class="plabel" for="outside-funding-date">${escapeHtml(W.fundingDate)}</label>`
     + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml(route.fundingDate ?? '')}"${disabled}>`
     + `<label class="plabel" for="outside-cap-requests">${escapeHtml(W.capRequests)}</label>`
     + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml(String(route.dailyRequestCap)) : ''}"${disabled}>`
     + `<label class="plabel" for="outside-cap-usd">${escapeHtml(W.capUsd)}</label>`
     + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml(String(route.dailySpendCapUsd)) : ''}"${disabled}>`
-    + `<p class="pnote ohsmall">${escapeHtml(W.saveRestarts)}</p>`
-    + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(W.saveRoute)}</button>`
-    + `<span class="actmsg" data-action-message role="status"></span></div></form>`;
+    + `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits${disabled}>${escapeHtml(W.saveRoute)}</button><span class="hint">${escapeHtml(W.saveRestarts)}</span></div>`
+    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return renderSection({ id: 'limits', title: W.limitsTitle, summary: `${limit} · ${funded}`, open: needed, attn: needed, body });
 }
 
 function renderFence(ready: DashboardOutsideHelpReadiness, canEdit: boolean): string {
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
   const mine = ready.fences.some((fence) => fence.thisWallet);
   const rows = ready.fences.map((fence) => `<li>${escapeHtml(fill(fence.thisWallet ? W.fenceThis : W.fenceOther, { at: fence.at.slice(0, 16).replace('T', ' ') }))}</li>`).join('');
-  return `<div class="sect">${escapeHtml(W.fenceTitle)}</div><p class="pnote ohwarn" data-outside-fence>${escapeHtml(W.fenceIntro)}</p><ul class="ohlist">${rows}</ul>`
+  const body = `<p class="pnote ohwarn" data-outside-fence>${escapeHtml(W.fenceIntro)}</p><ul class="ohlist">${rows}</ul>`
     + `<div class="ohfence">`
     + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml(W.recoverConfirm)}">`
     + `<button type="submit" class="btn primary"${mine ? '' : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml(W.recover)}</button>`
@@ -253,9 +370,10 @@ function renderFence(ready: DashboardOutsideHelpReadiness, canEdit: boolean): st
       + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml(W.abandon)}</button>`
       + `<span class="hint">${escapeHtml(W.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join('')
     + `</div>`;
+  return renderSection({ id: 'fence', title: W.fenceTitle, summary: '', open: true, attn: true, body });
 }
 
-function renderEnable(status: DashboardOutsideHelpStatus, summary: DashboardOutsideHelpSummary, canEdit: boolean): string {
+function renderLanguages(status: DashboardOutsideHelpStatus, canEdit: boolean): string {
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
   const chosen = new Set(status.settings.languages);
   const languages = status.languages.map((entry) => {
@@ -265,21 +383,6 @@ function renderEnable(status: DashboardOutsideHelpStatus, summary: DashboardOuts
       + `${chosen.has(entry.language) && !off ? ' checked' : ''}${off ? ' disabled aria-disabled="true"' : disabled}>`
       + `<span>${escapeHtml(name)}${off ? ` <span class="hint">${escapeHtml(W.packMissing)}</span>` : ''}</span></label>`;
   }).join('');
-  const on = status.settings.state === 'on';
-  const route = status.route;
-  const blockedReason = status.settings.state === 'invalid'
-    ? undefined
-    : route.state === 'not_configured'
-      ? W.enableBlockedRoute
-      : !route.acknowledgements.complete ? W.enableBlockedAcks : undefined;
-  const invalid = status.settings.state === 'invalid';
-  const button = invalid
-    ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml(W.replaceFile)}</button>`
-    : on
-      ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml(W.turnOff)}</button>`
-      : blockedReason
-        ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml(W.turnOn)}</button><span class="hint">${escapeHtml(blockedReason)}</span></span>`
-        : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml(W.turnOn)}</button>`;
   // The domain packs the gate admits beside the languages (the defaults, or
   // the file's own choices): named in plain words, on and off.
   const domainNames = W.domainNames as Readonly<Record<string, string>>;
@@ -288,20 +391,47 @@ function renderEnable(status: DashboardOutsideHelpStatus, summary: DashboardOuts
   const domains = `<p class="pnote" data-outside-domains="${escapeHtml(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(','))}">`
     + `${escapeHtml(fill(W.domainsOn, { list: domainsOn.join(', ') || W.domainsNone }))}`
     + `${domainsOff.length > 0 ? ` ${escapeHtml(fill(W.domainsOff, { list: domainsOff.join(', ') }))}` : ''}</p>`;
-  return `<div class="sect">${escapeHtml(W.languagesTitle)}</div><p class="pnote">${escapeHtml(W.languagesIntro)}</p>${domains}`
-    + `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="${invalid ? 'yes' : 'no'}">${languages}`
-    + `<div class="pfooter"><p>${escapeHtml(W.automatic)}</p><div class="pbuttons">${button}</div>`
-    + `<span class="actmsg" data-action-message role="status"></span></div></form>`
-    + (summary.state === 'fence_held' ? '' : '');
+  const named = status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => LANGUAGE_NAMES[entry.language]);
+  // The language boxes are read by the switch above (the enable post carries them).
+  return renderSection({
+    id: 'languages',
+    title: W.languagesTitle,
+    summary: named.join(', '),
+    open: false,
+    body: `<p class="pnote">${escapeHtml(W.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`,
+  });
+}
+
+function renderDetails(route: ConfiguredRoute): string {
+  if (route.readinessUnavailable || !route.readiness) return '';
+  const ready = route.readiness;
+  const facts = [
+    ready.daemonFound ? fill(W.facts.daemon, { version: ready.daemonVersion ?? W.facts.versionUnknown }) : W.facts.daemonMissing,
+    ready.torMode === 'off' ? W.facts.torOff : ready.torFound ? W.facts.tor : W.facts.torMissing,
+    ready.apiKeyConfigured ? W.facts.key : W.facts.keyMissing,
+    fill(ready.requestsToday.count === 1 ? W.facts.todayOne : W.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
+    ready.expiry.state === 'active' && ready.expiry.expiryDate
+      ? fill(W.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? '') })
+      : ready.expiry.state === 'expired' ? W.facts.expired : W.facts.expiryUnknown,
+    fill(W.routeLabel, { label: ready.routeLabel }),
+    ...(ready.lastSession ? [fill(W.lastSession, { at: ready.lastSession.at.slice(0, 16).replace('T', ' '), result: ready.lastSession.result })] : []),
+  ];
+  return renderSection({
+    id: 'details',
+    title: W.detailsTitle,
+    summary: '',
+    open: false,
+    body: `<ul class="ohfacts" data-outside-facts>${facts.map((fact) => `<li>${escapeHtml(fact)}</li>`).join('')}</ul>`,
+  });
 }
 
 /**
- * The card's own controller: five small forms posted as JSON with the control
+ * The card's own controller: small forms posted as JSON with the control
  * session's CSRF token. Deliberately not the shared dashboard controller or
  * the Control UI action set: those are shared with the native surfaces, and
  * these routes exist for this page alone.
  */
-export function outsideHelpClientScript(config: { csrfToken: string; paths: typeof DASHBOARD_OUTSIDE_HELP_PATHS; copy: { saving: string; failed: string; restarting: string } }): string {
+export function outsideHelpClientScript(config: { csrfToken: string; paths: typeof DASHBOARD_OUTSIDE_HELP_PATHS; copy: { saving: string; failed: string; restarting: string; on: string; off: string } }): string {
   return `(function () {
   var config = ${escapeScriptJson(JSON.stringify(config))};
   var root = document.querySelector('[data-outside-help]');
@@ -318,26 +448,49 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     var n = Number(trimmed);
     return isFinite(n) ? n : NaN;
   }
+  function checked(name) {
+    return Array.prototype.map.call(root.querySelectorAll('input[name="' + name + '"]:checked'), function (input) { return input.value; });
+  }
+  function field(name) {
+    var input = root.querySelector('[name="' + name + '"]');
+    return input ? input.value : '';
+  }
+  // Each post carries the whole card's state for its route, wherever on the
+  // card the fields sit: the switch reads the language boxes, and every route
+  // save reads the acknowledgements, the funding date and both limits.
   function bodyFor(form, kind, submitter) {
-    var data = new FormData(form);
     if (kind === 'enable') {
       var invalid = form.getAttribute('data-outside-invalid') === 'yes';
       var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
-      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: data.getAll('languages') };
+      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
       if (invalid) body.replace_invalid = true;
       return body;
     }
     if (kind === 'route') {
+      if (form.hasAttribute('data-outside-nolimit')) {
+        return { acknowledged: checked('acknowledged'), daily_request_cap: null, daily_spend_cap_usd: null };
+      }
       return {
-        acknowledged: data.getAll('acknowledged'),
-        funding_date: String(data.get('funding_date') || ''),
-        daily_request_cap: numberOrNull(data.get('daily_request_cap')),
-        daily_spend_cap_usd: numberOrNull(data.get('daily_spend_cap_usd')),
+        acknowledged: checked('acknowledged'),
+        funding_date: String(field('funding_date') || ''),
+        daily_request_cap: numberOrNull(field('daily_request_cap')),
+        daily_spend_cap_usd: numberOrNull(field('daily_spend_cap_usd')),
       };
     }
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
+  }
+  // After a restart the worker is briefly away: wait for it to answer, then reload.
+  function reloadWhenBack(delay) {
+    var tries = 0;
+    function poll() {
+      tries += 1;
+      fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+        if (response.ok || tries > 40) window.location.reload(); else setTimeout(poll, 1500);
+      }, function () { if (tries > 40) window.location.reload(); else setTimeout(poll, 1500); });
+    }
+    setTimeout(poll, delay);
   }
   var paths = { unlock: config.paths.unlock, enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
   root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
@@ -352,12 +505,13 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       try {
         // The local unlock presents no credential at all: the boundary wants a
         // loopback browser and nothing else. Every other form carries the CSRF token.
+        var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var response = await fetch(paths[kind], kind === 'unlock'
           ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
           : {
             method: 'POST', credentials: 'same-origin', cache: 'no-store',
             headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
-            body: JSON.stringify(bodyFor(form, kind, event.submitter)),
+            body: JSON.stringify(body),
           });
         var result = {};
         try { result = await response.json(); } catch (error) { result = {}; }
@@ -367,11 +521,18 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
           return;
         }
         message(form, result.status_message || '', false);
+        if (kind === 'enable' && body && !body.replace_invalid) {
+          // Say the new state at once, before the reload that redraws the card.
+          var line = root.querySelector('[data-outside-state-text]');
+          if (line) line.textContent = body.enabled ? config.copy.on : config.copy.off;
+          if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
+          if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
+        }
         if (result.restarting) {
           message(form, (result.status_message || '') + ' ' + config.copy.restarting, false);
-          setTimeout(function () { window.location.reload(); }, 6000);
+          reloadWhenBack(4000);
         } else {
-          setTimeout(function () { window.location.reload(); }, 1200);
+          setTimeout(function () { window.location.reload(); }, 900);
         }
       } catch (error) {
         message(form, config.copy.failed, true);

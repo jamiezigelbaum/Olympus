@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
-import { createModelKeyReload } from '../src/core/model-key-reload.ts';
+import { createModelKeyReload, workerRestartsItself } from '../src/core/model-key-reload.ts';
 import type { ModelSetupView } from '../src/core/model-setup.ts';
 import { parseDashboardControlParams } from '../src/core/control-ui-gateway.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
@@ -157,4 +157,14 @@ test('credential activation schedules one supervised reload after the response, 
   scheduled!(); await new Promise((resolve) => setTimeout(resolve, 0));
   expect(events).toEqual(['scheduled', 'shutdown', 'exit']);
   expect(createModelKeyReload({ managed: false, shutdown: () => { throw new Error('must not stop'); }, exit: () => { throw new Error('must not exit'); } })()).toBe(false);
+});
+
+test('a worker restarts itself under the generated unit and under the native service (Gateway or engine host), never when started by hand', () => {
+  expect(workerRestartsItself({ OLYMPUS_MANAGED_WORKER: '1' })).toBe(true);
+  // The engine host's LaunchAgent sets OLYMPUS_ENGINE_HOST on the host; its
+  // supervised worker child carries the native service instance id.
+  expect(workerRestartsItself({ OLYMPUS_ENGINE_HOST: '1', OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '0f8fad5b-d9cb-469f-a165-70867728950e' })).toBe(true);
+  expect(workerRestartsItself({ OLYMPUS_ENGINE_HOST: '1' })).toBe(false);
+  expect(workerRestartsItself({ OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '  ' })).toBe(false);
+  expect(workerRestartsItself({})).toBe(false);
 });
