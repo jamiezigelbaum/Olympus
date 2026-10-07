@@ -7,6 +7,7 @@ import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../.
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
+import { dirname, join } from 'node:path';
 import { OperationError } from '../../../core/operation-error.ts';
 import { resolveEmbeddingEpoch } from '../embedding-identity.ts';
 import {
@@ -26,22 +27,35 @@ import {
   type BuiltInEmbeddingStatus,
   type InstalledBuiltInEmbedding,
 } from './assets.ts';
-import { BUILT_IN_EMBEDDING_MODEL, type BuiltInEmbeddingModelSpec } from './manifest.ts';
+import {
+  BUILT_IN_EMBEDDING_MODEL,
+  BUILT_IN_EMBEDDING_MODELS,
+  builtInEmbeddingModel,
+  LITERT_RUNTIME_PACK,
+  type BuiltInEmbeddingModelSpec,
+} from './manifest.ts';
+import { startLiteRtEmbedder, type LiteRtEmbedder, type LiteRtEmbedderOptions } from './litert-runtime.ts';
 import { onnxRuntimeFromDirectory, type EmbeddingRuntime, type EmbeddingSession } from './runtime.ts';
 import { WordPieceTokenizer } from './wordpiece.ts';
 
 export const BUILT_IN_EMBEDDING_PROVIDER = 'built-in';
 export const BUILT_IN_EMBEDDING_THREADS_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_THREADS';
+/** `cpu` keeps a LiteRT model off the GPU. */
+export const BUILT_IN_EMBEDDING_DEVICE_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_DEVICE';
 
 /** A document longer than one model window is read as up to this many windows. */
 const MAX_WINDOWS_PER_DOCUMENT = 8;
 /**
  * Padded tokens per forward pass; bounds peak memory independent of input.
+ * It also keeps a GPU pass under the ~2,700-token batch past which some
+ * WebGPU kernels exceed the GPU's dispatch limit.
  * Measured on an M3 (arctic-m int8, 4 threads): 8,192 tokens peaked near
  * 1.5 GB RSS, 2,048 near 0.7 GB, at the same throughput.
  */
 const MAX_BATCH_TOKENS = 2_048;
 const MAX_BATCH_ROWS = 32;
+/** Inputs per LiteRT call: a question waits behind at most one of these. */
+const LITERT_BATCH = 8;
 /** After a failed install, wait this long before trying again. */
 const RETRY_AFTER_FAILURE_MS = 2 * 60_000;
 
@@ -50,6 +64,8 @@ export interface BuiltInSourceEmbeddingProviderOptions {
   model?: BuiltInEmbeddingModelSpec;
   /** Defaults to ONNX Runtime loaded from the installed pack. */
   runtime?: (installed: InstalledBuiltInEmbedding) => EmbeddingRuntime;
+  /** Starts a LiteRT model's helper; defaults to the real one. */
+  liteRt?: (options: LiteRtEmbedderOptions) => Promise<LiteRtEmbedder>;
   /** Defaults to the pinned downloader. */
   install?: (options: BuiltInEmbeddingInstallerOptions) => Promise<InstalledBuiltInEmbedding>;
   installerOptions?: Omit<BuiltInEmbeddingInstallerOptions, 'env' | 'model'>;
@@ -58,9 +74,17 @@ export interface BuiltInSourceEmbeddingProviderOptions {
   now?: () => number;
 }
 
-interface LoadedModel {
-  session: EmbeddingSession;
-  tokenizer: WordPieceTokenizer;
+interface OnnxModel { kind: 'onnx'; session: EmbeddingSession; tokenizer: WindowTokenizer }
+type LoadedModel = OnnxModel | { kind: 'litert'; embedder: LiteRtEmbedder };
+
+/** A tokenizer as the windowing sees it: content ids, and the special ids around every window. */
+interface WindowTokenizer {
+  tokenize(text: string): number[];
+  /** `[CLS]` or `<bos>`. */
+  startId: number;
+  /** `[SEP]` or `<eos>`. */
+  endId: number;
+  padId: number;
 }
 
 interface Window {
@@ -77,10 +101,13 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   backend: 'local';
   /** Forward passes this process may run in parallel. */
   readonly threads: number;
+  /** A LiteRT model tries the GPU first (`auto`) unless the owner keeps it on the CPU. */
+  readonly device: 'auto' | 'cpu';
 
   private spec: BuiltInEmbeddingModelSpec;
   private env: Record<string, string | undefined>;
   private runtimeFactory: (installed: InstalledBuiltInEmbedding) => EmbeddingRuntime;
+  private liteRtFactory: (options: LiteRtEmbedderOptions) => Promise<LiteRtEmbedder>;
   private install: (options: BuiltInEmbeddingInstallerOptions) => Promise<InstalledBuiltInEmbedding>;
   private installerOptions: Omit<BuiltInEmbeddingInstallerOptions, 'env' | 'model'>;
   private now: () => number;
@@ -99,7 +126,9 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     this.modelId = this.spec.modelId;
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
+    this.device = resolveDevice(this.env);
     this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
     this.now = options.now ?? Date.now;
@@ -110,19 +139,23 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       backend: this.backend,
       ...(options.epochId ? { epochOverride: options.epochId } : {}),
     });
+    // Keys a WordPiece model never set are left out, so a model's hash (and
+    // the vectors stored under it) does not move when another model is added.
     this.configHash = createHash('sha256').update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
       revision: this.spec.revision,
       weights: this.spec.model.sha256,
-      vocabulary: this.spec.vocabulary.sha256,
+      ...(this.spec.vocabulary ? { vocabulary: this.spec.vocabulary.sha256 } : {}),
+      ...(this.spec.runtime === 'litert' ? { runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}` } : {}),
       dimension: this.dimension,
       maxTokens: this.spec.maxTokens,
       pooling: this.spec.pooling,
       queryPrefix: this.spec.queryPrefix,
       documentPrefix: this.spec.documentPrefix,
-      windows: MAX_WINDOWS_PER_DOCUMENT,
+      // LiteRT reads a longer input in pieces and averages them (set explicitly in the helper).
+      ...(this.spec.runtime === 'litert' ? { overflow: 'chunk-and-average' } : { windows: MAX_WINDOWS_PER_DOCUMENT }),
       backend: this.backend,
     })).digest('hex');
   }
@@ -158,7 +191,9 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     // let the query lane fall back to keyword search until it finishes.
     if (options.taskType === 'RETRIEVAL_QUERY' && !this.loaded) {
       const status = this.status();
-      if (status.state !== 'ready' && status.state !== 'loading') {
+      // A LiteRT model's start can take half a minute (its first GPU program
+      // compile), so a question never waits for it; an ONNX load takes a second.
+      if (this.spec.runtime === 'litert' || (status.state !== 'ready' && status.state !== 'loading')) {
         void this.load().catch(() => undefined);
         throw new BuiltInEmbeddingNotReadyError(this.status());
       }
@@ -202,10 +237,27 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     }
     try {
       reportBuiltInEmbeddingState(reporterOptions, 'loading');
-      const tokenizer = new WordPieceTokenizer(readFileSync(installed.vocabularyPath, 'utf8'));
-      const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+      let model: LoadedModel;
+      if (this.spec.runtime === 'litert') {
+        if (!installed.libraryPath) throw new Error('the LiteRT-LM runtime is not installed.');
+        const embedder = await this.liteRtFactory({
+          library: installed.libraryPath,
+          model: installed.modelPath,
+          // LiteRT keeps compiled GPU programs here, so later starts take seconds.
+          cacheDir: join(dirname(installed.modelPath), 'cache'),
+          threads: this.threads,
+          device: this.device,
+          maxInputTokens: this.spec.maxTokens,
+        });
+        model = { kind: 'litert', embedder };
+      } else {
+        if (!installed.vocabularyPath) throw new Error('the model vocabulary is not installed.');
+        const tokenizer = loadTokenizer(installed.vocabularyPath);
+        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        model = { kind: 'onnx', session, tokenizer };
+      }
       reportBuiltInEmbeddingState(reporterOptions, 'ready');
-      return { session, tokenizer };
+      return model;
     } catch (error) {
       const failure = new BuiltInEmbeddingInstallError(
         'runtime_load_failed',
@@ -244,18 +296,17 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     inputs: SourceEmbeddingInput[],
     taskType: SourceEmbeddingTaskType,
   ): Promise<number[][]> {
+    if (model.kind === 'litert') return this.embedLiteRt(model.embedder, inputs, taskType);
     const windowTokens = this.spec.maxTokens - 2;
     const windows: Window[] = [];
     inputs.forEach((input, index) => {
-      const prefix = taskType === 'RETRIEVAL_QUERY' ? this.spec.queryPrefix : this.spec.documentPrefix;
-      const text = `${prefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
-      const ids = model.tokenizer.tokenize(text);
+      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
       const maxWindows = taskType === 'RETRIEVAL_QUERY' ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window = 0; window < count; window += 1) {
         windows.push({
           input: index,
-          ids: [model.tokenizer.clsId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.sepId],
+          ids: [model.tokenizer.startId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.endId],
         });
       }
     });
@@ -273,7 +324,37 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     return sums.map((sum) => normalize(sum));
   }
 
-  private async forward(model: LoadedModel, batch: Window[]): Promise<Float64Array[]> {
+  /** LiteRT tokenizes, windows and pools itself; this only frames the prompts and keeps the pass order. */
+  private async embedLiteRt(
+    embedder: LiteRtEmbedder,
+    inputs: SourceEmbeddingInput[],
+    taskType: SourceEmbeddingTaskType,
+  ): Promise<number[][]> {
+    const prompts = inputs.map((input) => promptText(this.spec, input, taskType));
+    const out: number[][] = [];
+    for (let offset = 0; offset < prompts.length; offset += LITERT_BATCH) {
+      const batch = prompts.slice(offset, offset + LITERT_BATCH);
+      let vectors: Float32Array[];
+      try {
+        vectors = await this.withSlot(taskType, () => embedder.embed(batch));
+      } catch (error) {
+        throw new OperationError(
+          'source_index_error',
+          `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`,
+          'This is a local runtime failure; Olympus restarts the model on the next try.',
+        );
+      }
+      for (const vector of vectors) {
+        if (vector.length !== this.dimension) {
+          throw new OperationError('source_index_error', `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
+        }
+        out.push(normalize(vector));
+      }
+    }
+    return out;
+  }
+
+  private async forward(model: OnnxModel, batch: Window[]): Promise<Float64Array[]> {
     const rows = batch.length;
     const length = Math.max(...batch.map((window) => window.ids.length));
     const inputIds = new BigInt64Array(rows * length);
@@ -296,13 +377,14 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
         'This is a local runtime failure; restarting Olympus reloads the model.',
       );
     }
-    const [outRows, outLength, hidden] = output.dims;
-    if (outRows !== rows || outLength !== length || hidden !== this.dimension) {
+    const expected = [rows, length, this.dimension];
+    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
       throw new OperationError(
         'source_index_error',
-        `The built-in search model returned shape [${output.dims.join(', ')}], expected [${rows}, ${length}, ${this.dimension}].`,
+        `The built-in search model returned shape [${output.dims.join(', ')}], expected [${expected.join(', ')}].`,
       );
     }
+    const hidden = this.dimension;
     return batch.map((window, row) => {
       const vector = new Float64Array(hidden);
       const base = row * length * hidden;
@@ -318,6 +400,26 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       return Float64Array.from(normalize(vector));
     });
   }
+}
+
+function loadTokenizer(path: string): WindowTokenizer {
+  const tokenizer = new WordPieceTokenizer(readFileSync(path, 'utf8'));
+  return {
+    tokenize: (text) => tokenizer.tokenize(text),
+    startId: tokenizer.clsId,
+    endId: tokenizer.sepId,
+    padId: tokenizer.padId,
+  };
+}
+
+/** The text a model reads for one input: its task prefix, then the title and text as the model was trained to see them. */
+function promptText(spec: BuiltInEmbeddingModelSpec, input: SourceEmbeddingInput, taskType: SourceEmbeddingTaskType): string {
+  if (taskType === 'RETRIEVAL_QUERY') return `${spec.queryPrefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
+  if (spec.documentPrefix.includes('{title}')) {
+    const title = input.title?.replace(/\s+/g, ' ').trim() || 'none';
+    return `${spec.documentPrefix.replace('{title}', () => title)}${input.text}`;
+  }
+  return `${spec.documentPrefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
 }
 
 /** Thrown for a query while the model is still downloading; the query lane degrades to keyword search. */
@@ -348,12 +450,6 @@ export interface BuiltInEmbeddingAttention {
 export function builtInEmbeddingAttention(status: BuiltInEmbeddingStatus): BuiltInEmbeddingAttention | undefined {
   if (status.state !== 'failed' || !status.failure) return undefined;
   return { id: 'built-in-embedding', reason: status.failure.reason, message: status.failure.message };
-}
-
-export function builtInEmbeddingStatusFromEnv(
-  env: Record<string, string | undefined> = process.env,
-): BuiltInEmbeddingStatus & { directory: string } {
-  return { ...readBuiltInEmbeddingStatus(env), directory: builtInEmbeddingPaths(env).root };
 }
 
 function builtInEmbeddingOperationError(error: unknown): OperationError {
@@ -401,6 +497,14 @@ function normalize(vector: ArrayLike<number>): number[] {
   return out;
 }
 
+function resolveDevice(env: Record<string, string | undefined>): 'auto' | 'cpu' {
+  const configured = env[BUILT_IN_EMBEDDING_DEVICE_ENV]?.trim().toLowerCase();
+  if (configured && configured !== 'cpu' && configured !== 'auto') {
+    throw new OperationError('config_error', `${BUILT_IN_EMBEDDING_DEVICE_ENV} must be "auto" or "cpu".`);
+  }
+  return configured === 'cpu' ? 'cpu' : 'auto';
+}
+
 function resolveThreads(explicit: number | undefined, env: Record<string, string | undefined>): number {
   const configured = explicit ?? (env[BUILT_IN_EMBEDDING_THREADS_ENV]?.trim()
     ? Number(env[BUILT_IN_EMBEDDING_THREADS_ENV])
@@ -432,11 +536,12 @@ export function sharedBuiltInSourceEmbeddingProvider(options: {
   modelId: string;
   env?: Record<string, string | undefined>;
 }): BuiltInSourceEmbeddingProvider {
-  if (options.modelId !== BUILT_IN_EMBEDDING_MODEL.modelId) {
+  const model = builtInEmbeddingModel(options.modelId);
+  if (!model) {
     throw new OperationError(
       'config_error',
       `This version of Olympus does not include the built-in embedding model "${options.modelId}".`,
-      `Use model "${BUILT_IN_EMBEDDING_MODEL.modelId}" for the built-in profile, or update Olympus.`,
+      `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(', ')} for the built-in profile, or update Olympus.`,
     );
   }
   const env = options.env ?? process.env;
@@ -444,7 +549,7 @@ export function sharedBuiltInSourceEmbeddingProvider(options: {
   sharedProviders ??= new Map();
   let provider = sharedProviders.get(key);
   if (!provider) {
-    provider = new BuiltInSourceEmbeddingProvider({ env });
+    provider = new BuiltInSourceEmbeddingProvider({ env, model });
     sharedProviders.set(key, provider);
   }
   return provider;

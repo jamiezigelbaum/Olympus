@@ -1,27 +1,36 @@
 /**
- * The built-in embedding model (owner decision 2026-10-01): the zero-setup
- * default for new installs. These tests run with a stub runtime and a stub
- * download server; `OLYMPUS_BUILT_IN_EMBEDDING_REAL_TEST=1` additionally runs
- * the real model (downloads ~225 MB once into OLYMPUS_BUILT_IN_EMBEDDING_DIR
- * or a temporary directory).
+ * The built-in embedding model: the zero-setup default for new installs
+ * (Arctic Embed M v1.5 from 2026-10-01, EmbeddingGemma 2 from 2026-10-06).
+ * These tests run with a stub runtime and a stub download server;
+ * `OLYMPUS_BUILT_IN_EMBEDDING_REAL_TEST=1` additionally runs the real default
+ * model (downloads it once into OLYMPUS_BUILT_IN_EMBEDDING_DIR or a temporary
+ * directory; EmbeddingGemma 2 runs through LiteRT-LM and needs Bun).
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gzipSync } from 'node:zlib';
+import { deflateRawSync, gzipSync } from 'node:zlib';
 import { loadSovereigntyPreset, SOVEREIGNTY_PRESETS, validateSovereigntyConfig, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import {
   BuiltInEmbeddingInstallError,
+  builtInEmbeddingPaths,
   installBuiltInEmbedding,
   readBuiltInEmbeddingStatus,
   type BuiltInEmbeddingStatus,
 } from '../src/workers/source-index/built-in-embedding/assets.ts';
+import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
 import {
+  ARCTIC_EMBED_M_V1_5,
   BUILT_IN_EMBEDDING_MODEL,
+  BUILT_IN_EMBEDDING_MODELS,
+  builtInEmbeddingModelFiles,
+  EMBEDDINGGEMMA_2,
+  LITERT_RUNTIME_PACK,
   ONNX_RUNTIME_PACK,
   type BuiltInEmbeddingModelSpec,
+  type LiteRtRuntimePackSpec,
   type OnnxRuntimePackSpec,
 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import {
@@ -31,7 +40,9 @@ import {
   builtInEmbeddingDashboardState,
   sharedBuiltInSourceEmbeddingProvider,
 } from '../src/workers/source-index/built-in-embedding/provider.ts';
+import { startLiteRtEmbedder, type LiteRtEmbedder, type LiteRtEmbedderOptions } from '../src/workers/source-index/built-in-embedding/litert-runtime.ts';
 import type { EmbeddingBatch, EmbeddingRuntime } from '../src/workers/source-index/built-in-embedding/runtime.ts';
+import { readZipEntry } from '../src/workers/source-index/built-in-embedding/zip.ts';
 import { readTarGz } from '../src/workers/source-index/built-in-embedding/tar.ts';
 import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embedding/wordpiece.ts';
 import { canonicalEmbeddingIdentityForModel } from '../src/workers/source-index/embedding-identity.ts';
@@ -47,7 +58,8 @@ import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 
-const BUILT_IN_EPOCH = 'local:built-in:arctic-embed-m-v1.5-int8-e58a8f7:768';
+const BUILT_IN_EPOCH = 'local:built-in:embeddinggemma-2-litert-24d962e:768';
+const ARCTIC_EPOCH = 'local:built-in:arctic-embed-m-v1.5-int8-e58a8f7:768';
 
 const VOCAB = [
   '[PAD]', '[UNK]', '[CLS]', '[SEP]', '[MASK]',
@@ -142,7 +154,7 @@ function servedAssets(options: { corruptModel?: boolean; status?: number } = {})
   ]);
   const requests: string[] = [];
   const model: BuiltInEmbeddingModelSpec = {
-    ...BUILT_IN_EMBEDDING_MODEL,
+    ...ARCTIC_EMBED_M_V1_5,
     modelId: 'test-built-in-model',
     dimension: 4,
     maxTokens: 8,
@@ -185,7 +197,7 @@ describe('built-in embedding installer', () => {
       onProgress: (status) => progress.push(status),
     });
 
-    expect(readFileSync(installed.vocabularyPath, 'utf8')).toBe(VOCAB);
+    expect(readFileSync(installed.vocabularyPath!, 'utf8')).toBe(VOCAB);
     const runtimeBin = join(installed.runtimeDir, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6');
     expect(readdirSync(runtimeBin)).toEqual([process.platform]);
     expect(existsSync(join(installed.runtimeDir, 'node_modules', 'onnxruntime-common', 'package.json'))).toBe(true);
@@ -280,7 +292,7 @@ describe('built-in embedding installer', () => {
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
     const served = servedAssets();
     const installed = await installBuiltInEmbedding({ env, model: served.model, skipRuntime: true, fetchImpl: served.fetchImpl });
-    await Bun.write(installed.vocabularyPath, VOCAB.replace('hello', 'HELLO'));
+    await Bun.write(installed.vocabularyPath!, VOCAB.replace('hello', 'HELLO'));
     const tampered = await installBuiltInEmbedding({
       env, model: { ...served.model, modelId: served.model.modelId }, skipRuntime: true, fetchImpl: served.fetchImpl,
     }).catch((caught: unknown) => caught);
@@ -288,7 +300,7 @@ describe('built-in embedding installer', () => {
     // Either the cache short-circuits or the mismatch is caught: never a silent load of a different vocabulary.
     if (tampered instanceof BuiltInEmbeddingInstallError) {
       expect(tampered.reason).toBe('checksum_mismatch');
-      expect(existsSync(installed.vocabularyPath)).toBe(false);
+      expect(existsSync(installed.vocabularyPath!)).toBe(false);
     }
   });
 });
@@ -495,7 +507,14 @@ describe('built-in embedding as the new-install default', () => {
     const secure = createSourceIndexEmbeddingProviderFromSovereignty(engine, 'secure_local', env);
     expect(internal).toBeInstanceOf(BuiltInSourceEmbeddingProvider);
     expect(secure).toBe(internal);
-    expect(createSourceIndexEmbeddingProviderFromEnv({ ...env, OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'built-in' })).toBe(internal);
+    expect(createSourceIndexEmbeddingProviderFromEnv({
+      ...env,
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'built-in',
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL: BUILT_IN_EMBEDDING_MODEL.modelId,
+    })).toBe(internal);
+    // Naming no model keeps the model that setting has always meant: an upgrade never re-embeds on its own.
+    expect(createSourceIndexEmbeddingProviderFromEnv({ ...env, OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'built-in' })?.modelId)
+      .toBe(ARCTIC_EMBED_M_V1_5.modelId);
     expect(() => sharedBuiltInSourceEmbeddingProvider({ modelId: 'some-future-model', env })).toThrow('does not include');
   });
 
@@ -532,6 +551,319 @@ describe('built-in embedding as the new-install default', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// LiteRT-LM (EmbeddingGemma 2)
+
+describe('ZIP reader', () => {
+  test('reads a stored or deflated entry and reports a missing one', () => {
+    const archive = buildZip([
+      { name: 'litert_lm/__init__.py', data: 'stored', deflate: false },
+      { name: 'litert_lm/liblitert-lm.dylib', data: 'native library '.repeat(200), deflate: true },
+    ]);
+    expect(new TextDecoder().decode(readZipEntry(archive, 'litert_lm/liblitert-lm.dylib'))).toBe('native library '.repeat(200));
+    expect(new TextDecoder().decode(readZipEntry(archive, 'litert_lm/__init__.py'))).toBe('stored');
+    expect(readZipEntry(archive, 'litert_lm/other.so')).toBeUndefined();
+    expect(() => readZipEntry(new Uint8Array(64), 'x')).toThrow('Not a ZIP archive');
+    // The directory still names the entry, but its bytes are gone.
+    const truncated = new Uint8Array([...archive.subarray(0, 40), ...archive.subarray(archive.length - 200)]);
+    expect(() => readZipEntry(truncated, 'litert_lm/liblitert-lm.dylib')).toThrow();
+  });
+});
+
+const PLATFORM = `${process.platform}-${process.arch}`;
+
+function servedLiteRt(options: { corruptWheel?: boolean } = {}) {
+  const modelBytes = new TextEncoder().encode('fake litertlm bundle '.repeat(500));
+  const wheel = buildZip([{ name: 'litert_lm/liblitert-lm.dylib', data: 'native library', deflate: true }]);
+  const served = options.corruptWheel ? new Uint8Array(wheel.length).fill(7) : wheel;
+  const requests: string[] = [];
+  const model: BuiltInEmbeddingModelSpec = {
+    ...EMBEDDINGGEMMA_2,
+    modelId: 'test-litert-model',
+    dimension: 4,
+    model: { name: 'model.litertlm', url: 'https://models.test/model.litertlm', bytes: modelBytes.length, sha256: sha256(modelBytes) },
+  };
+  const pack: LiteRtRuntimePackSpec = {
+    version: LITERT_RUNTIME_PACK.version,
+    platforms: { [PLATFORM]: { name: 'litert.whl', url: 'https://wheels.test/litert.whl', bytes: wheel.length, sha256: sha256(wheel), library: 'litert_lm/liblitert-lm.dylib' } },
+  };
+  const fetchImpl = (async (input: string | URL | Request) => {
+    requests.push(String(input));
+    const body = String(input).endsWith('.litertlm') ? modelBytes : String(input).endsWith('.whl') ? served : undefined;
+    return body ? new Response(new Uint8Array(body)) : new Response('missing', { status: 404 });
+  }) as typeof fetch;
+  return { model, pack, fetchImpl, requests };
+}
+
+describe('built-in embedding installer with a LiteRT model', () => {
+  test('downloads the model and takes only the library out of the pinned wheel', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    const served = servedLiteRt();
+    const installed = await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl });
+    expect(installed.vocabularyPath).toBeUndefined();
+    expect(readFileSync(installed.libraryPath!, 'utf8')).toBe('native library');
+    expect(readdirSync(installed.runtimeDir).sort()).toEqual(['liblitert-lm.dylib', 'olympus-runtime.json']);
+    expect(installed.runtimeDir).toBe(builtInEmbeddingPaths(env, served.model).runtimeDir);
+    expect(served.requests.sort()).toEqual(['https://models.test/model.litertlm', 'https://wheels.test/litert.whl']);
+    // Installed once: a second call downloads nothing.
+    await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl });
+    expect(served.requests).toHaveLength(2);
+  });
+
+  test('a library changed on disk after unpacking is unpacked again from the pinned wheel', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    const served = servedLiteRt();
+    const installed = await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl });
+    writeFileSync(installed.libraryPath!, 'tampered');
+    await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl });
+    expect(readFileSync(installed.libraryPath!, 'utf8')).toBe('native library');
+    expect(served.requests.filter((url) => url.endsWith('.whl'))).toHaveLength(2);
+  });
+
+  test('a wheel that does not match its pin installs nothing; a platform without a wheel is unsupported', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    const served = servedLiteRt({ corruptWheel: true });
+    const failed = await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl })
+      .catch((caught: unknown) => caught);
+    expect((failed as BuiltInEmbeddingInstallError).reason).toBe('checksum_mismatch');
+    expect(existsSync(builtInEmbeddingPaths(env, served.model).runtimeDir)).toBe(false);
+    const unsupported = await installBuiltInEmbedding({
+      env, model: served.model, liteRtRuntime: { ...served.pack, platforms: {} }, fetchImpl: served.fetchImpl,
+    }).catch((caught: unknown) => caught);
+    expect((unsupported as BuiltInEmbeddingInstallError).reason).toBe('unsupported_platform');
+  });
+});
+
+/** A stand-in LiteRT helper: each prompt becomes `[length, first char code, batch size, 1]`. */
+function stubLiteRt(log: { batches: string[][]; options: LiteRtEmbedderOptions[] }, dimension = 4) {
+  return async (options: LiteRtEmbedderOptions): Promise<LiteRtEmbedder> => {
+    log.options.push(options);
+    return {
+      device: options.device === 'cpu' ? 'cpu' : 'gpu',
+      async embed(texts) {
+        log.batches.push([...texts]);
+        return texts.map((text) => Float32Array.from({ length: dimension }, (_, index) => [text.length, text.charCodeAt(0), texts.length, 1][index] ?? 0));
+      },
+      async release() {},
+    };
+  };
+}
+
+function liteRtProvider(extraEnv: Record<string, string> = {}, dimension = 4) {
+  const served = servedLiteRt();
+  const log = { batches: [] as string[][], options: [] as LiteRtEmbedderOptions[] };
+  const provider = new BuiltInSourceEmbeddingProvider({
+    env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir(), ...extraEnv },
+    model: served.model,
+    liteRt: stubLiteRt(log, dimension),
+    installerOptions: { fetchImpl: served.fetchImpl, liteRtRuntime: served.pack },
+  });
+  return { provider, log };
+}
+
+describe('built-in embedding with a LiteRT model', () => {
+  test('frames documents and questions in the model\'s prompts and sends them in small batches', async () => {
+    const { provider, log } = liteRtProvider();
+    const documents = Array.from({ length: 11 }, (_, index) => ({ text: `note ${index}`, ...(index === 0 ? { title: 'Lab\n  results' } : {}) }));
+    const vectors = await provider.embed(documents, { taskType: 'RETRIEVAL_DOCUMENT' });
+    expect(vectors).toHaveLength(11);
+    expect(vectors.every((vector) => Math.abs(Math.hypot(...vector) - 1) < 1e-6)).toBe(true);
+    expect(log.batches.map((batch) => batch.length)).toEqual([8, 3]);
+    expect(log.batches[0]![0]).toBe('title: Lab results | text: note 0');
+    expect(log.batches[0]![1]).toBe('title: none | text: note 1');
+    await provider.embed([{ text: 'my liver numbers' }], { taskType: 'RETRIEVAL_QUERY' });
+    expect(log.batches.at(-1)).toEqual(['task: search result | query: my liver numbers']);
+  });
+
+  test('starts the helper with the installed library, a cache beside the model, and the owner\'s device choice', async () => {
+    const auto = liteRtProvider();
+    await auto.provider.prepare();
+    const [options] = auto.log.options;
+    expect(options!.library.endsWith('liblitert-lm.dylib')).toBe(true);
+    expect(options!.model.endsWith('model.litertlm')).toBe(true);
+    expect(options!.cacheDir).toBe(join(options!.model, '..', 'cache'));
+    expect(options!.device).toBe('auto');
+    expect(options!.maxInputTokens).toBe(EMBEDDINGGEMMA_2.maxTokens);
+    const cpu = liteRtProvider({ OLYMPUS_BUILT_IN_EMBEDDING_DEVICE: 'cpu' });
+    await cpu.provider.prepare();
+    expect(cpu.log.options[0]!.device).toBe('cpu');
+    expect(() => liteRtProvider({ OLYMPUS_BUILT_IN_EMBEDDING_DEVICE: 'metal' })).toThrow('must be "auto" or "cpu"');
+  });
+
+  test('a question never waits for a LiteRT start: it falls back and the start begins', async () => {
+    const { provider, log } = liteRtProvider();
+    await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' })).rejects.toBeInstanceOf(BuiltInEmbeddingNotReadyError);
+    await provider.prepare();
+    expect(log.options).toHaveLength(1);
+    await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' });
+    expect(log.batches).toHaveLength(1);
+  });
+
+  test('refuses a vector of the wrong size', async () => {
+    const { provider } = liteRtProvider({}, 8);
+    await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' })).rejects.toThrow('returned 8 values, expected 4');
+  });
+});
+
+/** A helper script that speaks the LiteRT helper's protocol without LiteRT. */
+function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'native-error-on-gpu' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
+  const path = join(temporaryDir(), 'fake-helper.js');
+  writeFileSync(path, `
+    const settings = JSON.parse(process.argv[2]);
+    const behaviour = ${JSON.stringify(behaviour)};
+    if (behaviour === 'fatal') { console.log(JSON.stringify({ fatal: 'no model here' })); process.exit(1); }
+    const device = settings.device === 'auto' ? 'gpu' : 'cpu';
+    if (behaviour === 'crash-on-gpu-start' && device === 'gpu') process.exit(139);
+    console.log('library chatter that is not JSON');
+    console.log(JSON.stringify({ ready: true, device }));
+    if (behaviour === 'close-stdin') { process.stdin.destroy(); setInterval(() => {}, 1000); return; }
+    const lines = require('node:readline').createInterface({ input: process.stdin });
+    if (behaviour === 'ignore-stdin-close') setInterval(() => {}, 1000);
+    else lines.on('close', () => process.exit(0));
+    lines.on('line', (line) => {
+      if (behaviour === 'hang') return;
+      const { id, texts } = JSON.parse(line);
+      if (behaviour === 'crash-first-gpu-batch' && device === 'gpu') process.exit(3);
+      if (behaviour === 'native-error-on-gpu' && device === 'gpu') { console.log(JSON.stringify({ id, error: 'LiteRT-LM could not embed this batch.', native: true })); return; }
+      if (texts.includes('bad')) { console.log(JSON.stringify({ id, error: 'Every input must be non-empty text.' })); return; }
+      const vectors = new Float32Array(texts.length * 2);
+      texts.forEach((text, index) => vectors.set([text.length, device === 'gpu' ? 1 : 2], index * 2));
+      console.log(JSON.stringify({ id, dimension: 2, vectors: Buffer.from(vectors.buffer).toString('base64') }));
+    });
+  `);
+  return path;
+}
+
+function helperOptions(helperPath: string, extra: Partial<LiteRtEmbedderOptions> = {}): LiteRtEmbedderOptions {
+  return { library: '/lib.so', model: '/model.litertlm', cacheDir: '/cache', threads: 1, device: 'auto', maxInputTokens: 2048, bunPath: process.execPath, helperPath, ...extra };
+}
+
+describe('the LiteRT helper process', () => {
+  test('starts, reports its device, and returns one vector per text', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('ok')));
+    expect(embedder.device).toBe('gpu');
+    const vectors = await embedder.embed(['ab', 'abcd']);
+    expect(vectors.map((vector) => Array.from(vector))).toEqual([[2, 1], [4, 1]]);
+    await embedder.release();
+  });
+
+  test('a helper that cannot open the model fails the start with its reason', async () => {
+    await expect(startLiteRtEmbedder(helperOptions(fakeHelper('fatal')))).rejects.toThrow('no model here');
+  });
+
+  test('a helper that stops on the GPU fails that batch and comes back on the CPU', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('crash-first-gpu-batch')));
+    await expect(embedder.embed(['abc'])).rejects.toThrow('stopped');
+    const vectors = await embedder.embed(['abc']);
+    expect(embedder.device).toBe('cpu');
+    expect(Array.from(vectors[0]!)).toEqual([3, 2]);
+    await embedder.release();
+  });
+
+  test('a native failure replaces the helper (GPU to CPU); a bad request fails only itself', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('native-error-on-gpu')));
+    await expect(embedder.embed(['abc'])).rejects.toThrow('could not embed');
+    expect(Array.from((await embedder.embed(['abc']))[0]!)).toEqual([3, 2]);
+    expect(embedder.device).toBe('cpu');
+    await expect(embedder.embed(['bad'])).rejects.toThrow('non-empty text');
+    expect(Array.from((await embedder.embed(['abcd']))[0]!)).toEqual([4, 2]);
+    expect(embedder.device).toBe('cpu');
+    await embedder.release();
+  });
+
+  test('a helper that dies starting on the GPU is started again on the CPU', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('crash-on-gpu-start')));
+    expect(embedder.device).toBe('cpu');
+    expect(Array.from((await embedder.embed(['abc']))[0]!)).toEqual([3, 2]);
+    await embedder.release();
+  });
+
+  test('a write to a helper that closed its input fails the batch, not this process', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('close-stdin'), { requestTimeoutMs: 1_000 }));
+    await Bun.sleep(100);
+    // Large enough to need more than one pipe write after the reader is gone:
+    // the write fails (EPIPE) or goes unanswered; either way only the batch fails.
+    await expect(embedder.embed(['x'.repeat(1_000_000)])).rejects.toThrow(/stopped/);
+    await embedder.release();
+  });
+
+  test('a batch that never answers is abandoned and the helper replaced', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('hang'), { requestTimeoutMs: 200 }));
+    await expect(embedder.embed(['abc'])).rejects.toThrow('stopped responding');
+    // The next batch starts a new helper (on the CPU, since the stuck one was on the GPU); it hangs too, and is abandoned too.
+    await expect(embedder.embed(['abc'])).rejects.toThrow('stopped responding');
+    expect(embedder.device).toBe('cpu');
+    await embedder.release();
+  });
+
+  test('release kills a helper that does not exit when its input closes', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('ignore-stdin-close'), { stopTimeoutMs: 100 }));
+    const started = Date.now();
+    await embedder.release();
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+});
+
+describe('the built-in model registry', () => {
+  test('EmbeddingGemma 2 is the new-install default and Arctic stays loadable', () => {
+    expect(BUILT_IN_EMBEDDING_MODEL).toBe(EMBEDDINGGEMMA_2);
+    expect(BUILT_IN_EMBEDDING_MODELS.map((model) => model.modelId)).toEqual([EMBEDDINGGEMMA_2.modelId, ARCTIC_EMBED_M_V1_5.modelId]);
+    expect(new Set(BUILT_IN_EMBEDDING_MODELS.map((model) => model.modelId)).size).toBe(BUILT_IN_EMBEDDING_MODELS.length);
+    for (const model of BUILT_IN_EMBEDDING_MODELS) {
+      expect(canonicalEmbeddingIdentityForModel(model.modelId)?.dimension).toBe(model.dimension);
+    }
+  });
+
+  test('Arctic keeps the identity its stored vectors were written under', () => {
+    const provider = new BuiltInSourceEmbeddingProvider({ env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() }, model: ARCTIC_EMBED_M_V1_5 });
+    expect(provider.epochId).toBe(ARCTIC_EPOCH);
+    // Frozen from the build before EmbeddingGemma 2 was added: a change here re-embeds every Arctic install.
+    expect(provider.configHash).toBe('1a42a3ee2296bb1f5572df71ab1361647e77d5f87c7b7b5351c606c79f0449f0');
+  });
+
+  test('an install that embedded with Arctic keeps embedding with Arctic', () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    for (const preset of SOVEREIGNTY_PRESETS) {
+      const config = loadSovereigntyPreset(preset);
+      const [id] = Object.entries(config.modelProfiles).find(([, profile]) => profile.provider === 'built-in')!;
+      const arcticEra: SovereigntyConfig = {
+        ...config,
+        modelProfiles: { ...config.modelProfiles, [id]: { ...config.modelProfiles[id]!, model: ARCTIC_EMBED_M_V1_5.modelId } },
+      };
+      const provider = createSourceIndexEmbeddingProviderFromSovereignty(createSovereigntyEngine(arcticEra), 'internal', env);
+      expect(provider?.modelId).toBe(ARCTIC_EMBED_M_V1_5.modelId);
+      expect(provider?.epochId).toBe(ARCTIC_EPOCH);
+    }
+  });
+
+  // Ship gates: every model and runtime file pinned, and a relevance bar
+  // calibrated on a real corpus. The default must never ship half-done.
+  test('every built-in model is pinned to an exact revision, size and digest', () => {
+    for (const model of BUILT_IN_EMBEDDING_MODELS) {
+      expect({ model: model.modelId, revision: /^[0-9a-f]{40}$/.test(model.revision) }).toEqual({ model: model.modelId, revision: true });
+      expect(model.modelId).not.toContain('UNPINNED');
+      for (const file of builtInEmbeddingModelFiles(model)) {
+        expect({ file: file.url, pinned: /^[0-9a-f]{64}$/.test(file.sha256) && file.bytes > 0 })
+          .toEqual({ file: file.url, pinned: true });
+        expect(file.url).toContain(`/resolve/${model.revision}/`);
+      }
+    }
+    for (const [platform, wheel] of Object.entries(LITERT_RUNTIME_PACK.platforms)) {
+      expect({ platform, pinned: /^[0-9a-f]{64}$/.test(wheel.sha256) && wheel.bytes > 0 && wheel.url.includes(LITERT_RUNTIME_PACK.version) })
+        .toEqual({ platform, pinned: true });
+    }
+    expect(Object.keys(LITERT_RUNTIME_PACK.platforms).sort()).toEqual([...ONNX_RUNTIME_PACK.platforms].sort());
+  });
+
+  test('every built-in model has a relevance bar calibrated for its vector lane', () => {
+    for (const model of BUILT_IN_EMBEDDING_MODELS) {
+      const bar = calibratedSemanticRelevanceBar(model.modelId);
+      expect({ model: model.modelId, calibrated: bar !== undefined && bar > 0 && bar < 1 })
+        .toEqual({ model: model.modelId, calibrated: true });
+    }
+  });
+});
+
 const realTest = process.env.OLYMPUS_BUILT_IN_EMBEDDING_REAL_TEST === '1' ? test : test.skip;
 
 describe('built-in embedding with the real model (opt-in)', () => {
@@ -552,6 +884,10 @@ describe('built-in embedding with the real model (opt-in)', () => {
     expect(documents.every((vector) => vector.length === 768)).toBe(true);
     const scores = documents.map((vector) => vector.reduce((sum, value, index) => sum + value * query![index]!, 0));
     expect(scores.indexOf(Math.max(...scores))).toBe(1);
+    // Longer than the model's 2,048-token window: read in pieces, not refused or cut.
+    const [long] = await provider.embed([{ text: 'The plumber fixed the kitchen sink and replaced the faucet. '.repeat(400) }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    expect(long!.length).toBe(768);
+    expect(long!.reduce((sum, value, index) => sum + value * query![index]!, 0)).toBeGreaterThan(scores[0]!);
   }, 900_000);
 });
 
@@ -603,6 +939,49 @@ function buildTar(entries: Array<{ path: string; data: string }>): Uint8Array {
   for (const block of blocks) {
     out.set(block, offset);
     offset += block.length;
+  }
+  return out;
+}
+
+/** A ZIP archive with stored or deflated entries, as a wheel is built. */
+function buildZip(entries: Array<{ name: string; data: string; deflate: boolean }>): Uint8Array {
+  const local: Uint8Array[] = [];
+  const central: Uint8Array[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = new TextEncoder().encode(entry.name);
+    const raw = new TextEncoder().encode(entry.data);
+    const body = entry.deflate ? new Uint8Array(deflateRawSync(raw)) : raw;
+    const header = new DataView(new ArrayBuffer(30));
+    header.setUint32(0, 0x04034b50, true);
+    header.setUint16(8, entry.deflate ? 8 : 0, true);
+    header.setUint32(18, body.length, true);
+    header.setUint32(22, raw.length, true);
+    header.setUint16(26, name.length, true);
+    local.push(new Uint8Array(header.buffer), name, body);
+    const record = new DataView(new ArrayBuffer(46));
+    record.setUint32(0, 0x02014b50, true);
+    record.setUint16(10, entry.deflate ? 8 : 0, true);
+    record.setUint32(20, body.length, true);
+    record.setUint32(24, raw.length, true);
+    record.setUint16(28, name.length, true);
+    record.setUint32(42, offset, true);
+    central.push(new Uint8Array(record.buffer), name);
+    offset += 30 + name.length + body.length;
+  }
+  const centralSize = central.reduce((sum, part) => sum + part.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);
+  end.setUint16(8, entries.length, true);
+  end.setUint16(10, entries.length, true);
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, offset, true);
+  const parts = [...local, ...central, new Uint8Array(end.buffer)];
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
   }
   return out;
 }

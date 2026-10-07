@@ -11,9 +11,9 @@ import { normalizeSecretRef } from './secret-store.ts';
 import { assertModelTrustTierAllowed } from './source-model-policy.ts';
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import type { SourceTrustDomain, SourceTrustTier } from './source-index/types.ts';
-import { BUILT_IN_EMBEDDING_MODEL } from '../workers/source-index/built-in-embedding/manifest.ts';
+import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL } from '../workers/source-index/built-in-embedding/manifest.ts';
 
-const BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
+const BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
 import {
   assertZkapiDaemonBaseUrl,
   loopbackPort,

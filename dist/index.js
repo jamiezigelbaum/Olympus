@@ -3964,10 +3964,10 @@ var init_venice_models = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/manifest.ts
-var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, BUILT_IN_EMBEDDING_MODEL;
+var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2_REVISION = "24d962e906c7d332c6428e71c9676855024569e2", EMBEDDINGGEMMA_2_BASE, EMBEDDINGGEMMA_2, BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, LITERT_WHEELS = "https://files.pythonhosted.org/packages", LITERT_RUNTIME_PACK;
 var init_manifest = __esm(() => {
   ARCTIC_M_BASE = `https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5/resolve/${ARCTIC_M_REVISION}`;
-  BUILT_IN_EMBEDDING_MODEL = {
+  ARCTIC_EMBED_M_V1_5 = {
     modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
     repository: "Snowflake/snowflake-arctic-embed-m-v1.5",
     revision: ARCTIC_M_REVISION,
@@ -3988,6 +3988,52 @@ var init_manifest = __esm(() => {
       url: `${ARCTIC_M_BASE}/vocab.txt`,
       bytes: 231508,
       sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  };
+  EMBEDDINGGEMMA_2_BASE = `https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm/resolve/${EMBEDDINGGEMMA_2_REVISION}`;
+  EMBEDDINGGEMMA_2 = {
+    modelId: "embeddinggemma-2-litert-24d962e",
+    repository: "litert-community/embeddinggemma-2-740m-litert-lm",
+    revision: EMBEDDINGGEMMA_2_REVISION,
+    license: "Apache-2.0",
+    runtime: "litert",
+    dimension: 768,
+    maxTokens: 2048,
+    pooling: "model",
+    queryPrefix: "task: search result | query: ",
+    documentPrefix: "title: {title} | text: ",
+    model: {
+      name: "embeddinggemma-2-740m.litertlm",
+      url: `${EMBEDDINGGEMMA_2_BASE}/embeddinggemma-2-740m.litertlm`,
+      bytes: 484622336,
+      sha256: "e7a8a2204b91e0f96e92960e84a09a89212e1633dcb7575a9bf3378b4df77f4c"
+    }
+  };
+  BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL = ARCTIC_EMBED_M_V1_5;
+  LITERT_RUNTIME_PACK = {
+    version: "0.18.0",
+    platforms: {
+      "darwin-arm64": {
+        name: "litert_lm_api-0.18.0-py3-none-macosx_12_0_arm64.whl",
+        url: `${LITERT_WHEELS}/cc/df/147e5fa60cf8964bdcbc022cbd38502f91ea415bf82bed2c9335fcf9be9d/litert_lm_api-0.18.0-py3-none-macosx_12_0_arm64.whl`,
+        bytes: 21430649,
+        sha256: "9fd0c55835e469a035c1b75cde4797b26292963c2c36d9fcdfceb965ffa08a37",
+        library: "litert_lm/liblitert-lm.dylib"
+      },
+      "linux-x64": {
+        name: "litert_lm_api-0.18.0-py3-none-manylinux_2_27_x86_64.whl",
+        url: `${LITERT_WHEELS}/c9/8f/eb7a5203be1d48440c6b8d6e6382c3f744dd6d338fe400555718b4d695a1/litert_lm_api-0.18.0-py3-none-manylinux_2_27_x86_64.whl`,
+        bytes: 47051760,
+        sha256: "b64e2cf6d7dcb90ff094b74af595cc5d53faa07e0889f967d15df8d3e696b53c",
+        library: "litert_lm/liblitert-lm.so"
+      },
+      "linux-arm64": {
+        name: "litert_lm_api-0.18.0-py3-none-manylinux_2_27_aarch64.whl",
+        url: `${LITERT_WHEELS}/cf/f2/60707ac6860248e5f3601926c7cfe44794db350b60c1f14cb6e7e8874ae4/litert_lm_api-0.18.0-py3-none-manylinux_2_27_aarch64.whl`,
+        bytes: 46425934,
+        sha256: "d066db0c2bcd832b2b9cf8532b5fff385f7cff8562a1b482f8da0b51f810c47c",
+        library: "litert_lm/liblitert-lm.so"
+      }
     }
   };
 });
@@ -4638,7 +4684,7 @@ var init_sovereignty = __esm(() => {
   init_manifest();
   init_zkapi_consult_settings();
   init_source_model_policy();
-  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
+  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
   SUPPORTED_PROVIDERS = [
     "local-openai-compatible",
     "openclaw-infer",
@@ -9267,6 +9313,12 @@ var init_embedding_identity = __esm(() => {
       modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
       backend: "local",
       dimension: 768
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "embeddinggemma-2-litert-24d962e",
+      backend: "local",
+      dimension: 768
     })
   ];
 });
@@ -9309,7 +9361,8 @@ var init_local_index = __esm(() => {
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
-    [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4]
+    [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
+    [EMBEDDINGGEMMA_2.modelId, 0.73]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",
@@ -9470,13 +9523,213 @@ var init_tier_names_only_settle = __esm(() => {
 // src/workers/source-index/built-in-embedding/tar.ts
 var init_tar = () => {};
 
+// src/workers/source-index/built-in-embedding/zip.ts
+var init_zip = () => {};
+
 // src/workers/source-index/built-in-embedding/assets.ts
 var STALE_LOCK_MS, DOWNLOAD_STALL_MS;
 var init_assets = __esm(() => {
   init_manifest();
   init_tar();
+  init_zip();
   STALE_LOCK_MS = 30 * 60000;
   DOWNLOAD_STALL_MS = 2 * 60000;
+});
+
+// src/workers/source-index/built-in-embedding/litert-runtime.ts
+import { spawn } from "node:child_process";
+import { existsSync as existsSync10, statSync as statSync10 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { delimiter as delimiter4, dirname as dirname14, isAbsolute as isAbsolute11, join as join17 } from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
+function helperEnvironment() {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined)
+      continue;
+    if (["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"].includes(name) || name.startsWith("VK_")) {
+      env[name] = value;
+    }
+  }
+  env.HOME ??= homedir11();
+  return env;
+}
+
+class HelperProcess {
+  child;
+  device = "cpu";
+  nextId = 1;
+  pending = new Map;
+  stderr = "";
+  requestTimeoutMs;
+  stopTimeoutMs;
+  exited = false;
+  constructor(child, options) {
+    this.child = child;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
+  }
+  failAll(reason) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(reason);
+    }
+    this.pending.clear();
+  }
+  static start(options, device) {
+    const settings = {
+      library: options.library,
+      model: options.model,
+      cacheDir: options.cacheDir,
+      threads: options.threads,
+      device,
+      maxInputTokens: options.maxInputTokens
+    };
+    const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: helperEnvironment()
+    });
+    const helper = new HelperProcess(child, options);
+    child.stdin.on("error", (error) => {
+      helper.exited = true;
+      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
+      child.kill("SIGKILL");
+    });
+    return new Promise((resolve3, reject) => {
+      let started = false;
+      const timer = setTimeout(() => {
+        if (started)
+          return;
+        child.kill("SIGKILL");
+        reject(new Error("The built-in search model took too long to start."));
+      }, options.startTimeoutMs ?? 5 * 60000);
+      child.stderr.on("data", (chunk) => {
+        helper.stderr = (helper.stderr + chunk.toString("utf8")).slice(-4000);
+      });
+      createInterface({ input: child.stdout }).on("line", (line) => {
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (!started) {
+          if (message.ready) {
+            started = true;
+            clearTimeout(timer);
+            helper.device = message.device === "gpu" ? "gpu" : "cpu";
+            resolve3(helper);
+          } else if (message.fatal) {
+            started = true;
+            clearTimeout(timer);
+            reject(Object.assign(new Error(message.fatal), { fatal: true }));
+          }
+          return;
+        }
+        helper.settle(message);
+      });
+      child.on("error", (error) => {
+        if (!started) {
+          started = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      child.on("exit", () => {
+        helper.exited = true;
+      });
+      child.on("close", (code, signal) => {
+        helper.exited = true;
+        const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split(`
+`).at(-1)}` : ""}.`);
+        if (!started) {
+          started = true;
+          clearTimeout(timer);
+          reject(reason);
+        }
+        helper.failAll(reason);
+      });
+    });
+  }
+  embed(texts) {
+    if (this.exited)
+      return Promise.reject(new Error("The built-in search model is not running."));
+    const id = this.nextId++;
+    return new Promise((resolve3, reject) => {
+      const timer = setTimeout(() => {
+        this.child.kill("SIGKILL");
+        this.exited = true;
+        this.failAll(new Error("The built-in search model stopped responding and was restarted."));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve: resolve3, reject, count: texts.length, timer });
+      this.child.stdin.write(`${JSON.stringify({ id, texts })}
+`);
+    });
+  }
+  settle(message) {
+    const pending = message.id === undefined ? undefined : this.pending.get(message.id);
+    if (!pending || message.id === undefined)
+      return;
+    this.pending.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.error || !message.vectors || !message.dimension) {
+      pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
+      if (message.native) {
+        this.exited = true;
+        this.child.kill("SIGKILL");
+      }
+      return;
+    }
+    const bytes = Buffer.from(message.vectors, "base64");
+    const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    const vectors = Array.from({ length: pending.count }, (_, index) => all.subarray(index * message.dimension, (index + 1) * message.dimension));
+    if (vectors.some((vector) => vector.length !== message.dimension)) {
+      pending.reject(new Error("The built-in search model returned the wrong number of values."));
+      return;
+    }
+    pending.resolve(vectors);
+  }
+  async stop() {
+    if (this.exited)
+      return;
+    const exited = new Promise((resolve3) => this.child.once("close", () => resolve3()));
+    this.child.stdin.end();
+    const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
+    await exited;
+    clearTimeout(timer);
+  }
+}
+function helperPath() {
+  const here = dirname14(fileURLToPath5(import.meta.url));
+  for (const name of ["litert-helper.js", "litert-helper.ts"]) {
+    const candidate = join17(here, name);
+    if (existsSync10(candidate))
+      return candidate;
+  }
+  throw new Error("The built-in search model helper is missing from this install.");
+}
+function resolveBun() {
+  const bunName = process.platform === "win32" ? "bun.exe" : "bun";
+  const candidates = [
+    process.versions.bun ? process.execPath : undefined,
+    process.env.BUN_INSTALL ? join17(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter4).filter(Boolean).map((directory) => join17(directory, bunName)),
+    join17(homedir11(), ".bun", "bin", bunName)
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute11(candidate))
+      continue;
+    try {
+      if (statSync10(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  throw new Error("The built-in search model needs Bun, and none was found.");
+}
+var REQUEST_TIMEOUT_MS;
+var init_litert_runtime = __esm(() => {
+  REQUEST_TIMEOUT_MS = 3 * 60000;
 });
 
 // src/workers/source-index/built-in-embedding/runtime.ts
@@ -9493,6 +9746,7 @@ var init_provider = __esm(() => {
   init_embeddings();
   init_assets();
   init_manifest();
+  init_litert_runtime();
   init_runtime();
   init_wordpiece();
   RETRY_AFTER_FAILURE_MS = 2 * 60000;
@@ -10350,7 +10604,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join17 } from "node:path";
+import { join as join18 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -10396,7 +10650,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join17(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join18(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -10733,11 +10987,11 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { homedir as homedir11 } from "node:os";
-import { dirname as dirname14, join as join18 } from "node:path";
+import { homedir as homedir12 } from "node:os";
+import { dirname as dirname15, join as join19 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir11(), ".local", "share");
-  return join18(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir12(), ".local", "share");
+  return join19(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
@@ -15446,9 +15700,9 @@ function constantTimeStringEqual(actual, expected) {
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname17, join as join22 } from "node:path";
-import { homedir as homedir14 } from "node:os";
+import { existsSync as existsSync13, mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname18, join as join23 } from "node:path";
+import { homedir as homedir15 } from "node:os";
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -16042,12 +16296,12 @@ init_secret_store();
 init_atomic_file();
 init_file_lease();
 init_zkapi_consult_settings();
-import { spawn, execFileSync as execFileSync2 } from "node:child_process";
+import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash6, randomUUID as randomUUID7 } from "node:crypto";
-import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync10, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, realpathSync, rmSync as rmSync3, statSync as statSync10, writeFileSync as writeFileSync4 } from "node:fs";
+import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync11, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, realpathSync, rmSync as rmSync3, statSync as statSync11, writeFileSync as writeFileSync4 } from "node:fs";
 import { createConnection } from "node:net";
-import { homedir as homedir12, tmpdir as tmpdir2 } from "node:os";
-import { delimiter as delimiter4, dirname as dirname15, join as join19, resolve as resolvePath2 } from "node:path";
+import { homedir as homedir13, tmpdir as tmpdir2 } from "node:os";
+import { delimiter as delimiter5, dirname as dirname16, join as join20, resolve as resolvePath2 } from "node:path";
 var DAY_MS = 24 * 60 * 60 * 1000;
 var PROBE_MAX_BYTES = 64 * 1024;
 var MAX_QUESTION_BYTES = 8 * 1024;
@@ -16222,14 +16476,14 @@ function runSelfTestProbe(argv, env) {
   }
 }
 function defaultZkapiConfinement() {
-  if (process.platform === "darwin" && existsSync10("/usr/bin/sandbox-exec")) {
+  if (process.platform === "darwin" && existsSync11("/usr/bin/sandbox-exec")) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
       level,
       limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
       wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
       selfTest: async (workDir, env) => {
-        const script = join19(workDir, "confinement-self-test.cjs");
+        const script = join20(workDir, "confinement-self-test.cjs");
         writeFileSync4(script, SELF_TEST_SCRIPT, { mode: 384 });
         const outside = runSelfTestProbe([process.execPath, script], env);
         const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
@@ -16244,14 +16498,14 @@ function defaultZkapiConfinement() {
     selfTest: async () => false
   };
 }
-function defaultZkapiStatePath(home = homedir12()) {
-  return join19(home, ".olympus", "zkapi-consult-state.json");
+function defaultZkapiStatePath(home = homedir13()) {
+  return join20(home, ".olympus", "zkapi-consult-state.json");
 }
 function utcDay(now) {
   return now.toISOString().slice(0, 10);
 }
 function readState(path) {
-  if (!existsSync10(path))
+  if (!existsSync11(path))
     return;
   const parsed = JSON.parse(readFileSync14(path, "utf8"));
   if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
@@ -16267,8 +16521,8 @@ function zkapiLastSession(path) {
   return readState(path)?.lastSession;
 }
 function zkapiWalletDirectory(env) {
-  const home = env.HOME?.trim() || homedir12();
-  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join19(home, "Library", "Application Support", "zkapi-clientd") : join19(env.XDG_CONFIG_HOME?.trim() || join19(home, ".config"), "zkapi-clientd"));
+  const home = env.HOME?.trim() || homedir13();
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join20(home, "Library", "Application Support", "zkapi-clientd") : join20(env.XDG_CONFIG_HOME?.trim() || join20(home, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath2(configured);
   try {
     return realpathSync(absolute2);
@@ -16378,11 +16632,11 @@ function childEnvironment(env) {
   return out;
 }
 function resolveExecutable(name, explicit, env) {
-  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter4).filter(Boolean).map((dir) => join19(dir, name));
+  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter5).filter(Boolean).map((dir) => join20(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync3(candidate, constants2.X_OK);
-      if (statSync10(candidate).isFile())
+      if (statSync11(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -16500,10 +16754,10 @@ var SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomp
 
 // src/core/consult-gate.ts
 import { createHash as createHash7 } from "node:crypto";
-import { existsSync as existsSync11, readFileSync as readFileSync15, statSync as statSync11 } from "node:fs";
-import { homedir as homedir13 } from "node:os";
-import { basename as basename4, dirname as dirname16, join as join20 } from "node:path";
-import { fileURLToPath as fileURLToPath5 } from "node:url";
+import { existsSync as existsSync12, readFileSync as readFileSync15, statSync as statSync12 } from "node:fs";
+import { homedir as homedir14 } from "node:os";
+import { basename as basename4, dirname as dirname17, join as join21 } from "node:path";
+import { fileURLToPath as fileURLToPath6 } from "node:url";
 init_opsec();
 init_types();
 var CONSULT_GATE_MAX_QUESTION_BYTES = 600;
@@ -16737,14 +16991,14 @@ var VOCABULARY_DIR = ["assets", "consult", "vocabulary"];
 var CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 var CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
 function consultUserVocabularyDir(env = process.env) {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join20(env.HOME?.trim() || homedir13(), ".olympus", "consult", "vocabulary");
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join21(env.HOME?.trim() || homedir14(), ".olympus", "consult", "vocabulary");
 }
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync11(path))
+    if (!existsSync12(path))
       return "missing";
-    if (statSync11(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
+    if (statSync12(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync15(path);
     return createHash7("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
@@ -16753,15 +17007,15 @@ function verifiedPackFile(path, sha256) {
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname16(fileURLToPath5(moduleUrl));
-  const root = basename4(here) === "core" && basename4(dirname16(here)) === "src" ? dirname16(dirname16(here)) : basename4(here) === "dist" ? dirname16(here) : undefined;
-  return root !== undefined && existsSync11(join20(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname17(fileURLToPath6(moduleUrl));
+  const root = basename4(here) === "core" && basename4(dirname17(here)) === "src" ? dirname17(dirname17(here)) : basename4(here) === "dist" ? dirname17(here) : undefined;
+  return root !== undefined && existsSync12(join21(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
   const root = consultVocabularyRoot();
   const status = selection.shipped.map((id) => {
-    const result = root ? verifiedPackFile(join20(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    const result = root ? verifiedPackFile(join21(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
     return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
   });
   if (selection.user.length > 0) {
@@ -16769,7 +17023,7 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const manifest = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
       const sha256 = manifest.get(id);
-      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join20(userDir, `${id}.txt.gz`), sha256);
+      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join21(userDir, `${id}.txt.gz`), sha256);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -16779,8 +17033,8 @@ function userManifestEntries(userDir) {
   if (!userDir)
     return [];
   try {
-    const path = join20(userDir, "manifest.json");
-    if (!existsSync11(path) || statSync11(path).size > 1024 * 1024)
+    const path = join21(userDir, "manifest.json");
+    if (!existsSync12(path) || statSync12(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync15(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -17717,7 +17971,7 @@ var UNIT_WORDS = new Set([
 
 // src/core/consult-settings.ts
 import { closeSync as closeSync3, constants as constants3, fstatSync, openSync as openSync3, readSync } from "node:fs";
-import { join as join21 } from "node:path";
+import { join as join22 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var DEFAULT_CONSULT_SETTINGS = Object.freeze({
@@ -17734,7 +17988,7 @@ var OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
 var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
 function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
-  return home ? join21(home, ".olympus", "consult.json") : undefined;
+  return home ? join22(home, ".olympus", "consult.json") : undefined;
 }
 var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 function parseConsultSettings(value) {
@@ -17888,10 +18142,10 @@ function errorCode(error) {
 
 // src/core/doctor.ts
 function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir14();
+  const home = env.HOME?.trim() || homedir15();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" ? inspectEngine({ homeDir: home }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync12(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync13(workerServicePaths(process.platform, home).unitPath) : false;
   return {
     ...openclawPath ? { openclawPath } : {},
     engine: { installed: engine.installed, state: engine.state },
@@ -17974,7 +18228,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync12(configPath))
+  if (configPath === undefined || !existsSync13(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -17986,7 +18240,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join22(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join23(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -18988,7 +19242,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join22(dirname17(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join23(dirname18(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -19009,7 +19263,7 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync12(path))
+    if (!existsSync13(path))
       return;
     const parsed = JSON.parse(readFileSync16(path, "utf8"));
     const record = asRecord15(parsed);
@@ -19032,7 +19286,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync9(dirname17(path), { recursive: true });
+  mkdirSync9(dirname18(path), { recursive: true });
   writeFileSync5(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -19246,7 +19500,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync12(join22(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync13(join23(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
