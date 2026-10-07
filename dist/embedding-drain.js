@@ -24460,6 +24460,10 @@ var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
 init_connect();
 init_worker_auth();
 
+// src/core/dashboard-session-secret.ts
+init_atomic_file();
+init_worker_auth();
+
 // src/workers/email-source/file-extraction-runtime.ts
 init_credential_broker();
 init_types();
