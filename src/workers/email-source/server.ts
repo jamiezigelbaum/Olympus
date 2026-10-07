@@ -1170,9 +1170,10 @@ function createWorkerSharedBuiltInModel(
   if (base.status().state !== 'not_started') void model.prepare();
   // A fresh install's first download, started by the tier sniffer when it
   // has items waiting for this model (prepare() is shared and deduplicated).
-  // A verified install whose server once failed to start is re-armed too, at
-  // most once per BUILT_IN_MODEL_RETRY_MS: otherwise `failed` would keep the
-  // sniffer and the private panel off this model until the engine restarts.
+  // A verified install (prepared in this process) whose server later failed
+  // to start is re-armed too, at most once per BUILT_IN_MODEL_RETRY_MS:
+  // otherwise `failed` would keep the sniffer and the private panel off this
+  // model until the engine restarts. A failed install is never re-run here.
   let lastRetryMs = 0;
   const startIfIdle = (): void => {
     const status = base.status();
@@ -1180,7 +1181,7 @@ function createWorkerSharedBuiltInModel(
       void model.prepare();
       return;
     }
-    if (status.state === 'failed' && status.failure?.reason === 'runtime_load_failed'
+    if (prepared && status.state === 'failed' && status.failure?.reason === 'runtime_load_failed'
       && Date.now() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
       lastRetryMs = Date.now();
       void model.prepare();

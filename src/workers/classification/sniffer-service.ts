@@ -365,10 +365,11 @@ export class TierSnifferService {
       abort.abort();
       return tick;
     }
+    const overran = this.overrunAbortedAtMs !== 0;
     this.running = false;
     this.abort = undefined;
     this.lastTick = tick;
-    this.reportWaiting(tick);
+    this.reportWaiting(tick, overran);
     if (this.stopped) this.closeLedgers();
     return tick;
   }
@@ -382,15 +383,18 @@ export class TierSnifferService {
    * reason changes (and once when asking resumes), so a stalled queue is never
    * silent. Content-free: a state name, never an item.
    */
-  private reportWaiting(tick: TierSnifferTick): void {
+  private reportWaiting(tick: TierSnifferTick, overran = false): void {
     let reason: TierSnifferWaitReason | undefined;
     if (tick.state === 'model_unavailable') reason = 'no_model';
     else if (tick.state === 'awaiting_owner_approval') reason = 'awaiting_owner_approval';
     else if (tick.state === 'failed') reason = 'failed';
     else if (tick.state === 'ran' && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
-      reason = stop === 'yield' || stop === 'preempted'
-        ? (this.answering() || !this.breakerOpen() ? 'yielding_to_answers' : 'breaker_open')
+      reason = stop === 'yield' || stop === 'preempted' || stop === 'aborted'
+        ? overran ? 'pass_stuck'
+          : this.answering() ? 'yielding_to_answers'
+            : this.breakerOpen() ? 'breaker_open'
+              : 'yielding_to_answers'
         : stop === 'daily_budget' ? 'daily_budget'
           : stop === 'transport_failures' ? 'model_not_answering'
             : undefined;
@@ -399,11 +403,13 @@ export class TierSnifferService {
       this.setWaiting(reason, tick);
       return;
     }
-    if (tick.state === 'ran' && (tick.report.calls > 0 || tick.report.pendingSeen === 0)) {
-      const previous = this.waitingReason;
-      this.waiting = undefined;
-      this.waitingReason = 'asking';
-      if (tick.report.calls > 0 && previous && previous !== 'asking') this.options.log?.('Olympus tier sniffer: asking again.');
+    // Any other finished pass (it asked, the queue is empty, or nothing was
+    // left to ask this tick) clears the reason: a stale one never lingers.
+    const previous = this.waitingReason;
+    this.waiting = undefined;
+    this.waitingReason = 'asking';
+    if (tick.state === 'ran' && tick.report.calls > 0 && previous && previous !== 'asking') {
+      this.options.log?.('Olympus tier sniffer: asking again.');
     }
   }
 

@@ -28696,10 +28696,11 @@ class TierSnifferService {
       abort.abort();
       return tick;
     }
+    const overran = this.overrunAbortedAtMs !== 0;
     this.running = false;
     this.abort = undefined;
     this.lastTick = tick;
-    this.reportWaiting(tick);
+    this.reportWaiting(tick, overran);
     if (this.stopped)
       this.closeLedgers();
     return tick;
@@ -28707,7 +28708,7 @@ class TierSnifferService {
   clockMs() {
     return (this.options.now?.() ?? new Date).getTime();
   }
-  reportWaiting(tick) {
+  reportWaiting(tick, overran = false) {
     let reason;
     if (tick.state === "model_unavailable")
       reason = "no_model";
@@ -28717,18 +28718,17 @@ class TierSnifferService {
       reason = "failed";
     else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
-      reason = stop === "yield" || stop === "preempted" ? this.answering() || !this.breakerOpen() ? "yielding_to_answers" : "breaker_open" : stop === "daily_budget" ? "daily_budget" : stop === "transport_failures" ? "model_not_answering" : undefined;
+      reason = stop === "yield" || stop === "preempted" || stop === "aborted" ? overran ? "pass_stuck" : this.answering() ? "yielding_to_answers" : this.breakerOpen() ? "breaker_open" : "yielding_to_answers" : stop === "daily_budget" ? "daily_budget" : stop === "transport_failures" ? "model_not_answering" : undefined;
     }
     if (reason) {
       this.setWaiting(reason, tick);
       return;
     }
-    if (tick.state === "ran" && (tick.report.calls > 0 || tick.report.pendingSeen === 0)) {
-      const previous = this.waitingReason;
-      this.waiting = undefined;
-      this.waitingReason = "asking";
-      if (tick.report.calls > 0 && previous && previous !== "asking")
-        this.options.log?.("Olympus tier sniffer: asking again.");
+    const previous = this.waitingReason;
+    this.waiting = undefined;
+    this.waitingReason = "asking";
+    if (tick.state === "ran" && tick.report.calls > 0 && previous && previous !== "asking") {
+      this.options.log?.("Olympus tier sniffer: asking again.");
     }
   }
   setWaiting(reason, tick) {
