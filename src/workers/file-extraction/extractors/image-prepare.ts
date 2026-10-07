@@ -18,7 +18,7 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeMediaCacheFile } from '../../../core/media-cache.ts';
+import { SIPS_PATH, writeMediaCacheFile } from '../../../core/media-cache.ts';
 import type { ExtractedMedia, ExtractorOutput } from '../types.ts';
 import {
   ExtractionCommandError,
@@ -28,7 +28,6 @@ import {
 } from './command-runner.ts';
 import { imageExtensionForMimeType } from './ocr.ts';
 
-export const SIPS_PATH = '/usr/bin/sips';
 export const DEFAULT_IMAGE_PREPARE_TIMEOUT_MS = 60_000;
 /**
  * Larger originals are skipped (`skipped_too_large`): a phone photo is a few
@@ -42,6 +41,13 @@ export const IMAGE_PREPARE_MAX_PIXEL_EDGE = 1_024;
  */
 const MAX_PREPARED_BYTES = 16 * 1024 * 1024;
 const TEMP_DIR_PREFIX = 'olympus-image-prepare-';
+/**
+ * Pictures smaller than this on either side (a logo, a tracking pixel, an
+ * icon) are not worth a picture vector; they keep the text-lane
+ * behaviour they had before.
+ */
+export const IMAGE_PREPARE_MIN_PIXEL_EDGE = 64;
+const MIN_INPUT_BYTES = 1_024;
 
 export const IMAGE_PREPARE_ERROR_FAILED = 'image_prepare_failed';
 export const IMAGE_PREPARE_ERROR_TIMEOUT = 'image_prepare_timeout';
@@ -69,7 +75,8 @@ export interface ImagePreparationInput {
 export type ImagePreparationResult =
   | { kind: 'media'; media: ExtractedMedia }
   | { kind: 'settled'; output: ExtractorOutput }
-  | { kind: 'unavailable' };
+  | { kind: 'unavailable' }
+  | { kind: 'too_small' };
 
 export type ImagePreparation = (input: ImagePreparationInput) => Promise<ImagePreparationResult>;
 
@@ -82,6 +89,7 @@ export function createImagePreparation(options: ImagePreparationOptions): ImageP
     if (Math.max(input.sizeBytes, input.bytes.byteLength) > maxInputBytes) {
       return { kind: 'settled', output: { status: 'skipped_too_large' } };
     }
+    if (input.bytes.byteLength < MIN_INPUT_BYTES) return { kind: 'too_small' };
     const tempDir = await mkdtemp(join(tmpdir(), TEMP_DIR_PREFIX));
     try {
       const inputPath = join(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
@@ -121,9 +129,14 @@ export function createImagePreparation(options: ImagePreparationOptions): ImageP
       if (!isJpeg(prepared)) {
         return { kind: 'settled', output: { status: 'failed_terminal', errorKind: IMAGE_PREPARE_ERROR_FAILED } };
       }
+      const size = jpegPixelSize(prepared);
+      if (size && Math.min(size.width, size.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) return { kind: 'too_small' };
       try {
         const stored = writeMediaCacheFile(options.cacheDir, prepared, 'image/jpeg');
-        return { kind: 'media', media: { path: stored.path, sha256: stored.sha256, mimeType: 'image/jpeg' } };
+        return {
+          kind: 'media',
+          media: { path: stored.path, sha256: stored.sha256, mimeType: 'image/jpeg', stagingHolder: stored.stagingHolder },
+        };
       } catch {
         return { kind: 'settled', output: { status: 'failed_retryable', errorKind: IMAGE_PREPARE_ERROR_CACHE_WRITE } };
       }
@@ -131,6 +144,33 @@ export function createImagePreparation(options: ImagePreparationOptions): ImageP
       await rm(tempDir, { recursive: true, force: true });
     }
   };
+}
+
+/**
+ * Width and height from a JPEG's start-of-frame segment, or undefined when
+ * the header cannot be walked.
+ */
+export function jpegPixelSize(bytes: Uint8Array): { width: number; height: number } | undefined {
+  let offset = 2;
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 0xff) return undefined;
+    const marker = bytes[offset + 1]!;
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      offset += 2;
+      continue;
+    }
+    const length = (bytes[offset + 2]! << 8) | bytes[offset + 3]!;
+    const startOfFrame = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (startOfFrame) {
+      return {
+        height: (bytes[offset + 5]! << 8) | bytes[offset + 6]!,
+        width: (bytes[offset + 7]! << 8) | bytes[offset + 8]!,
+      };
+    }
+    if (length < 2) return undefined;
+    offset += 2 + length;
+  }
+  return undefined;
 }
 
 /**

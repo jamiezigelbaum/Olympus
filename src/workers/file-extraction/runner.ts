@@ -43,6 +43,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { dirname } from 'node:path';
+import { releaseMediaCacheFile } from '../../core/media-cache.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { isModelEndpointRedirectError } from '../../core/model-transport.ts';
 import {
@@ -68,6 +70,7 @@ import {
   EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
   EXTRACTION_SINK_SKIPPED_EMPTY_TEXT,
   EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
+  EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY,
   EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
   EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
@@ -76,6 +79,7 @@ import {
   EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
 } from './store-sink.ts';
 import type {
+  ExtractedMedia,
   ExtractionEgress,
   ExtractionEgressPolicy,
   ExtractionApprovedRemoteDestination,
@@ -148,6 +152,9 @@ const SINK_SKIP_SETTLEMENTS: Readonly<Record<string, ExtractionTerminalStatus>> 
   // absence of content is the configured, correct end state, not a policy
   // refusal to be investigated or a failure to be retried.
   [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: 'metadata_only',
+  // A picture's content rests only in a Private store; a lane writing to any
+  // other store keeps the item's names, which is its correct end state there.
+  [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: 'metadata_only',
 });
 
 // --- the egress gate -------------------------------------------------------
@@ -552,7 +559,10 @@ export function createFileExtractionRunner(
         approvedScopeKeys: [request.approvedScopeKey],
       });
 
-      const byKind = new Map<string, ExtractionItemRef[]>();
+      // Keyed by kind and the version a job for this media type is queued
+      // under (Extractor.versionFor), so a media-scoped version only re-reads
+      // that media type.
+      const byKind = new Map<string, { kind: string; version: string; refs: ExtractionItemRef[] }>();
       let jobsUnroutable = 0;
       for (const ref of page.candidates) {
         const extractor = registry.select(ref, request.extractorKind);
@@ -560,21 +570,22 @@ export function createFileExtractionRunner(
           jobsUnroutable += 1;
           continue;
         }
-        const bucket = byKind.get(extractor.kind);
-        if (bucket) bucket.push(ref);
-        else byKind.set(extractor.kind, [ref]);
+        const version = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
+        const key = `${extractor.kind}\u0000${version}`;
+        const bucket = byKind.get(key);
+        if (bucket) bucket.refs.push(ref);
+        else byKind.set(key, { kind: extractor.kind, version, refs: [ref] });
       }
 
       let jobsQueued = 0;
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
-      for (const [extractorKind, refs] of byKind) {
-        const extractor = registry.get(extractorKind)!;
+      for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
         const result = jobs.enqueue({
           refs,
           extractorKind,
-          extractorVersion: extractor.version,
+          extractorVersion,
           // Omitted means "this pass has nothing to say about policy", which the
           // store keeps distinct from asserting the permissive value: a re-plan
           // that names no decision must not rewrite a stored needs_review.
@@ -598,7 +609,7 @@ export function createFileExtractionRunner(
         jobsForced,
         jobsSkippedTooLarge,
         jobsUnroutable,
-        extractorKinds: [...byKind.keys()],
+        extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
         done: page.done,
         policy: extractionPlanPolicy(
@@ -607,7 +618,7 @@ export function createFileExtractionRunner(
             ? [registry.get(request.extractorKind)].filter(
                 (extractor): extractor is Extractor => extractor !== undefined,
               )
-            : [...byKind.keys()].map((kind) => registry.get(kind)!),
+            : [...new Set([...byKind.values()].map((bucket) => bucket.kind))].map((kind) => registry.get(kind)!),
         ),
       };
     },
@@ -773,13 +784,30 @@ interface JobOutcome {
   leaseExpired?: boolean;
 }
 
-async function settleOneJob(input: {
+interface SettleOneJobInput {
   job: LeasedExtractionJob;
   extractor: Extractor | undefined;
   corpus: ExtractionRunnerCorpus;
   resolveSource: () => Promise<FileExtractionSource>;
   now: () => Date;
-}): Promise<JobOutcome> {
+}
+
+/**
+ * Settles one job and then gives up the extraction's hold on any media file
+ * it prepared (ExtractedMedia.stagingHolder): a store that took the file holds
+ * its own reference by now, and a file nothing took is removed with the hold.
+ */
+async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
+  const staged: { media?: ExtractedMedia } = {};
+  try {
+    return await settleOneJobHeld(input, staged);
+  } finally {
+    const media = staged.media;
+    if (media?.stagingHolder) releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname(media.path));
+  }
+}
+
+async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: ExtractedMedia }): Promise<JobOutcome> {
   const { job, extractor, corpus } = input;
   if (!extractor) {
     return { status: 'failed_terminal', errorKind: EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR };
@@ -870,6 +898,7 @@ async function settleOneJob(input: {
   }
   try {
     output = await extractor.extract(extractorInput);
+    if (output.status === 'indexed' && output.media) staged.media = output.media;
   } catch (error) {
     // A redirecting model endpoint is a configuration fault, not this file's:
     // it keeps its own kind so the lane can say so, and the job waits for its

@@ -63,6 +63,8 @@ describe('connector-store locator-index operator', () => {
         DROP TABLE locator_identity_index_state;
         DROP TRIGGER connector_store_chunk_media_release;
         DROP TABLE chunk_media_releases;
+        DROP TABLE chunk_media_failures;
+        DROP INDEX idx_connector_store_chunks_media;
         ALTER TABLE chunks DROP COLUMN media_path;
         ALTER TABLE chunks DROP COLUMN media_sha256;
         UPDATE schema_version SET version = 10 WHERE store_id = 'connector-store';

@@ -83,10 +83,14 @@ four (`OLYMPUS_BUILT_IN_EMBEDDING_THREADS` overrides). Supported: macOS on
 Apple silicon, Linux x64 and arm64 (glibc 2.27 or newer).
 
 Photos are searched by their picture too (2026-10-07,
-`docs/design/photo-embeddings.md`). On a Mac each still image is reduced to a
+`docs/design/photo-embeddings.md`). Mac only for now: elsewhere photos stay
+names-only. An ingestion policy file you wrote yourself
+(`~/.olympus/sources/dropbox.personal.ingestion.json`) is used as written; if
+its media rule still lists `image/` and the photo extensions, remove those
+entries to have photos read. On a Mac each still image is reduced to a
 JPEG of at most 1,024 pixels (with the built-in `sips`) and kept in an
 owner-only cache, `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/media-cache`
-(override with `OLYMPUS_MEDIA_CACHE_DIR`); the built-in model embeds that
+(or an `olympus-media` folder inside `OLYMPUS_MEDIA_CACHE_DIR`); the built-in model embeds that
 picture together with the photo's title and any text read off it, about
 1.4 s per photo on an M3's GPU. Its image encoder is on from the start and
 leaves text vectors unchanged, so this needs no re-embed. Other embedding

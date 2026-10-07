@@ -52,6 +52,32 @@ export interface SourceEmbeddingProvider {
    * sweep checks it before embedding anything queued under the binding.
    */
   assertBindingCurrent?(): void;
+  /**
+   * Present only on a provider whose model reads pictures (the built-in
+   * EmbeddingGemma 2): whether it can embed a document's `image` right now
+   * (its image encoder started). A provider without this method embeds the
+   * text and ignores `image`. When this answers false, chunks with a picture
+   * are held, never embedded as text under an input hash that names the
+   * picture.
+   */
+  imageSupport?(): Promise<boolean>;
+}
+
+/**
+ * Some inputs of a batch could not be embedded (a picture the image encoder
+ * could not read) while the rest could. The embed lane records those inputs
+ * as failed and embeds the others; it is never a fault of the engine.
+ */
+export class SourceEmbeddingInputsFailedError extends Error {
+  readonly failedIndexes: readonly number[];
+  readonly reason: string;
+
+  constructor(failedIndexes: readonly number[], reason: string) {
+    super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
+    this.name = 'SourceEmbeddingInputsFailedError';
+    this.failedIndexes = failedIndexes;
+    this.reason = reason;
+  }
 }
 
 /** Secure corpora may use local embeddings or the explicitly approved Venice cloud lane. */
@@ -1189,6 +1215,7 @@ export function memoizeQueryEmbeddings(provider: SourceEmbeddingProvider): Sourc
       return pending;
     },
     ...(provider.assertBindingCurrent ? { assertBindingCurrent: () => provider.assertBindingCurrent!() } : {}),
+    ...(provider.imageSupport ? { imageSupport: () => provider.imageSupport!() } : {}),
   };
   return memoized;
 }

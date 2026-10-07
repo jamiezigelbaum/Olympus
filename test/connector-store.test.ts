@@ -2224,6 +2224,8 @@ describe('LocalConnectorStore reactions', () => {
       rewind.exec(`
         DROP TRIGGER connector_store_chunk_media_release;
         DROP TABLE chunk_media_releases;
+        DROP TABLE chunk_media_failures;
+        DROP INDEX idx_connector_store_chunks_media;
         ALTER TABLE chunks DROP COLUMN media_path;
         ALTER TABLE chunks DROP COLUMN media_sha256;
       `);

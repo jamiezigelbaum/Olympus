@@ -120,7 +120,8 @@ describe('connector-store status readiness', () => {
     if (!metadataScope.allowed || !contentScope.allowed || !contentScope.filters) return;
     const store = new LocalConnectorStore({
       dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local',
-      exclusions: dropboxCanonicalIngestionMatcher(defaultDropboxIngestionPolicy(), {
+      // A machine that cannot prepare pictures (this lane's CI): still images stay names-only.
+      exclusions: dropboxCanonicalIngestionMatcher(defaultDropboxIngestionPolicy({ stillImagesRead: false }), {
         [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: '/tmp/olympus-status-test-missing-exclusions.json',
       }),
     });
@@ -178,11 +179,9 @@ describe('connector-store status readiness', () => {
         folders: 40,
         scope_full_ingestion_files: 3,
         scope_metadata_only_files: 556,
-        // The picture in the ingested folder is read since photos are
-        // searchable by content (2026-10-07): eligible, not deferred.
-        scope_policy_deferred_files: 0,
-        qa_eligible_items: 3,
-        qa_metadata_only_expected: 556,
+        scope_policy_deferred_files: 1,
+        qa_eligible_items: 2,
+        qa_metadata_only_expected: 557,
         items_with_text: 0,
         chunks: 0,
         embedded_chunks: 0,
@@ -193,8 +192,8 @@ describe('connector-store status readiness', () => {
         filters: contentScope.filters,
       });
       expect(candidates.candidates.map((candidate) => candidate.identity.providerItemId).sort())
-        .toEqual(['cover.jpg', 'one.pdf', 'two.pdf']);
-      expect(candidates.skippedByDisposition ?? 0).toBe(0);
+        .toEqual(['one.pdf', 'two.pdf']);
+      expect(candidates.skippedByDisposition).toBe(1);
       const current = candidates.candidates[0]!;
       expect(store.itemMatchesExtractionRef({
         ...current.identity,

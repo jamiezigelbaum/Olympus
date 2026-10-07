@@ -42,7 +42,12 @@ import type {
   LocalContentRequest,
 } from '../../core/evidence-pack.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { releaseMediaCacheFile, retainMediaCacheFile } from '../../core/media-cache.ts';
+import {
+  isMediaCachePath,
+  releaseMediaCacheFile,
+  retainMediaCacheFile,
+  stillImagePreparationAvailable,
+} from '../../core/media-cache.ts';
 import {
   assertSqliteSchemaCanOpen,
   currentStoreMigrations,
@@ -110,6 +115,7 @@ import {
   decodeEmbedding,
   encodeEmbedding,
   isApprovedSecureSourceEmbeddingProvider,
+  SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
@@ -398,6 +404,16 @@ function createConnectorStoreChunkMediaReleases(db: Database): void {
     CREATE TABLE IF NOT EXISTS chunk_media_releases (
       media_sha256 TEXT PRIMARY KEY,
       media_path TEXT NOT NULL
+    );
+    -- "Does any chunk still hold this picture" is asked on every release.
+    CREATE INDEX IF NOT EXISTS idx_connector_store_chunks_media
+      ON chunks(media_sha256) WHERE media_sha256 IS NOT NULL;
+    -- Pictures the image encoder could not read: never sent again, so one
+    -- bad photo cannot hold up the rest of a store's embedding.
+    CREATE TABLE IF NOT EXISTS chunk_media_failures (
+      media_sha256 TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      failed_at TEXT NOT NULL
     );
     CREATE TRIGGER IF NOT EXISTS connector_store_chunk_media_release
     AFTER DELETE ON chunks
@@ -2365,6 +2381,7 @@ export class LocalConnectorStore {
 
   close(): void {
     try {
+      this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
@@ -3023,16 +3040,18 @@ export class LocalConnectorStore {
         media_sha256: string | null;
       }>;
       const namesOnly = options.layers === 'metadata';
-      if (!namesOnly && !this.chunkMediaColumnsPresent && copy.chunks.some((chunk) => chunk.mediaSha256)) {
-        throw new Error('Connector store chunks cannot carry media before the v13 schema.');
-      }
+      // A picture rests only in a Private store: a copy into any other store
+      // (an owner's override, a move to Personal) keeps the text and drops
+      // the picture, and its chunks are re-hashed below so they embed as text.
+      const keepsMedia = this.trustDomain === 'secure_local' && this.chunkMediaColumnsPresent;
+      const strippedMedia = !keepsMedia && copy.chunks.some((chunk) => chunk.mediaSha256);
       const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
         const current = existing[index];
         return current?.chunk_index === chunk.chunkIndex
           && current.bounded_text === chunk.boundedText
           && current.content_hash === chunk.contentHash
           && current.embedding_input_hash === chunk.embeddingInputHash
-          && (current.media_sha256 ?? undefined) === (chunk.mediaSha256 ?? undefined);
+          && (current.media_sha256 ?? undefined) === (keepsMedia ? chunk.mediaSha256 ?? undefined : undefined);
       });
       let chunksWritten = 0;
       if (!unchanged) {
@@ -3051,13 +3070,13 @@ export class LocalConnectorStore {
         for (const chunk of copy.chunks) {
           if (this.chunkMediaColumnsPresent) {
             insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now,
-              chunk.mediaPath ?? null, chunk.mediaSha256 ?? null);
+              keepsMedia ? chunk.mediaPath ?? null : null, keepsMedia ? chunk.mediaSha256 ?? null : null);
           } else {
             insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
           }
-          if (chunk.mediaPath) retainMediaCacheFile(chunk.mediaPath, this.mediaHolder);
           chunksWritten += 1;
         }
+        if (strippedMedia) this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
       }
       this.refreshFtsForItem(itemPk);
       const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
@@ -3114,8 +3133,37 @@ export class LocalConnectorStore {
           : {}),
       };
     })();
+    if (this.trustDomain === 'secure_local' && options.layers !== 'metadata') {
+      for (const chunk of copy.chunks) {
+        if (chunk.mediaPath && chunk.mediaSha256) retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+      }
+    }
     this.releaseUnreferencedChunkMedia();
     return imported;
+  }
+
+  /** The stored row's embedding seasoning, for re-hashing chunk inputs. */
+  private chunkMediaFailed(mediaSha256: string): boolean {
+    return Boolean(this.db.query('SELECT 1 AS failed FROM chunk_media_failures WHERE media_sha256 = ?').get(mediaSha256));
+  }
+
+  private storedEmbeddingSeasoning(itemPk: number): ConnectorStoreEmbeddingSeasoning {
+    return (this.db.query(`
+      SELECT title, search_text, mime_type, authored_at, updated_at FROM items WHERE item_pk = ?
+    `).get(itemPk) as ConnectorStoreEmbeddingSeasoning | null) ?? {
+      title: null, search_text: null, mime_type: null, authored_at: null, updated_at: null,
+    };
+  }
+
+  /**
+   * Drops a chunk's picture whose cache file is gone or not where the cache
+   * keeps it, and re-hashes the item's chunks: the item keeps (and embeds) its
+   * text instead of waiting for ever on a file that will not come back. A new
+   * extraction of the photo brings the picture back.
+   */
+  private clearChunkMedia(chunkPk: number, itemPk: number): void {
+    this.db.query('UPDATE chunks SET media_path = NULL, media_sha256 = NULL WHERE chunk_pk = ?').run(chunkPk);
+    this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
   }
 
   /**
@@ -3310,6 +3358,16 @@ export class LocalConnectorStore {
    * the tier ledger says this copy serves names only.
    */
   stripCopyContent(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): number {
+    try {
+      return this.stripCopyContentHeld(identity);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private stripCopyContentHeld(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
   ): number {
     return this.db.transaction((): number => {
@@ -4057,6 +4115,14 @@ export class LocalConnectorStore {
     const selectedFilters = connectorStoreFilterSql(options.filters);
     let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
 
+    // A picture is read for media search where this machine can prepare it,
+    // and only into a Private store. A still image this store holds as text
+    // alone (OCR read before pictures were) is then a candidate once more;
+    // the text lane queues it under its image-scoped version, so it is read
+    // once, not on every pass.
+    const imagesWithoutPicture = this.chunkMediaColumnsPresent
+      && this.trustDomain === 'secure_local'
+      && stillImagePreparationAvailable();
     // With no media-type filter every scanned row is a match, so one query of
     // exactly `limit` rows is enough. With a filter the scan has to be able to
     // run past non-matching rows, hence a wider window.
@@ -4073,7 +4139,11 @@ export class LocalConnectorStore {
         AND LOWER(i.mime_type) <> 'inode/directory'
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
-        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk))
+        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${imagesWithoutPicture ? `OR (
+            LOWER(i.mime_type) LIKE 'image/%'
+            AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk AND c.media_sha256 IS NOT NULL)
+          )` : ''})
         ${selectedFilters.sql}
       ORDER BY i.item_pk
       LIMIT ?
@@ -4710,6 +4780,18 @@ export class LocalConnectorStore {
         skippedProviderItemIds: skippedProviderItemIds.sort(),
       };
     })();
+    // References are taken once the content is committed: a rolled-back
+    // restore leaves no marker behind. The extraction's own staging hold
+    // keeps the file until then.
+    for (const record of options.items) {
+      if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
+        retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
+      } else if (record.media && this.chunkMediaColumnsPresent) {
+        const present = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
+          .get(record.media.sha256) as { present: number } | null;
+        if (present) retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
+      }
+    }
     this.releaseUnreferencedChunkMedia();
     return summary;
   }
@@ -4730,7 +4812,8 @@ export class LocalConnectorStore {
       for (const entry of queued) {
         const referenced = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
           .get(entry.media_sha256) as { present: number } | null;
-        if (!referenced) releaseMediaCacheFile(entry.media_path, this.mediaHolder);
+        // The media cache refuses any path that is not its own `<sha256>.jpg`.
+        if (!referenced) releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
         this.db.query('DELETE FROM chunk_media_releases WHERE media_sha256 = ?').run(entry.media_sha256);
       }
     } catch {
@@ -4762,6 +4845,14 @@ export class LocalConnectorStore {
    * the identities beyond their coordinates.
    */
   relinquishItems(options: ConnectorStoreRelinquishOptions): ConnectorStoreRelinquishSummary {
+    try {
+      return this.relinquishItemsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private relinquishItemsHeld(options: ConnectorStoreRelinquishOptions): ConnectorStoreRelinquishSummary {
     const syncConnectorId = requireNonEmpty(options.syncConnectorId, 'Relinquish sync connector id');
     const ownerConnectorId = requireNonEmpty(options.ownerConnectorId, 'Relinquish owner connector id');
     return this.db.transaction(() => {
@@ -5117,6 +5208,17 @@ export class LocalConnectorStore {
     dryRun: boolean;
     purgeUnevaluable?: boolean;
   }): ConnectorStorePurgeSummary {
+    try {
+      return this.purgeExcludedItemsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private purgeExcludedItemsHeld(options: {
+    dryRun: boolean;
+    purgeUnevaluable?: boolean;
+  }): ConnectorStorePurgeSummary {
     if (!this.exclusions.active) {
       return emptyPurgeSummary(this.corpusId, options.dryRun, this.exclusions);
     }
@@ -5198,6 +5300,17 @@ export class LocalConnectorStore {
    * row instead would silently convert metadata-only into invisible.
    */
   stripMetadataOnlyRepresentations(options: {
+    dryRun: boolean;
+    stripUnevaluable?: boolean;
+  }): ConnectorStoreMetadataOnlyStripSummary {
+    try {
+      return this.stripMetadataOnlyRepresentationsHeld(options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private stripMetadataOnlyRepresentationsHeld(options: {
     dryRun: boolean;
     stripUnevaluable?: boolean;
   }): ConnectorStoreMetadataOnlyStripSummary {
@@ -5866,6 +5979,18 @@ export class LocalConnectorStore {
   // --- Sync -----------------------------------------------------------------
 
   async syncFromConnector(
+    connector: SourceConnector,
+    options?: ConnectorStoreSyncOptions,
+  ): Promise<ConnectorStoreSyncSummary> {
+    // A sync can tombstone or replace items; their pictures are released here.
+    try {
+      return await this.syncFromConnectorHeld(connector, options);
+    } finally {
+      this.releaseUnreferencedChunkMedia();
+    }
+  }
+
+  private async syncFromConnectorHeld(
     connector: SourceConnector,
     options?: ConnectorStoreSyncOptions,
   ): Promise<ConnectorStoreSyncSummary> {
@@ -7100,6 +7225,10 @@ export class LocalConnectorStore {
     if (media && !this.chunkMediaColumnsPresent) {
       throw new Error('Connector store chunks cannot carry media before the v13 schema.');
     }
+    // A picture rests only in a Private store (docs/design/photo-embeddings.md).
+    if (media && this.trustDomain !== 'secure_local') {
+      throw new Error('Connector store chunks carry picture media only in a Private store.');
+    }
     // Media (a prepared photo) rides on the first chunk, and its digest is
     // part of that chunk's embedding input: a changed picture re-embeds.
     const desired = chunks.map((chunk, index) => {
@@ -7179,7 +7308,6 @@ export class LocalConnectorStore {
       }
       this.refreshFtsForItem(itemPk);
     })();
-    if (media) retainMediaCacheFile(media.path, this.mediaHolder);
     return { chunksIndexed: chunks.length, ftsContentChanged: true };
   }
 
@@ -7828,6 +7956,7 @@ export class LocalConnectorStore {
     // were in flight. They were seen and not embedded, so they are reported as
     // skipped rather than silently dropped out of the counts.
     let staleSkipped = 0;
+    let readsImages: boolean | undefined;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
@@ -7844,17 +7973,33 @@ export class LocalConnectorStore {
         batch = recheck.kept;
         if (batch.length === 0) continue;
       }
-      // A chunk whose prepared picture is gone from the media cache is not
-      // embedded as text alone under an input hash that names the picture:
-      // it is seen and skipped, keeps its keyword search, and embeds again
-      // once a new extraction brings the picture back.
-      const mediaMissing = batch.filter((row) => row.media_path && !existsSync(row.media_path));
-      if (mediaMissing.length > 0) {
-        staleSkipped += mediaMissing.length;
-        batch = batch.filter((row) => !mediaMissing.includes(row));
-        if (batch.length === 0) continue;
+      // Pictures, for a provider whose model reads them (one that does not
+      // embeds a photo's text and ignores the picture). A chunk is never
+      // embedded as text alone under an input hash that names its picture:
+      //  - the image encoder is not running: the chunk is held (seen, skipped);
+      //  - its picture failed before: it stays skipped, so one bad photo cannot
+      //    hold up the rest of the store;
+      //  - its cache file is gone (or not where the cache keeps files): the
+      //    picture is dropped and the item re-hashed, so it embeds as text.
+      if (provider.imageSupport && batch.some((row) => row.media_sha256)) {
+        readsImages ??= await provider.imageSupport();
+        const skip = new Set<(typeof batch)[number]>();
+        for (const row of batch) {
+          if (!row.media_sha256) continue;
+          if (!readsImages || this.chunkMediaFailed(row.media_sha256)) {
+            skip.add(row);
+          } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync(row.media_path)) {
+            this.clearChunkMedia(row.chunk_pk, row.item_pk);
+            skip.add(row);
+          }
+        }
+        if (skip.size > 0) {
+          staleSkipped += skip.size;
+          batch = batch.filter((row) => !skip.has(row));
+          if (batch.length === 0) continue;
+        }
       }
-      const vectors = await provider.embed(batch.map((row) => ({
+      const inputsFor = (rows: typeof batch) => rows.map((row) => ({
         ...(row.title ? { title: row.title } : {}),
         text: buildConnectorStoreEmbeddingText(row),
         // A chunk with a prepared photo hands it to the provider; one that
@@ -7862,7 +8007,27 @@ export class LocalConnectorStore {
         ...(row.media_path && row.media_sha256
           ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: 'image/jpeg' } }
           : {}),
-      })), { taskType: 'RETRIEVAL_DOCUMENT' });
+      }));
+      let vectors: number[][];
+      try {
+        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
+      } catch (error) {
+        if (!(error instanceof SourceEmbeddingInputsFailedError)) throw error;
+        // Some pictures could not be read: mark them, embed the rest.
+        const failedRows = new Set(error.failedIndexes.map((index) => batch[index]).filter((row) => row !== undefined));
+        const failedAt = nowIso();
+        for (const row of failedRows) {
+          if (row.media_sha256) {
+            this.db.query(`
+              INSERT OR REPLACE INTO chunk_media_failures (media_sha256, reason, failed_at) VALUES (?, ?, ?)
+            `).run(row.media_sha256, error.reason, failedAt);
+          }
+        }
+        staleSkipped += failedRows.size;
+        batch = batch.filter((row) => !failedRows.has(row));
+        if (batch.length === 0) continue;
+        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
+      }
       if (vectors.length !== batch.length) {
         throw new Error('Connector store embedding provider returned the wrong number of vectors.');
       }
@@ -12517,6 +12682,8 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'connector_store_locator_identity_update',
   'chunk_media_releases',
   'connector_store_chunk_media_release',
+  'idx_connector_store_chunks_media',
+  'chunk_media_failures',
 ] as const;
 
 const CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
@@ -12631,6 +12798,8 @@ function validateConnectorStoreV6Schema(db: Database): void {
 function validateConnectorStoreSchema(db: Database): void {
   validateConnectorStoreV12Schema(db, 'v13', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
+  assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at'], false, 'v13');
+  assertIndexColumns(db, 'idx_connector_store_chunks_media', ['media_sha256'], 'v13');
   assertTriggerExists(db, 'connector_store_chunk_media_release', 'v13');
 }
 

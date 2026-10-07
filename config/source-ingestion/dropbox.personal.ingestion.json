@@ -13,17 +13,28 @@
     {
       "match": {
         "mime_type_prefixes": [
+          "image/",
           "video/"
         ],
         "extensions": [
           "3gp",
           "avi",
+          "bmp",
+          "gif",
+          "heic",
+          "heif",
+          "jpeg",
+          "jpg",
           "m4v",
           "mov",
           "mp4",
           "mpeg",
           "mpg",
-          "webm"
+          "png",
+          "tif",
+          "tiff",
+          "webm",
+          "webp"
         ]
       },
       "action": "metadata_only",

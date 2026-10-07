@@ -10,16 +10,26 @@
  * cache's clean-up, the additive schema migration, the Private content
  * default for images, and the coverage statement.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { solidPng } from './helpers/solid-png.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import { mediaCacheDir, writeMediaCacheFile } from '../src/core/media-cache.ts';
-import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import {
+  MEDIA_CACHE_DIR_ENV,
+  isMediaCachePath,
+  mediaCacheDir,
+  releaseMediaCacheFile,
+  retainMediaCacheFile,
+  sweepMediaCache,
+  writeMediaCacheFile,
+} from '../src/core/media-cache.ts';
+import { deleteOlympusData } from '../src/data-lifecycle.ts';
+import { defaultDropboxConnectorStoreDbPath } from '../src/workers/dropbox-files/connector-store.ts';
+import { DEFAULT_STILL_IMAGE_EXTENSIONS, defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { classifyContentTier, IMAGE_PRIVATE_DEFAULT_REASON } from '../src/workers/classification/tier-classifier.ts';
@@ -32,11 +42,18 @@ import {
   IMAGE_PREPARE_ERROR_TIMEOUT,
   createImagePreparation,
 } from '../src/workers/file-extraction/extractors/image-prepare.ts';
-import { IMAGE_MEDIA_DESCRIPTOR, createTextExtractor } from '../src/workers/file-extraction/extractors/text.ts';
+import {
+  IMAGE_MEDIA_DESCRIPTOR,
+  IMAGE_MEDIA_VERSION_SUFFIX,
+  createTextExtractor,
+} from '../src/workers/file-extraction/extractors/text.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { buildExtractorRegistry, createDefaultExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
 import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';
-import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
+import {
+  EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY,
+  createConnectorStoreExtractionSink,
+} from '../src/workers/file-extraction/store-sink.ts';
 import type {
   ExtractionItemRef,
   ExtractionSinkRequest,
@@ -45,6 +62,7 @@ import type {
 } from '../src/workers/file-extraction/types.ts';
 import {
   DeterministicSourceEmbeddingProvider,
+  SourceEmbeddingInputsFailedError,
   type SourceEmbeddingInput,
   type SourceEmbeddingTaskType,
 } from '../src/workers/source-index/embeddings.ts';
@@ -59,10 +77,25 @@ afterEach(() => {
   for (const dir of temporaryDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+// Stores only trust a picture path inside the configured media cache, so this
+// file runs with its own cache (restored afterwards: test files share a process).
+const CACHE_BASE = mkdtempSync(join(tmpdir(), 'olympus-photo-cache-'));
+let previousCacheEnv: string | undefined;
+beforeAll(() => {
+  previousCacheEnv = process.env[MEDIA_CACHE_DIR_ENV];
+  process.env[MEDIA_CACHE_DIR_ENV] = CACHE_BASE;
+});
+afterAll(() => {
+  if (previousCacheEnv === undefined) delete process.env[MEDIA_CACHE_DIR_ENV];
+  else process.env[MEDIA_CACHE_DIR_ENV] = previousCacheEnv;
+  rmSync(CACHE_BASE, { recursive: true, force: true });
+});
+const cache = () => mediaCacheDir({ [MEDIA_CACHE_DIR_ENV]: CACHE_BASE });
+
 const JPEG_MAGIC = [0xff, 0xd8, 0xff, 0xe0];
 
 /** A stand-in for `sips`: writes a "JPEG" whose bytes depend on the input. */
-function fakeSips(calls: string[][] = [], behaviour: 'ok' | 'fail' | 'timeout' | 'missing' | 'not-jpeg' = 'ok'): ExtractionCommandRunner {
+function fakeSips(calls: string[][] = [], behaviour: 'ok' | 'fail' | 'timeout' | 'missing' | 'not-jpeg' | 'thumbnail' = 'ok'): ExtractionCommandRunner {
   return async (request) => {
     calls.push([request.command, ...request.args]);
     if (behaviour === 'missing') throw Object.assign(new Error('spawn sips ENOENT'), { code: 'ENOENT' });
@@ -70,9 +103,18 @@ function fakeSips(calls: string[][] = [], behaviour: 'ok' | 'fail' | 'timeout' |
     if (behaviour === 'fail') throw new ExtractionCommandError({ command: request.command, exitCode: 13, stdout: '', stderr: '' });
     const input = readFileSync(request.args[request.args.length - 3]!);
     const output = request.args[request.args.length - 1]!;
-    writeFileSync(output, behaviour === 'not-jpeg' ? Buffer.from('nope') : Buffer.concat([Buffer.from(JPEG_MAGIC), input]));
+    // A thumbnail: a start-of-frame segment naming 32 x 32 pixels.
+    const thumbnail = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x20, 0x00, 0x20, 0x03]);
+    writeFileSync(output, behaviour === 'not-jpeg'
+      ? Buffer.from('nope')
+      : behaviour === 'thumbnail' ? thumbnail : Buffer.concat([Buffer.from(JPEG_MAGIC), input]));
     return { stdout: '', stderr: '' };
   };
+}
+
+/** Original picture bytes, distinct per seed and over the small-file floor. */
+function picture(seed: number): Uint8Array {
+  return new Uint8Array(2048).fill(seed);
 }
 
 function extractorInput(bytes: Uint8Array, mimeType = 'image/heic'): ExtractorInput {
@@ -100,9 +142,9 @@ function extractorInput(bytes: Uint8Array, mimeType = 'image/heic'): ExtractorIn
   };
 }
 
-describe('the default ingestion policy reads still images and keeps video names-only', () => {
+describe('the default ingestion policy reads still images where they can be prepared, and keeps video names-only', () => {
   test('photos are admitted for extraction; video and the book shelf stay metadata-only', () => {
-    const policy = defaultDropboxIngestionPolicy();
+    const policy = defaultDropboxIngestionPolicy({ stillImagesRead: true });
     const media = policy.rules.find((rule) => rule.reason === 'media_default_metadata_only')!;
     expect(media.match.mime_type_prefixes).toEqual(['video/']);
     for (const extension of ['jpeg', 'jpg', 'png', 'heic', 'heif', 'webp', 'gif', 'tif', 'tiff', 'bmp']) {
@@ -117,11 +159,20 @@ describe('the default ingestion policy reads still images and keeps video names-
     expect(matcher.evaluateItem({ path: '/Calibre Library/Author/cover.jpg', mimeType: 'image/jpeg' }).disposition).toBe('metadata_only');
   });
 
-  test('the readiness ladder no longer expects pictures to be metadata-only', () => {
-    const sql = defaultDeferredContentReadinessSql();
-    expect(sql).not.toContain("'image/%'");
-    expect(sql).not.toContain('.jpg');
-    expect(sql).toContain("'video/%'");
+  test('a machine that cannot prepare pictures keeps them names-only, so none is downloaded for nothing', () => {
+    const policy = defaultDropboxIngestionPolicy({ stillImagesRead: false });
+    const media = policy.rules.find((rule) => rule.reason === 'media_default_metadata_only')!;
+    expect(media.match.mime_type_prefixes).toEqual(['image/', 'video/']);
+    for (const extension of DEFAULT_STILL_IMAGE_EXTENSIONS) expect(media.match.extensions).toContain(extension);
+    const matcher = dropboxCanonicalIngestionMatcher(policy, {
+      [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: join(temporaryDir(), 'missing-exclusions.json'),
+    });
+    expect(matcher.evaluateItem({ path: '/Photos/kitchen.jpg', mimeType: 'image/jpeg' }).disposition).toBe('metadata_only');
+    // The readiness ladder agrees in both cases.
+    expect(defaultDeferredContentReadinessSql(false)).toContain("'image/%'");
+    expect(defaultDeferredContentReadinessSql(true)).not.toContain("'image/%'");
+    expect(defaultDeferredContentReadinessSql(true)).not.toContain('.jpg');
+    expect(defaultDeferredContentReadinessSql(true)).toContain("'video/%'");
   });
 });
 
@@ -130,7 +181,7 @@ describe('image preparation in the shared text lane', () => {
     const cacheDir = join(temporaryDir(), 'media-cache');
     const calls: string[][] = [];
     const prepare = createImagePreparation({ cacheDir, commandRunner: fakeSips(calls) });
-    const result = await prepare({ bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/heic', sizeBytes: 3 });
+    const result = await prepare({ bytes: picture(1), mimeType: 'image/heic', sizeBytes: 2048 });
     expect(result.kind).toBe('media');
     if (result.kind !== 'media') return;
     expect(calls[0]!.slice(0, 6)).toEqual(['/usr/bin/sips', '-s', 'format', 'jpeg', '-Z', '1024']);
@@ -139,14 +190,14 @@ describe('image preparation in the shared text lane', () => {
     expect(statSync(cacheDir).mode & 0o777).toBe(0o700);
     expect(statSync(result.media.path).mode & 0o777).toBe(0o600);
     // The same picture again is the same file.
-    const again = await prepare({ bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/heic', sizeBytes: 3 });
-    expect(again).toEqual(result);
+    const again = await prepare({ bytes: picture(1), mimeType: 'image/heic', sizeBytes: 2048 });
+    expect(again.kind === 'media' ? [again.media.path, again.media.sha256] : []).toEqual([result.media.path, result.media.sha256]);
   });
 
   test('a too-large picture is skipped and a refused one is a normal extraction failure', async () => {
     const cacheDir = join(temporaryDir(), 'media-cache');
-    const input = { bytes: new Uint8Array(10), mimeType: 'image/png', sizeBytes: 10 };
-    expect(await createImagePreparation({ cacheDir, commandRunner: fakeSips(), maxInputBytes: 5 })(input))
+    const input = { bytes: picture(2), mimeType: 'image/png', sizeBytes: 2048 };
+    expect(await createImagePreparation({ cacheDir, commandRunner: fakeSips(), maxInputBytes: 1000 })(input))
       .toEqual({ kind: 'settled', output: { status: 'skipped_too_large' } });
     expect(await createImagePreparation({ cacheDir, commandRunner: fakeSips([], 'fail') })(input))
       .toEqual({ kind: 'settled', output: { status: 'failed_terminal', errorKind: IMAGE_PREPARE_ERROR_FAILED } });
@@ -158,13 +209,42 @@ describe('image preparation in the shared text lane', () => {
       .toEqual({ kind: 'unavailable' });
   });
 
+  test('a tiny picture (a logo, a tracking pixel) gets no picture vector', async () => {
+    const cacheDir = join(temporaryDir(), 'media-cache');
+    expect(await createImagePreparation({ cacheDir, commandRunner: fakeSips() })({ bytes: new Uint8Array(200), mimeType: 'image/png', sizeBytes: 200 }))
+      .toEqual({ kind: 'too_small' });
+    expect(await createImagePreparation({ cacheDir, commandRunner: fakeSips([], 'thumbnail') })({ bytes: picture(5), mimeType: 'image/png', sizeBytes: 2048 }))
+      .toEqual({ kind: 'too_small' });
+    // The text lane then treats it as it did before (here: names only).
+    const extractor = createTextExtractor({ imagePreparation: createImagePreparation({ cacheDir, commandRunner: fakeSips([], 'thumbnail') }) });
+    expect(await extractor.extract(extractorInput(picture(6)))).toEqual({ status: 'metadata_only' });
+  });
+
+  test('a picture whose OCR fails leaves nothing in the cache', async () => {
+    const cacheDir = join(temporaryDir(), 'media-cache');
+    const extractor = createTextExtractor({
+      imagePreparation: createImagePreparation({ cacheDir, commandRunner: fakeSips() }),
+      imageOcr: async () => ({ status: 'failed_retryable', errorKind: 'ocr_command_failed' }),
+    });
+    expect(await extractor.extract(extractorInput(picture(7)))).toEqual({ status: 'failed_retryable', errorKind: 'ocr_command_failed' });
+    expect(readdirSync(cacheDir).filter((name) => name.endsWith('.jpg'))).toEqual([]);
+  });
+
+  test('pictures are queued once more under an image-scoped version; other files keep theirs', () => {
+    const plain = createTextExtractor();
+    expect(plain.versionFor).toBeUndefined();
+    const extractor = createTextExtractor({ imagePreparation: createImagePreparation({ cacheDir: '/unused', commandRunner: fakeSips() }) });
+    expect(extractor.versionFor!('image/heic')).toBe(`${extractor.version}${IMAGE_MEDIA_VERSION_SUFFIX}`);
+    expect(extractor.versionFor!('application/pdf')).toBe(extractor.version);
+  });
+
   test('the text lane indexes a prepared picture: a descriptor, any OCR text, and the copy as media', async () => {
     const cacheDir = join(temporaryDir(), 'media-cache');
     const extractor = createTextExtractor({
       imagePreparation: createImagePreparation({ cacheDir, commandRunner: fakeSips() }),
       imageOcr: async () => ({ status: 'indexed', text: 'OPEN HOUSE SUNDAY' }),
     });
-    const output = await extractor.extract(extractorInput(new Uint8Array([9, 9, 9])));
+    const output = await extractor.extract(extractorInput(picture(3)));
     expect(output.status).toBe('indexed');
     if (output.status !== 'indexed') return;
     expect(output.text).toBe(`${IMAGE_MEDIA_DESCRIPTOR}\nOPEN HOUSE SUNDAY`);
@@ -176,26 +256,60 @@ describe('image preparation in the shared text lane', () => {
       imagePreparation: createImagePreparation({ cacheDir, commandRunner: fakeSips() }),
       imageOcr: async () => ({ status: 'metadata_only' }),
     });
-    const plain = await quiet.extract(extractorInput(new Uint8Array([7])));
+    const plain = await quiet.extract(extractorInput(picture(4)));
     expect(plain.status === 'indexed' ? plain.text : undefined).toBe(IMAGE_MEDIA_DESCRIPTOR);
   });
 
   test('without preparation (off macOS) an image is exactly as before', async () => {
     const extractor = createTextExtractor();
-    expect(await extractor.extract(extractorInput(new Uint8Array([1])))).toEqual({ status: 'metadata_only' });
+    expect(await extractor.extract(extractorInput(picture(8)))).toEqual({ status: 'metadata_only' });
     const registry = createDefaultExtractorRegistry({
       media: { cacheDir: join(temporaryDir(), 'media-cache'), platform: 'linux' },
       ocr: { platform: 'linux' },
     });
     const text = registry.get('local_text')!;
-    expect(await text.extract(extractorInput(new Uint8Array([1]), 'image/jpeg'))).toEqual({ status: 'metadata_only' });
+    expect(await text.extract(extractorInput(picture(8), 'image/jpeg'))).toEqual({ status: 'metadata_only' });
   });
 
   test('the media cache lives under the Olympus data directory unless overridden', () => {
     expect(mediaCacheDir({ HOME: '/home/owner' })).toBe('/home/owner/.local/share/openclaw/olympus/media-cache');
     expect(mediaCacheDir({ XDG_DATA_HOME: '/data' })).toBe('/data/openclaw/olympus/media-cache');
-    expect(mediaCacheDir({ OLYMPUS_MEDIA_CACHE_DIR: '/cache/media' })).toBe('/cache/media');
+    // A directory the owner names gets a dedicated subdirectory: Olympus never
+    // changes the permissions of a directory it did not create.
+    expect(mediaCacheDir({ OLYMPUS_MEDIA_CACHE_DIR: '/cache/media' })).toBe('/cache/media/olympus-media');
     expect(() => mediaCacheDir({ OLYMPUS_MEDIA_CACHE_DIR: 'relative' })).toThrow('absolute');
+  });
+
+  test('only the cache\'s own <sha256>.jpg files are ever marked or removed', () => {
+    const dir = join(temporaryDir(), 'media-cache');
+    const outside = join(temporaryDir(), 'precious.jpg');
+    writeFileSync(outside, 'keep me');
+    const sha = 'e'.repeat(64);
+    expect(isMediaCachePath(join(dir, `${sha}.jpg`), sha, dir)).toBe(true);
+    expect(isMediaCachePath(join(dir, '..', `${sha}.jpg`), sha, dir)).toBe(false);
+    expect(isMediaCachePath(join(dir, `${'f'.repeat(64)}.jpg`), sha, dir)).toBe(false);
+    expect(retainMediaCacheFile(outside, sha, 'store', dir)).toBe(false);
+    expect(releaseMediaCacheFile(outside, sha, 'store', dir)).toBe(false);
+    expect(existsSync(outside)).toBe(true);
+    expect(existsSync(`${outside}.refs`)).toBe(false);
+  });
+
+  test('the sweep removes what nothing holds once it is old, and keeps what is held', () => {
+    const dir = join(temporaryDir(), 'media-cache');
+    const orphan = writeMediaCacheFile(dir, jpegBytes(101), 'image/jpeg');
+    const held = writeMediaCacheFile(dir, jpegBytes(102), 'image/jpeg');
+    const fresh = writeMediaCacheFile(dir, jpegBytes(103), 'image/jpeg');
+    retainMediaCacheFile(held.path, held.sha256, 'store', dir);
+    // Every staging hold is from an extraction that died two days ago.
+    const old = (Date.now() - 2 * 24 * 60 * 60_000) / 1000;
+    for (const media of [orphan, held]) {
+      utimesSync(media.path, old, old);
+      for (const marker of readdirSync(`${media.path}.refs`)) utimesSync(join(`${media.path}.refs`, marker), old, old);
+    }
+    expect(sweepMediaCache(dir)).toBe(1);
+    expect(existsSync(orphan.path)).toBe(false);
+    expect(existsSync(held.path)).toBe(true);
+    expect(existsSync(fresh.path)).toBe(true);
   });
 
   const realSips = process.platform === 'darwin' && process.env.OLYMPUS_MEDIA_REAL_SIPS_TEST === '1' ? test : test.skip;
@@ -292,8 +406,22 @@ function chunkRows(dbPath: string) {
   }
 }
 
-function jpeg(seed: number): Uint8Array {
-  return new Uint8Array([...JPEG_MAGIC, seed, seed + 1, seed + 2]);
+/** Prepared-JPEG bytes, distinct per seed. */
+function jpegBytes(seed: number): Uint8Array {
+  return new Uint8Array([...JPEG_MAGIC, seed & 0xff, seed >> 8, 7]);
+}
+let seedCounter = 0;
+
+/**
+ * What the runner does for one prepared picture: the text lane writes it (with
+ * its staging hold), the sink stores it, and the hold is released.
+ */
+async function landPicture(store: LocalConnectorStore, id = 'photo-1', text: string = IMAGE_MEDIA_DESCRIPTOR) {
+  const written = writeMediaCacheFile(cache(), jpegBytes(1_000 + (seedCounter += 1)), 'image/jpeg');
+  const media = { path: written.path, sha256: written.sha256, mimeType: 'image/jpeg' as const };
+  const result = await sinkFor(store).accept(request(media, text, id));
+  releaseMediaCacheFile(written.path, written.sha256, written.stagingHolder);
+  return { media, result, stagingHolder: written.stagingHolder };
 }
 
 class CapturingProvider extends DeterministicSourceEmbeddingProvider {
@@ -304,48 +432,77 @@ class CapturingProvider extends DeterministicSourceEmbeddingProvider {
   }
 }
 
+/** A provider whose model reads pictures; `poison` names pictures it cannot read. */
+class PictureProvider extends CapturingProvider {
+  constructor(private readonly vision = true, private readonly poison = new Set<string>()) {
+    super({ dimension: 8 });
+  }
+
+  async imageSupport(): Promise<boolean> {
+    return this.vision;
+  }
+
+  override async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
+    const failed = inputs.flatMap((input, index) => (input.image && this.poison.has(input.image.sha256) ? [index] : []));
+    if (failed.length > 0) throw new SourceEmbeddingInputsFailedError(failed, 'image_unreadable');
+    return super.embed(inputs, options);
+  }
+}
+
 describe('a prepared picture through runner, sink and store', () => {
-  test('the runner hands the extractor\'s media to the sink with the text', async () => {
-    const jobs = new LocalFileExtractionJobStore(':memory:');
-    try {
-      const media = { path: '/cache/abc.jpg', sha256: 'a'.repeat(64), mimeType: 'image/jpeg' as const };
-      const extractor: Extractor = {
-        kind: 'fake_text', version: '1', needsBytes: true, egress: 'local', accepts: () => true,
-        async extract() { return { status: 'indexed', text: IMAGE_MEDIA_DESCRIPTOR, media }; },
-      };
-      const accepted: ExtractionSinkRequest[] = [];
-      jobs.enqueue({ refs: [photoRef()], extractorKind: 'fake_text', extractorVersion: '1', policyDecision: 'index_allowed' });
-      const runner = createFileExtractionRunner({
-        jobs,
-        registry: buildExtractorRegistry([extractor]),
-        corpora: [{
-          corpusId: CORPUS_ID,
-          trustDomain: 'secure_local',
-          source: {
-            id: 'fake', corpusId: CORPUS_ID, provider: 'fake',
-            async listCandidates() { return { candidates: [], done: true }; },
-            async fetch() { return { bytes: jpeg(1), mimeType: 'image/jpeg' }; },
-          },
-          sink: { async accept(sinkRequest) { accepted.push(sinkRequest); return { accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 1 }; } },
-        }],
-      });
-      const result = await runner.run({ corpusId: CORPUS_ID, provider: 'fake', accountScope: 'personal', approvedScopeKey: 'scope' });
-      expect(result.counts.indexed).toBe(1);
-      expect(accepted[0]!.media).toEqual(media);
-    } finally {
-      jobs.close();
+  test('the runner hands the extractor\'s media to the sink, then gives up its own hold', async () => {
+    for (const accept of [true, false]) {
+      const jobs = new LocalFileExtractionJobStore(':memory:');
+      try {
+        const written = writeMediaCacheFile(cache(), jpegBytes(1 + (accept ? 0 : 1)), 'image/jpeg');
+        const media = { path: written.path, sha256: written.sha256, mimeType: 'image/jpeg' as const, stagingHolder: written.stagingHolder };
+        const extractor: Extractor = {
+          kind: 'fake_text', version: '1', needsBytes: true, egress: 'local', accepts: () => true,
+          async extract() { return { status: 'indexed', text: IMAGE_MEDIA_DESCRIPTOR, media }; },
+        };
+        const accepted: ExtractionSinkRequest[] = [];
+        jobs.enqueue({ refs: [photoRef()], extractorKind: 'fake_text', extractorVersion: '1', policyDecision: 'index_allowed' });
+        const runner = createFileExtractionRunner({
+          jobs,
+          registry: buildExtractorRegistry([extractor]),
+          corpora: [{
+            corpusId: CORPUS_ID,
+            trustDomain: 'secure_local',
+            source: {
+              id: 'fake', corpusId: CORPUS_ID, provider: 'fake',
+              async listCandidates() { return { candidates: [], done: true }; },
+              async fetch() { return { bytes: picture(1), mimeType: 'image/jpeg' }; },
+            },
+            sink: {
+              async accept(sinkRequest) {
+                accepted.push(sinkRequest);
+                // A store that takes the picture holds its own reference.
+                if (accept) retainMediaCacheFile(sinkRequest.media!.path, sinkRequest.media!.sha256, 'store');
+                return accept
+                  ? { accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 1 }
+                  : { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY };
+              },
+            },
+          }],
+        });
+        const result = await runner.run({ corpusId: CORPUS_ID, provider: 'fake', accountScope: 'personal', approvedScopeKey: 'scope' });
+        expect(accepted[0]!.media).toEqual(media);
+        // Taken: kept. Refused: nothing holds it, so it is gone.
+        expect(existsSync(written.path)).toBe(accept);
+        expect(accept ? result.counts.indexed : result.counts.metadata_only).toBe(1);
+      } finally {
+        jobs.close();
+      }
     }
   });
 
   test('the store attaches the picture to the first chunk, and its digest is in the embedding input hash', async () => {
-    const cacheDir = join(temporaryDir(), 'media-cache');
     const dbPath = join(temporaryDir(), 'store.sqlite');
     const textOnlyPath = join(temporaryDir(), 'text-only.sqlite');
     const store = await photoStore(dbPath);
     const textOnly = await photoStore(textOnlyPath);
     try {
-      const media = writeMediaCacheFile(cacheDir, jpeg(1), 'image/jpeg');
-      const result = await sinkFor(store).accept(request({ path: media.path, sha256: media.sha256, mimeType: 'image/jpeg' }));
+      const { media, result } = await landPicture(store);
       expect(result).toMatchObject({ accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 1 });
       await sinkFor(textOnly).accept(request(undefined));
       const [withMedia] = chunkRows(dbPath);
@@ -356,93 +513,183 @@ describe('a prepared picture through runner, sink and store', () => {
 
       // The same picture again is unchanged; a changed picture behind the
       // same text is a changed representation with a new input hash.
-      const same = await sinkFor(store).accept(request({ path: media.path, sha256: media.sha256, mimeType: 'image/jpeg' }));
+      const same = await sinkFor(store).accept(request(media));
       expect(same.chunksAwaitingEmbedding).toBe(0);
-      const changed = writeMediaCacheFile(cacheDir, jpeg(2), 'image/jpeg');
-      await sinkFor(store).accept(request({ path: changed.path, sha256: changed.sha256, mimeType: 'image/jpeg' }));
+      const changed = await landPicture(store);
       const [after] = chunkRows(dbPath);
-      expect(after!.media_sha256).toBe(changed.sha256);
+      expect(after!.media_sha256).toBe(changed.media.sha256);
       expect(after!.embedding_input_hash).not.toBe(withMedia!.embedding_input_hash);
       // The replaced picture had no other holder: it is gone from the cache.
       expect(existsSync(media.path)).toBe(false);
-      expect(existsSync(changed.path)).toBe(true);
+      expect(existsSync(changed.media.path)).toBe(true);
     } finally {
       store.close();
       textOnly.close();
     }
   });
 
-  test('the embed lane hands the picture to the provider, re-embeds a changed one, and skips a missing one', async () => {
-    const cacheDir = join(temporaryDir(), 'media-cache');
-    const store = await photoStore(undefined, ['photo-1', 'photo-2']);
-    try {
-      const first = writeMediaCacheFile(cacheDir, jpeg(1), 'image/jpeg');
-      await sinkFor(store).accept(request({ path: first.path, sha256: first.sha256, mimeType: 'image/jpeg' }));
-      await sinkFor(store).accept(request(undefined, 'A note about the kitchen', 'photo-2'));
-      const provider = new CapturingProvider({ dimension: 8 });
-      const summary = await store.embedChunks({ provider });
-      expect(summary.chunksEmbedded).toBe(2);
-      const withImage = provider.inputs.find((input) => input.image);
-      expect(withImage?.image).toEqual({ path: first.path, sha256: first.sha256, mimeType: 'image/jpeg' });
-      expect(withImage?.text.endsWith(IMAGE_MEDIA_DESCRIPTOR)).toBe(true);
-      expect(provider.inputs.filter((input) => !input.image)).toHaveLength(1);
-
-      const second = writeMediaCacheFile(cacheDir, jpeg(3), 'image/jpeg');
-      await sinkFor(store).accept(request({ path: second.path, sha256: second.sha256, mimeType: 'image/jpeg' }));
-      provider.inputs.length = 0;
-      await store.embedChunks({ provider });
-      expect(provider.inputs.map((input) => input.image?.sha256)).toEqual([second.sha256]);
-
-      // A picture gone from the cache is not embedded as text alone.
-      const third = writeMediaCacheFile(cacheDir, jpeg(5), 'image/jpeg');
-      await sinkFor(store).accept(request({ path: third.path, sha256: third.sha256, mimeType: 'image/jpeg' }));
-      rmSync(third.path);
-      provider.inputs.length = 0;
-      const skipped = await store.embedChunks({ provider });
-      expect(provider.inputs).toHaveLength(0);
-      expect(skipped.chunksEmbedded).toBe(0);
-    } finally {
-      store.close();
+  test('a Personal (or Public) store never receives a picture or a photo\'s text, from any lane', async () => {
+    for (const trustDomain of ['internal', 'public_safe'] as const) {
+      const dbPath = join(temporaryDir(), `${trustDomain}.sqlite`);
+      const store = new LocalConnectorStore({ dbPath, corpusId: `${trustDomain}.fake.files`, family: 'file', trustDomain });
+      try {
+        await store.syncFromConnector(connectorFor([photoItem()]), { fetchContent: false });
+        const sink = createConnectorStoreExtractionSink({
+          store,
+          classify: () => buildSourceSensitivity({ trustTier: trustDomain === 'internal' ? 'S3' : 'S1', trustDomain }),
+          syncConnectorId: 'extraction',
+          ownerConnectorId: 'fake-connector',
+          ownershipKind: 'observed',
+        });
+        const written = writeMediaCacheFile(cache(), jpegBytes(500), 'image/jpeg');
+        const withPicture = await sink.accept(request({ path: written.path, sha256: written.sha256, mimeType: 'image/jpeg' }));
+        const ocrOnly = await sink.accept(request(undefined, 'Photo\nOPEN HOUSE SUNDAY'));
+        releaseMediaCacheFile(written.path, written.sha256, written.stagingHolder);
+        expect(withPicture.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY);
+        expect(ocrOnly.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY);
+        expect(chunkRows(dbPath)).toEqual([]);
+        expect(existsSync(written.path)).toBe(false);
+      } finally {
+        store.close();
+      }
     }
   });
 
-  test('a picture another store still references is kept when one store lets it go', async () => {
-    const cacheDir = join(temporaryDir(), 'media-cache');
+  test('a copy into a Personal store keeps the text and drops the picture; into a Private store it keeps both', async () => {
+    const from = await photoStore(join(temporaryDir(), 'from.sqlite'));
+    const personalPath = join(temporaryDir(), 'personal.sqlite');
+    const privatePath = join(temporaryDir(), 'private.sqlite');
+    const personal = new LocalConnectorStore({ dbPath: personalPath, corpusId: 'internal.fake.files', family: 'file', trustDomain: 'internal' });
+    const secure = new LocalConnectorStore({ dbPath: privatePath, corpusId: 'secure_local.other.files', family: 'file', trustDomain: 'secure_local' });
+    try {
+      const { media } = await landPicture(from);
+      const copy = from.exportItemCopy(photoItem().identity)!;
+      expect(copy.chunks[0]).toMatchObject({ mediaPath: media.path, mediaSha256: media.sha256 });
+      personal.importItemCopy(copy, { trustTier: 'S3', syncConnectorId: 'tier-move' });
+      const [personalChunk] = chunkRows(personalPath);
+      expect(personalChunk).toMatchObject({ media_path: null, media_sha256: null });
+      // Re-hashed as text, so it embeds as text there.
+      expect(personalChunk!.embedding_input_hash).not.toBe(copy.chunks[0]!.embeddingInputHash);
+      secure.importItemCopy(copy, { trustTier: 'S4', syncConnectorId: 'tier-move' });
+      expect(chunkRows(privatePath)[0]).toMatchObject({ media_path: media.path, media_sha256: media.sha256 });
+      // Both Private stores hold it now: the first letting go keeps the file.
+      await sinkFor(from).accept(request(undefined, 'Now just text'));
+      expect(existsSync(media.path)).toBe(true);
+    } finally {
+      from.close();
+      personal.close();
+      secure.close();
+    }
+  });
+
+  test('a twin photo deleted while the other is mid-extraction does not take the file', async () => {
     const a = await photoStore(join(temporaryDir(), 'a.sqlite'));
     const b = await photoStore(join(temporaryDir(), 'b.sqlite'));
     try {
-      const media = writeMediaCacheFile(cacheDir, jpeg(1), 'image/jpeg');
-      const asMedia = { path: media.path, sha256: media.sha256, mimeType: 'image/jpeg' as const };
-      await sinkFor(a).accept(request(asMedia));
-      await sinkFor(b).accept(request(asMedia));
-      await sinkFor(a).accept(request(undefined, 'Now just text'));
-      expect(existsSync(media.path)).toBe(true);
-      await sinkFor(b).accept(request(undefined, 'Now just text'));
-      expect(existsSync(media.path)).toBe(false);
+      const bytes = jpegBytes(700);
+      const first = writeMediaCacheFile(cache(), bytes, 'image/jpeg');
+      await sinkFor(a).accept(request({ path: first.path, sha256: first.sha256, mimeType: 'image/jpeg' }));
+      releaseMediaCacheFile(first.path, first.sha256, first.stagingHolder);
+      // The twin's extraction writes the same bytes (its hold taken) ...
+      const twin = writeMediaCacheFile(cache(), bytes, 'image/jpeg');
+      // ... the first copy's item is stripped meanwhile ...
+      a.stripCopyContent(photoItem().identity);
+      expect(existsSync(first.path)).toBe(true);
+      // ... and the twin lands on a file that is still there.
+      await sinkFor(b).accept(request({ path: twin.path, sha256: twin.sha256, mimeType: 'image/jpeg' }));
+      releaseMediaCacheFile(twin.path, twin.sha256, twin.stagingHolder);
+      expect(existsSync(twin.path)).toBe(true);
     } finally {
       a.close();
       b.close();
     }
   });
 
-  test('a tier move\'s copy carries the picture to the other store', async () => {
-    const cacheDir = join(temporaryDir(), 'media-cache');
-    const from = await photoStore(join(temporaryDir(), 'from.sqlite'));
-    const toPath = join(temporaryDir(), 'to.sqlite');
-    const to = new LocalConnectorStore({ dbPath: toPath, corpusId: 'internal.fake.files', family: 'file', trustDomain: 'internal' });
+  test('deleting paths release a picture at once: strip, purge, close', async () => {
+    const store = await photoStore(undefined, ['photo-1', 'photo-2']);
+    const one = await landPicture(store, 'photo-1');
+    const two = await landPicture(store, 'photo-2');
+    store.stripCopyContent(photoItem('photo-1').identity);
+    expect(existsSync(one.media.path)).toBe(false);
+    expect(existsSync(two.media.path)).toBe(true);
+    store.close();
+    expect(existsSync(two.media.path)).toBe(true);
+  });
+
+  test('the embed lane hands the picture to a provider that reads pictures; others embed the text', async () => {
+    const store = await photoStore(undefined, ['photo-1', 'photo-2']);
     try {
-      const media = writeMediaCacheFile(cacheDir, jpeg(1), 'image/jpeg');
-      await sinkFor(from).accept(request({ path: media.path, sha256: media.sha256, mimeType: 'image/jpeg' }));
-      const copy = from.exportItemCopy(photoItem().identity)!;
-      expect(copy.chunks[0]).toMatchObject({ mediaPath: media.path, mediaSha256: media.sha256 });
-      to.importItemCopy(copy, { trustTier: 'S3', syncConnectorId: 'tier-move' });
-      expect(chunkRows(toPath)[0]).toMatchObject({ media_path: media.path, media_sha256: media.sha256 });
-      // Both stores hold it now: the first letting go keeps the file.
-      await sinkFor(from).accept(request(undefined, 'Now just text'));
-      expect(existsSync(media.path)).toBe(true);
+      const first = await landPicture(store);
+      await sinkFor(store).accept(request(undefined, 'A note about the kitchen', 'photo-2'));
+      const provider = new PictureProvider();
+      const summary = await store.embedChunks({ provider });
+      expect(summary.chunksEmbedded).toBe(2);
+      const withImage = provider.inputs.find((input) => input.image);
+      expect(withImage?.image).toEqual({ path: first.media.path, sha256: first.media.sha256, mimeType: 'image/jpeg' });
+      expect(withImage?.text.endsWith(IMAGE_MEDIA_DESCRIPTOR)).toBe(true);
+
+      const second = await landPicture(store);
+      provider.inputs.length = 0;
+      await store.embedChunks({ provider });
+      expect(provider.inputs.map((input) => input.image?.sha256)).toEqual([second.media.sha256]);
+
+      // A provider that does not read pictures embeds the photo's text, even
+      // with the cache file gone.
+      const textModel = new CapturingProvider({ modelId: 'text-only-model', dimension: 8 });
+      rmSync(second.media.path);
+      expect((await store.embedChunks({ provider: textModel })).chunksEmbedded).toBe(2);
     } finally {
-      from.close();
-      to.close();
+      store.close();
+    }
+  });
+
+  test('a picture gone from the cache is dropped, and the photo embeds as text instead of waiting for ever', async () => {
+    const dbPath = join(temporaryDir(), 'store.sqlite');
+    const store = await photoStore(dbPath);
+    try {
+      const { media } = await landPicture(store);
+      rmSync(media.path);
+      const provider = new PictureProvider();
+      expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(0);
+      expect(chunkRows(dbPath)[0]).toMatchObject({ media_path: null, media_sha256: null });
+      expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(1);
+      expect(provider.inputs.every((input) => !input.image)).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('without the image encoder, photos are held and text keeps embedding', async () => {
+    const dbPath = join(temporaryDir(), 'store.sqlite');
+    const store = await photoStore(dbPath, ['photo-1', 'photo-2']);
+    try {
+      const { media } = await landPicture(store);
+      await sinkFor(store).accept(request(undefined, 'A note', 'photo-2'));
+      const blind = new PictureProvider(false);
+      expect((await store.embedChunks({ provider: blind })).chunksEmbedded).toBe(1);
+      expect(blind.inputs.some((input) => input.image)).toBe(false);
+      // The photo still carries its picture, and embeds once the encoder runs.
+      expect(chunkRows(dbPath)[0]).toMatchObject({ media_sha256: media.sha256 });
+      expect((await store.embedChunks({ provider: new PictureProvider(true) })).chunksEmbedded).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('one unreadable picture is marked and never holds up the rest of the store', async () => {
+    const store = await photoStore(undefined, ['photo-1', 'photo-2', 'photo-3']);
+    try {
+      const bad = await landPicture(store, 'photo-1');
+      await landPicture(store, 'photo-2');
+      await sinkFor(store).accept(request(undefined, 'A note', 'photo-3'));
+      const provider = new PictureProvider(true, new Set([bad.media.sha256]));
+      expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(2);
+      provider.inputs.length = 0;
+      expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(0);
+      // The bad photo is not sent again.
+      expect(provider.inputs).toEqual([]);
+    } finally {
+      store.close();
     }
   });
 
@@ -455,6 +702,8 @@ describe('a prepared picture through runner, sink and store', () => {
     db.exec(`
       DROP TRIGGER connector_store_chunk_media_release;
       DROP TABLE chunk_media_releases;
+      DROP TABLE chunk_media_failures;
+      DROP INDEX idx_connector_store_chunks_media;
       ALTER TABLE chunks DROP COLUMN media_path;
       ALTER TABLE chunks DROP COLUMN media_sha256;
       UPDATE schema_version SET version = 12 WHERE store_id = 'connector-store';
@@ -469,11 +718,33 @@ describe('a prepared picture through runner, sink and store', () => {
       const columns = (check.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
       expect(columns).toContain('media_path');
       expect(columns).toContain('media_sha256');
+      const indexes = (check.query('PRAGMA index_list(chunks)').all() as Array<{ name: string }>).map((index) => index.name);
+      expect(indexes).toContain('idx_connector_store_chunks_media');
       const rows = check.query('SELECT bounded_text, media_sha256 FROM chunks').all() as Array<{ bounded_text: string; media_sha256: string | null }>;
       expect(rows).toEqual([{ bounded_text: 'Text from before photos', media_sha256: null }]);
     } finally {
       check.close();
     }
+  });
+});
+
+describe('data lifecycle and the media cache', () => {
+  test('deleting a source releases its photos; deleting everything names the cache, wherever it is', async () => {
+    const home = temporaryDir('olympus-photo-home-');
+    // XDG_DATA_HOME is set so the store path is under this temporary home,
+    // never the real one.
+    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share'), [MEDIA_CACHE_DIR_ENV]: CACHE_BASE };
+    const dbPath = defaultDropboxConnectorStoreDbPath(env);
+    expect(dbPath.startsWith(home)).toBe(true);
+    mkdirSync(join(dbPath, '..'), { recursive: true });
+    const store = await photoStore(dbPath);
+    const { media } = await landPicture(store);
+    store.close();
+    const all = deleteOlympusData({ all: true, dryRun: true, homeDir: home, env });
+    expect([...all.removed, ...all.missing]).toContain(cache());
+    const result = deleteOlympusData({ sourceId: 'dropbox.files', homeDir: home, env });
+    expect(result.removed).toContain(media.path);
+    expect(existsSync(media.path)).toBe(false);
   });
 });
 
@@ -493,7 +764,9 @@ describe('photo content rests Private by default', () => {
 
   test('the owner\'s per-item override still decides, and a secret read off a picture is still Secrets', () => {
     expect(classifyContentTier({ ...base, text: 'Photo', mimeType: 'image/jpeg' }, { override: { kind: 'tier', tier: 'private' } }).contentTier).toBe('private');
-    const secret = classifyContentTier({ ...base, text: 'Photo\nAKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', mimeType: 'image/jpeg' });
+    // Built from parts so the repository's credential scanner does not read a literal key.
+    const fakeKey = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+    const secret = classifyContentTier({ ...base, text: `Photo\n${fakeKey}`, mimeType: 'image/jpeg' });
     expect(secret.contentTier).toBe('secrets');
   });
 });

@@ -77,9 +77,10 @@ import {
   type ZipEntryDirectoryRecord,
 } from './document-formats.ts';
 import type { ImagePreparation } from './image-prepare.ts';
+import { releaseMediaCacheFile } from '../../../core/media-cache.ts';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export const TEXT_EXTRACTOR_KIND = 'local_text';
 export const TEXT_EXTRACTOR_VERSION = '2026-05-22';
@@ -168,6 +169,16 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
     kind,
     version,
     needsBytes: true,
+    // Pictures read for media search are a new reading of an image: an image
+    // read before (names only, or OCR text) is queued once more under this.
+    ...(imagePreparation
+      ? {
+        versionFor(mimeType: string | undefined): string {
+          const normalized = normalizeMimeType(mimeType);
+          return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}` : version;
+        },
+      }
+      : {}),
     egress: 'local',
     accepts(mimeType) {
       return textLaneAccepts(mimeType);
@@ -209,8 +220,18 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
           const prepared = await imagePreparation({ bytes, mimeType, sizeBytes: context.sizeBytes });
           if (prepared.kind === 'settled') return prepared.output;
           if (prepared.kind === 'media') {
-            const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
-            return preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+            let output: ExtractorOutput;
+            try {
+              const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
+              output = preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+            } catch (error) {
+              releaseStaged(prepared.media);
+              throw error;
+            }
+            // A result that does not carry the picture on gives up the
+            // extraction's hold, so the cached copy does not outlive it.
+            if (output.status !== 'indexed') releaseStaged(prepared.media);
+            return output;
           }
         }
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
@@ -259,11 +280,21 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   };
 }
 
+function releaseStaged(media: ExtractedMedia): void {
+  if (media.stagingHolder) releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname(media.path));
+}
+
 /**
  * The descriptor an image chunk carries. The words the model reads beside the
  * picture are the item's title and context (the store adds them) and this.
  */
 export const IMAGE_MEDIA_DESCRIPTOR = 'Photo';
+
+/**
+ * Appended to the text lane's version for images when pictures are read for
+ * media search (2026-10-07).
+ */
+export const IMAGE_MEDIA_VERSION_SUFFIX = '+image-media-2026-10-07';
 
 /**
  * An image prepared for media search: indexed, with the prepared copy as

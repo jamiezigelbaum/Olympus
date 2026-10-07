@@ -286,6 +286,12 @@ export interface ExtractedMedia {
   path: string;
   sha256: string;
   mimeType: 'image/jpeg';
+  /**
+   * The extraction's own hold on the cached file, taken when it was written.
+   * The runner releases it once the result is stored or refused, so a file
+   * no store took is removed and a file a store took is kept.
+   */
+  stagingHolder?: string;
 }
 
 /**
@@ -349,6 +355,12 @@ export interface Extractor {
   readonly kind: string;
   readonly version: string;
   readonly needsBytes: boolean;
+  /**
+   * The version a job for this media type is queued under, when it differs
+   * from `version`: a capability added for one media type (pictures read for
+   * media search) re-reads only items of that type, once.
+   */
+  versionFor?(mimeType: string | undefined): string;
   readonly egress: ExtractionEgress;
   readonly approvedRemoteDestination?: ExtractionApprovedRemoteDestination;
   accepts(mimeType: string | undefined, name?: string): boolean;

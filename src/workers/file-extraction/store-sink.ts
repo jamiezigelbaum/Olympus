@@ -27,6 +27,7 @@
 
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { RawItem } from '../../core/contracts.ts';
+import { isImageMediaType } from '../classification/tier-classifier.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
   SourceItemIdentity,
@@ -86,6 +87,14 @@ export const EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = 'store_item_tier_move_qu
  * stored nowhere and only its location is kept.
  */
 export const EXTRACTION_SINK_SKIPPED_SECRETS = 'store_item_secrets';
+/**
+ * A still image's content (its picture, and any text read off it) rests only
+ * in a Private store (docs/design/photo-embeddings.md). A store of any other
+ * trust domain refuses it, whatever lane wrote to it; the item keeps its
+ * names. A tiered store set routes image content to its Private store
+ * instead, so this is the backstop for a lane that has no such set.
+ */
+export const EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = 'store_image_content_private_only';
 
 /**
  * Maps the two store refusals a healthy sink can race into onto skip tokens,
@@ -291,6 +300,14 @@ export function createConnectorStoreExtractionSink(
       // complete short-circuits before classification, so relying on the throw
       // would let an ineligible item report success purely because a previous
       // pass had already stored its text.
+      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== 'secure_local') {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY,
+        };
+      }
       const sensitivity = options.classify(plan.item);
       if (sensitivity.trustDomain !== store.trustDomain || sensitivity.trustTier === 'S5') {
         return {

@@ -22,6 +22,12 @@ export type LiteRtEmbedItem = string | { text: string; image?: string };
 export interface LiteRtEmbedder {
   /** Where the helper runs the model now. */
   readonly device: LiteRtDevice;
+  /** Whether the helper started the image encoder (it may run without it). */
+  readonly vision: boolean;
+  /**
+   * One vector per item. An item whose picture could not be read gets an
+   * EMPTY vector (length 0) while the rest are embedded.
+   */
   embed(items: readonly LiteRtEmbedItem[]): Promise<Float32Array[]>;
   release(): Promise<void>;
 }
@@ -82,6 +88,7 @@ interface Pending {
 class HelperProcess {
   readonly child: ChildProcessWithoutNullStreams;
   device: LiteRtDevice = 'cpu';
+  vision = false;
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private stderr = '';
@@ -137,7 +144,7 @@ class HelperProcess {
         helper.stderr = (helper.stderr + chunk.toString('utf8')).slice(-4_000);
       });
       createInterface({ input: child.stdout }).on('line', (line) => {
-        let message: { ready?: boolean; device?: LiteRtDevice; fatal?: string; id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number };
+        let message: { ready?: boolean; device?: LiteRtDevice; vision?: boolean; fatal?: string; id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[] };
         try {
           message = JSON.parse(line);
         } catch {
@@ -148,6 +155,7 @@ class HelperProcess {
             started = true;
             clearTimeout(timer);
             helper.device = message.device === 'gpu' ? 'gpu' : 'cpu';
+            helper.vision = message.vision === true;
             resolve(helper);
           } else if (message.fatal) {
             started = true;
@@ -203,11 +211,17 @@ class HelperProcess {
     });
   }
 
-  private settle(message: { id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number }): void {
+  private settle(message: { id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[] }): void {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
     if (!pending || message.id === undefined) return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
+    const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
+    if (!message.error && failed.size === pending.count) {
+      // Every item's picture failed: nothing to decode, nothing wrong with the engine.
+      pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
+      return;
+    }
     if (message.error || !message.vectors || !message.dimension) {
       pending.reject(new Error(message.error ?? 'The built-in search model returned no vectors.'));
       // LiteRT-LM itself failed (a GPU dispatch failure, say): the helper is
@@ -222,8 +236,10 @@ class HelperProcess {
     }
     const bytes = Buffer.from(message.vectors, 'base64');
     const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-    const vectors = Array.from({ length: pending.count }, (_, index) => all.subarray(index * message.dimension!, (index + 1) * message.dimension!));
-    if (vectors.some((vector) => vector.length !== message.dimension)) {
+    const vectors = Array.from({ length: pending.count }, (_, index) => (failed.has(index)
+      ? new Float32Array(0)
+      : all.subarray(index * message.dimension!, (index + 1) * message.dimension!)));
+    if (vectors.some((vector, index) => !failed.has(index) && vector.length !== message.dimension)) {
       pending.reject(new Error('The built-in search model returned the wrong number of values.'));
       return;
     }
@@ -261,6 +277,7 @@ export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promi
   process.once('exit', releaseAtExit);
   return {
     get device() { return helper.device; },
+    get vision() { return helper.vision; },
     async embed(items) {
       if (helper.exited) {
         if (helper.device === 'gpu') device = 'cpu';

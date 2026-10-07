@@ -10,8 +10,9 @@
 // `{"id":N,"items":[{"text":"...","image":"/abs/path.jpg"?},...]}` gets
 // `{"id":N,"vectors":"<base64 float32 little-endian>","dimension":D}` (one
 // vector per text or item; an item with an image is embedded as text and
-// picture together) or `{"id":N,"error":"..."}`, with `"native":true` when
-// LiteRT-LM itself failed.
+// picture together; `"failed":[i,...]` names items whose picture could not be
+// read, their vectors left as zeros) or `{"id":N,"error":"..."}`, with
+// `"native":true` when LiteRT-LM itself failed.
 
 import { dlopen, FFIType, ptr, toArrayBuffer, type Pointer } from 'bun:ffi';
 import { closeSync, fstatSync, mkdirSync, openSync, readSync } from 'node:fs';
@@ -92,6 +93,8 @@ function createEngine(lib: LiteRt, settings: LiteRtHelperSettings, backend: 'gpu
 interface EmbedItem {
   text: string;
   image?: string;
+  /** The engine was started without its image encoder. */
+  unsupported?: boolean;
 }
 
 /** The request's items, checked before any native input exists, so a bad one leaks nothing. */
@@ -107,8 +110,8 @@ function requestItems(request: { texts?: unknown; items?: unknown }, vision: boo
     if (typeof item?.text !== 'string' || item.text.length === 0) throw new Error('Every input must be non-empty text.');
     if (item.image === undefined) return { text: item.text };
     if (typeof item.image !== 'string' || !isAbsolute(item.image)) throw new Error('An image must be an absolute file path.');
-    if (!vision) throw new Error('This model was started without its image encoder.');
-    return { text: item.text, image: item.image };
+    // Without the image encoder a picture fails its own item, never the batch.
+    return { text: item.text, image: item.image, ...(vision ? {} : { unsupported: true }) };
   });
 }
 
@@ -132,9 +135,73 @@ function readImage(path: string): Buffer {
   }
 }
 
-function embedBatch(lib: LiteRt, engine: Pointer, options: Pointer, items: readonly EmbedItem[]): { vectors: Float32Array; dimension: number } {
-  // Read every picture before any native input exists, so a bad one leaks nothing.
-  const images = items.map((item) => (item.image ? readImage(item.image) : undefined));
+/**
+ * Embeds a batch, isolating pictures the image encoder cannot read: such an
+ * item is reported in `failed` (its vector left as zeros) and every other
+ * item is still embedded. A failure with no picture involved is the engine's
+ * own (NativeError), and the parent replaces the helper for it.
+ */
+function embedBatch(
+  lib: LiteRt,
+  engine: Pointer,
+  options: Pointer,
+  items: readonly EmbedItem[],
+): { vectors: Float32Array; dimension: number; failed: number[] } {
+  const failed = new Set<number>();
+  // Read every picture before any native input exists; an unreadable file
+  // fails its own item only.
+  const images = items.map((item, index) => {
+    if (!item.image) return undefined;
+    if (item.unsupported) {
+      failed.add(index);
+      return undefined;
+    }
+    try {
+      return readImage(item.image);
+    } catch {
+      failed.add(index);
+      return undefined;
+    }
+  });
+  const results = new Map<number, Float32Array>();
+  let dimension = 0;
+  const run = (indexes: readonly number[]) => {
+    const out = embedRaw(lib, engine, options, indexes.map((index) => items[index]!), indexes.map((index) => images[index]));
+    dimension = out.dimension;
+    indexes.forEach((index, row) => results.set(index, out.vectors.subarray(row * out.dimension, (row + 1) * out.dimension)));
+  };
+  const live = items.map((_, index) => index).filter((index) => !failed.has(index));
+  if (live.length > 0) {
+    try {
+      run(live);
+    } catch (error) {
+      if (!(error instanceof NativeError) || !live.some((index) => images[index])) throw error;
+      // A picture can fail a whole batch. Text alone again (a failure there is
+      // the engine's), then each picture alone, keeping the ones that work.
+      const textOnly = live.filter((index) => !images[index]);
+      if (textOnly.length > 0) run(textOnly);
+      for (const index of live.filter((candidate) => images[candidate])) {
+        try {
+          run([index]);
+        } catch (itemError) {
+          if (!(itemError instanceof NativeError)) throw itemError;
+          failed.add(index);
+        }
+      }
+    }
+  }
+  const vectors = new Float32Array(dimension * items.length);
+  for (const [index, vector] of results) vectors.set(vector, index * dimension);
+  return { vectors, dimension, failed: [...failed].sort((left, right) => left - right) };
+}
+
+function embedRaw(
+  lib: LiteRt,
+  engine: Pointer,
+  options: Pointer,
+  items: readonly EmbedItem[],
+  images: ReadonlyArray<Buffer | undefined>,
+): { vectors: Float32Array; dimension: number } {
   const inputs: Array<Pointer | null> = [];
   try {
     // One item is its text, then its picture: LiteRT embeds them together.
@@ -247,8 +314,13 @@ function main(): void {
     try {
       const request = JSON.parse(line) as { id: number; texts?: unknown; items?: unknown };
       id = request.id;
-      const { vectors, dimension } = embedBatch(lib, engine, options, requestItems(request, vision));
-      send({ id, dimension, vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString('base64') });
+      const { vectors, dimension, failed } = embedBatch(lib, engine, options, requestItems(request, vision));
+      send({
+        id,
+        dimension,
+        vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString('base64'),
+        ...(failed.length > 0 ? { failed } : {}),
+      });
     } catch (error) {
       send({ id, error: error instanceof Error ? error.message : String(error), ...(error instanceof NativeError ? { native: true } : {}) });
     }

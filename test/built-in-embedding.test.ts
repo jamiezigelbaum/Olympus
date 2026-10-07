@@ -48,8 +48,10 @@ import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embeddi
 import { canonicalEmbeddingIdentityForModel } from '../src/workers/source-index/embedding-identity.ts';
 import {
   isApprovedSecureSourceEmbeddingProvider,
+  SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
 } from '../src/workers/source-index/embeddings.ts';
+import { mediaCacheDir } from '../src/core/media-cache.ts';
 import {
   createSourceIndexEmbeddingProviderFromEnv,
   createSourceIndexEmbeddingProviderFromSovereignty,
@@ -636,16 +638,24 @@ describe('built-in embedding installer with a LiteRT model', () => {
 });
 
 /** A stand-in LiteRT helper: each prompt becomes `[length, first char code, batch size, 1]`. */
-function stubLiteRt(log: { batches: string[][]; images: Array<Array<string | undefined>>; options: LiteRtEmbedderOptions[] }, dimension = 4) {
+function stubLiteRt(
+  log: { batches: string[][]; images: Array<Array<string | undefined>>; options: LiteRtEmbedderOptions[] },
+  dimension = 4,
+  helper: { vision?: boolean; poison?: string } = {},
+) {
   return async (options: LiteRtEmbedderOptions): Promise<LiteRtEmbedder> => {
     log.options.push(options);
     return {
       device: options.device === 'cpu' ? 'cpu' : 'gpu',
+      vision: helper.vision ?? options.visionTokensPerImage !== undefined,
       async embed(items) {
         const texts = items.map((item) => (typeof item === 'string' ? item : item.text));
         log.batches.push(texts);
         log.images.push(items.map((item) => (typeof item === 'string' ? undefined : item.image)));
-        return texts.map((text) => Float32Array.from({ length: dimension }, (_, index) => [text.length, text.charCodeAt(0), texts.length, 1][index] ?? 0));
+        // A picture the stand-in cannot read comes back as an empty vector, as from the helper.
+        return items.map((item, row) => (typeof item !== 'string' && helper.poison && item.image?.includes(helper.poison)
+          ? new Float32Array(0)
+          : Float32Array.from({ length: dimension }, (_, index) => [texts[row]!.length, texts[row]!.charCodeAt(0), texts.length, 1][index] ?? 0)));
       },
       async release() {},
     };
@@ -657,16 +667,23 @@ function withoutVision(model: BuiltInEmbeddingModelSpec): BuiltInEmbeddingModelS
   return rest;
 }
 
-function liteRtProvider(extraEnv: Record<string, string> = {}, dimension = 4, vision = false) {
+function liteRtProvider(extraEnv: Record<string, string> = {}, dimension = 4, vision = false, helper: { vision?: boolean; poison?: string } = {}) {
   const served = servedLiteRt();
   const log = { batches: [] as string[][], images: [] as Array<Array<string | undefined>>, options: [] as LiteRtEmbedderOptions[] };
+  const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir(), OLYMPUS_MEDIA_CACHE_DIR: temporaryDir(), ...extraEnv };
   const provider = new BuiltInSourceEmbeddingProvider({
-    env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir(), ...extraEnv },
+    env,
     model: vision ? { ...served.model, vision: { tokensPerImage: 140 } } : withoutVision(served.model),
-    liteRt: stubLiteRt(log, dimension),
+    liteRt: stubLiteRt(log, dimension, helper),
     installerOptions: { fetchImpl: served.fetchImpl, liteRtRuntime: served.pack },
   });
-  return { provider, log };
+  return { provider, log, env };
+}
+
+/** An image input whose path is the media cache's own file for its digest. */
+function cacheImage(env: Record<string, string>, seed: string) {
+  const sha = seed.repeat(64).slice(0, 64);
+  return { path: join(mediaCacheDir(env), `${sha}.jpg`), sha256: sha, mimeType: 'image/jpeg' };
 }
 
 describe('built-in embedding with a LiteRT model', () => {
@@ -708,10 +725,11 @@ describe('built-in embedding with a LiteRT model', () => {
   });
 
   test('a document with a picture sends its usual prompt with the picture; a question never does', async () => {
-    const { provider, log } = liteRtProvider({}, 4, true);
+    const { provider, log, env } = liteRtProvider({}, 4, true);
     await provider.prepare();
     expect(log.options[0]!.visionTokensPerImage).toBe(140);
-    const image = { path: '/media-cache/abc.jpg', sha256: 'a'.repeat(64), mimeType: 'image/jpeg' };
+    expect(await provider.imageSupport()).toBe(true);
+    const image = cacheImage(env, 'a');
     await provider.embed([
       { title: 'kitchen.jpg', text: 'Photo', image },
       { text: 'a note' },
@@ -723,10 +741,28 @@ describe('built-in embedding with a LiteRT model', () => {
   });
 
   test('a model without vision embeds the text alone and starts without the encoder', async () => {
-    const { provider, log } = liteRtProvider();
-    await provider.embed([{ text: 'Photo', image: { path: '/x.jpg', sha256: 'b'.repeat(64), mimeType: 'image/jpeg' } }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    const { provider, log, env } = liteRtProvider();
+    await provider.embed([{ text: 'Photo', image: cacheImage(env, 'b') }], { taskType: 'RETRIEVAL_DOCUMENT' });
     expect(log.options[0]!.visionTokensPerImage).toBeUndefined();
     expect(log.images[0]).toEqual([undefined]);
+    expect(await provider.imageSupport()).toBe(false);
+  });
+
+  test('a helper whose image encoder did not start reports it, so photos are held', async () => {
+    const { provider } = liteRtProvider({}, 4, true, { vision: false });
+    expect(await provider.imageSupport()).toBe(false);
+  });
+
+  test('one unreadable picture fails only its own input; a path outside the cache is never sent', async () => {
+    const { provider, log, env } = liteRtProvider({}, 4, true, { poison: 'c'.repeat(8) });
+    const error = await provider.embed([
+      { text: 'note' },
+      { title: 'bad.jpg', text: 'Photo', image: cacheImage(env, 'c') },
+      { title: 'elsewhere.jpg', text: 'Photo', image: { path: '/etc/passwd', sha256: 'd'.repeat(64), mimeType: 'image/jpeg' } },
+    ], { taskType: 'RETRIEVAL_DOCUMENT' }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SourceEmbeddingInputsFailedError);
+    expect((error as SourceEmbeddingInputsFailedError).failedIndexes).toEqual([1, 2]);
+    expect(log.images[0]).toEqual([undefined, cacheImage(env, 'c').path, undefined]);
   });
 
   test('refuses a vector of the wrong size', async () => {
@@ -736,16 +772,17 @@ describe('built-in embedding with a LiteRT model', () => {
 });
 
 /** A helper script that speaks the LiteRT helper's protocol without LiteRT. */
-function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'native-error-on-gpu' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
+function fakeHelper(behaviour: 'ok' | 'no-vision' | 'fatal' | 'crash-first-gpu-batch' | 'native-error-on-gpu' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
   const path = join(temporaryDir(), 'fake-helper.js');
   writeFileSync(path, `
     const settings = JSON.parse(process.argv[2]);
     const behaviour = ${JSON.stringify(behaviour)};
     if (behaviour === 'fatal') { console.log(JSON.stringify({ fatal: 'no model here' })); process.exit(1); }
+    const vision = settings.visionTokensPerImage !== undefined && behaviour !== 'no-vision';
     const device = settings.device === 'auto' ? 'gpu' : 'cpu';
     if (behaviour === 'crash-on-gpu-start' && device === 'gpu') process.exit(139);
     console.log('library chatter that is not JSON');
-    console.log(JSON.stringify({ ready: true, device }));
+    console.log(JSON.stringify({ ready: true, device, vision }));
     if (behaviour === 'close-stdin') { process.stdin.destroy(); setInterval(() => {}, 1000); return; }
     const lines = require('node:readline').createInterface({ input: process.stdin });
     if (behaviour === 'ignore-stdin-close') setInterval(() => {}, 1000);
@@ -760,9 +797,14 @@ function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'nativ
       if (behaviour === 'native-error-on-gpu' && device === 'gpu') { console.log(JSON.stringify({ id, error: 'LiteRT-LM could not embed this batch.', native: true })); return; }
       if (texts.includes('bad')) { console.log(JSON.stringify({ id, error: 'Every input must be non-empty text.' })); return; }
       const vectors = new Float32Array(items.length * 2);
-      // An item with a picture answers with the vision setting it was started with.
-      items.forEach((item, index) => vectors.set([item.text.length, item.image ? settings.visionTokensPerImage : device === 'gpu' ? 1 : 2], index * 2));
-      console.log(JSON.stringify({ id, dimension: 2, vectors: Buffer.from(vectors.buffer).toString('base64') }));
+      // As the real helper: a picture it cannot read (no encoder, or a bad
+      // file) fails its own item, which comes back in failed with zeros.
+      const failed = [];
+      items.forEach((item, index) => {
+        if (item.image && (!vision || item.image.includes('poison'))) { failed.push(index); return; }
+        vectors.set([item.text.length, item.image ? settings.visionTokensPerImage : device === 'gpu' ? 1 : 2], index * 2);
+      });
+      console.log(JSON.stringify({ id, dimension: 2, vectors: Buffer.from(vectors.buffer).toString('base64'), ...(failed.length ? { failed } : {}) }));
     });
   `);
   return path;
@@ -779,6 +821,20 @@ describe('the LiteRT helper process', () => {
     const vectors = await embedder.embed(['ab', 'abcd']);
     expect(vectors.map((vector) => Array.from(vector))).toEqual([[2, 1], [4, 1]]);
     await embedder.release();
+  });
+
+  test('a picture the helper cannot read fails only its item; a helper without the encoder says so', async () => {
+    const poisoned = await startLiteRtEmbedder(helperOptions(fakeHelper('ok'), { visionTokensPerImage: 140 }));
+    expect(poisoned.vision).toBe(true);
+    const mixed = await poisoned.embed([{ text: 'abc', image: '/media/poison.jpg' }, 'de', { text: 'f', image: '/media/ok.jpg' }]);
+    expect(mixed.map((vector) => Array.from(vector))).toEqual([[], [2, 1], [1, 140]]);
+    expect(poisoned.device).toBe('gpu');
+    await poisoned.release();
+    const blind = await startLiteRtEmbedder(helperOptions(fakeHelper('no-vision'), { visionTokensPerImage: 140 }));
+    expect(blind.vision).toBe(false);
+    expect((await blind.embed([{ text: 'abc', image: '/media/a.jpg' }])).map((vector) => vector.length)).toEqual([0]);
+    expect((await blind.embed(['abcd'])).map((vector) => Array.from(vector))).toEqual([[4, 1]]);
+    await blind.release();
   });
 
   test('sends text with a picture as items, and text alone as before', async () => {
@@ -946,15 +1002,21 @@ describe('built-in embedding with the real model (opt-in)', () => {
     const env = {
       ...process.env,
       OLYMPUS_BUILT_IN_EMBEDDING_DIR: process.env.OLYMPUS_BUILT_IN_EMBEDDING_DIR || temporaryDir(),
+      OLYMPUS_MEDIA_CACHE_DIR: temporaryDir(),
     };
     const provider = new BuiltInSourceEmbeddingProvider({ env });
     await provider.prepare();
-    const path = join(temporaryDir(), 'red.png');
-    writeFileSync(path, solidPng(256, 256, [220, 20, 20]));
+    expect(await provider.imageSupport()).toBe(true);
+    // The provider reads pictures only from the media cache, named for their digest.
+    const bytes = solidPng(256, 256, [220, 20, 20]);
+    const digest = sha256(bytes);
+    mkdirSync(mediaCacheDir(env), { recursive: true });
+    const path = join(mediaCacheDir(env), `${digest}.jpg`);
+    writeFileSync(path, bytes);
     const [picture] = await provider.embed([{
       title: 'swatch.png',
       text: 'Photo',
-      image: { path, sha256: sha256(readFileSync(path)), mimeType: 'image/png' },
+      image: { path, sha256: digest, mimeType: 'image/png' },
     }], { taskType: 'RETRIEVAL_DOCUMENT' });
     const [textOnly] = await provider.embed([{ title: 'swatch.png', text: 'Photo' }], { taskType: 'RETRIEVAL_DOCUMENT' });
     const [match, other] = await provider.embed([{ text: 'a plain red square' }], { taskType: 'RETRIEVAL_QUERY' })

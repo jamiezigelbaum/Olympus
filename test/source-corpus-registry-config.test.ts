@@ -518,7 +518,9 @@ describe('config-driven source corpus registry', () => {
     const generatedPolicy = loadDropboxIngestionPolicy({
       inlinePolicy: JSON.parse(readFileSync(join(import.meta.dir, '..', 'config', 'source-ingestion', 'dropbox.personal.ingestion.json'), 'utf8')) as unknown,
     });
-    const defaultPolicy = defaultDropboxIngestionPolicy();
+    // The private host is Linux, which cannot prepare pictures: its policy is
+    // the default without still images read (docs/design/photo-embeddings.md).
+    const defaultPolicy = defaultDropboxIngestionPolicy({ stillImagesRead: false });
     expect(generatedPolicy).toEqual(defaultPolicy);
     expect(dropboxPolicyApprovedScopeKeys(generatedPolicy)).toEqual([
       'dropbox.personal:/',
