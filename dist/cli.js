@@ -84747,6 +84747,21 @@ class LocalFileExtractionJobStore {
     })();
     return { matchedJobs: matched.length, jobsRequeued: requeued };
   }
+  hasWorkWaitingForReader(request) {
+    const lane = requireLaneKey(request);
+    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
+    const pending = this.db.query(`
+      SELECT 1 AS hit FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status IN ('queued', 'leased', 'failed_retryable')
+        AND extractor_kind = ?
+      LIMIT 1
+    `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind);
+    if (pending)
+      return true;
+    const { sql, params } = this.unreadJobsQuery(request);
+    return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
+  }
   unreadJobsQuery(request) {
     const lane = requireLaneKey(request);
     const extractorKind = requireToken3(request.extractorKind, "extractorKind");
@@ -88877,6 +88892,7 @@ function createBuiltInTranscriber(options = {}) {
   let installing;
   let failedAt;
   let consecutiveFailures = 0;
+  const readyListeners = [];
   let server;
   const prepare = () => {
     if (unavailable)
@@ -88892,6 +88908,11 @@ function createBuiltInTranscriber(options = {}) {
       installed = result;
       failedAt = undefined;
       consecutiveFailures = 0;
+      for (const listener of readyListeners) {
+        try {
+          listener();
+        } catch {}
+      }
     }, (error2) => {
       if (error2 instanceof BuiltInReasoningInstallError && (error2.reason === "unsupported_platform" || error2.reason === "insufficient_memory")) {
         unavailable = error2.message;
@@ -88936,6 +88957,9 @@ function createBuiltInTranscriber(options = {}) {
   };
   return {
     prepare,
+    onReady(listener) {
+      readyListeners.push(listener);
+    },
     async stop() {
       await server?.stop();
     },
@@ -89055,6 +89079,13 @@ async function transcribeChunk(fetchImpl, endpoint2, wav, timeoutMs) {
 }
 function runningBuiltInTranscriber() {
   return sharedTranscriber;
+}
+function wireBuiltInTranscriptionAtBoot(input) {
+  if (input.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || input.env.NODE_ENV === "test" || !input.engine)
+    return;
+  if (input.wake)
+    input.engine.onReady?.(input.wake);
+  return input.engine;
 }
 function transcriptionDeadlineFromLease(leaseExpiresAt) {
   const at = leaseExpiresAt ? Date.parse(leaseExpiresAt) : Number.NaN;
@@ -90136,8 +90167,33 @@ function createFileExtractionRunner(options) {
     }
     return requeued;
   }
+  function prepareReadersWithWaitingWork(work) {
+    const asked = [];
+    for (const extractor of registry2.list()) {
+      const policy = extractor.reread;
+      if (!policy)
+        continue;
+      try {
+        const waiting = "queuedKinds" in work ? work.queuedKinds.has(extractor.kind) : work.lanes.some((lane) => jobs.hasWorkWaitingForReader({
+          ...lane,
+          extractorKind: extractor.kind,
+          warnings: policy.unreadWarnings,
+          terminalErrorKinds: policy.unreadTerminalErrorKinds,
+          ...policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}
+        }));
+        if (!waiting)
+          continue;
+        policy.prepare();
+        asked.push(extractor.kind);
+      } catch (error2) {
+        console.error(`Extraction reader check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      }
+    }
+    return asked;
+  }
   return {
     reclassifyTerminal,
+    prepareReadersWithWaitingWork: (lanes) => prepareReadersWithWaitingWork({ lanes }),
     corpusIds() {
       return [...corporaById.keys()];
     },
@@ -90189,6 +90245,8 @@ function createFileExtractionRunner(options) {
           ...request.force !== undefined ? { force: request.force } : {}
         });
         jobsQueued += result.jobsQueued;
+        if (result.jobsQueued > 0)
+          prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
         jobsExisting += result.jobsExisting;
         jobsForced += result.jobsForced;
         jobsSkippedTooLarge += result.jobsSkippedTooLarge;
@@ -110168,6 +110226,11 @@ class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    for (const state of this.states) {
+      try {
+        state.task.atStart?.();
+      } catch {}
+    }
     this.runDueTasks();
   }
   stop() {
@@ -110216,6 +110279,27 @@ class SourceScheduler {
     }
     if (woke)
       this.scheduleContinueWake(at);
+  }
+  wakeTasksOfKind(kind, at = this.now().getTime()) {
+    let woke = 0;
+    for (const state of this.states) {
+      if (state.task.kind !== kind || state.consecutiveFailures > 0)
+        continue;
+      if (taskCadence(state.source, state.task) !== "continuous")
+        continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        woke += 1;
+        continue;
+      }
+      if (state.nextRunAt <= at)
+        continue;
+      state.nextRunAt = at;
+      woke += 1;
+    }
+    if (woke > 0)
+      this.scheduleContinueWake(at);
+    return woke;
   }
   refreshFastWakeTimers() {
     const desired = new Set(this.sources.flatMap((source) => source.tasks.filter((task) => taskCadence(source, task) === "continuous" && taskIntervalMs(source, task) < this.tickMs).map((task) => taskIntervalMs(source, task))));
@@ -110381,7 +110465,10 @@ class SourceScheduler {
       const continuing = result.continueSoon === true && !retryAt;
       const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
-      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const scheduledRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const wokenWhileRunning = state.wakeAfterRun === true && !retryAt;
+      delete state.wakeAfterRun;
+      const nextRunAt = wokenWhileRunning ? Math.min(scheduledRunAt, continueAt) : scheduledRunAt;
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, "checkpoint");
         this.applyPersistedState(state, this.stateStore.recordSuccess({
@@ -110418,11 +110505,12 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
-      if (continuing)
+      if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
       if (result.status === "progress" && !retryAt)
         this.wakeDownstream(state, continueAt);
     } catch (error2) {
+      delete state.wakeAfterRun;
       const message = error2 instanceof Error ? error2.message : String(error2);
       const errorKind = safeSchedulerErrorKind(error2);
       const errorHash = hash(message);
@@ -110768,6 +110856,9 @@ function fileExtractionSchedulerTask(input) {
     id: input.id,
     kind: "extract",
     writer: true,
+    atStart: () => {
+      input.runner.prepareReadersWithWaitingWork?.([input.lane]);
+    },
     run: async (context) => {
       let cursor = context?.checkpoint ?? undefined;
       const startCursor = cursor;
@@ -128067,6 +128158,13 @@ async function main() {
       }
     } : {}
   }) : undefined;
+  wireBuiltInTranscriptionAtBoot({
+    env: process.env,
+    engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
+    ...sourceScheduler ? { wake: () => {
+      sourceScheduler.wakeTasksOfKind("extract");
+    } } : {}
+  });
   const sourceAnswerLatencyLogPath = sourceAnswer ? resolveSourceAnswerLatencyLogPath(process.env) : undefined;
   const sourceAnswerLatencyLog = sourceAnswerLatencyLogPath ? createFileSourceAnswerLatencyLog(sourceAnswerLatencyLogPath) : undefined;
   const mailScopeSummaryCache = new Map;
