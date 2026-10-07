@@ -57,33 +57,33 @@ function embedBatch(lib, engine, options, texts) {
       inputs.push(lib.litert_lm_input_data_create(INPUT_TEXT, ptr(buffer), buffer.length));
     }
     if (inputs.some((input) => !input))
-      throw new Error("LiteRT-LM refused an input.");
+      throw new NativeError("LiteRT-LM refused an input.");
     const items = inputs.map((input) => new BigUint64Array([BigInt(input)]));
     const batch = new BigUint64Array(items.map((item) => BigInt(ptr(item))));
     const counts = new BigUint64Array(texts.length).fill(1n);
     const responses = lib.litert_lm_embedding_engine_compute_embedding_batch(engine, ptr(batch), ptr(counts), texts.length, options);
     keepAlive(items, batch, counts);
     if (!responses)
-      throw new Error("LiteRT-LM could not embed this batch.");
+      throw new NativeError("LiteRT-LM could not embed this batch.");
     try {
       const count = Number(lib.litert_lm_embedding_responses_get_size(responses));
       if (count !== texts.length)
-        throw new Error(`LiteRT-LM returned ${count} vectors for ${texts.length} inputs.`);
+        throw new NativeError(`LiteRT-LM returned ${count} vectors for ${texts.length} inputs.`);
       let dimension = 0;
       let vectors = new Float32Array(0);
       for (let index = 0;index < count; index += 1) {
         const response = lib.litert_lm_embedding_responses_get_at(responses, index);
         if (!response)
-          throw new Error("LiteRT-LM returned a missing vector.");
+          throw new NativeError("LiteRT-LM returned a missing vector.");
         const size = Number(lib.litert_lm_embedding_response_get_size(response));
         const values = lib.litert_lm_embedding_response_get_values(response);
         if (!values || size === 0)
-          throw new Error("LiteRT-LM returned an empty vector.");
+          throw new NativeError("LiteRT-LM returned an empty vector.");
         if (index === 0) {
           dimension = size;
           vectors = new Float32Array(size * count);
         } else if (size !== dimension) {
-          throw new Error("LiteRT-LM returned vectors of different sizes.");
+          throw new NativeError("LiteRT-LM returned vectors of different sizes.");
         }
         vectors.set(new Float32Array(toArrayBuffer(values, 0, size * 4)), index * size);
       }
@@ -100,6 +100,9 @@ function embedBatch(lib, engine, options, texts) {
 var held = {};
 function keepAlive(...values) {
   held.values = values;
+}
+
+class NativeError extends Error {
 }
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}
@@ -143,7 +146,7 @@ function main() {
       const { vectors, dimension } = embedBatch(lib, engine, options, request.texts);
       send({ id, dimension, vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString("base64") });
     } catch (error) {
-      send({ id, error: error instanceof Error ? error.message : String(error) });
+      send({ id, error: error instanceof Error ? error.message : String(error), ...error instanceof NativeError ? { native: true } : {} });
     }
   });
   lines.on("close", () => process.exit(0));

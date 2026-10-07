@@ -124,7 +124,7 @@ class HelperProcess {
         helper.stderr = (helper.stderr + chunk.toString('utf8')).slice(-4_000);
       });
       createInterface({ input: child.stdout }).on('line', (line) => {
-        let message: { ready?: boolean; device?: LiteRtDevice; fatal?: string; id?: number; error?: string; vectors?: string; dimension?: number };
+        let message: { ready?: boolean; device?: LiteRtDevice; fatal?: string; id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number };
         try {
           message = JSON.parse(line);
         } catch {
@@ -139,7 +139,8 @@ class HelperProcess {
           } else if (message.fatal) {
             started = true;
             clearTimeout(timer);
-            reject(new Error(message.fatal));
+            // The helper has already tried every device it was allowed: retrying would only load the model again.
+            reject(Object.assign(new Error(message.fatal), { fatal: true }));
           }
           return;
         }
@@ -184,13 +185,21 @@ class HelperProcess {
     });
   }
 
-  private settle(message: { id?: number; error?: string; vectors?: string; dimension?: number }): void {
+  private settle(message: { id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number }): void {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
     if (!pending || message.id === undefined) return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
     if (message.error || !message.vectors || !message.dimension) {
       pending.reject(new Error(message.error ?? 'The built-in search model returned no vectors.'));
+      // LiteRT-LM itself failed (a GPU dispatch failure, say): the helper is
+      // replaced on the next batch, on the CPU if it was on the GPU, instead of
+      // sending every later batch to the same failing engine. A bad request
+      // fails only itself.
+      if (message.native) {
+        this.exited = true;
+        this.child.kill('SIGKILL');
+      }
       return;
     }
     const bytes = Buffer.from(message.vectors, 'base64');
@@ -226,7 +235,7 @@ export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promi
   } catch (error) {
     // A GPU start that kills the helper outright (a driver fault rather than
     // a refused engine) leaves the CPU untried; try it once before failing.
-    if (device === 'cpu') throw error;
+    if (device === 'cpu' || (error as { fatal?: boolean }).fatal) throw error;
     device = 'cpu';
     helper = await HelperProcess.start(options, device);
   }

@@ -706,7 +706,7 @@ describe('built-in embedding with a LiteRT model', () => {
 });
 
 /** A helper script that speaks the LiteRT helper's protocol without LiteRT. */
-function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
+function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'native-error-on-gpu' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
   const path = join(temporaryDir(), 'fake-helper.js');
   writeFileSync(path, `
     const settings = JSON.parse(process.argv[2]);
@@ -724,6 +724,8 @@ function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'crash
       if (behaviour === 'hang') return;
       const { id, texts } = JSON.parse(line);
       if (behaviour === 'crash-first-gpu-batch' && device === 'gpu') process.exit(3);
+      if (behaviour === 'native-error-on-gpu' && device === 'gpu') { console.log(JSON.stringify({ id, error: 'LiteRT-LM could not embed this batch.', native: true })); return; }
+      if (texts.includes('bad')) { console.log(JSON.stringify({ id, error: 'Every input must be non-empty text.' })); return; }
       const vectors = new Float32Array(texts.length * 2);
       texts.forEach((text, index) => vectors.set([text.length, device === 'gpu' ? 1 : 2], index * 2));
       console.log(JSON.stringify({ id, dimension: 2, vectors: Buffer.from(vectors.buffer).toString('base64') }));
@@ -755,6 +757,17 @@ describe('the LiteRT helper process', () => {
     const vectors = await embedder.embed(['abc']);
     expect(embedder.device).toBe('cpu');
     expect(Array.from(vectors[0]!)).toEqual([3, 2]);
+    await embedder.release();
+  });
+
+  test('a native failure replaces the helper (GPU to CPU); a bad request fails only itself', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('native-error-on-gpu')));
+    await expect(embedder.embed(['abc'])).rejects.toThrow('could not embed');
+    expect(Array.from((await embedder.embed(['abc']))[0]!)).toEqual([3, 2]);
+    expect(embedder.device).toBe('cpu');
+    await expect(embedder.embed(['bad'])).rejects.toThrow('non-empty text');
+    expect(Array.from((await embedder.embed(['abcd']))[0]!)).toEqual([4, 2]);
+    expect(embedder.device).toBe('cpu');
     await embedder.release();
   });
 

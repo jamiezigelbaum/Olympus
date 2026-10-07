@@ -18993,7 +18993,7 @@ class HelperProcess {
           } else if (message.fatal) {
             started = true;
             clearTimeout(timer);
-            reject(new Error(message.fatal));
+            reject(Object.assign(new Error(message.fatal), { fatal: true }));
           }
           return;
         }
@@ -19045,6 +19045,10 @@ class HelperProcess {
     clearTimeout(pending.timer);
     if (message.error || !message.vectors || !message.dimension) {
       pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
+      if (message.native) {
+        this.exited = true;
+        this.child.kill("SIGKILL");
+      }
       return;
     }
     const bytes = Buffer.from(message.vectors, "base64");
@@ -19072,7 +19076,7 @@ async function startLiteRtEmbedder(options) {
   try {
     helper = await HelperProcess.start(options, device);
   } catch (error) {
-    if (device === "cpu")
+    if (device === "cpu" || error.fatal)
       throw error;
     device = "cpu";
     helper = await HelperProcess.start(options, device);

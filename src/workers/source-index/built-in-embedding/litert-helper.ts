@@ -7,7 +7,7 @@
 // first argument; the helper answers `{"ready":true,"device":"gpu"|"cpu"}` or
 // `{"fatal":"..."}` and exits. Then each request `{"id":N,"texts":[...]}`
 // gets `{"id":N,"vectors":"<base64 float32 little-endian>","dimension":D}`
-// or `{"id":N,"error":"..."}`.
+// or `{"id":N,"error":"..."}`, with `"native":true` when LiteRT-LM itself failed.
 
 import { dlopen, FFIType, ptr, toArrayBuffer, type Pointer } from 'bun:ffi';
 import { mkdirSync } from 'node:fs';
@@ -86,7 +86,7 @@ function embedBatch(lib: LiteRt, engine: Pointer, options: Pointer, texts: reado
       // input_data_create copies the bytes.
       inputs.push(lib.litert_lm_input_data_create(INPUT_TEXT, ptr(buffer), buffer.length));
     }
-    if (inputs.some((input) => !input)) throw new Error('LiteRT-LM refused an input.');
+    if (inputs.some((input) => !input)) throw new NativeError('LiteRT-LM refused an input.');
     // A batch of single-input items: each item is a one-pointer array. These
     // arrays are only reachable through their addresses during the call, so
     // they stay referenced until it returns.
@@ -95,23 +95,23 @@ function embedBatch(lib: LiteRt, engine: Pointer, options: Pointer, texts: reado
     const counts = new BigUint64Array(texts.length).fill(1n);
     const responses = lib.litert_lm_embedding_engine_compute_embedding_batch(engine, ptr(batch), ptr(counts), texts.length, options);
     keepAlive(items, batch, counts);
-    if (!responses) throw new Error('LiteRT-LM could not embed this batch.');
+    if (!responses) throw new NativeError('LiteRT-LM could not embed this batch.');
     try {
       const count = Number(lib.litert_lm_embedding_responses_get_size(responses));
-      if (count !== texts.length) throw new Error(`LiteRT-LM returned ${count} vectors for ${texts.length} inputs.`);
+      if (count !== texts.length) throw new NativeError(`LiteRT-LM returned ${count} vectors for ${texts.length} inputs.`);
       let dimension = 0;
       let vectors = new Float32Array(0);
       for (let index = 0; index < count; index += 1) {
         const response = lib.litert_lm_embedding_responses_get_at(responses, index);
-        if (!response) throw new Error('LiteRT-LM returned a missing vector.');
+        if (!response) throw new NativeError('LiteRT-LM returned a missing vector.');
         const size = Number(lib.litert_lm_embedding_response_get_size(response));
         const values = lib.litert_lm_embedding_response_get_values(response);
-        if (!values || size === 0) throw new Error('LiteRT-LM returned an empty vector.');
+        if (!values || size === 0) throw new NativeError('LiteRT-LM returned an empty vector.');
         if (index === 0) {
           dimension = size;
           vectors = new Float32Array(size * count);
         } else if (size !== dimension) {
-          throw new Error('LiteRT-LM returned vectors of different sizes.');
+          throw new NativeError('LiteRT-LM returned vectors of different sizes.');
         }
         vectors.set(new Float32Array(toArrayBuffer(values, 0, size * 4)), index * size);
       }
@@ -129,6 +129,9 @@ const held: { values?: unknown[] } = {};
 function keepAlive(...values: unknown[]): void {
   held.values = values;
 }
+
+/** A failure inside LiteRT-LM itself, as opposed to a bad request: the parent replaces this helper. */
+class NativeError extends Error {}
 
 function send(message: unknown): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -173,7 +176,7 @@ function main(): void {
       const { vectors, dimension } = embedBatch(lib, engine, options, request.texts);
       send({ id, dimension, vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString('base64') });
     } catch (error) {
-      send({ id, error: error instanceof Error ? error.message : String(error) });
+      send({ id, error: error instanceof Error ? error.message : String(error), ...(error instanceof NativeError ? { native: true } : {}) });
     }
   });
   // The parent closed our input: it is gone or done with us.
