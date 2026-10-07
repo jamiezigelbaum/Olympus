@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { mailScopeDraftView } from '../../core/mail-source-scope.ts';
 import type { RemotePublicUrls } from '../../core/remote-public-url.ts';
 import {
-  writeSovereigntyConfigFile,
+  updateSovereigntyConfigFile,
   type SovereigntyConfig,
   type SovereigntyModelProfile,
 } from '../../core/sovereignty.ts';
@@ -229,19 +229,28 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
         venice: options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile('venice')),
         local: Object.values(policy.modelProfiles).some((profile) => profile.provider === 'local-openai-compatible' && profile.purpose !== 'embedding'),
       };
-      const next = applyModelChoice(policy, choice, configured);
+      // Decided against the policy in memory (so a refusal needs no file
+      // access), then applied as one transaction over the file as it is now:
+      // lease, re-read, patch the routes and profile this choice owns,
+      // validate, atomic commit. Never a whole-file write from the boot
+      // snapshot.
+      const decided = applyModelChoice(policy, choice, configured);
       let restarting = false;
-      if (next.changed) {
+      if (decided.changed) {
         // Only a policy file the owner already has is rewritten; an inline or
         // environment policy is changed where it lives, on the Mac.
         if (options.sovereignty.source !== 'file' || !options.sovereignty.path) throw new ModelChoiceRefusal('model_not_configured');
-        writeSovereigntyConfigFile({ config: next.config, path: options.sovereignty.path, force: true });
-        policy = next.config;
-        restarting = options.requestReload();
+        const update = updateSovereigntyConfigFile({
+          path: options.sovereignty.path,
+          patch: (current) => applyModelChoice(current, choice, configured).config,
+        });
+        if (!update.ok) throw new ModelChoiceRefusal('model_not_configured');
+        policy = update.config;
+        restarting = update.changed ? options.requestReload() : false;
       }
       const answers = currentAnswerChoice(policy);
       return {
-        changed: next.changed,
+        changed: decided.changed,
         embedding: embeddingIsBuiltIn(policy) ? 'built_in' : 'custom',
         ...(answers ? { answers } : {}),
         restarting,

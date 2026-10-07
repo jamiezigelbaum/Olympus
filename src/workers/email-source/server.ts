@@ -4577,6 +4577,14 @@ export async function main(): Promise<void> {
   // worker module itself never imports the writer; its routes are served
   // only inside an authenticated local control session (workers/http.ts).
   const { createDashboardConsultAdapter } = await import('./dashboard-consult.ts');
+  const consultRouteKey = (secretRef: string | undefined): string | undefined => {
+    if (!secretRef) return undefined;
+    try {
+      return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...(readWorkerSetupEnv() ?? {}) } })?.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const dashboardConsult = createDashboardConsultAdapter({
     sovereignty: {
       config: sovereigntyEngine.config,
@@ -4585,13 +4593,13 @@ export async function main(): Promise<void> {
     },
     // Presence from the same environment the Models row reads, so a key just
     // written to worker.env reads as present before the restart applies it.
-    resolveSecret: (secretRef) => {
-      if (!secretRef) return undefined;
-      try {
-        return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...(readWorkerSetupEnv() ?? {}) } })?.trim() || undefined;
-      } catch {
-        return undefined;
-      }
+    // The adapter gets a yes/no; the key itself is resolved only here, for
+    // the recovery session, and handed straight to the transport.
+    secretPresent: (secretRef) => consultRouteKey(secretRef) !== undefined,
+    recoverSession: async (route, secretRef) => {
+      const { recoverZkapiSession } = await import('../../core/consult-transport-zkapi.ts');
+      const apiKey = consultRouteKey(secretRef);
+      return recoverZkapiSession({ ...route, ...(apiKey ? { apiKey } : {}) });
     },
     requestReload: () => requestModelReload(),
     env: process.env,

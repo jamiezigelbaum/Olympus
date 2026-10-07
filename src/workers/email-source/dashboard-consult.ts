@@ -24,8 +24,11 @@
  *     configured route with every acknowledgement accepted;
  *   - `saveRoute`: records the eight acknowledgements (version 3), the
  *     owner-confirmed funding date and the optional daily caps in the zkapi
- *     profile of the owner's sovereignty policy file, then asks the worker
- *     to restart, because the policy is read at boot;
+ *     profile of the owner's sovereignty policy file, as one transaction over
+ *     the file as it is now (lease, re-read, patch only that block, validate,
+ *     atomic commit; a file that no longer matches this adapter's view is a
+ *     conflict and nothing is written), then asks the worker to restart,
+ *     because the policy is read at boot;
  *   - `addRoute`: adds the one zkapi profile when none exists;
  *   - `recover` / `abandon`: the two fence buttons (§A.8), both explicit.
  */
@@ -39,7 +42,6 @@ import { writeConsultSettings, type ConsultSettingsWriteRefusal } from '../../co
 import {
   abandonZkapiFence,
   defaultZkapiStatePath,
-  recoverZkapiSession,
   zkapiConsultReadiness,
   zkapiFenceScope,
   zkapiOutstandingFences,
@@ -48,8 +50,7 @@ import {
   type ZkapiConsultTransportOptions,
 } from '../../core/consult-transport-zkapi.ts';
 import {
-  validateSovereigntyConfig,
-  writeSovereigntyConfigFile,
+  updateSovereigntyConfigFile,
   type SovereigntyConfig,
   type SovereigntyModelProfile,
 } from '../../core/sovereignty.ts';
@@ -60,6 +61,7 @@ import {
   ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION,
   type ZkapiConsultSettings,
 } from '../../core/zkapi-consult-settings.ts';
+import { OperationError } from '../../core/operation-error.ts';
 import { resolveZkapiConsultTransport } from '../chatgpt/consult-orchestrator.ts';
 import type {
   DashboardOutsideHelpLanguage,
@@ -87,8 +89,14 @@ export interface DashboardConsultBackend {
 export interface DashboardConsultAdapterOptions {
   /** The policy as loaded at boot; replaced in memory after each write here. */
   sovereignty: { config: SovereigntyConfig; source: string; path?: string };
-  /** Resolves a profile's secret reference on this Mac (never shown; only its presence reaches the page). */
-  resolveSecret: (secretRef: string | undefined) => string | undefined;
+  /** Whether a profile's secret reference resolves on this Mac. Presence only: the adapter never holds a key. */
+  secretPresent: (secretRef: string | undefined) => boolean;
+  /**
+   * Runs the recovery session for the route. The composition root resolves
+   * the route's key from `secretRef` and hands it to the transport; the
+   * adapter passes the route without a key and never sees one.
+   */
+  recoverSession: (route: ZkapiConsultTransportOptions, secretRef: string | undefined) => Promise<ZkapiConsultResult>;
   /** Restarts the worker to apply a policy change; false when it cannot restart itself. */
   requestReload: () => boolean;
   env?: Record<string, string | undefined>;
@@ -96,9 +104,8 @@ export interface DashboardConsultAdapterOptions {
   settingsLocation?: ConsultSettingsLocation;
   statePath?: string;
   now?: () => Date;
-  /** Seams for tests: the readiness probe and the recovery session. */
+  /** Seam for tests: the readiness probe. */
   readiness?: (options: Parameters<typeof zkapiConsultReadiness>[0]) => Promise<ZkapiConsultReadiness>;
-  recoverSession?: (options: ZkapiConsultTransportOptions) => Promise<ZkapiConsultResult>;
 }
 
 /** The id the adapter gives the one zkapi profile it adds. */
@@ -123,7 +130,10 @@ const MESSAGES = {
   custody: 'The folder ~/.olympus must belong to you alone (owner-only, not a link). Fix its permissions, then try again.',
   busy: 'Another change is being written right now. Try again in a moment.',
   writeFailed: 'Olympus could not write the settings file. Nothing was changed.',
+  writeUncertain: 'Olympus could not confirm whether the settings file changed. Reload the page to see the current setting.',
   policyNotFile: 'Your privacy policy is not kept in a file on this computer, so Olympus cannot record this here.',
+  policyChanged: 'Your privacy policy file changed since this page loaded. Nothing was written; reload the page and try again.',
+  policyUnreadable: 'Your privacy policy file could not be read. Nothing was written.',
   routeExists: 'A zkAPI route is already configured.',
   tickAll: 'Tick every statement to record your acknowledgement.',
   fundingDate: 'Enter the funding date as YYYY-MM-DD, the day the deposit was confirmed.',
@@ -149,7 +159,6 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   const statePath = options.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
   const location: ConsultSettingsLocation = options.settingsLocation ?? { env };
   const readiness = options.readiness ?? zkapiConsultReadiness;
-  const recover = options.recoverSession ?? recoverZkapiSession;
   let policy = options.sovereignty.config;
   let restartPending = false;
 
@@ -160,9 +169,10 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     return { id, profile };
   };
 
+  // The route without its key: the adapter never resolves a secret.
   const transport = (): ZkapiConsultTransportOptions | undefined => resolveZkapiConsultTransport(
     policy.modelProfiles,
-    (secretRef) => options.resolveSecret(secretRef),
+    () => undefined,
     { env, statePath },
   );
 
@@ -222,8 +232,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     const transportOptions = transport();
     if (!transportOptions) return base;
     try {
-      const { apiKey: _key, ...probe } = transportOptions;
-      const ready = await readiness({ ...probe, apiKeyPresent: transportOptions.apiKey !== undefined, now: () => now() });
+      const ready = await readiness({ ...transportOptions, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
       return {
         ...base,
         readiness: {
@@ -231,7 +240,8 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
           blockers: [...ready.blockers],
           daemonFound: ready.daemonExecutable !== undefined,
           ...(ready.daemonVersion ? { daemonVersion: ready.daemonVersion } : {}),
-          torFound: ready.tor === 'off' || ready.torExecutable !== undefined,
+          torMode: ready.tor,
+          torFound: ready.torExecutable !== undefined,
           apiKeyConfigured: ready.apiKeyConfigured,
           expiry: {
             state: ready.money.expiryEstimate.state,
@@ -262,11 +272,23 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
 
   const policyWritable = (): boolean => options.sovereignty.source === 'file' && Boolean(options.sovereignty.path);
 
-  const writePolicy = (next: SovereigntyConfig): DashboardConsultOutcome | undefined => {
+  /**
+   * One transaction over the policy file as it is now: lease, re-read, the
+   * patch over the current policy (only the fields this card owns), validate,
+   * atomic commit. The file must still match the policy this adapter's view
+   * was built on; otherwise nothing is written, the view follows the file,
+   * and the owner is told to reload.
+   */
+  const writePolicy = (patch: (current: SovereigntyConfig) => SovereigntyConfig): DashboardConsultOutcome | undefined => {
     if (!policyWritable()) return { ok: false, httpStatus: 409, code: 'policy_not_file', message: MESSAGES.policyNotFile };
-    const validated = validateSovereigntyConfig(next);
-    writeSovereigntyConfigFile({ config: validated, path: options.sovereignty.path!, force: true });
-    policy = validated;
+    const update = updateSovereigntyConfigFile({ path: options.sovereignty.path!, expect: policy, patch });
+    if (!update.ok) {
+      if (update.reason === 'conflict' && update.current) policy = update.current;
+      return update.reason === 'conflict'
+        ? { ok: false, httpStatus: 409, code: 'policy_changed', message: MESSAGES.policyChanged }
+        : { ok: false, httpStatus: 500, code: 'policy_unreadable', message: MESSAGES.policyUnreadable };
+    }
+    policy = update.config;
     return undefined;
   };
 
@@ -299,7 +321,9 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       const current = readConsultSettings(location);
       const base = current.state === 'valid' ? current.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen: ConsultLanguage[] = [...base.languages];
-      if (update.languages !== undefined) {
+      // Turning off keeps the stored languages whatever the form sent (an
+      // empty selection must never stop the off switch).
+      if (enabled && update.languages !== undefined) {
         if (!Array.isArray(update.languages) || update.languages.length === 0) return invalid(MESSAGES.languagesEmpty, 'languages_empty');
         if (!update.languages.every((item): item is ConsultLanguage => typeof item === 'string' && (ALL_LANGUAGES as string[]).includes(item))) {
           return invalid('An unknown language was chosen.', 'language_unknown');
@@ -338,7 +362,10 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       if (!Array.isArray(acknowledged) || !acknowledged.every((item) => typeof item === 'string')) return invalid(MESSAGES.tickAll, 'acknowledgements_incomplete');
       const accepted = new Set(acknowledged as string[]);
       if (!ACKNOWLEDGEMENT_IDS.every((id) => accepted.has(id))) return invalid(MESSAGES.tickAll, 'acknowledgements_incomplete');
-      const zkapi: Record<string, unknown> = { ...(route.profile.zkapi ?? {}) };
+      // The owned fields of the zkapi block, applied over the block as the
+      // file holds it now; `null` clears a cap.
+      const zkapi: Record<string, unknown> = {};
+      const cleared: string[] = [];
       zkapi.acknowledgements = { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [...ACKNOWLEDGEMENT_IDS] };
       if (update.funding_date !== undefined && update.funding_date !== null && update.funding_date !== '') {
         if (typeof update.funding_date !== 'string' || parseIsoDate(update.funding_date) === undefined) return invalid(MESSAGES.fundingDate, 'funding_date_invalid');
@@ -348,18 +375,23 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         const raw = update[field];
         if (raw === undefined) continue;
         if (raw === null || raw === '') {
-          delete zkapi[key];
+          cleared.push(key);
           continue;
         }
         if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0 || (key === 'dailyRequestCap' && !Number.isInteger(raw))) return invalid(MESSAGES.caps, 'cap_invalid');
         zkapi[key] = raw;
       }
-      const next = structuredClone(policy);
-      const profile = next.modelProfiles[route.id]!;
-      // The validator parses the block (unknown keys refuse; bounds apply).
-      (profile as { zkapi?: unknown }).zkapi = zkapi as unknown as ZkapiConsultSettings;
       try {
-        const refused = writePolicy(next);
+        const refused = writePolicy((current) => {
+          const next = structuredClone(current);
+          const profile = next.modelProfiles[route.id];
+          if (!profile || profile.provider !== 'zkapi') throw new OperationError('config_error', 'The zkAPI route is no longer in the policy file.');
+          // Only this block is owned here. The validator parses it (unknown keys refuse; bounds apply).
+          const block: Record<string, unknown> = { ...(profile.zkapi ?? {}), ...zkapi };
+          for (const key of cleared) delete block[key];
+          (profile as { zkapi?: unknown }).zkapi = block as unknown as ZkapiConsultSettings;
+          return next;
+        });
         if (refused) return refused;
       } catch (error) {
         return { ok: false, httpStatus: 400, code: 'config_error', message: (error as Error).message };
@@ -372,18 +404,23 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     async addRoute(update) {
       if (update.confirm !== true) return invalid(MESSAGES.confirm, 'confirmation_required');
       if (zkapiProfile()) return { ok: false, httpStatus: 409, code: 'route_exists', message: MESSAGES.routeExists };
-      const next = structuredClone(policy);
-      next.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID] = {
-        provider: 'zkapi',
-        trust: 'standard_cloud',
-        purpose: 'consult',
-        baseUrl: ZKAPI_DAEMON_DEFAULT_BASE_URL,
-        model: DASHBOARD_ZKAPI_DEFAULT_MODEL,
-        secretRef: `env:${DASHBOARD_ZKAPI_API_KEY_ENV}`,
-        zkapi: {} as ZkapiConsultSettings,
-      } as SovereigntyModelProfile;
       try {
-        const refused = writePolicy(next);
+        const refused = writePolicy((current) => {
+          if (Object.values(current.modelProfiles).some((profile) => profile.provider === 'zkapi')) {
+            throw new OperationError('config_error', 'A zkAPI route is already in the policy file.');
+          }
+          const next = structuredClone(current);
+          next.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID] = {
+            provider: 'zkapi',
+            trust: 'standard_cloud',
+            purpose: 'consult',
+            baseUrl: ZKAPI_DAEMON_DEFAULT_BASE_URL,
+            model: DASHBOARD_ZKAPI_DEFAULT_MODEL,
+            secretRef: `env:${DASHBOARD_ZKAPI_API_KEY_ENV}`,
+            zkapi: {} as ZkapiConsultSettings,
+          } as SovereigntyModelProfile;
+          return next;
+        });
         if (refused) return refused;
       } catch (error) {
         return { ok: false, httpStatus: 400, code: 'config_error', message: (error as Error).message };
@@ -406,7 +443,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       const scopes = Object.keys(fences);
       if (scopes.length === 0) return { ok: false, httpStatus: 409, code: 'no_unresolved_session', message: MESSAGES.noFence };
       if (!scopes.includes(zkapiFenceScope({ env }))) return { ok: false, httpStatus: 409, code: 'unresolved_session_other_wallet', message: MESSAGES.otherWallet };
-      const result = await recover(transportOptions);
+      const result = await options.recoverSession(transportOptions, zkapiProfile()?.profile.secretRef);
       const receipt = result.ok ? result.receipt : result.error.receipt;
       if (!result.ok) return { ok: false, httpStatus: 502, code: result.error.code, message: MESSAGES.recoveryFailed };
       if (receipt?.fence !== 'clear' || receipt.settlement !== 'confirmed') {
@@ -449,5 +486,7 @@ function writeRefusal(reason: ConsultSettingsWriteRefusal, revision: number): Da
       return { ok: false, httpStatus: 400, code: 'invalid_params', message: MESSAGES.languagesEmpty };
     case 'write_failed':
       return { ok: false, httpStatus: 500, code: 'write_failed', message: MESSAGES.writeFailed };
+    case 'write_uncertain':
+      return { ok: false, httpStatus: 500, code: 'write_uncertain', message: MESSAGES.writeUncertain };
   }
 }
