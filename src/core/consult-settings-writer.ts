@@ -78,11 +78,18 @@ export type ConsultSettingsWriteRefusal =
   | 'invalid_current'
   /** The file is at another revision than the caller expected; nothing written. */
   | 'revision_conflict'
-  /** The atomic replace failed; the old file, if any, is intact. */
-  | 'write_failed';
+  /** The replace failed before anything was published; the old file, if any, is intact. */
+  | 'write_failed'
+  /** Something failed after the new file may have been published, and the file could not be read back to say which. */
+  | 'write_uncertain';
 
 export type ConsultSettingsWriteResult =
-  | { readonly ok: true; readonly settings: ConsultSettings }
+  | {
+    readonly ok: true;
+    readonly settings: ConsultSettings;
+    /** The new file was published, but a step after the publish (directory flush, mode, lease release) failed; the state reported is what the file reads now. */
+    readonly publishedDespiteError?: true;
+  }
   | {
     readonly ok: false;
     readonly reason: ConsultSettingsWriteRefusal;
@@ -91,6 +98,9 @@ export type ConsultSettingsWriteResult =
     /** The reader's reason, for `invalid_current`. */
     readonly invalidReason?: ConsultSettingsInvalidReason;
   };
+
+/** Test seam: runs after the new file is published and before the mode is set. */
+export const __consultSettingsWriterTestHooks: { afterPublish: ((path: string) => void) | undefined } = { afterPublish: undefined };
 
 /** How long a write waits for the lease; a held lease is reported, never waited out. */
 export const CONSULT_SETTINGS_LEASE_TIMEOUT_MS = 2_000;
@@ -123,19 +133,30 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
         const currentRevision = current.state === 'absent' ? 0 : current.settings.revision;
         if (currentRevision !== input.expectedRevision) return { ok: false as const, reason: 'revision_conflict' as const, current };
       }
+      // Failures are split at the publish point (the rename inside the atomic
+      // helper). Before it, nothing changed. After it, the new file may be
+      // live even though a later step (directory flush, chmod, lease release)
+      // threw, so the file is read back and the actual state is reported.
+      let published = false;
       try {
         lease.commit(() => {
-          writePrivateFileAtomicSync(path, `${JSON.stringify(candidate)}\n`);
+          writePrivateFileAtomicSync(path, `${JSON.stringify(candidate)}\n`, { onPublished: () => { published = true; } });
+          __consultSettingsWriterTestHooks.afterPublish?.(path);
           // The temporary file is created at 0600 under the process umask;
           // the rename keeps that mode. Said again here so the file the reader
           // accepts is owner-only whatever the umask was.
           chmodSync(path, 0o600);
         });
       } catch {
-        return { ok: false as const, reason: 'write_failed' as const };
+        if (!published) return { ok: false as const, reason: 'write_failed' as const };
+        const actual = readConsultSettings({ path });
+        if (actual.state === 'valid' && actual.settings.revision === nextRevision) {
+          return { ok: true as const, settings: actual.settings, publishedDespiteError: true as const };
+        }
+        return { ok: false as const, reason: 'write_uncertain' as const, current: actual };
       }
       const written = readConsultSettings({ path });
-      if (written.state !== 'valid') return { ok: false as const, reason: 'write_failed' as const, current: written };
+      if (written.state !== 'valid') return { ok: false as const, reason: 'write_uncertain' as const, current: written };
       return { ok: true as const, settings: written.settings };
     }, { acquireTimeoutMs: CONSULT_SETTINGS_LEASE_TIMEOUT_MS });
   } catch (error) {

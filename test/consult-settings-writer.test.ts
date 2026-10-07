@@ -22,7 +22,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { withFileLeaseSync } from '../src/core/file-lease.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { DEFAULT_CONSULT_SETTINGS, readConsultSettings } from '../src/core/consult-settings.ts';
-import { writeConsultSettings, type ConsultSettingsWriteInput } from '../src/core/consult-settings-writer.ts';
+import { __consultSettingsWriterTestHooks, writeConsultSettings, type ConsultSettingsWriteInput } from '../src/core/consult-settings-writer.ts';
 
 const repoRoot = join(import.meta.dir, '..');
 const homes: string[] = [];
@@ -34,6 +34,7 @@ function tempHome(): string {
 }
 
 afterEach(() => {
+  __consultSettingsWriterTestHooks.afterPublish = undefined;
   for (const home of homes.splice(0)) {
     try {
       chmodSync(join(home, '.olympus'), 0o700);
@@ -114,6 +115,23 @@ describe('writeConsultSettings: the happy path', () => {
     expect(readFileSync(settingsFile(home), 'utf8')).toBe(before);
     // No temp file was left behind either.
     expect(readdirSync(join(home, '.olympus')).filter((name) => name !== 'consult.json')).toEqual([]);
+  });
+
+  test('a failure after the publish (the rename) is not "nothing changed": the file is read back and the new state reported', () => {
+    const home = tempHome();
+    const env = { HOME: home };
+    expect(writeConsultSettings(UPDATE, { env }).ok).toBe(true);
+    __consultSettingsWriterTestHooks.afterPublish = () => { throw new Error('directory flush failed'); };
+    const result = writeConsultSettings({ ...UPDATE, enabled: false, expectedRevision: 1 }, { env });
+    expect(result).toMatchObject({ ok: true, publishedDespiteError: true, settings: { revision: 2, enabled: false } });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 2, enabled: false } });
+    __consultSettingsWriterTestHooks.afterPublish = undefined;
+    // A failure before the publish is "nothing changed", and says so.
+    chmodSync(join(home, '.olympus'), 0o500);
+    const before = writeConsultSettings({ ...UPDATE, enabled: true, expectedRevision: 2 }, { env });
+    chmodSync(join(home, '.olympus'), 0o700);
+    if (!before.ok) expect(['write_failed', 'directory_custody']).toContain(before.reason);
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: before.ok ? 3 : 2 } });
   });
 
   test('an explicit path wins over HOME, like the reader', () => {
