@@ -51473,7 +51473,7 @@ var init_vocabulary = __esm(() => {
     outsideNote: "General information from an outside model. It did not read your documents and has not been checked.",
     outsidePending: "Looking up general background…",
     outsidePaused: "Anonymous answers are paused.",
-    outsideAsked: "Sent without names:",
+    outsideAsked: "What Olympus asked:",
     outsideShortened: "Shortened by Olympus."
   };
   DASHBOARD_PICKER_COPY = {
@@ -51680,7 +51680,7 @@ var init_vocabulary = __esm(() => {
       fence_held: "Anonymous answers (zkAPI): paused · unfinished payment"
     },
     experimental: "Experimental: on macOS, Olympus can't yet confirm the connection is anonymous (network route not verified).",
-    intro: "When the answer from your Mac is missing something, Olympus can ask a top AI model through zkAPI, paid anonymously, so no one can tell the question came from you. Names and identifying details are removed first; the AI provider reads the question.",
+    intro: "When the answer from your Mac is missing something, Olympus can ask a top AI model a short question through zkAPI. Payment is anonymous, and with Tor on the provider can't see where the question came from. Olympus blocks names and other identifying words before sending, but the provider reads the question.",
     privacy: "Your files and private answer stay on this Mac. The outside model sees only the short question, and that question could still hint at private things.",
     state: {
       off: "Anonymous answers are off.",

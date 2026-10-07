@@ -1652,7 +1652,7 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   outsidePending: 'Looking up general background…',
   outsidePaused: 'Anonymous answers are paused.',
   /** The collapsed disclosure that shows the question Olympus sent. */
-  outsideAsked: 'Sent without names:',
+  outsideAsked: 'What Olympus asked:',
   /** The application-owned footer when the reply was shortened. */
   outsideShortened: 'Shortened by Olympus.',
 } as const;
@@ -1901,7 +1901,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** The honesty label: the network route is not verified on macOS, said plainly. */
   experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
   /** What outside help is, before anything technical (owner, 2026-10-07). */
-  intro: 'When the answer from your Mac is missing something, Olympus can ask a top AI model through zkAPI, paid anonymously, so no one can tell the question came from you. Names and identifying details are removed first; the AI provider reads the question.',
+  intro: 'When the answer from your Mac is missing something, Olympus can ask a top AI model a short question through zkAPI. Payment is anonymous, and with Tor on the provider can\'t see where the question came from. Olympus blocks names and other identifying words before sending, but the provider reads the question.',
   /** The public privacy line, in plain words (design §2, §A.10). */
   privacy: 'Your files and private answer stay on this Mac. The outside model sees only the short question, and that question could still hint at private things.',
   state: {

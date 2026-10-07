@@ -162,7 +162,7 @@ describe('the Outside help page: states and copy', () => {
     expect(html).toContain('<title>Olympus / Anonymous answers</title>');
     expect(html).toContain(`data-outside-state="off">${W.state.off}<`);
     // What it is, then the plain privacy line; no "evidence pack" on the page.
-    expect(html).toContain(W.intro);
+    expect(html).toContain(W.intro.replace(/'/g, '&#39;'));
     expect(html).toContain(W.privacy);
     expect(visibleText(html)).not.toContain('evidence pack');
     // The honesty label keeps "network route not verified".
