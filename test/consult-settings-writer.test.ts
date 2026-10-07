@@ -134,6 +134,26 @@ describe('writeConsultSettings: the happy path', () => {
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: before.ok ? 3 : 2 } });
   });
 
+  test('a lease release that throws after the publish is reported from the file, never as "nothing changed"', () => {
+    const home = tempHome();
+    const env = { HOME: home };
+    expect(writeConsultSettings(UPDATE, { env }).ok).toBe(true);
+    const lockPath = `${settingsFile(home)}.lock`;
+    // After the publish the lock file becomes a directory: the release's read
+    // of its own record throws (not ENOENT), and so does the release.
+    __consultSettingsWriterTestHooks.afterPublish = () => {
+      rmSync(lockPath, { force: true });
+      mkdirSync(lockPath);
+    };
+    const result = writeConsultSettings({ ...UPDATE, enabled: false, expectedRevision: 1 }, { env });
+    __consultSettingsWriterTestHooks.afterPublish = undefined;
+    rmSync(lockPath, { recursive: true, force: true });
+    expect(result).toMatchObject({ ok: true, publishedDespiteError: true, settings: { revision: 2, enabled: false } });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 2, enabled: false } });
+    // The next write works once the lock is gone.
+    expect(writeConsultSettings({ ...UPDATE, expectedRevision: 2 }, { env })).toMatchObject({ ok: true, settings: { revision: 3 } });
+  });
+
   test('an explicit path wins over HOME, like the reader', () => {
     const home = tempHome();
     mkdirSync(join(home, 'elsewhere'), { mode: 0o700 });

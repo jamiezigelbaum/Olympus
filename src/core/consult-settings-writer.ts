@@ -124,6 +124,17 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) return { ok: false, reason: 'invalid_input' };
   const custody = ensureSettingsDirectory(dirname(path));
   if (custody !== 'ok') return { ok: false, reason: custody };
+  // Tracked across the whole lease lifecycle, including the release that runs
+  // after the callback: once the new file is published, any later error is
+  // uncertainty about a live file, never "nothing changed".
+  let published = false;
+  const afterPublish = (): ConsultSettingsWriteResult => {
+    const actual = readConsultSettings({ path });
+    if (actual.state === 'valid' && actual.settings.revision === nextRevision) {
+      return { ok: true, settings: actual.settings, publishedDespiteError: true };
+    }
+    return { ok: false, reason: 'write_uncertain', current: actual };
+  };
   try {
     return withFileLeaseSync(path, (lease) => {
       const current = readConsultSettings({ path });
@@ -137,7 +148,6 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
       // helper). Before it, nothing changed. After it, the new file may be
       // live even though a later step (directory flush, chmod, lease release)
       // threw, so the file is read back and the actual state is reported.
-      let published = false;
       try {
         lease.commit(() => {
           writePrivateFileAtomicSync(path, `${JSON.stringify(candidate)}\n`, { onPublished: () => { published = true; } });
@@ -149,17 +159,16 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
         });
       } catch {
         if (!published) return { ok: false as const, reason: 'write_failed' as const };
-        const actual = readConsultSettings({ path });
-        if (actual.state === 'valid' && actual.settings.revision === nextRevision) {
-          return { ok: true as const, settings: actual.settings, publishedDespiteError: true as const };
-        }
-        return { ok: false as const, reason: 'write_uncertain' as const, current: actual };
+        return afterPublish();
       }
       const written = readConsultSettings({ path });
       if (written.state !== 'valid') return { ok: false as const, reason: 'write_uncertain' as const, current: written };
       return { ok: true as const, settings: written.settings };
     }, { acquireTimeoutMs: CONSULT_SETTINGS_LEASE_TIMEOUT_MS });
   } catch (error) {
+    // A throw out of the lease itself: acquiring it (busy) or releasing it.
+    // After a publish, a release failure is reported from the file.
+    if (published) return afterPublish();
     if (error instanceof FileLeaseBusyError || (error as { code?: string })?.code === 'file_lease_busy') return { ok: false, reason: 'lease_busy' };
     return { ok: false, reason: 'write_failed' };
   }
