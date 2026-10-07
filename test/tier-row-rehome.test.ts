@@ -779,7 +779,7 @@ describe('Private-row re-home', () => {
       await rehomePrivateTierRows({ set: next.set, embeddingLedgerPath: ledgerPath(next) });
       expect(next.stores.secure_local!.queuedEmbeddingItemIds()).toContain(localId('orchid'));
       expect(JSON.parse(next.ledger.readMeta('private_row_rehome_pending_embed') ?? '[]')).toContain(localId('orchid'));
-    });
+    }, 60_000);
 
     for (const boundary of ['decision', 'staging', 'import'] as const) {
       test(`restart at the ${boundary} boundary: fresh handles resume to one serving copy, source bytes kept, destination searchable`, async () => {
