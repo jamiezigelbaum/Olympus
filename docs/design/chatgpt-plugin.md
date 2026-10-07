@@ -940,9 +940,17 @@ the writer's one caller), `src/workers/dashboard/outside-help.ts` and
   worker handler refuses without them. No `/dashboard` path is ever on the
   relay's forward list. An import-graph test holds that no MCP, setup-tool,
   ChatGPT, relay or remote module reaches the writer or the adapter.
-  Residual: a process on this Mac that can speak to the loopback port as a
-  browser would (no bearer, loopback origin) can mint a local session; the
-  grade removes bearer-derived authority, not local-process authority.
+  Sessions are signed with a worker-private secret kept beside the worker
+  token (`~/.config/olympus/dashboard-session.secret`, owner-only, created
+  on first start, regenerated if unreadable or foreign, never derived from
+  the bearer) bound to the bearer, so a bearer holder cannot forge a cookie,
+  a worker restart does not log the owner out, and rotating the worker token
+  still revokes every session. The local mint also requires the recorded
+  socket peer to be loopback. Residual: a process on this Mac that can speak
+  to the loopback port as a browser would (no bearer, loopback origin), or
+  that can read that secret file, can mint or forge a local session; the
+  grade and the secret remove bearer-derived authority, not local-process
+  authority.
 - **The settings writer.** `~/.olympus/consult.json`, compare-and-swap on
   `revision` under the cross-process file lease, written as an atomic
   owner-only replace (0600) inside an owner-only `~/.olympus` (0700, a real
