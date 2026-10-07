@@ -403,6 +403,13 @@ export interface FileExtractionRunner {
   ): JanitorRequeueExtractionJobsResult;
   counts(lane: ExtractionLaneKey): readonly ExtractionStatusCount[];
   corpusIds(): readonly string[];
+  /**
+   * Asks every lane reader that has work waiting for it (queued, or settled
+   * unread) to get ready, which starts a first-use download. A reader with
+   * nothing waiting is never asked, so nothing downloads for media the
+   * owner's chosen sources do not contain. Returns the kinds asked.
+   */
+  prepareReadersWithWaitingWork?(): readonly string[];
 }
 
 // --- the runner ------------------------------------------------------------
@@ -516,8 +523,34 @@ export function createFileExtractionRunner(
     return requeued;
   }
 
+  /**
+   * Generic over lanes: a reader is asked only when its lane has work.
+   */
+  function prepareReadersWithWaitingWork(kinds?: ReadonlySet<string>): string[] {
+    const asked: string[] = [];
+    for (const extractor of registry.list()) {
+      const policy = extractor.reread;
+      if (!policy || (kinds && !kinds.has(extractor.kind))) continue;
+      try {
+        const waiting = kinds !== undefined || jobs.hasWorkWaitingForReader({
+          extractorKind: extractor.kind,
+          warnings: policy.unreadWarnings,
+          terminalErrorKinds: policy.unreadTerminalErrorKinds,
+          ...(policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}),
+        });
+        if (!waiting) continue;
+        policy.prepare();
+        asked.push(extractor.kind);
+      } catch (error) {
+        console.error(`Extraction reader check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return asked;
+  }
+
   return {
     reclassifyTerminal,
+    prepareReadersWithWaitingWork: () => prepareReadersWithWaitingWork(),
 
     corpusIds(): readonly string[] {
       return [...corporaById.keys()];
@@ -584,6 +617,10 @@ export function createFileExtractionRunner(
           ...(request.force !== undefined ? { force: request.force } : {}),
         });
         jobsQueued += result.jobsQueued;
+        // Newly catalogued items for a lane whose reader is not installed
+        // yet (for example the first audio file in the owner's chosen
+        // sources): start getting it ready now, not when a job is leased.
+        if (result.jobsQueued > 0) prepareReadersWithWaitingWork(new Set([extractorKind]));
         jobsExisting += result.jobsExisting;
         jobsForced += result.jobsForced;
         jobsSkippedTooLarge += result.jobsSkippedTooLarge;

@@ -599,6 +599,27 @@ export class SourceScheduler {
     if (woke) this.scheduleContinueWake(at);
   }
 
+  /**
+   * Brings every task of `kind` forward to run within seconds, for when
+   * something those tasks wait on has just become available (a built-in
+   * reader finished installing, so extraction can read what it left unread).
+   * Generic: no source is named. A running task, a task in a failure backoff
+   * and a task not on the continuous cadence are left alone. Returns how many
+   * tasks were woken.
+   */
+  wakeTasksOfKind(kind: SourceSchedulerTaskKind, at: number = this.now().getTime()): number {
+    let woke = 0;
+    for (const state of this.states) {
+      if (state.task.kind !== kind || state.running || state.consecutiveFailures > 0) continue;
+      if (taskCadence(state.source, state.task) !== 'continuous') continue;
+      if (state.nextRunAt <= at) continue;
+      state.nextRunAt = at;
+      woke += 1;
+    }
+    if (woke > 0) this.scheduleContinueWake(at);
+    return woke;
+  }
+
   private refreshFastWakeTimers(): void {
     const desired = new Set(this.sources.flatMap((source) => source.tasks
       .filter((task) => taskCadence(source, task) === 'continuous' && taskIntervalMs(source, task) < this.tickMs)

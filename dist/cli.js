@@ -84259,6 +84259,7 @@ class LocalFileExtractionJobStore {
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
       runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_extraction_jobs_kind_status ON extraction_jobs(extractor_kind, status);");
     }
   }
   close() {
@@ -84747,14 +84748,26 @@ class LocalFileExtractionJobStore {
     })();
     return { matchedJobs: matched.length, jobsRequeued: requeued };
   }
+  hasWorkWaitingForReader(request) {
+    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
+    const pending = this.db.query(`
+      SELECT 1 AS hit FROM extraction_jobs
+      WHERE extractor_kind = ? AND status IN ('queued', 'leased', 'failed_retryable')
+      LIMIT 1
+    `).get(extractorKind);
+    if (pending)
+      return true;
+    const { sql, params } = this.unreadJobsQuery(request);
+    return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
+  }
   unreadJobsQuery(request) {
-    const lane = requireLaneKey(request);
+    const lane = request.corpusId === undefined ? undefined : requireLaneKey(request);
     const extractorKind = requireToken3(request.extractorKind, "extractorKind");
     const warnings = request.warnings.map((warning) => requireToken3(warning, "warning"));
     const kinds = request.terminalErrorKinds.map((kind) => requireToken3(kind, "terminalErrorKind"));
     const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken3(warning, "notReadyWarning"));
     const clauses = [];
-    const params = [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind];
+    const params = lane ? [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind] : [extractorKind];
     const hasWarning = (values) => `EXISTS (
         SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
         WHERE a.job_id = j.job_id AND a.warnings_json IS NOT NULL
@@ -84769,8 +84782,7 @@ class LocalFileExtractionJobStore {
       clauses.push(`(j.status = 'failed_terminal' AND ${onceGuard} AND j.last_error_kind IN (${kinds.map(() => "?").join(", ")}))`);
       params.push(...kinds);
     }
-    const sql = `j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ?
-      AND j.extractor_kind = ?
+    const sql = `${lane ? "j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ? AND " : ""}j.extractor_kind = ?
       AND ${clauses.length > 0 ? `(${clauses.join(" OR ")})` : "0"}`;
     return { sql, params };
   }
@@ -88877,6 +88889,7 @@ function createBuiltInTranscriber(options = {}) {
   let installing;
   let failedAt;
   let consecutiveFailures = 0;
+  const readyListeners = [];
   let server;
   const prepare = () => {
     if (unavailable)
@@ -88892,6 +88905,11 @@ function createBuiltInTranscriber(options = {}) {
       installed = result;
       failedAt = undefined;
       consecutiveFailures = 0;
+      for (const listener of readyListeners) {
+        try {
+          listener();
+        } catch {}
+      }
     }, (error2) => {
       if (error2 instanceof BuiltInReasoningInstallError && (error2.reason === "unsupported_platform" || error2.reason === "insufficient_memory")) {
         unavailable = error2.message;
@@ -88936,6 +88954,9 @@ function createBuiltInTranscriber(options = {}) {
   };
   return {
     prepare,
+    onReady(listener) {
+      readyListeners.push(listener);
+    },
     async stop() {
       await server?.stop();
     },
@@ -89055,6 +89076,14 @@ async function transcribeChunk(fetchImpl, endpoint2, wav, timeoutMs) {
 }
 function runningBuiltInTranscriber() {
   return sharedTranscriber;
+}
+function wireBuiltInTranscriptionAtBoot(input) {
+  if (input.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || input.env.NODE_ENV === "test" || !input.engine)
+    return;
+  if (input.wake)
+    input.engine.onReady?.(input.wake);
+  input.prepareWaitingReaders?.();
+  return input.engine;
 }
 function transcriptionDeadlineFromLease(leaseExpiresAt) {
   const at = leaseExpiresAt ? Date.parse(leaseExpiresAt) : Number.NaN;
@@ -90136,8 +90165,32 @@ function createFileExtractionRunner(options) {
     }
     return requeued;
   }
+  function prepareReadersWithWaitingWork(kinds) {
+    const asked = [];
+    for (const extractor of registry2.list()) {
+      const policy = extractor.reread;
+      if (!policy || kinds && !kinds.has(extractor.kind))
+        continue;
+      try {
+        const waiting = kinds !== undefined || jobs.hasWorkWaitingForReader({
+          extractorKind: extractor.kind,
+          warnings: policy.unreadWarnings,
+          terminalErrorKinds: policy.unreadTerminalErrorKinds,
+          ...policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}
+        });
+        if (!waiting)
+          continue;
+        policy.prepare();
+        asked.push(extractor.kind);
+      } catch (error2) {
+        console.error(`Extraction reader check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      }
+    }
+    return asked;
+  }
   return {
     reclassifyTerminal,
+    prepareReadersWithWaitingWork: () => prepareReadersWithWaitingWork(),
     corpusIds() {
       return [...corporaById.keys()];
     },
@@ -90189,6 +90242,8 @@ function createFileExtractionRunner(options) {
           ...request.force !== undefined ? { force: request.force } : {}
         });
         jobsQueued += result.jobsQueued;
+        if (result.jobsQueued > 0)
+          prepareReadersWithWaitingWork(new Set([extractorKind]));
         jobsExisting += result.jobsExisting;
         jobsForced += result.jobsForced;
         jobsSkippedTooLarge += result.jobsSkippedTooLarge;
@@ -110217,6 +110272,22 @@ class SourceScheduler {
     if (woke)
       this.scheduleContinueWake(at);
   }
+  wakeTasksOfKind(kind, at = this.now().getTime()) {
+    let woke = 0;
+    for (const state of this.states) {
+      if (state.task.kind !== kind || state.running || state.consecutiveFailures > 0)
+        continue;
+      if (taskCadence(state.source, state.task) !== "continuous")
+        continue;
+      if (state.nextRunAt <= at)
+        continue;
+      state.nextRunAt = at;
+      woke += 1;
+    }
+    if (woke > 0)
+      this.scheduleContinueWake(at);
+    return woke;
+  }
   refreshFastWakeTimers() {
     const desired = new Set(this.sources.flatMap((source) => source.tasks.filter((task) => taskCadence(source, task) === "continuous" && taskIntervalMs(source, task) < this.tickMs).map((task) => taskIntervalMs(source, task))));
     for (const [intervalMs, timer] of this.fastWakeTimers) {
@@ -128067,6 +128138,14 @@ async function main() {
       }
     } : {}
   }) : undefined;
+  wireBuiltInTranscriptionAtBoot({
+    env: process.env,
+    engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
+    ...sourceScheduler ? { wake: () => {
+      sourceScheduler.wakeTasksOfKind("extract");
+    } } : {},
+    prepareWaitingReaders: () => fileExtractionRuntime?.runner.prepareReadersWithWaitingWork?.()
+  });
   const sourceAnswerLatencyLogPath = sourceAnswer ? resolveSourceAnswerLatencyLogPath(process.env) : undefined;
   const sourceAnswerLatencyLog = sourceAnswerLatencyLogPath ? createFileSourceAnswerLatencyLog(sourceAnswerLatencyLogPath) : undefined;
   const mailScopeSummaryCache = new Map;

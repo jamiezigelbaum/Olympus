@@ -69,6 +69,31 @@ output is only ever stored as text.
 - Memory: the engine is used only with at least 7 GiB of RAM. Disk: the
   shared 2 GiB headroom check before download.
 
+## When it downloads
+
+Owner decision 2026-10-07: only when the owner's chosen sources contain
+audio. The extraction queue is the catalogue of what approved lanes chose to
+read, and each item is routed there by the transcription lane's own test
+(`transcriptionLaneAccepts`, MIME type or file extension) at plan time. So:
+
+- At engine start, `prepareReadersWithWaitingWork` (runner.ts) asks each lane
+  reader with work waiting for it (queued, leased, due a retry, or settled
+  unread) to get ready. One lookup per reader over the job queue
+  (`idx_extraction_jobs_kind_status`, created if missing, outside the
+  versioned migrations so a rollback opens the file unchanged), stopping at
+  the first hit.
+- After a sync that catalogued new items, the scheduler already wakes that
+  source's extraction within seconds; its plan pass asks the reader to get
+  ready as soon as it queues the first job for it.
+- With no audio, the transcriber is never asked and nothing downloads.
+- When the install finishes, the engine's `onReady` wakes every extraction
+  task (`SourceScheduler.wakeTasksOfKind('extract')`, generic, no source
+  named), so unread audio is requeued and read within seconds.
+
+Every gate still applies: an owner command wins, tests never download, the
+platform/opt-in switch, the memory floor, the disk headroom, and the failed
+install backoff.
+
 ## Install state and failure classes
 
 | Situation | Job outcome | Retries spent |
