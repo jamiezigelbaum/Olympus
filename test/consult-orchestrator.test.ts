@@ -239,7 +239,7 @@ describe('the gate fixtures behave as the tests assume', () => {
   });
 
   test('the implied-place case (M0 round 2): "Portugal" with countries and places on, absent from or present in the snapshot, and with both packs off; unit words pass', () => {
-    const texts = (place: string) => ['What should I prepare for the trip?', `Your itinerary covers three days in ${place} with a morning flight and a hotel near the river.`, 'Passport rules for the trip are not stated.'];
+    const texts = (place: string) => ['What should I prepare for the trip?', `Your itinerary covers three days in ${place} with a morning flight and a hotel near the river.`, 'The documents do not say what the trip requires.'];
     const lisbon = privateEvidencePack('What should I prepare for the trip?', [
       { id: 'itinerary', text: 'Three days in Lisbon: the flight lands in the morning and the hotel is near the river.' },
     ]);
