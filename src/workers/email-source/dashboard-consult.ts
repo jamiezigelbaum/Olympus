@@ -134,6 +134,7 @@ const MESSAGES = {
   policyNotFile: 'Your privacy policy is not kept in a file on this computer, so Olympus cannot record this here.',
   policyChanged: 'Your privacy policy file changed since this page loaded. Nothing was written; reload the page and try again.',
   policyUnreadable: 'Your privacy policy file could not be read. Nothing was written.',
+  policyUncertain: 'Olympus could not confirm whether your privacy policy file changed. Reload the page to see the current state.',
   routeExists: 'A zkAPI route is already configured.',
   tickAll: 'Tick every statement to record your acknowledgement.',
   fundingDate: 'Enter the funding date as YYYY-MM-DD, the day the deposit was confirmed.',
@@ -283,11 +284,14 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     if (!policyWritable()) return { ok: false, httpStatus: 409, code: 'policy_not_file', message: MESSAGES.policyNotFile };
     const update = updateSovereigntyConfigFile({ path: options.sovereignty.path!, expect: policy, patch });
     if (!update.ok) {
-      if (update.reason === 'conflict' && update.current) policy = update.current;
-      return update.reason === 'conflict'
-        ? { ok: false, httpStatus: 409, code: 'policy_changed', message: MESSAGES.policyChanged }
-        : { ok: false, httpStatus: 500, code: 'policy_unreadable', message: MESSAGES.policyUnreadable };
+      if (update.current) policy = update.current;
+      if (update.reason === 'conflict') return { ok: false, httpStatus: 409, code: 'policy_changed', message: MESSAGES.policyChanged };
+      // Something failed after the publish point and the file does not read
+      // back as the new policy: the view follows whatever the file holds now.
+      if (update.reason === 'uncertain') return { ok: false, httpStatus: 500, code: 'policy_uncertain', message: MESSAGES.policyUncertain };
+      return { ok: false, httpStatus: 500, code: 'policy_unreadable', message: MESSAGES.policyUnreadable };
     }
+    // Published (even when a step after the rename failed): the policy is live, so it is applied.
     policy = update.config;
     return undefined;
   };
