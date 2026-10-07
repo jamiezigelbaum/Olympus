@@ -258,6 +258,12 @@ export interface SourceSchedulerTask {
   bootstrapLastSuccessAt?(): string | undefined;
   /** Seeds a counts-only proof for externally completed work after restart. */
   bootstrapLastResult?(): SourceSchedulerTaskRunResult | undefined;
+  /**
+   * Cheap, synchronous work to do once when the scheduler starts, before the
+   * task is next due (for example, asking a lane's reader to get ready for
+   * work already waiting in that lane). Never awaited; a throw is ignored.
+   */
+  atStart?(): void;
   run(context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult>;
 }
 
@@ -437,6 +443,8 @@ interface SchedulerTaskState {
   degradedReason?: string;
   lastResult?: SourceSchedulerTaskStatus['last_result'];
   pendingUnpark?: PendingSourceSchedulerUnpark;
+  /** Woken while running: run again within seconds of completing. */
+  wakeAfterRun?: boolean;
 }
 
 export class SourceSchedulerTaskFailure extends Error {
@@ -543,6 +551,13 @@ export class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    for (const state of this.states) {
+      try {
+        state.task.atStart?.();
+      } catch {
+        // Start-up hints never stop the scheduler.
+      }
+    }
     void this.runDueTasks();
   }
 
@@ -603,15 +618,21 @@ export class SourceScheduler {
    * Brings every task of `kind` forward to run within seconds, for when
    * something those tasks wait on has just become available (a built-in
    * reader finished installing, so extraction can read what it left unread).
-   * Generic: no source is named. A running task, a task in a failure backoff
-   * and a task not on the continuous cadence are left alone. Returns how many
-   * tasks were woken.
+   * Generic: no source is named. A task running right now is marked and runs
+   * again within seconds of completing. A task in a failure backoff keeps its
+   * backoff, and a manual-cadence task runs only when the owner runs it.
+   * Returns how many tasks were woken.
    */
   wakeTasksOfKind(kind: SourceSchedulerTaskKind, at: number = this.now().getTime()): number {
     let woke = 0;
     for (const state of this.states) {
-      if (state.task.kind !== kind || state.running || state.consecutiveFailures > 0) continue;
+      if (state.task.kind !== kind || state.consecutiveFailures > 0) continue;
       if (taskCadence(state.source, state.task) !== 'continuous') continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        woke += 1;
+        continue;
+      }
       if (state.nextRunAt <= at) continue;
       state.nextRunAt = at;
       woke += 1;
@@ -834,12 +855,17 @@ export class SourceScheduler {
       const continuing = result.continueSoon === true && !retryAt;
       const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
-      const nextRunAt = retryAt?.at
+      const scheduledRunAt = retryAt?.at
         ? Date.parse(retryAt.at)
         : Math.min(
           continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt,
           wakeAt ?? Number.POSITIVE_INFINITY,
         );
+      // Woken while it ran (wakeTasksOfKind): what it waited on became
+      // available mid-pass, so it runs again within seconds.
+      const wokenWhileRunning = state.wakeAfterRun === true && !retryAt;
+      delete state.wakeAfterRun;
+      const nextRunAt = wokenWhileRunning ? Math.min(scheduledRunAt, continueAt) : scheduledRunAt;
 
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, 'checkpoint');
@@ -871,9 +897,10 @@ export class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
-      if (continuing) this.scheduleContinueWake(nextRunAt);
+      if (continuing || wokenWhileRunning) this.scheduleContinueWake(nextRunAt);
       if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
     } catch (error) {
+      delete state.wakeAfterRun;
       const message = error instanceof Error ? error.message : String(error);
       const errorKind = safeSchedulerErrorKind(error);
       const errorHash = hash(message);
@@ -1330,6 +1357,10 @@ export function fileExtractionSchedulerTask(input: {
     id: input.id,
     kind: 'extract',
     writer: true,
+    // At engine start, a reader with work already waiting in THIS lane (an
+    // approved one: the scheduler holds only approved lanes) gets ready now,
+    // instead of at the lane's next pass.
+    atStart: () => { input.runner.prepareReadersWithWaitingWork?.([input.lane]); },
     run: async (context?: SourceSchedulerTaskRunContext) => {
       let cursor = context?.checkpoint ?? undefined;
       const startCursor = cursor;

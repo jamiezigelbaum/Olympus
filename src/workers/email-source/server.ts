@@ -3833,13 +3833,13 @@ export async function main(): Promise<void> {
     })
     : undefined;
   // Built-in transcription installs only when the chosen sources contain
-  // audio (checked now, and after each sync's plan pass), and once ready
-  // wakes every extraction task so unread audio is read within seconds.
+  // audio (each approved extraction lane checks at scheduler start, and each
+  // plan pass after a sync), and once ready wakes every extraction task so
+  // unread audio is read within seconds.
   wireBuiltInTranscriptionAtBoot({
     env: process.env,
     engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
     ...(sourceScheduler ? { wake: () => { sourceScheduler.wakeTasksOfKind('extract'); } } : {}),
-    prepareWaitingReaders: () => fileExtractionRuntime?.runner.prepareReadersWithWaitingWork?.(),
   });
   // Content-free latency ledger: on by default so the next "why was that answer
   // slow?" is answerable from the host. Only wired when the answer path exists.

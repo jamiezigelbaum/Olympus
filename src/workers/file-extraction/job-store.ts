@@ -530,10 +530,6 @@ export class LocalFileExtractionJobStore {
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
       runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
-      // Not a versioned migration on purpose: an extra index changes nothing
-      // an older build reads, so a rollback opens this file as before. It
-      // serves the cross-lane "is any work waiting for this reader" lookup.
-      this.db.exec('CREATE INDEX IF NOT EXISTS idx_extraction_jobs_kind_status ON extraction_jobs(extractor_kind, status);');
     }
   }
 
@@ -1276,37 +1272,38 @@ export class LocalFileExtractionJobStore {
   }
 
   /**
-   * Whether any lane has work waiting for `extractorKind`'s reader: a job
+   * Whether this lane has work waiting for `extractorKind`'s reader: a job
    * queued, leased or due a retry, or one it settled unread (as in
-   * `unreadJobCount`). The queue holds exactly what approved lanes chose to
-   * read, routed to the lane by media type and file extension at plan time,
-   * so this answers "do the owner's chosen sources contain such items" from
-   * one indexed lookup that stops at the first hit.
+   * `unreadJobCount`). The queue holds what the lane chose to read, routed
+   * by media type and file extension at plan time, so for an approved lane
+   * this answers "do the owner's chosen sources contain such items". Always
+   * lane-scoped (there is no cross-lane mode): rows left behind by a lane
+   * that is no longer approved never count. Uses the lane index and stops at
+   * the first hit.
    */
-  hasWorkWaitingForReader(request: Omit<UnreadExtractionJobsRequest, keyof ExtractionLaneKey>): boolean {
+  hasWorkWaitingForReader(request: UnreadExtractionJobsRequest): boolean {
+    const lane = requireLaneKey(request);
     const extractorKind = requireToken(request.extractorKind, 'extractorKind');
     const pending = this.db.query(`
       SELECT 1 AS hit FROM extraction_jobs
-      WHERE extractor_kind = ? AND status IN ('queued', 'leased', 'failed_retryable')
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status IN ('queued', 'leased', 'failed_retryable')
+        AND extractor_kind = ?
       LIMIT 1
-    `).get(extractorKind) as { hit: number } | null;
+    `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind) as { hit: number } | null;
     if (pending) return true;
     const { sql, params } = this.unreadJobsQuery(request);
     return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
   }
 
-  private unreadJobsQuery(
-    request: Omit<UnreadExtractionJobsRequest, keyof ExtractionLaneKey> & Partial<ExtractionLaneKey>,
-  ): { sql: string; params: string[] } {
-    const lane = request.corpusId === undefined ? undefined : requireLaneKey(request as ExtractionLaneKey);
+  private unreadJobsQuery(request: UnreadExtractionJobsRequest): { sql: string; params: string[] } {
+    const lane = requireLaneKey(request);
     const extractorKind = requireToken(request.extractorKind, 'extractorKind');
     const warnings = request.warnings.map((warning) => requireToken(warning, 'warning'));
     const kinds = request.terminalErrorKinds.map((kind) => requireToken(kind, 'terminalErrorKind'));
     const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken(warning, 'notReadyWarning'));
     const clauses: string[] = [];
-    const params: string[] = lane
-      ? [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind]
-      : [extractorKind];
+    const params: string[] = [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind];
     const hasWarning = (values: readonly string[]): string => `EXISTS (
         SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
         WHERE a.job_id = j.job_id AND a.warnings_json IS NOT NULL
@@ -1323,7 +1320,8 @@ export class LocalFileExtractionJobStore {
       clauses.push(`(j.status = 'failed_terminal' AND ${onceGuard} AND j.last_error_kind IN (${kinds.map(() => '?').join(', ')}))`);
       params.push(...kinds);
     }
-    const sql = `${lane ? 'j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ? AND ' : ''}j.extractor_kind = ?
+    const sql = `j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ?
+      AND j.extractor_kind = ?
       AND ${clauses.length > 0 ? `(${clauses.join(' OR ')})` : '0'}`;
     return { sql, params };
   }

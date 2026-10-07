@@ -84259,7 +84259,6 @@ class LocalFileExtractionJobStore {
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
       runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
-      this.db.exec("CREATE INDEX IF NOT EXISTS idx_extraction_jobs_kind_status ON extraction_jobs(extractor_kind, status);");
     }
   }
   close() {
@@ -84749,25 +84748,28 @@ class LocalFileExtractionJobStore {
     return { matchedJobs: matched.length, jobsRequeued: requeued };
   }
   hasWorkWaitingForReader(request) {
+    const lane = requireLaneKey(request);
     const extractorKind = requireToken3(request.extractorKind, "extractorKind");
     const pending = this.db.query(`
       SELECT 1 AS hit FROM extraction_jobs
-      WHERE extractor_kind = ? AND status IN ('queued', 'leased', 'failed_retryable')
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status IN ('queued', 'leased', 'failed_retryable')
+        AND extractor_kind = ?
       LIMIT 1
-    `).get(extractorKind);
+    `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind);
     if (pending)
       return true;
     const { sql, params } = this.unreadJobsQuery(request);
     return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
   }
   unreadJobsQuery(request) {
-    const lane = request.corpusId === undefined ? undefined : requireLaneKey(request);
+    const lane = requireLaneKey(request);
     const extractorKind = requireToken3(request.extractorKind, "extractorKind");
     const warnings = request.warnings.map((warning) => requireToken3(warning, "warning"));
     const kinds = request.terminalErrorKinds.map((kind) => requireToken3(kind, "terminalErrorKind"));
     const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken3(warning, "notReadyWarning"));
     const clauses = [];
-    const params = lane ? [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind] : [extractorKind];
+    const params = [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind];
     const hasWarning = (values) => `EXISTS (
         SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
         WHERE a.job_id = j.job_id AND a.warnings_json IS NOT NULL
@@ -84782,7 +84784,8 @@ class LocalFileExtractionJobStore {
       clauses.push(`(j.status = 'failed_terminal' AND ${onceGuard} AND j.last_error_kind IN (${kinds.map(() => "?").join(", ")}))`);
       params.push(...kinds);
     }
-    const sql = `${lane ? "j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ? AND " : ""}j.extractor_kind = ?
+    const sql = `j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ?
+      AND j.extractor_kind = ?
       AND ${clauses.length > 0 ? `(${clauses.join(" OR ")})` : "0"}`;
     return { sql, params };
   }
@@ -89082,7 +89085,6 @@ function wireBuiltInTranscriptionAtBoot(input) {
     return;
   if (input.wake)
     input.engine.onReady?.(input.wake);
-  input.prepareWaitingReaders?.();
   return input.engine;
 }
 function transcriptionDeadlineFromLease(leaseExpiresAt) {
@@ -90165,19 +90167,20 @@ function createFileExtractionRunner(options) {
     }
     return requeued;
   }
-  function prepareReadersWithWaitingWork(kinds) {
+  function prepareReadersWithWaitingWork(work) {
     const asked = [];
     for (const extractor of registry2.list()) {
       const policy = extractor.reread;
-      if (!policy || kinds && !kinds.has(extractor.kind))
+      if (!policy)
         continue;
       try {
-        const waiting = kinds !== undefined || jobs.hasWorkWaitingForReader({
+        const waiting = "queuedKinds" in work ? work.queuedKinds.has(extractor.kind) : work.lanes.some((lane) => jobs.hasWorkWaitingForReader({
+          ...lane,
           extractorKind: extractor.kind,
           warnings: policy.unreadWarnings,
           terminalErrorKinds: policy.unreadTerminalErrorKinds,
           ...policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}
-        });
+        }));
         if (!waiting)
           continue;
         policy.prepare();
@@ -90190,7 +90193,7 @@ function createFileExtractionRunner(options) {
   }
   return {
     reclassifyTerminal,
-    prepareReadersWithWaitingWork: () => prepareReadersWithWaitingWork(),
+    prepareReadersWithWaitingWork: (lanes) => prepareReadersWithWaitingWork({ lanes }),
     corpusIds() {
       return [...corporaById.keys()];
     },
@@ -90243,7 +90246,7 @@ function createFileExtractionRunner(options) {
         });
         jobsQueued += result.jobsQueued;
         if (result.jobsQueued > 0)
-          prepareReadersWithWaitingWork(new Set([extractorKind]));
+          prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
         jobsExisting += result.jobsExisting;
         jobsForced += result.jobsForced;
         jobsSkippedTooLarge += result.jobsSkippedTooLarge;
@@ -110223,6 +110226,11 @@ class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    for (const state of this.states) {
+      try {
+        state.task.atStart?.();
+      } catch {}
+    }
     this.runDueTasks();
   }
   stop() {
@@ -110275,10 +110283,15 @@ class SourceScheduler {
   wakeTasksOfKind(kind, at = this.now().getTime()) {
     let woke = 0;
     for (const state of this.states) {
-      if (state.task.kind !== kind || state.running || state.consecutiveFailures > 0)
+      if (state.task.kind !== kind || state.consecutiveFailures > 0)
         continue;
       if (taskCadence(state.source, state.task) !== "continuous")
         continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        woke += 1;
+        continue;
+      }
       if (state.nextRunAt <= at)
         continue;
       state.nextRunAt = at;
@@ -110452,7 +110465,10 @@ class SourceScheduler {
       const continuing = result.continueSoon === true && !retryAt;
       const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
-      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const scheduledRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const wokenWhileRunning = state.wakeAfterRun === true && !retryAt;
+      delete state.wakeAfterRun;
+      const nextRunAt = wokenWhileRunning ? Math.min(scheduledRunAt, continueAt) : scheduledRunAt;
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, "checkpoint");
         this.applyPersistedState(state, this.stateStore.recordSuccess({
@@ -110489,11 +110505,12 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
-      if (continuing)
+      if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
       if (result.status === "progress" && !retryAt)
         this.wakeDownstream(state, continueAt);
     } catch (error2) {
+      delete state.wakeAfterRun;
       const message = error2 instanceof Error ? error2.message : String(error2);
       const errorKind = safeSchedulerErrorKind(error2);
       const errorHash = hash(message);
@@ -110839,6 +110856,9 @@ function fileExtractionSchedulerTask(input) {
     id: input.id,
     kind: "extract",
     writer: true,
+    atStart: () => {
+      input.runner.prepareReadersWithWaitingWork?.([input.lane]);
+    },
     run: async (context) => {
       let cursor = context?.checkpoint ?? undefined;
       const startCursor = cursor;
@@ -128143,8 +128163,7 @@ async function main() {
     engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
     ...sourceScheduler ? { wake: () => {
       sourceScheduler.wakeTasksOfKind("extract");
-    } } : {},
-    prepareWaitingReaders: () => fileExtractionRuntime?.runner.prepareReadersWithWaitingWork?.()
+    } } : {}
   });
   const sourceAnswerLatencyLogPath = sourceAnswer ? resolveSourceAnswerLatencyLogPath(process.env) : undefined;
   const sourceAnswerLatencyLog = sourceAnswerLatencyLogPath ? createFileSourceAnswerLatencyLog(sourceAnswerLatencyLogPath) : undefined;

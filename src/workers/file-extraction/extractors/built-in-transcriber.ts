@@ -462,24 +462,23 @@ export function runningBuiltInTranscriber(): BuiltInTranscriptionEngine | undefi
 
 /**
  * Engine start for built-in transcription. The model downloads only when the
- * owner's chosen sources contain audio (owner decision 2026-10-07): at start,
- * `prepareWaitingReaders` asks each extraction reader with work already
- * waiting in the queue to get ready, and the plan pass that follows every
- * sync with new items does the same for newly queued audio (runner.ts). Once
- * the model is ready, `wake` brings the extraction tasks forward so the audio
- * left unread is read within seconds. Never blocks; every engine gate (an
- * owner command wins, test env, platform, memory, disk, failure backoff)
- * still applies. Returns the engine it wired, if any.
+ * owner's chosen sources contain audio (owner decision 2026-10-07): when the
+ * scheduler starts, each approved extraction lane asks its readers to get
+ * ready if that lane already has work waiting for them
+ * (`fileExtractionSchedulerTask` atStart), and the plan pass after every sync
+ * with new items does the same for newly queued audio (runner.ts). This wires
+ * the other half: once the model is ready, `wake` brings the extraction
+ * tasks forward so audio left unread is read within seconds. Every engine
+ * gate (an owner command wins, test env, platform, memory, disk, failure
+ * backoff) still applies. Returns the engine it wired, if any.
  */
 export function wireBuiltInTranscriptionAtBoot(input: {
   env: Record<string, string | undefined>;
   engine: BuiltInTranscriptionEngine | undefined;
   wake?: () => void;
-  prepareWaitingReaders?: () => unknown;
 }): BuiltInTranscriptionEngine | undefined {
   if (input.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || input.env.NODE_ENV === 'test' || !input.engine) return undefined;
   if (input.wake) input.engine.onReady?.(input.wake);
-  input.prepareWaitingReaders?.();
   return input.engine;
 }
 

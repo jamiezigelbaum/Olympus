@@ -76,19 +76,23 @@ audio. The extraction queue is the catalogue of what approved lanes chose to
 read, and each item is routed there by the transcription lane's own test
 (`transcriptionLaneAccepts`, MIME type or file extension) at plan time. So:
 
-- At engine start, `prepareReadersWithWaitingWork` (runner.ts) asks each lane
-  reader with work waiting for it (queued, leased, due a retry, or settled
-  unread) to get ready. One lookup per reader over the job queue
-  (`idx_extraction_jobs_kind_status`, created if missing, outside the
-  versioned migrations so a rollback opens the file unchanged), stopping at
-  the first hit.
+- When the scheduler starts, each approved extraction lane's task
+  (`fileExtractionSchedulerTask` `atStart`) calls
+  `prepareReadersWithWaitingWork([lane])` (runner.ts): a reader with work
+  waiting in that lane (queued, leased, due a retry, or settled unread) is
+  asked to get ready. The lookup is always lane-scoped (lane index, first
+  hit), so rows left in a folder or source that is no longer approved never
+  trigger a download.
 - After a sync that catalogued new items, the scheduler already wakes that
   source's extraction within seconds; its plan pass asks the reader to get
   ready as soon as it queues the first job for it.
 - With no audio, the transcriber is never asked and nothing downloads.
 - When the install finishes, the engine's `onReady` wakes every extraction
   task (`SourceScheduler.wakeTasksOfKind('extract')`, generic, no source
-  named), so unread audio is requeued and read within seconds.
+  named), so unread audio is requeued and read within seconds. Exactly which
+  tasks wake: every continuous-cadence extract task that is not in a failure
+  backoff; one running at that moment runs again within seconds of
+  finishing. Manual-cadence lanes run when the owner runs them.
 
 Every gate still applies: an owner command wins, tests never download, the
 platform/opt-in switch, the memory floor, the disk headroom, and the failed

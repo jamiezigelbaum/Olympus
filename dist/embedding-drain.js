@@ -27273,6 +27273,11 @@ class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    for (const state of this.states) {
+      try {
+        state.task.atStart?.();
+      } catch {}
+    }
     this.runDueTasks();
   }
   stop() {
@@ -27325,10 +27330,15 @@ class SourceScheduler {
   wakeTasksOfKind(kind, at = this.now().getTime()) {
     let woke = 0;
     for (const state of this.states) {
-      if (state.task.kind !== kind || state.running || state.consecutiveFailures > 0)
+      if (state.task.kind !== kind || state.consecutiveFailures > 0)
         continue;
       if (taskCadence(state.source, state.task) !== "continuous")
         continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        woke += 1;
+        continue;
+      }
       if (state.nextRunAt <= at)
         continue;
       state.nextRunAt = at;
@@ -27502,7 +27512,10 @@ class SourceScheduler {
       const continuing = result.continueSoon === true && !retryAt;
       const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
-      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const scheduledRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const wokenWhileRunning = state.wakeAfterRun === true && !retryAt;
+      delete state.wakeAfterRun;
+      const nextRunAt = wokenWhileRunning ? Math.min(scheduledRunAt, continueAt) : scheduledRunAt;
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, "checkpoint");
         this.applyPersistedState(state, this.stateStore.recordSuccess({
@@ -27539,11 +27552,12 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
-      if (continuing)
+      if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
       if (result.status === "progress" && !retryAt)
         this.wakeDownstream(state, continueAt);
     } catch (error) {
+      delete state.wakeAfterRun;
       const message = error instanceof Error ? error.message : String(error);
       const errorKind = safeSchedulerErrorKind(error);
       const errorHash = hash(message);
