@@ -61,6 +61,12 @@ describe('connector-store locator-index operator', () => {
         DROP TRIGGER connector_store_locator_identity_update;
         DROP TABLE item_locator_identities;
         DROP TABLE locator_identity_index_state;
+        DROP TRIGGER connector_store_chunk_media_release;
+        DROP TABLE chunk_media_releases;
+        DROP TABLE chunk_media_failures;
+        DROP INDEX idx_connector_store_chunks_media;
+        ALTER TABLE chunks DROP COLUMN media_path;
+        ALTER TABLE chunks DROP COLUMN media_sha256;
         UPDATE schema_version SET version = 10 WHERE store_id = 'connector-store';
       `);
     } finally {
@@ -80,7 +86,7 @@ describe('connector-store locator-index operator', () => {
     expect(first).toMatchObject({
       execute: true,
       schemaVersionBefore: 10,
-      schemaVersionAfter: 12,
+      schemaVersionAfter: 13,
       before: { state: 'backfill_required', cursorItemPk: 0, indexedItems: 0 },
       after: { state: 'backfill_required', indexedItems: 1 },
       batch: { scannedItems: 1 },
@@ -89,8 +95,8 @@ describe('connector-store locator-index operator', () => {
     const second = runConnectorStoreLocatorIndex([...args, '--execute']);
     expect(second).toMatchObject({
       execute: true,
-      schemaVersionBefore: 12,
-      schemaVersionAfter: 12,
+      schemaVersionBefore: 13,
+      schemaVersionAfter: 13,
       before: { state: 'backfill_required', indexedItems: 1 },
       after: { state: 'ready', indexedItems: 2 },
       batch: { scannedItems: 1 },
@@ -108,7 +114,7 @@ describe('connector-store locator-index operator', () => {
     const proof = new Database(dbPath, { readonly: true });
     try {
       expect(proof.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get())
-        .toEqual({ version: 12 });
+        .toEqual({ version: 13 });
       expect((proof.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((row) => row.name))
         .toEqual(expect.arrayContaining([
           'source_scope_generation', 'source_scope_revision', 'source_scope_folder_keys_json',

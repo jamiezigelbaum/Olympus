@@ -203,8 +203,27 @@ export interface TierClassificationInput {
    * nothing waits on the text, so the item is never left pending forever.
    */
   namesOnly?: boolean;
+  /**
+   * The item's media type. A still image's content (its picture, and any
+   * text read off it) rests Private by default (IMAGE_PRIVATE_DEFAULT_REASON).
+   */
+  mimeType?: string;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
+}
+
+/**
+ * Photo content is Private by default, whatever text was read off it: no
+ * judge yet looks at a picture (docs/design/photo-embeddings.md, owner
+ * decision 2026-10-07). The names keep their own tier; only Secrets (a
+ * secret read in the picture's text) and the owner's per-item override
+ * decide otherwise.
+ */
+export const IMAGE_PRIVATE_DEFAULT_REASON = 'content:image_private_default';
+
+/** Whether a media type is a still image, whose content rests Private by default. */
+export function isImageMediaType(mimeType: string | undefined): boolean {
+  return (mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? '').startsWith('image/');
 }
 
 export interface TierClassificationOptions {
@@ -357,6 +376,7 @@ function classifyItemTiersWithPublic(
     signals,
     text,
     ...(input.namesOnly ? { namesOnly: true } : {}),
+    ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
     matchInput,
     names: snifferNames(signals),
     metadata,
@@ -413,6 +433,8 @@ export interface ContentTierInput {
   title?: string;
   path?: string;
   sender?: string;
+  /** The item's media type: a still image's content rests Private by default. */
+  mimeType?: string;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
@@ -451,6 +473,7 @@ export function classifyContentTier(
   const content = contentPass({
     signals: {},
     text,
+    ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
     matchInput: namesMatchInput({
       ...(input.title?.trim() ? { title: input.title } : {}),
       ...(input.path?.trim() ? { path: input.path } : {}),
@@ -651,6 +674,8 @@ function contentPass(args: {
   text: string | undefined;
   /** The owner keeps the content unread (TierClassificationInput.namesOnly). */
   namesOnly?: boolean;
+  /** The item is a still image: its content rests Private by default. */
+  image?: boolean;
   matchInput: NamesMatchInput;
   /** The item's names (title, folder path, sender), bounded: they travel with the excerpt. */
   names: string;
@@ -689,6 +714,13 @@ function contentPass(args: {
         pending: false,
       };
     }
+  }
+
+  // A still image's content is Private by default, whatever its text says
+  // and whatever rule set the names (only Secrets, above, and the per-item
+  // override, before either pass, decide otherwise).
+  if (args.image) {
+    return { tier: maxTier(metadata.tier, 'secure'), decidedBy: 'default', reasons: [IMAGE_PRIVATE_DEFAULT_REASON], pending: false };
   }
 
   // A force rule fixes the tier; only Secrets (above) may still raise it.

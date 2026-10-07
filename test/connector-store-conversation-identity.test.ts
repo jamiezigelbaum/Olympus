@@ -33,7 +33,7 @@ describe('LocalConnectorStore conversation-scoped identity migration', () => {
       store.close();
 
       const firstOpen = inspectFixture(dbPath);
-      expect(firstOpen.version).toBe(12);
+      expect(firstOpen.version).toBe(13);
       expect(firstOpen.data).toEqual(before);
       expect(firstOpen.foreignKeyErrors).toEqual([]);
       // The reactions column arrives empty on an upgraded store, so an item
@@ -480,7 +480,10 @@ function fixtureData(db: Database): FixtureData {
         content_hash, trust_tier, tombstoned, deleted_at, sync_run_id
       FROM items ORDER BY item_pk
     `).all(),
-    chunks: db.query('SELECT * FROM chunks ORDER BY chunk_pk').all(),
+    chunks: db.query(`
+      SELECT chunk_pk, item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at
+      FROM chunks ORDER BY chunk_pk
+    `).all(),
     fts: db.query(`
       SELECT title, bounded_text, item_pk, chunk_pk
       FROM connector_store_fts ORDER BY CAST(item_pk AS INTEGER), CAST(chunk_pk AS INTEGER)

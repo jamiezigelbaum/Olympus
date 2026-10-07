@@ -265,10 +265,33 @@ export interface ExtractorInput {
 export interface ExtractorIndexedOutput {
   status: 'indexed';
   text: string;
+  /**
+   * A prepared media copy the item's content is also searched by (today a
+   * photo, reduced to a JPEG in the owner-only media cache). It travels with
+   * the text to the store, which attaches it to the item's first chunk so
+   * the embedding lane can hand it to a model that reads images.
+   */
+  media?: ExtractedMedia;
   derivations?: readonly ExtractionDerivation[];
   warnings?: readonly string[];
   egressDestination?: ExtractionApprovedRemoteDestination;
   errorKind?: never;
+}
+
+/**
+ * A prepared media file in the owner-only media cache, content-addressed by
+ * the SHA-256 of its bytes.
+ */
+export interface ExtractedMedia {
+  path: string;
+  sha256: string;
+  mimeType: 'image/jpeg';
+  /**
+   * The extraction's own hold on the cached file, taken when it was written.
+   * The runner releases it once the result is stored or refused, so a file
+   * no store took is removed and a file a store took is kept.
+   */
+  stagingHolder?: string;
 }
 
 /**
@@ -332,6 +355,12 @@ export interface Extractor {
   readonly kind: string;
   readonly version: string;
   readonly needsBytes: boolean;
+  /**
+   * The version a job for this media type is queued under, when it differs
+   * from `version`: a capability added for one media type (pictures read for
+   * media search) re-reads only items of that type, once.
+   */
+  versionFor?(mimeType: string | undefined): string;
   readonly egress: ExtractionEgress;
   readonly approvedRemoteDestination?: ExtractionApprovedRemoteDestination;
   accepts(mimeType: string | undefined, name?: string): boolean;
@@ -472,6 +501,22 @@ export interface ExtractorRegistryConfig {
      */
     builtIn?: BuiltInTranscriptionEngine;
   };
+  /**
+   * Image preparation for media search (docs/design/photo-embeddings.md).
+   * Without a cache directory, or off macOS, images keep today's behaviour.
+   */
+  media?: {
+    /**
+     * Owner-only, content-addressed directory the prepared copies live in.
+     */
+    cacheDir?: string;
+    /**
+     * Overrides `process.platform`, for tests.
+     */
+    platform?: NodeJS.Platform;
+    timeoutMs?: number;
+    maxInputBytes?: number;
+  };
 }
 
 /**
@@ -576,6 +621,10 @@ export interface ExtractionSinkRequest {
    */
   fetchedAt: string;
   derivations?: readonly ExtractionDerivation[];
+  /**
+   * The prepared media copy the extractor produced with this text, if any.
+   */
+  media?: ExtractedMedia;
   metadata?: Readonly<Record<string, unknown>>;
   /**
    * The claim this text was produced under, carried to the corpus mutation

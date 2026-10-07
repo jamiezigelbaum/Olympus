@@ -40,6 +40,7 @@ import {
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
+import { sweepImageContentToPrivate } from '../connector-store/tier-image-content-sweep.ts';
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
@@ -628,6 +629,16 @@ export class TierSnifferService {
           this.options.log?.(
             `Olympus tier rules: ${report.raised} stored item(s) raised by a new owner rule (hidden first)`
             + `${report.secrets ? `, ${report.secrets} made Secrets` : ''}.`,
+          );
+        }
+      } catch {
+        // A set that cannot be read keeps its placements this tick.
+      }
+      try {
+        const images = sweepImageContentToPrivate({ set });
+        if (images.raised > 0 || images.stripped > 0) {
+          this.options.log?.(
+            `Olympus photos: ${images.raised} stored photo(s) moved to Private (hidden first), ${images.stripped} photo text(s) removed from a non-Private store.`,
           );
         }
       } catch {

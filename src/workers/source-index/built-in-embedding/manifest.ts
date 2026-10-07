@@ -44,6 +44,16 @@ export interface BuiltInEmbeddingModelSpec {
   model: PinnedDownload;
   /** The WordPiece `vocab.txt` an ONNX model reads; a LiteRT model carries its own tokenizer. */
   vocabulary?: PinnedDownload;
+  /**
+   * A LiteRT model that also reads images: the vision encoder is enabled and
+   * a document may carry a picture beside its text. Turning the encoder on
+   * leaves text vectors unchanged (cosine 1.000000 CPU, 0.999998 GPU, M3), so
+   * this is deliberately NOT part of the model's identity (configHash).
+   */
+  vision?: {
+    /** Image tokens per picture; LiteRT-LM 0.18.0 supports 70 or 140. */
+    tokensPerImage: 70 | 140;
+  };
 }
 
 export interface PinnedNpmPackage {
@@ -123,6 +133,7 @@ export const EMBEDDINGGEMMA_2: BuiltInEmbeddingModelSpec = {
   pooling: 'model',
   queryPrefix: 'task: search result | query: ',
   documentPrefix: 'title: {title} | text: ',
+  vision: { tokensPerImage: 140 },
   model: {
     name: 'embeddinggemma-2-740m.litertlm',
     url: `${EMBEDDINGGEMMA_2_BASE}/embeddinggemma-2-740m.litertlm`,

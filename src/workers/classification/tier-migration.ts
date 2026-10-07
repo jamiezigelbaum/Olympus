@@ -710,6 +710,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
               signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
               provider: item.identity.provider,
               text: item.chunks.map((chunk) => chunk.text).join(''),
+              ...(item.mimeType ? { mimeType: item.mimeType } : {}),
               subject: item.identity,
             },
             {

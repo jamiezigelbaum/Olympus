@@ -36,6 +36,7 @@ import {
   type ExtractionCandidateReader,
 } from '../../core/file-extraction-source.ts';
 import type { RawItem } from '../../core/contracts.ts';
+import { mediaCacheDir, sweepMediaCache } from '../../core/media-cache.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
 import {
@@ -240,6 +241,15 @@ export function createFileExtractionRuntime(
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
     }
     const view = tierSet ? tieredExtractionView(tierSet) : undefined;
+    // A plain (untiered) store that is not Private holds no picture content;
+    // what an earlier build stored there is removed once (the names stay).
+    if (!tierSet && store.trustDomain !== 'secure_local') {
+      try {
+        store.stripImageContentOutsidePrivate();
+      } catch {
+        // Tried again at the next start.
+      }
+    }
     corpora.push({
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
@@ -328,7 +338,15 @@ export function createFileExtractionRuntime(
     return undefined;
   }
 
-  const extractorConfig = options.extractors ?? {};
+  const extractorConfig: ExtractorRegistryConfig = {
+    ...(options.extractors ?? {}),
+    // Prepared photo copies live in the owner-only media cache under the
+    // Olympus data directory (docs/design/photo-embeddings.md).
+    media: { cacheDir: mediaCacheDir(env), ...(options.extractors?.media ?? {}) },
+  };
+  // Copies nothing holds (an extraction that died before its result was
+  // stored) are removed once they are a day old.
+  if (extractorConfig.media?.cacheDir) sweepMediaCache(extractorConfig.media.cacheDir);
   const registry = createDefaultExtractorRegistry(extractorConfig);
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
 
