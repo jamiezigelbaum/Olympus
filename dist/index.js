@@ -17724,6 +17724,7 @@ var DEFAULT_CONSULT_SETTINGS = Object.freeze({
 });
 var TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
 var DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
+var OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
 var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
 function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
@@ -17748,16 +17749,18 @@ function parseConsultSettings(value) {
     return;
   if (new Set(languages).size !== languages.length)
     return;
-  if (!isPlainObject(domains) || !hasExactKeys(domains, DOMAIN_KEYS))
+  if (!isPlainObject(domains))
     return;
-  if (!DOMAIN_KEYS.every((key) => typeof domains[key] === "boolean"))
+  if (!Object.keys(domains).every((key) => DOMAIN_KEYS.includes(key)))
+    return;
+  if (!DOMAIN_KEYS.every((key) => (key in domains) ? typeof domains[key] === "boolean" : OPTIONAL_DOMAIN_KEYS.includes(key)))
     return;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
     enabled,
     languages: Object.freeze([...languages]),
-    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key]]))),
+    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] : true]))),
     strict
   });
 }

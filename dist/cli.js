@@ -59726,16 +59726,18 @@ function parseConsultSettings(value) {
     return;
   if (new Set(languages).size !== languages.length)
     return;
-  if (!isPlainObject(domains) || !hasExactKeys(domains, DOMAIN_KEYS))
+  if (!isPlainObject(domains))
     return;
-  if (!DOMAIN_KEYS.every((key) => typeof domains[key] === "boolean"))
+  if (!Object.keys(domains).every((key) => DOMAIN_KEYS.includes(key)))
+    return;
+  if (!DOMAIN_KEYS.every((key) => (key in domains) ? typeof domains[key] === "boolean" : OPTIONAL_DOMAIN_KEYS.includes(key)))
     return;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
     enabled,
     languages: Object.freeze([...languages]),
-    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key]]))),
+    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] : true]))),
     strict
   });
 }
@@ -59880,7 +59882,7 @@ function hasExactKeys(value, keys) {
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
-var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, DEFAULT_CONSULT_SETTINGS, TOP_LEVEL_KEYS, DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
+var CONSULT_SETTINGS_VERSION = 1, CONSULT_SETTINGS_MAX_BYTES, DEFAULT_CONSULT_SETTINGS, TOP_LEVEL_KEYS, DOMAIN_KEYS, OPTIONAL_DOMAIN_KEYS, LANGUAGES, __consultSettingsTestHooks;
 var init_consult_settings = __esm(() => {
   init_consult_gate();
   CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
@@ -59894,6 +59896,7 @@ var init_consult_settings = __esm(() => {
   });
   TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
   DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
+  OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
   LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
   __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 });
