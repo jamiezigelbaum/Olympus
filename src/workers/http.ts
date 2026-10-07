@@ -566,6 +566,9 @@ export const DASHBOARD_CONSULT_CONTROL_PATHS: readonly string[] = [
   '/dashboard/consult/route/add',
   '/dashboard/consult/recover',
   '/dashboard/consult/abandon',
+  // The one-click install of Tor and zkapi-clientd (core/managed-tools.ts):
+  // it downloads programs Olympus later runs, so it is held to the same grade.
+  '/dashboard/consult/tools/install',
 ];
 
 export function isDashboardConsultControlRoute(request: Request): boolean {

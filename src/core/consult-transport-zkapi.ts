@@ -61,6 +61,7 @@ import {
   withFileLeaseSync,
   type ProcessInstanceIdentity,
 } from './file-lease.ts';
+import { managedToolExecutable } from './managed-tools.ts';
 import {
   parseIsoDate,
   ZKAPI_EXPIRY_NOTICE_DAYS,
@@ -1492,6 +1493,28 @@ function linuxListenerPids(port: number): number[] | ZkapiListenerInspection {
 }
 
 // ---------------------------------------------------------------------------
+// Which executable: the owner's explicit path, else Olympus's own install, else PATH
+
+/**
+ * The one resolution the readiness probe and the real session share. An
+ * explicit path in the route's settings is only that path. Otherwise the
+ * build Olympus installed and verified (managed-tools.ts: pinned version and
+ * hash, owner-only folders, real path inside its version folder) comes first,
+ * then resolveExecutable's search.
+ */
+export function resolveZkapiExecutable(
+  name: 'zkapi-clientd' | 'tor',
+  explicit: string | undefined,
+  env: Record<string, string | undefined>,
+): string | undefined {
+  if (!explicit) {
+    const managed = managedToolExecutable(name, { env });
+    if (managed) return managed;
+  }
+  return resolveExecutable(name, explicit, env);
+}
+
+// ---------------------------------------------------------------------------
 // Readiness (doctor): no Tor, no daemon start, no inference
 
 /**
@@ -1511,7 +1534,7 @@ export async function zkapiConsultReadiness(
   const blockers = settingsBlockers(money);
   const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
   if (!apiKeyConfigured) blockers.push('daemon_api_key_missing');
-  const daemonExecutable = resolveExecutable('zkapi-clientd', settings.daemonExecutable, env);
+  const daemonExecutable = resolveZkapiExecutable('zkapi-clientd', settings.daemonExecutable, env);
   let daemonVersion: string | undefined;
   if (!daemonExecutable) {
     blockers.push('daemon_not_found');
@@ -1529,7 +1552,7 @@ export async function zkapiConsultReadiness(
     }
     if (!versionSupported(daemonVersion)) blockers.push('daemon_version_unsupported');
   }
-  const torExecutable = settings.tor === 'per_consult' ? resolveExecutable('tor', settings.torExecutable, env) : undefined;
+  const torExecutable = settings.tor === 'per_consult' ? resolveZkapiExecutable('tor', settings.torExecutable, env) : undefined;
   if (settings.tor === 'per_consult' && !torExecutable) blockers.push('tor_not_found');
   const daemonPort = await portAnswers(Number(new URL(options.baseUrl).port || 80)) ? 'in_use' : 'free';
   if (daemonPort === 'in_use') blockers.push('daemon_already_running');
@@ -2007,9 +2030,9 @@ async function runSession(
   const blocked = settingsBlockers(zkapiMoneyStatus(settings, now()))[0];
   if (blocked) return refuse(blocked);
   if (!options.apiKey) return refuse('daemon_api_key_missing');
-  const daemonExecutable = resolveExecutable('zkapi-clientd', settings.daemonExecutable, env);
+  const daemonExecutable = resolveZkapiExecutable('zkapi-clientd', settings.daemonExecutable, env);
   if (!daemonExecutable) return refuse('daemon_not_found');
-  const torExecutable = perConsultTor ? resolveExecutable('tor', settings.torExecutable, env) : undefined;
+  const torExecutable = perConsultTor ? resolveZkapiExecutable('tor', settings.torExecutable, env) : undefined;
   if (perConsultTor && !torExecutable) return refuse('tor_not_found');
   try {
     const stranded = await recoverStrandedGroups(statePath, now());

@@ -30,7 +30,11 @@
  *     conflict and nothing is written), then asks the worker to restart,
  *     because the policy is read at boot;
  *   - `addRoute`: adds the one zkapi profile when none exists;
- *   - `recover` / `abandon`: the two fence buttons (§A.8), both explicit.
+ *   - `recover` / `abandon`: the two fence buttons (§A.8), both explicit;
+ *   - `installTools`: starts the one-click install of the pinned Tor and
+ *     zkapi-clientd builds (core/managed-tools.ts) in the background and
+ *     returns at once; `status` carries where each program was found and the
+ *     install's progress. It writes no setting and touches no wallet or key.
  */
 import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
 import {
@@ -42,6 +46,7 @@ import { writeConsultSettings, type ConsultSettingsWriteRefusal } from '../../co
 import {
   abandonZkapiFence,
   defaultZkapiStatePath,
+  resolveExecutable,
   zkapiConsultReadiness,
   zkapiFenceScope,
   zkapiOutstandingFences,
@@ -62,6 +67,8 @@ import {
   type ZkapiConsultSettings,
 } from '../../core/zkapi-consult-settings.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { createManagedToolsJob, managedToolsState, type ManagedToolsJob, type ManagedToolsJobState } from '../../core/managed-tools.ts';
+import type { DashboardOutsideHelpInstall, DashboardOutsideHelpTools } from '../dashboard/outside-help-tools.ts';
 import { resolveZkapiConsultTransport } from '../chatgpt/consult-orchestrator.ts';
 import type {
   DashboardOutsideHelpLanguage,
@@ -84,6 +91,7 @@ export interface DashboardConsultBackend {
   addRoute(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
   recover(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
   abandon(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
+  installTools(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
 }
 
 export interface DashboardConsultAdapterOptions {
@@ -106,6 +114,10 @@ export interface DashboardConsultAdapterOptions {
   now?: () => Date;
   /** Seam for tests: the readiness probe. */
   readiness?: (options: Parameters<typeof zkapiConsultReadiness>[0]) => Promise<ZkapiConsultReadiness>;
+  /** Seam for tests: the background install (default: the pinned downloads into the managed folder). */
+  toolsJob?: ManagedToolsJob;
+  /** Seam for tests: where each program is (default: the managed folder, then PATH). */
+  toolsState?: () => DashboardOutsideHelpTools['tools'];
 }
 
 /** The id the adapter gives the one zkapi profile it adds. */
@@ -152,7 +164,26 @@ const MESSAGES = {
   recoveryIncomplete: 'The recovery session ran, but settlement was not confirmed. The request is still held; try again later.',
   recoveryFailed: 'The recovery session did not complete. The request is still held.',
   abandoned: 'The held request is marked abandoned. It no longer blocks consults and stays in the ledger as a record.',
+  installStarted: 'Installing Tor and zkAPI. This takes a minute or two.',
+  installRunning: 'An install is already running.',
 } as const;
+
+/** The card's view of the background install. */
+export function dashboardInstallView(state: ManagedToolsJobState): DashboardOutsideHelpInstall {
+  switch (state.state) {
+    case 'idle':
+      return { state: 'idle' };
+    case 'running': {
+      const label = state.tool === 'tor' ? 'Tor' : 'zkAPI';
+      const percent = state.receivedBytes !== undefined && state.totalBytes ? Math.min(100, Math.floor((state.receivedBytes / state.totalBytes) * 100)) : undefined;
+      return { state: 'running', tool: label, phase: state.phase, ...(percent !== undefined ? { percent } : {}) };
+    }
+    case 'done':
+      return { state: 'done' };
+    case 'failed':
+      return { state: 'failed', code: state.code, message: state.message };
+  }
+}
 
 export function createDashboardConsultAdapter(options: DashboardConsultAdapterOptions): DashboardConsultBackend {
   const env = options.env ?? process.env;
@@ -160,6 +191,17 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   const statePath = options.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
   const location: ConsultSettingsLocation = options.settingsLocation ?? { env };
   const readiness = options.readiness ?? zkapiConsultReadiness;
+  const toolsJob = options.toolsJob ?? createManagedToolsJob({ env });
+  // Olympus's own verified install first (what the transport runs), else the
+  // same PATH search the transport falls back to.
+  const toolsState = options.toolsState ?? ((): DashboardOutsideHelpTools['tools'] => managedToolsState({ env }).map((entry) => {
+    const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
+    return {
+      tool: entry.tool,
+      label: entry.label,
+      source: entry.installed ? 'olympus' : system ? 'system' : entry.offered ? 'missing' : 'not_offered',
+    };
+  }));
   let policy = options.sovereignty.config;
   let restartPending = false;
 
@@ -299,6 +341,12 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   const invalid = (message: string, code = 'invalid_params'): DashboardConsultOutcome => ({ ok: false, httpStatus: 400, code, message });
 
   return {
+    async installTools(update) {
+      if (update.confirm !== true) return invalid(MESSAGES.confirm, 'confirmation_required');
+      if (toolsJob.start() === 'running') return { ok: false, httpStatus: 409, code: 'install_running', message: MESSAGES.installRunning };
+      return { ok: true, status_message: MESSAGES.installStarted };
+    },
+
     summary() {
       const settings = settingsView();
       if (settings.state === 'invalid') return { state: 'invalid' };
@@ -313,6 +361,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         route: await routeView(),
         languages: languages(),
         restartPending,
+        tools: { tools: toolsState(), install: dashboardInstallView(toolsJob.progress()) },
       };
     },
 

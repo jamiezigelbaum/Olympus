@@ -15700,9 +15700,9 @@ function constantTimeStringEqual(actual, expected) {
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync13, mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname18, join as join23 } from "node:path";
-import { homedir as homedir15 } from "node:os";
+import { existsSync as existsSync13, mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname19, join as join24 } from "node:path";
+import { homedir as homedir16 } from "node:os";
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -16295,13 +16295,182 @@ init_secret_store();
 // src/core/consult-transport-zkapi.ts
 init_atomic_file();
 init_file_lease();
-init_zkapi_consult_settings();
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash6, randomUUID as randomUUID7 } from "node:crypto";
-import { accessSync as accessSync3, chmodSync as chmodSync2, constants as constants2, existsSync as existsSync11, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, realpathSync, rmSync as rmSync3, statSync as statSync11, writeFileSync as writeFileSync4 } from "node:fs";
+import { accessSync as accessSync4, chmodSync as chmodSync3, constants as constants3, existsSync as existsSync11, mkdirSync as mkdirSync9, mkdtempSync, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync4, statSync as statSync12, writeFileSync as writeFileSync5 } from "node:fs";
 import { createConnection } from "node:net";
-import { homedir as homedir13, tmpdir as tmpdir2 } from "node:os";
-import { delimiter as delimiter5, dirname as dirname16, join as join20, resolve as resolvePath2 } from "node:path";
+import { homedir as homedir14, tmpdir as tmpdir2 } from "node:os";
+import { delimiter as delimiter5, dirname as dirname17, join as join21, resolve as resolvePath2 } from "node:path";
+
+// src/core/managed-tools.ts
+import {
+  accessSync as accessSync3,
+  constants as constants2,
+  lstatSync as lstatSync3,
+  mkdirSync as mkdirSync8,
+  readFileSync as readFileSync14,
+  readdirSync as readdirSync2,
+  realpathSync,
+  renameSync as renameSync3,
+  rmSync as rmSync3,
+  statSync as statSync11,
+  symlinkSync,
+  writeFileSync as writeFileSync4,
+  chmodSync as chmodSync2
+} from "node:fs";
+import { homedir as homedir13 } from "node:os";
+import { dirname as dirname16, isAbsolute as isAbsolute12, join as join20, posix, sep as sep3 } from "node:path";
+init_file_lease();
+var ZKAPI_RELEASE = "https://github.com/ethereum/zkapi/releases/download/clientd-v0.1.6";
+var ZKAPI_REQUIRED = [
+  "bin/zkapi-clientd",
+  "bin/zkapi-walletd",
+  "share/zkapi-clientd/build-info.json",
+  "share/zkapi-clientd/proof-setup/manifest.json",
+  "share/zkapi-clientd/proof-setup/request.pk",
+  "share/zkapi-clientd/proof-setup/request.vk",
+  "share/zkapi-clientd/proof-setup/withdrawal.pk",
+  "share/zkapi-clientd/proof-setup/withdrawal.vk"
+];
+var ZKAPI_RENAME = { "zkapi-clientd": "bin/zkapi-clientd", "zkapi-walletd": "bin/zkapi-walletd" };
+function zkapiAsset(name, sha256, bytes) {
+  return { url: `${ZKAPI_RELEASE}/${name}`, sha256, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
+}
+var TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24";
+function torMacAsset(name, sha256, bytes) {
+  return { url: `${TOR_RELEASE}/${name}`, sha256, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"] };
+}
+function torLinuxAsset(name, sha256, bytes) {
+  return {
+    url: `${TOR_RELEASE}/${name}`,
+    sha256,
+    bytes,
+    executable: "bin/tor",
+    required: ["tor/tor", "tor/libevent-2.1.so.7", "tor/libssl.so.3", "tor/libcrypto.so.3"],
+    skip: ["debug/"],
+    launcher: { path: "bin/tor", target: "tor/tor", libraryDir: "tor" }
+  };
+}
+var MANAGED_TOOL_PINS = {
+  tor: {
+    tool: "tor",
+    label: "Tor",
+    version: "15.0.24",
+    versionLine: /^Tor version \d+\.\d+\.\d+/,
+    assets: {
+      "darwin-arm64": torMacAsset("tor-expert-bundle-macos-aarch64-15.0.24.tar.gz", "d47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644", 18724201),
+      "darwin-x64": torMacAsset("tor-expert-bundle-macos-x86_64-15.0.24.tar.gz", "8acb0b590f6be34084dcb6d84009ac0c61cc7c5261b7a19d2ab94845aa9bd5b6", 19356806),
+      "linux-x64": torLinuxAsset("tor-expert-bundle-linux-x86_64-15.0.24.tar.gz", "8e012ec6815d7899cb64011582e2dade88e74119c6661068a2a3252de0ccd7f2", 32348376),
+      "linux-ia32": torLinuxAsset("tor-expert-bundle-linux-i686-15.0.24.tar.gz", "7537fea3478d05b8af25d7f8199c031b281f7015c32bb4177bef71f8e5100d9b", 25964591)
+    }
+  },
+  "zkapi-clientd": {
+    tool: "zkapi-clientd",
+    label: "zkAPI",
+    version: "0.1.6",
+    versionLine: /^zkapi-clientd 0\.1\.6(\s|$)/,
+    assets: {
+      "darwin-arm64": zkapiAsset("zkapi-clientd_0.1.6_darwin_arm64.tar.gz", "0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4", 22904346),
+      "darwin-x64": zkapiAsset("zkapi-clientd_0.1.6_darwin_amd64.tar.gz", "ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12", 23547367),
+      "linux-x64": zkapiAsset("zkapi-clientd_0.1.6_linux_amd64.tar.gz", "41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95", 23826995),
+      "linux-arm64": zkapiAsset("zkapi-clientd_0.1.6_linux_arm64.tar.gz", "41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf", 23612951)
+    }
+  }
+};
+var MANIFEST_FILE = "olympus-tool.json";
+var MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
+var DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+function managedToolsPlatform(platform2 = process.platform, arch = process.arch) {
+  if (platform2 === "darwin" && (arch === "arm64" || arch === "x64"))
+    return `darwin-${arch}`;
+  if (platform2 === "linux" && (arch === "arm64" || arch === "x64" || arch === "ia32"))
+    return `linux-${arch}`;
+  return;
+}
+function managedToolsBase(host = {}) {
+  const env = host.env ?? process.env;
+  const platform2 = host.platform ?? process.platform;
+  const home = env.HOME?.trim() || (host.env ? undefined : homedir13());
+  if (platform2 === "darwin")
+    return home && isAbsolute12(home) ? join20(home, "Library", "Application Support", "Olympus") : undefined;
+  if (platform2 === "linux") {
+    const xdg = env.XDG_DATA_HOME?.trim();
+    if (xdg && isAbsolute12(xdg))
+      return join20(xdg, "olympus");
+    return home && isAbsolute12(home) ? join20(home, ".local", "share", "olympus") : undefined;
+  }
+  return;
+}
+function currentUid(host) {
+  return host.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
+}
+function privatelyOwned(path, uid, kind) {
+  try {
+    const stats = statSync11(path);
+    if (kind === "dir" ? !stats.isDirectory() : !stats.isFile())
+      return false;
+    if (uid !== undefined && stats.uid !== uid)
+      return false;
+    return (stats.mode & 18) === 0;
+  } catch {
+    return false;
+  }
+}
+function within(parent, child) {
+  return child.startsWith(parent.endsWith(sep3) ? parent : `${parent}${sep3}`);
+}
+function readManifest(path, uid) {
+  try {
+    const stats = lstatSync3(path);
+    if (!stats.isFile() || uid !== undefined && stats.uid !== uid || (stats.mode & 18) !== 0)
+      return;
+    const parsed = JSON.parse(readFileSync14(path, "utf8"));
+    if (parsed.schema !== 1 || typeof parsed.tool !== "string" || typeof parsed.version !== "string" || typeof parsed.sha256 !== "string")
+      return;
+    return parsed;
+  } catch {
+    return;
+  }
+}
+function managedToolExecutable(tool, host = {}) {
+  const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
+  const platformKey = managedToolsPlatform(host.platform, host.arch);
+  const asset = platformKey && pin ? pin.assets[platformKey] : undefined;
+  const base = managedToolsBase(host);
+  if (!pin || !asset || !base)
+    return;
+  const uid = currentUid(host);
+  const root = join20(base, "tools");
+  const versionDir = join20(root, tool, pin.version);
+  for (const dir of [base, root, join20(root, tool), versionDir]) {
+    try {
+      if (lstatSync3(dir).isSymbolicLink())
+        return;
+    } catch {
+      return;
+    }
+    if (!privatelyOwned(dir, uid, "dir"))
+      return;
+  }
+  const manifest = readManifest(join20(versionDir, MANIFEST_FILE), uid);
+  if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
+    return;
+  try {
+    const realDir = realpathSync(versionDir);
+    const real = realpathSync(join20(versionDir, asset.executable));
+    if (!within(realDir, real))
+      return;
+    if (!privatelyOwned(real, uid, "file"))
+      return;
+    accessSync3(real, constants2.X_OK);
+    return real;
+  } catch {
+    return;
+  }
+}
+
+// src/core/consult-transport-zkapi.ts
+init_zkapi_consult_settings();
 var DAY_MS = 24 * 60 * 60 * 1000;
 var PROBE_MAX_BYTES = 64 * 1024;
 var MAX_QUESTION_BYTES = 8 * 1024;
@@ -16483,8 +16652,8 @@ function defaultZkapiConfinement() {
       limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
       wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
       selfTest: async (workDir, env) => {
-        const script = join20(workDir, "confinement-self-test.cjs");
-        writeFileSync4(script, SELF_TEST_SCRIPT, { mode: 384 });
+        const script = join21(workDir, "confinement-self-test.cjs");
+        writeFileSync5(script, SELF_TEST_SCRIPT, { mode: 384 });
         const outside = runSelfTestProbe([process.execPath, script], env);
         const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
         return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
@@ -16498,8 +16667,8 @@ function defaultZkapiConfinement() {
     selfTest: async () => false
   };
 }
-function defaultZkapiStatePath(home = homedir13()) {
-  return join20(home, ".olympus", "zkapi-consult-state.json");
+function defaultZkapiStatePath(home = homedir14()) {
+  return join21(home, ".olympus", "zkapi-consult-state.json");
 }
 function utcDay(now) {
   return now.toISOString().slice(0, 10);
@@ -16507,7 +16676,7 @@ function utcDay(now) {
 function readState(path) {
   if (!existsSync11(path))
     return;
-  const parsed = JSON.parse(readFileSync14(path, "utf8"));
+  const parsed = JSON.parse(readFileSync15(path, "utf8"));
   if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
     throw new Error("zkAPI state record is malformed");
   }
@@ -16521,11 +16690,11 @@ function zkapiLastSession(path) {
   return readState(path)?.lastSession;
 }
 function zkapiWalletDirectory(env) {
-  const home = env.HOME?.trim() || homedir13();
-  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join20(home, "Library", "Application Support", "zkapi-clientd") : join20(env.XDG_CONFIG_HOME?.trim() || join20(home, ".config"), "zkapi-clientd"));
+  const home = env.HOME?.trim() || homedir14();
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join21(home, "Library", "Application Support", "zkapi-clientd") : join21(env.XDG_CONFIG_HOME?.trim() || join21(home, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath2(configured);
   try {
-    return realpathSync(absolute2);
+    return realpathSync2(absolute2);
   } catch {
     return absolute2;
   }
@@ -16632,11 +16801,11 @@ function childEnvironment(env) {
   return out;
 }
 function resolveExecutable(name, explicit, env) {
-  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter5).filter(Boolean).map((dir) => join20(dir, name));
+  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter5).filter(Boolean).map((dir) => join21(dir, name));
   for (const candidate of candidates) {
     try {
-      accessSync3(candidate, constants2.X_OK);
-      if (statSync11(candidate).isFile())
+      accessSync4(candidate, constants3.X_OK);
+      if (statSync12(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -16654,6 +16823,14 @@ function portAnswers(port) {
     socket.once("error", () => done(false));
   });
 }
+function resolveZkapiExecutable(name, explicit, env) {
+  if (!explicit) {
+    const managed = managedToolExecutable(name, { env });
+    if (managed)
+      return managed;
+  }
+  return resolveExecutable(name, explicit, env);
+}
 async function zkapiConsultReadiness(options) {
   const now = (options.now ?? (() => new Date))();
   const env = options.env ?? process.env;
@@ -16664,7 +16841,7 @@ async function zkapiConsultReadiness(options) {
   const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
   if (!apiKeyConfigured)
     blockers.push("daemon_api_key_missing");
-  const daemonExecutable = resolveExecutable("zkapi-clientd", settings.daemonExecutable, env);
+  const daemonExecutable = resolveZkapiExecutable("zkapi-clientd", settings.daemonExecutable, env);
   let daemonVersion;
   if (!daemonExecutable) {
     blockers.push("daemon_not_found");
@@ -16683,7 +16860,7 @@ async function zkapiConsultReadiness(options) {
     if (!versionSupported(daemonVersion))
       blockers.push("daemon_version_unsupported");
   }
-  const torExecutable = settings.tor === "per_consult" ? resolveExecutable("tor", settings.torExecutable, env) : undefined;
+  const torExecutable = settings.tor === "per_consult" ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
   if (settings.tor === "per_consult" && !torExecutable)
     blockers.push("tor_not_found");
   const daemonPort = await portAnswers(Number(new URL(options.baseUrl).port || 80)) ? "in_use" : "free";
@@ -16754,9 +16931,9 @@ var SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomp
 
 // src/core/consult-gate.ts
 import { createHash as createHash7 } from "node:crypto";
-import { existsSync as existsSync12, readFileSync as readFileSync15, statSync as statSync12 } from "node:fs";
-import { homedir as homedir14 } from "node:os";
-import { basename as basename4, dirname as dirname17, join as join21 } from "node:path";
+import { existsSync as existsSync12, readFileSync as readFileSync16, statSync as statSync13 } from "node:fs";
+import { homedir as homedir15 } from "node:os";
+import { basename as basename4, dirname as dirname18, join as join22 } from "node:path";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 init_opsec();
 init_types();
@@ -16991,31 +17168,31 @@ var VOCABULARY_DIR = ["assets", "consult", "vocabulary"];
 var CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 var CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
 function consultUserVocabularyDir(env = process.env) {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join21(env.HOME?.trim() || homedir14(), ".olympus", "consult", "vocabulary");
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join22(env.HOME?.trim() || homedir15(), ".olympus", "consult", "vocabulary");
 }
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
     if (!existsSync12(path))
       return "missing";
-    if (statSync12(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
+    if (statSync13(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
-    const gz = readFileSync15(path);
+    const gz = readFileSync16(path);
     return createHash7("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname17(fileURLToPath6(moduleUrl));
-  const root = basename4(here) === "core" && basename4(dirname17(here)) === "src" ? dirname17(dirname17(here)) : basename4(here) === "dist" ? dirname17(here) : undefined;
-  return root !== undefined && existsSync12(join21(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname18(fileURLToPath6(moduleUrl));
+  const root = basename4(here) === "core" && basename4(dirname18(here)) === "src" ? dirname18(dirname18(here)) : basename4(here) === "dist" ? dirname18(here) : undefined;
+  return root !== undefined && existsSync12(join22(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
   const root = consultVocabularyRoot();
   const status = selection.shipped.map((id) => {
-    const result = root ? verifiedPackFile(join21(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    const result = root ? verifiedPackFile(join22(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
     return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
   });
   if (selection.user.length > 0) {
@@ -17023,7 +17200,7 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const manifest = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
       const sha256 = manifest.get(id);
-      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join21(userDir, `${id}.txt.gz`), sha256);
+      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join22(userDir, `${id}.txt.gz`), sha256);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -17033,10 +17210,10 @@ function userManifestEntries(userDir) {
   if (!userDir)
     return [];
   try {
-    const path = join21(userDir, "manifest.json");
-    if (!existsSync12(path) || statSync12(path).size > 1024 * 1024)
+    const path = join22(userDir, "manifest.json");
+    if (!existsSync12(path) || statSync13(path).size > 1024 * 1024)
       return [];
-    const manifest = JSON.parse(readFileSync15(path, "utf8"));
+    const manifest = JSON.parse(readFileSync16(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
       return [];
     const packs = manifest.packs;
@@ -17970,8 +18147,8 @@ var UNIT_WORDS = new Set([
 ]);
 
 // src/core/consult-settings.ts
-import { closeSync as closeSync3, constants as constants3, fstatSync, openSync as openSync3, readSync } from "node:fs";
-import { join as join22 } from "node:path";
+import { closeSync as closeSync3, constants as constants4, fstatSync, openSync as openSync3, readSync } from "node:fs";
+import { join as join23 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var DEFAULT_CONSULT_SETTINGS = Object.freeze({
@@ -17988,7 +18165,7 @@ var OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
 var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
 function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
-  return home ? join22(home, ".olympus", "consult.json") : undefined;
+  return home ? join23(home, ".olympus", "consult.json") : undefined;
 }
 var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 function parseConsultSettings(value) {
@@ -18043,7 +18220,7 @@ function readConsultSettings(location = {}) {
       return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
     let descriptor;
     try {
-      descriptor = openSync3(path, constants3.O_RDONLY | constants3.O_NOFOLLOW | constants3.O_NONBLOCK);
+      descriptor = openSync3(path, constants4.O_RDONLY | constants4.O_NOFOLLOW | constants4.O_NONBLOCK);
     } catch (error) {
       const code = errorCode(error);
       if (code === "ENOENT" || code === "ENOTDIR")
@@ -18142,7 +18319,7 @@ function errorCode(error) {
 
 // src/core/doctor.ts
 function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir15();
+  const home = env.HOME?.trim() || homedir16();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" ? inspectEngine({ homeDir: home }) : { installed: false, state: "not_loaded" };
   const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync13(workerServicePaths(process.platform, home).unitPath) : false;
@@ -18240,7 +18417,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join23(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join24(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -19242,7 +19419,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join23(dirname18(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join24(dirname19(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -19265,7 +19442,7 @@ function readIngestionHealthState(path) {
   try {
     if (!existsSync13(path))
       return;
-    const parsed = JSON.parse(readFileSync16(path, "utf8"));
+    const parsed = JSON.parse(readFileSync17(path, "utf8"));
     const record = asRecord15(parsed);
     const sources = asRecord15(record.sources);
     const normalized = {};
@@ -19286,8 +19463,8 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync9(dirname18(path), { recursive: true });
-  writeFileSync5(path, `${JSON.stringify(state, null, 2)}
+  mkdirSync10(dirname19(path), { recursive: true });
+  writeFileSync6(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function ingestionHealthHint(ledger) {
@@ -19500,7 +19677,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync13(join23(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync13(join24(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });

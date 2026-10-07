@@ -4215,6 +4215,7 @@ export async function main(): Promise<void> {
               addRoute: (update) => dashboardConsult.addRoute(update),
               recover: (update) => dashboardConsult.recover(update),
               abandon: (update) => dashboardConsult.abandon(update),
+              installTools: (update) => dashboardConsult.installTools(update),
             },
             modelInstalls: () => {
               const embedding = chatgptEmbeddingState();

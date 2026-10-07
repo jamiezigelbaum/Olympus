@@ -16,6 +16,7 @@ import { ZKAPI_RISK_ACKNOWLEDGEMENTS } from '../../core/zkapi-consult-settings.t
 import { escapeHtml, escapeScriptJson } from './components.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from './vocabulary.ts';
 import { fill } from './source-rows.ts';
+import { DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, renderOutsideHelpTools, type DashboardOutsideHelpTools } from './outside-help-tools.ts';
 
 /** One word for Setup's row. */
 export interface DashboardOutsideHelpSummary {
@@ -80,6 +81,8 @@ export interface DashboardOutsideHelpStatus {
   readonly languages: readonly DashboardOutsideHelpLanguage[];
   /** A policy write happened and the worker could not restart itself. */
   readonly restartPending: boolean;
+  /** Tor and zkapi-clientd: where each was found, and the one-click install's progress (outside-help-tools.ts). */
+  readonly tools?: DashboardOutsideHelpTools;
 }
 
 /** The query flag the page answers to; same /dashboard path and auth as every page. */
@@ -94,6 +97,7 @@ export const DASHBOARD_OUTSIDE_HELP_PATHS = {
   addRoute: '/dashboard/consult/route/add',
   recover: '/dashboard/consult/recover',
   abandon: '/dashboard/consult/abandon',
+  installTools: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
 } as const;
 
 export function outsideHelpHref(basePath = '/dashboard'): string {
@@ -146,6 +150,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const parts: string[] = [];
   parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
   parts.push(`<p class="ohlabel">${escapeHtml(W.experimental)}</p>`);
+  parts.push(renderOutsideHelpTools(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) }));
   parts.push(`<p class="pintro">${escapeHtml(W.intro)}</p>`);
   parts.push(`<p class="ohstate" data-outside-state="${escapeHtml(summary.state)}">${escapeHtml(outsideHelpStateLine(summary))}</p>`);
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);

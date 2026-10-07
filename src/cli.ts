@@ -134,6 +134,7 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'connections',
   'data',
   'tier',
+  'zkapi',
 ]);
 
 async function main(): Promise<void> {
@@ -209,6 +210,29 @@ async function main(): Promise<void> {
 
   if (args[0] === 'worker') {
     await runWorkerCommand(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'zkapi' && args[1] === 'install-tools') {
+    if (args.length !== 2) throw new OperationError('invalid_params', 'olympus zkapi install-tools takes no options.');
+    // The same installer as the dashboard's one click (core/managed-tools.ts):
+    // pinned downloads, verified before extraction, into Olympus's own folder.
+    // It configures nothing: no wallet, no key, no setting.
+    const { installManagedTools } = await import('./core/managed-tools.ts');
+    const labels: Record<string, string> = { tor: 'Tor', 'zkapi-clientd': 'zkAPI' };
+    let last = '';
+    const result = await installManagedTools({
+      onProgress: (event) => {
+        const percent = event.phase === 'downloading' && event.receivedBytes !== undefined && event.totalBytes
+          ? ` ${Math.floor((event.receivedBytes / event.totalBytes) * 10) * 10}%`
+          : '';
+        const line = `${event.phase === 'downloading' ? 'Downloading' : event.phase === 'checking' ? 'Checking' : 'Installing'} ${labels[event.tool] ?? event.tool}…${percent}`;
+        if (line !== last) console.error(line);
+        last = line;
+      },
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = 1;
     return;
   }
 
@@ -699,6 +723,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
     || group === 'connections'
     || group === 'data'
     || group === 'tier'
+    || group === 'zkapi'
   ) {
     return command ? `${group} ${command}` : undefined;
   }
@@ -1144,6 +1169,7 @@ function printHelp(): void {
   console.log('  olympus data verify --input <dir>');
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
+  console.log('  olympus zkapi install-tools');
   console.log('  olympus serve');
   console.log('  olympus --tools-json');
 }
@@ -1182,6 +1208,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'data verify': 'olympus data verify --input <dir>',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
   ...TIER_CLI_USAGE,
+  'zkapi install-tools': 'olympus zkapi install-tools',
   serve: 'olympus serve',
 };
 
@@ -1272,6 +1299,11 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     `  ${TIER_CLI_USAGE['tier rules']}`,
     `  ${TIER_CLI_USAGE['tier classifier']}`,
     `  ${TIER_CLI_USAGE['tier migrate']}`,
+  ],
+  zkapi: [
+    'Usage: olympus zkapi <command>',
+    'Commands:',
+    '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
   ],
 };
 
