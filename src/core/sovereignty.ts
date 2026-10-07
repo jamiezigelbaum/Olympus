@@ -1,4 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { withFileLeaseSync } from './file-lease.ts';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -568,16 +570,112 @@ export function writeSovereigntyConfigFile(input: {
   // privacy profile and the tier rules. It must exist after setup, and at
   // 0700 -- created with the process umask it was world-readable, which is
   // the wrong custody for the directory that holds the owner's privacy rules.
+  publishSovereigntyConfigFile(path, config);
+  return path;
+}
+
+/**
+ * The one way a policy file is published: the directory owner-only, then an
+ * atomic durable replace (temp file at 0600, fsync, rename, directory fsync),
+ * so a crash or a failed write leaves the old policy intact, never a torn
+ * one. Owner-only every time it is written, not only the first time.
+ */
+function publishSovereigntyConfigFile(path: string, config: SovereigntyConfig, onPublished?: () => void): void {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  // The mode argument applies at CREATION only, so a --force overwrite left an
-  // existing world-readable policy file exactly as world-readable as it found
-  // it. This file records how sensitive data is handled; it is owner-only every
-  // time it is written, not only the first time.
+  __sovereigntyFileTestHooks.beforePublish?.(path);
+  writePrivateFileAtomicSync(path, `${JSON.stringify(config, null, 2)}\n`, {
+    onPublished: () => {
+      onPublished?.();
+      __sovereigntyFileTestHooks.afterPublish?.(path);
+    },
+  });
   chmodSync(path, 0o600);
-  return path;
+}
+
+/** Test seams: just before the atomic replace of a policy file, and just after its rename (the publish point). */
+export const __sovereigntyFileTestHooks: {
+  beforePublish: ((path: string) => void) | undefined;
+  afterPublish: ((path: string) => void) | undefined;
+} = { beforePublish: undefined, afterPublish: undefined };
+
+export type SovereigntyConfigUpdate =
+  | {
+    readonly ok: true;
+    readonly config: SovereigntyConfig;
+    readonly changed: boolean;
+    /** The new policy was published, then a later step (directory flush, mode, lease release) failed; `config` is what the file reads now. */
+    readonly publishedDespiteError?: true;
+  }
+  | {
+    readonly ok: false;
+    /** `uncertain`: something failed after the publish point and the file does not read back as the new policy. */
+    readonly reason: 'conflict' | 'unreadable' | 'uncertain';
+    readonly current?: SovereigntyConfig;
+  };
+
+/**
+ * Change an owner's policy file as one transaction: take the file lease,
+ * re-read the file as it is now, let `patch` return the next policy from
+ * that current one (patching only the fields it owns), validate, and commit
+ * atomically. Nothing is ever written from a boot-time snapshot. `expect`
+ * lets a caller refuse a stale edit: when the current file differs from the
+ * policy the caller's view was built on, nothing is written and the current
+ * policy is handed back. `patch` returning the same object means no change.
+ */
+export function updateSovereigntyConfigFile(input: {
+  path: string;
+  expect?: SovereigntyConfig;
+  patch: (current: SovereigntyConfig) => SovereigntyConfig;
+}): SovereigntyConfigUpdate {
+  // Failures split at the publish point (the rename). Before it, nothing
+  // changed and the error is the caller's (a validation refusal, an
+  // unreadable file). After it, the new policy may be live even though the
+  // directory flush, the mode or the lease release threw: the file is read
+  // back and reported as published, or as uncertain. Never as untouched.
+  let published = false;
+  let validated: SovereigntyConfig | undefined;
+  const afterPublish = (): SovereigntyConfigUpdate => {
+    try {
+      const actual = validateSovereigntyConfig(JSON.parse(readFileSync(input.path, 'utf8')) as SovereigntyConfig);
+      if (validated && JSON.stringify(actual) === JSON.stringify(validated)) {
+        return { ok: true, config: actual, changed: true, publishedDespiteError: true };
+      }
+      return { ok: false, reason: 'uncertain', current: actual };
+    } catch {
+      return { ok: false, reason: 'uncertain' };
+    }
+  };
+  try {
+    return withFileLeaseSync(input.path, (lease) => {
+      let current: SovereigntyConfig;
+      try {
+        current = validateSovereigntyConfig(JSON.parse(readFileSync(input.path, 'utf8')) as SovereigntyConfig);
+      } catch {
+        return { ok: false as const, reason: 'unreadable' as const };
+      }
+      // Compared in normalized form: the file may hold the un-normalized
+      // spelling the owner wrote, the caller the validated one.
+      if (input.expect && JSON.stringify(validateSovereigntyConfig(input.expect)) !== JSON.stringify(current)) {
+        return { ok: false as const, reason: 'conflict' as const, current };
+      }
+      const next = input.patch(current);
+      if (next === current) return { ok: true as const, config: current, changed: false };
+      const toPublish = validateSovereigntyConfig(next);
+      validated = toPublish;
+      try {
+        lease.commit(() => publishSovereigntyConfigFile(input.path, toPublish, () => { published = true; }));
+      } catch (error) {
+        if (!published) throw error;
+        return afterPublish();
+      }
+      return { ok: true as const, config: toPublish, changed: true };
+    }, { acquireTimeoutMs: 5_000 });
+  } catch (error) {
+    if (published) return afterPublish();
+    throw error;
+  }
 }
 
 export function loadSovereigntyPreset(name: SovereigntyPresetName): SovereigntyConfig {

@@ -13,6 +13,7 @@ import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } f
 import { createModelKeyReload } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
+import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -1780,6 +1781,12 @@ export async function main(): Promise<void> {
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
   const authToken = workerAuthTokenFromEnv(process.env);
+  // The dashboard control-session signing secret: its own owner-only file
+  // beside the worker token, created on first start, never the bearer.
+  const dashboardSessionSecret = loadOrCreateDashboardSessionSecret({ env: process.env });
+  if (dashboardSessionSecret.source !== 'file') {
+    console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === 'memory' ? ' (could not be written; sessions end with this worker)' : ''}`);
+  }
   const olympusConfig = loadConfig();
   const sourceCorpusRegistry = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
@@ -4193,6 +4200,17 @@ export async function main(): Promise<void> {
               read: () => dashboardPrivacy.read(),
               save: (update) => dashboardPrivacy.save(update),
             },
+            // Outside help (consults): the Mac dashboard card's backend, the
+            // one caller of the settings writer; bound late like privacy.
+            consult: {
+              summary: () => dashboardConsult.summary(),
+              status: () => dashboardConsult.status(),
+              setEnabled: (update) => dashboardConsult.setEnabled(update),
+              saveRoute: (update) => dashboardConsult.saveRoute(update),
+              addRoute: (update) => dashboardConsult.addRoute(update),
+              recover: (update) => dashboardConsult.recover(update),
+              abandon: (update) => dashboardConsult.abandon(update),
+            },
             modelInstalls: () => {
               const embedding = chatgptEmbeddingState();
               const privateModel = chatgptPrivateModelState();
@@ -4560,6 +4578,39 @@ export async function main(): Promise<void> {
     readSettings: (pending) => readChatGptPrivacySettings(process.env, pending),
     pendingCount: pendingClassificationCount,
   });
+  // Outside help (consults, stage C5): the Mac dashboard card's backend
+  // (dashboard-consult.ts) and, through it, the only caller of the
+  // outside-help settings writer. Wired here at the composition root so the
+  // worker module itself never imports the writer; its routes are served
+  // only inside an authenticated local control session (workers/http.ts).
+  const { createDashboardConsultAdapter } = await import('./dashboard-consult.ts');
+  const consultRouteKey = (secretRef: string | undefined): string | undefined => {
+    if (!secretRef) return undefined;
+    try {
+      return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...(readWorkerSetupEnv() ?? {}) } })?.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const dashboardConsult = createDashboardConsultAdapter({
+    sovereignty: {
+      config: sovereigntyEngine.config,
+      source: sovereigntyEngine.source,
+      ...(sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}),
+    },
+    // Presence from the same environment the Models row reads, so a key just
+    // written to worker.env reads as present before the restart applies it.
+    // The adapter gets a yes/no; the key itself is resolved only here, for
+    // the recovery session, and handed straight to the transport.
+    secretPresent: (secretRef) => consultRouteKey(secretRef) !== undefined,
+    recoverSession: async (route, secretRef) => {
+      const { recoverZkapiSession } = await import('../../core/consult-transport-zkapi.ts');
+      const apiKey = consultRouteKey(secretRef);
+      return recoverZkapiSession({ ...route, ...(apiKey ? { apiKey } : {}) });
+    },
+    requestReload: () => requestModelReload(),
+    env: process.env,
+  });
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
   // source_answer needs an Analyst the Mac can actually run; without one,
   // ChatGPT answers from olympus_search alone.
@@ -4680,7 +4731,7 @@ export async function main(): Promise<void> {
             },
           },
         }),
-        withWorkerBearerAuth(worker.fetch, { authToken }),
+        withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
       )),
     )))),
   });

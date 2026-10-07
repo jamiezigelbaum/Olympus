@@ -740,7 +740,7 @@ async function writePrivateFileAtomic(path, text) {
   }
   await syncDirectory(dirname2(path));
 }
-function writePrivateFileAtomicSync(path, text) {
+function writePrivateFileAtomicSync(path, text, options = {}) {
   const temp = temporaryPathFor(path);
   try {
     const descriptor = openSync2(temp, "wx", 384);
@@ -751,6 +751,7 @@ function writePrivateFileAtomicSync(path, text) {
       closeSync2(descriptor);
     }
     renameSync(temp, path);
+    options.onPublished?.();
   } catch (error) {
     try {
       rmSync(temp, { force: true });
@@ -3896,7 +3897,7 @@ var init_zkapi_consult_settings = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { dirname as dirname4, join as join4 } from "node:path";
 function defaultSovereigntyConfigPath() {
@@ -4530,6 +4531,8 @@ function stringArrayField(value, label) {
 }
 var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
 var init_sovereignty = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
   init_operation_error();
   init_local_model_policy();
   init_config();
@@ -18371,7 +18374,7 @@ import {
   renameSync as renameSync2,
   rmSync as rmSync2,
   statSync as statSync5,
-  writeFileSync as writeFileSync4,
+  writeFileSync as writeFileSync3,
   writeSync
 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
@@ -18545,14 +18548,14 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     const library = readZipEntry(readFileSync8(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
-    writeFileSync4(join7(staging, basename(wheel.library)), library, { mode: 493 });
+    writeFileSync3(join7(staging, basename(wheel.library)), library, { mode: 493 });
     rmSync2(archivePath, { force: true });
     const marker = {
       wheel: wheel.name,
       sha256: wheel.sha256,
       librarySha256: createHash5("sha256").update(library).digest("hex")
     };
-    writeFileSync4(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync3(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync2(runtimeDir, { recursive: true, force: true });
     renameSync2(staging, runtimeDir);
@@ -18620,14 +18623,14 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform2, report
       for (const file of files) {
         const target = join7(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
         ensureDirectory(dirname9(target));
-        writeFileSync4(target, file.data, { mode: file.mode & 493 || 420 });
+        writeFileSync3(target, file.data, { mode: file.mode & 493 || 420 });
       }
       rmSync2(archivePath, { force: true });
     }
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync4(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync3(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync2(runtimeDir, { recursive: true, force: true });
     renameSync2(staging, runtimeDir);
@@ -18883,7 +18886,7 @@ class ProgressReporter {
     try {
       mkdirSync8(dirname9(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync4(temporary, `${JSON.stringify(this.status)}
+      writeFileSync3(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync2(temporary, this.statusPath);
     } catch {}
@@ -24438,6 +24441,12 @@ var init_dashboard_view_model = __esm(() => {
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
 });
 
+// src/core/request-peer.ts
+var peers;
+var init_request_peer = __esm(() => {
+  peers = new WeakMap;
+});
+
 // src/workers/google-connectors/gmail-live-control.ts
 var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
 var init_gmail_live_control = __esm(() => {
@@ -24932,7 +24941,7 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash18 } from "node:crypto";
-import { existsSync as existsSync13, lstatSync as lstatSync3, mkdirSync as mkdirSync12, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync13, lstatSync as lstatSync3, mkdirSync as mkdirSync12, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname19, isAbsolute as isAbsolute5 } from "node:path";
 
 // src/workers/email-source/server.ts
@@ -24962,6 +24971,10 @@ var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 // src/workers/email-source/server.ts
 init_connect();
+init_worker_auth();
+
+// src/core/dashboard-session-secret.ts
+init_atomic_file();
 init_worker_auth();
 
 // src/workers/email-source/file-extraction-runtime.ts
@@ -25539,7 +25552,7 @@ import {
   readFileSync as readFileSync10,
   renameSync as renameSync3,
   rmSync as rmSync3,
-  writeFileSync as writeFileSync5
+  writeFileSync as writeFileSync4
 } from "node:fs";
 import { randomUUID as randomUUID5 } from "node:crypto";
 import { homedir as homedir13 } from "node:os";
@@ -25762,7 +25775,7 @@ function writeCatalogCache(path, catalog) {
   try {
     mkdirSync9(dirname13(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync5(tempPath, `${JSON.stringify({
+    writeFileSync4(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
@@ -26350,6 +26363,12 @@ var CODEX_SNIPPET = [
 // src/workers/dashboard/pages/setup.ts
 init_source_dashboard();
 init_vocabulary();
+
+// src/workers/dashboard/outside-help.ts
+init_zkapi_consult_settings();
+init_vocabulary();
+
+// src/workers/dashboard/pages/setup.ts
 var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears on this page like any " + "built-in.";
 var CONNECTOR_PROMPT = [
   "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
@@ -26406,6 +26425,9 @@ var CLIENT_COPY = {
   rulesEmpty: DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty
 };
 
+// src/workers/dashboard/pages/outside-help.ts
+init_vocabulary();
+
 // src/workers/dashboard/index.ts
 init_vocabulary();
 
@@ -26413,6 +26435,7 @@ init_vocabulary();
 init_mail_source_scope();
 
 // src/workers/http.ts
+init_request_peer();
 init_worker_auth();
 
 // src/core/dashboard-launch.ts
@@ -30984,7 +31007,7 @@ if (__require.main == __require.module) {
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
       mkdirSync12(dirname19(args.reportPath), { recursive: true });
-      writeFileSync6(args.reportPath, `${json}
+      writeFileSync5(args.reportPath, `${json}
 `);
     }
     console.log(json);
@@ -30995,7 +31018,7 @@ if (__require.main == __require.module) {
     if (args.reportPath) {
       mkdirSync12(dirname19(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
-        writeFileSync6(args.reportPath, `${JSON.stringify(report2, null, 2)}
+        writeFileSync5(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);
       };
     }
@@ -31003,7 +31026,7 @@ if (__require.main == __require.module) {
     const report = await runSourceEmbeddingDrain(options);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath)
-      writeFileSync6(args.reportPath, `${json}
+      writeFileSync5(args.reportPath, `${json}
 `);
     console.log(json);
     if (process.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION === "true" && report.status === "attention") {

@@ -245,7 +245,10 @@ describe('worker HTTP bind and auth', () => {
         headers: { 'Content-Type': 'application/json' },
       });
     };
-    const fetch = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now });
+    // The control-session secret the worker keeps in its state file
+    // (core/dashboard-session-secret.ts); both instances below load the same one.
+    const sessionSecret = 'test-session-secret-shared-across-restarts';
+    const fetch = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now, sessionSecret });
 
     const mint = await fetch(new Request(`${origin}/dashboard/control/session`, {
       method: 'POST',
@@ -267,10 +270,14 @@ describe('worker HTTP bind and auth', () => {
       `${cookie}; HttpOnly; SameSite=Strict; Path=/dashboard; Max-Age=${20 * 24 * 60 * 60}`,
     );
 
-    // Nothing is stored on the worker: a fresh handler with the same token
-    // accepts the cookie, so a restart does not log the browser out.
-    const restarted = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now });
+    // Nothing is stored on the worker but its signing secret: a fresh handler
+    // loading the same secret accepts the cookie, so a restart does not log the
+    // browser out. The bearer alone is not enough (the secret is not derived
+    // from it): a restart without the secret file ends every session.
+    const restarted = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now, sessionSecret });
     expect((await restarted(control())).status).toBe(200);
+    const withoutSecret = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => now });
+    expect((await withoutSecret(control())).status).toBe(401);
 
     // The picker keepalive proves custody without the bearer and changes nothing.
     const keepalive = await fetch(new Request(`${origin}/dashboard/control/session`, {
@@ -298,7 +305,7 @@ describe('worker HTTP bind and auth', () => {
     // A validly signed cookie dated in the future is refused past five
     // minutes of skew: minted on a fast clock, verified on the real one.
     const mintOn = async (clockMs: number) => {
-      const ahead = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => clockMs });
+      const ahead = withWorkerBearerAuth(handler, { authToken: 'worker-secret', now: () => clockMs, sessionSecret });
       const minted = await ahead(new Request(`${origin}/dashboard/control/session`, {
         method: 'POST',
         headers: { Authorization: 'Bearer worker-secret', Origin: origin },
@@ -315,8 +322,8 @@ describe('worker HTTP bind and auth', () => {
     expect((await fetch(skewControl(await mintOn(now + 4 * 60_000)))).status).toBe(200);
     expect((await fetch(skewControl(await mintOn(now + 6 * 60_000)))).status).toBe(401);
 
-    // Rotating the worker token revokes every session at once.
-    const rotatedToken = withWorkerBearerAuth(handler, { authToken: 'worker-secret-2', now: () => now });
+    // Rotating the worker token revokes every session at once, secret file or not.
+    const rotatedToken = withWorkerBearerAuth(handler, { authToken: 'worker-secret-2', now: () => now, sessionSecret });
     expect((await rotatedToken(control())).status).toBe(401);
 
     // Lock clears this browser's cookie; it takes the same custody proof as

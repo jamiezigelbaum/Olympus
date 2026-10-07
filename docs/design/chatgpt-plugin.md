@@ -906,6 +906,123 @@ for the snapshot metadata); no product path writes that file until C5.
   control pairs), judged by the first-token rule, is the merge gate of the
   C4b pull request and is still owed.
 
+### Outside help enable flow (added 2026-10-07, stage C5)
+
+Design `docs/design/frontier-consult-lane.md` §A.9, §A.10, §A.14 and the
+owner rulings of §10: automatic by default (no approval step; strict mode is
+C6), enabled only from the Mac, fence recovery a button and never automatic,
+the eight risk acknowledgements, one "send" in total including the fee
+buffer. The code is `src/core/consult-settings-writer.ts` (the writer),
+`src/workers/email-source/dashboard-consult.ts` (the Mac dashboard adapter,
+the writer's one caller), `src/workers/dashboard/outside-help.ts` and
+`pages/outside-help.ts` (the card), and the five routes in
+`src/workers/email-source/index.ts`.
+
+- **Where.** The standalone Mac dashboard, `/dashboard?outside-help`,
+  reached from Setup's Outside help row. The native OpenClaw Control UI and
+  the ChatGPT dashboard never build that URL and render one sentence for it
+  (`controlMode: 'native'`): a hosted agent cannot see or touch the
+  controls. A locked browser or the read-only `dash_` link is pointed at
+  Setup's gate.
+- **Who.** The five routes (`POST /dashboard/consult`, `/route`,
+  `/route/add`, `/recover`, `/abandon`) are accepted only from a
+  **local-grade** control session. Every control session cookie now carries
+  a signed grade: `bearer` for a session the worker bearer minted directly
+  or through a launch ticket a bearer minted (the Gateway bridge holds that
+  bearer for the agents it serves), `local` for a session minted by
+  `POST /dashboard/control/session/local`, which refuses any
+  `Authorization` header and any non-loopback or proxied origin. The card
+  shows a one-click "Unlock outside help on this Mac" to a bearer-grade
+  session; a loopback browser presenting no bearer gets a local-grade
+  cookie. The boundary (`DASHBOARD_CONSULT_CONTROL_PATHS` in
+  `src/workers/http.ts`) refuses the bearer and any bearer-grade session on
+  these routes (403 `mac_dashboard_only`), injects the control-session
+  context and grade headers it strips from every incoming request, and the
+  worker handler refuses without them. No `/dashboard` path is ever on the
+  relay's forward list. An import-graph test holds that no MCP, setup-tool,
+  ChatGPT, relay or remote module reaches the writer or the adapter.
+  Sessions are signed with a worker-private secret kept beside the worker
+  token (`~/.config/olympus/dashboard-session.secret`, owner-only, created
+  on first start, regenerated if unreadable or foreign, never derived from
+  the bearer) bound to the bearer, so a bearer holder cannot forge a cookie,
+  a worker restart does not log the owner out, and rotating the worker token
+  still revokes every session. The local mint also requires the recorded
+  socket peer to be loopback. Residual: a process on this Mac that can speak
+  to the loopback port as a browser would (no bearer, loopback origin), or
+  that can read that secret file, can mint or forge a local session; the
+  grade and the secret remove bearer-derived authority, not local-process
+  authority.
+- **The settings writer.** `~/.olympus/consult.json`, compare-and-swap on
+  `revision` under the cross-process file lease, written as an atomic
+  owner-only replace (0600) inside an owner-only `~/.olympus` (0700, a real
+  directory, not a symlink; created when missing, refused when wrong). No
+  HOME, no write, with no fallback to the operating system's home. A file
+  that does not parse is never overwritten unless the owner chooses
+  "Replace the damaged settings file", which keeps outside help off.
+  `strict` is kept as saved (C6 adds its approval step); domains keep the
+  gate defaults.
+- **Turning on** requires a configured zkAPI route whose profile records
+  every one of the eight acknowledgements at version 3, and languages whose
+  vocabulary packs are installed (shipped packs verified by hash; German and
+  Italian are optional user packs). Turning off never requires anything.
+  The page carries the revision it was built from; a stale one is a 409
+  and nothing is written.
+- **The route.** The one `zkapi` sovereignty profile. "Add the zkAPI route"
+  writes a consult-only profile (`trust: standard_cloud`, `purpose:
+  consult`, the daemon's default loopback base URL, model
+  `openai/gpt-5-mini`, `secretRef: env:OLYMPUS_ZKAPI_API_KEY`) through the
+  same validator `olympus sovereignty init` uses. The acknowledgements, the
+  owner-confirmed funding date and the optional daily caps are recorded in
+  that profile's `zkapi` block. Every policy write is one transaction
+  (`updateSovereigntyConfigFile`): the file lease, a re-read of the file as
+  it is now, a patch of only the owned fields, validation, and an atomic
+  durable replace (the old file survives any failure); a file that no
+  longer matches the adapter's view is a 409 `policy_changed` and nothing
+  is written. ChatGPT's `olympus_model_set` uses the same transaction. The
+  adapter never holds a key: it gets a presence answer and hands recovery
+  to the composition root, which resolves the key for the transport. The
+  sovereignty policy is read at boot, so
+  each of these writes asks the worker to restart (`requestReload`, the
+  Models card's own path); when the worker cannot restart itself the card
+  says so and the change waits for a managed restart. The settings file
+  itself needs no restart (read at every use).
+- **Readiness** is `zkapiConsultReadiness` with the key's presence only
+  (never the key): blockers are shown in plain words (program not installed,
+  Tor missing, API key not configured, acknowledgements, funding date,
+  expiry estimate, held request, ports, caps). The probe runs only for the
+  card's own render inside a control session.
+- **Setup steps shown, in the order that worked live
+  (`docs/design/consult-m1-measurement.md`):** install `zkapi-clientd`
+  (0.1.5 or 0.1.6) and Tor → `zkapi-clientd config --usd N` (ONE transfer in
+  total: the deposit plus the fee buffer the tool shows; gas prices move,
+  so a shortfall means another transfer) → wait for "Private inference
+  balance activated" → `--relay-url socks5://127.0.0.1:19050` →
+  `--require-api-key` → `--api-key <key>`, stored where the profile's key
+  reference points (for `env:NAME`, a `NAME=<key>` line in
+  `~/.config/olympus/worker.env`, owner-only, then a worker restart) →
+  `--key-reuse-window-seconds 0` (Olympus refuses to send while the window
+  is on, `key_reuse_on`).
+- **Disclosure, up front** (§A.10, §Z.2): the public privacy sentence; one
+  outside question per incomplete private answer within about five minutes,
+  up to $6 each counted in full; sent only on recent panel activity but not
+  guaranteed off by closing the panel; no daily limit unless set, the
+  deposit is the hard limit; deposit and withdrawal fees, the 30-day expiry
+  and no top-up; the outside provider reads the question; the route is
+  experimental and not verified on macOS; no approval step.
+- **Held request (fence).** Recover runs `recoverZkapiSession` (one fixed,
+  content-free request; reserves up to $6) behind a confirm, only for a
+  fence of this wallet; Abandon marks the named fence abandoned behind a
+  confirm that states the privacy consequence (an unsettled request may
+  later settle under another session's network identity). Neither is ever
+  automatic.
+- **Content-free.** The card and its status carry codes, counts, dates and
+  the key reference; never a question, a reply, a key or the daemon's
+  configuration (`config.json` is never read).
+- **Release gate.** The quiet-machine B2 first-token rerun (§A.7: load
+  below 3, n ≥ 20 per phase, 30 control pairs) must pass before the enable
+  path ships; it is owed, and is the C5 release gate rather than a merge
+  gate. Acceptance with fakes: `test/consult-enable-acceptance.test.ts`.
+
 ### Relay
 
 - `/private/<id>` and `/private/<id>/open` are routed by the install prefix
