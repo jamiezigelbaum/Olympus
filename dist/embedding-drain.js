@@ -16685,6 +16685,20 @@ var init_local_index = __esm(() => {
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
       return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
     }
+    embeddingOwedItemIds(modelId, localItemIds) {
+      if (localItemIds.length === 0)
+        return [];
+      const rows = this.db.query(`
+      SELECT DISTINCT i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND i.local_item_id IN (SELECT value FROM json_each(?))
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+    `).all(modelId, JSON.stringify(localItemIds));
+      return rows.map((row) => row.local_item_id);
+    }
     embeddingBacklogEstimate(modelId, embedder, scope) {
       const tierExclusion = this.embeddingTierExclusionFilter();
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };

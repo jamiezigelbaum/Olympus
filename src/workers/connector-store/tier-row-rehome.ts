@@ -152,6 +152,12 @@ export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Prom
   pruneRefused(ledger);
   resumePendingEmbeddings(set);
   await runQueuedMoves(options, report, ours);
+  // Whoever completed a move, and whether or not its note was written, its
+  // rows must reach the embedding queue: reconcile from what the stores hold.
+  if (completed.length > 0) {
+    addPendingEmbeddings(set, completed.map((move) => move.localItemId));
+    resumePendingEmbeddings(set);
+  }
   await replayMissingReceipts(options, report, completed);
   set.recordRowRehomeReport(report);
   return report;
@@ -175,7 +181,7 @@ function domainRestsAtPrivateTier(set: TieredStoreSet, domain: SourceTrustDomain
 function considerRow(
   set: TieredStoreSet,
   domain: SourceTrustDomain,
-  row: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string; family: string },
+  row: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string; family: string; localItemId: string },
   report: TierRowRehomeReport,
   ours: TierLedgerIdentity[],
   completed: CompletedMove[],
@@ -204,7 +210,7 @@ function considerRow(
     const left = copies.find((copy) => copy.state === 'superseded' && copy.corpusId === store.corpusId
       && copy.supersededByGeneration === generation);
     const arrived = copies.find((copy) => copy.state === 'current' && copy.trustDomain === 'secure_local');
-    if (left && arrived) completed.push({ identity, generation, from: left.corpusId, to: arrived.corpusId });
+    if (left && arrived) completed.push({ identity, localItemId: row.localItemId, generation, from: left.corpusId, to: arrived.corpusId });
     return void (report.skipped += 1);
   }
   if (record && (openQuestion(record) || record.state === 'moving' || forced(record) || record.contentTier === 'secrets' || record.metadataTier === 'secrets')) {
@@ -266,6 +272,7 @@ function considerRow(
 
 interface CompletedMove {
   identity: TierLedgerIdentity;
+  localItemId: string;
   generation: number;
   from: string;
   to: string;
@@ -445,6 +452,8 @@ async function runQueuedMoves(
       });
       report.moved += 1;
       moved.push(exported.identity.localItemId);
+      // Remembered at once, not after the loop: the next call re-queues it.
+      addPendingEmbeddings(set, [exported.identity.localItemId]);
     } catch (error) {
       if (error instanceof TierLedgerGenerationConflictError) {
         // Decided again, or settled by someone else (the sniffer's automatic move) first.
@@ -470,7 +479,7 @@ async function runQueuedMoves(
     }
   }
   ledger.writeMeta(QUEUE_CURSOR_META_KEY, waiting > 0 ? lastLooked : '');
-  if (moved.length > 0) handOffToEmbedding(set, moved);
+  if (moved.length > 0) resumePendingEmbeddings(set);
   // Remember whether any of our work is still waiting, so the next call knows
   // whether to read the queue at all.
   ledger.writeMeta(OUTSTANDING_META_KEY, waiting + report.failed > 0 ? '1' : '');
@@ -478,23 +487,29 @@ async function runQueuedMoves(
 
 const PENDING_EMBED_META_KEY = 'private_row_rehome_pending_embed';
 const QUEUE_CURSOR_META_KEY = 'private_row_rehome_queue_cursor';
-const PENDING_EMBED_LIMIT = 5_000;
+/** Ids checked for embedding currency per query. */
+const PENDING_EMBED_BATCH = 500;
 
 /**
  * Rows moved into the Private store carry chunks but no vectors, and a lane
  * whose Private store only embeds what its own syncs queued would never pick
- * them up. Hand them to the store's existing embedding queue with the
- * provider the lane would use (its scope binding included), and remember them
- * until they are embedded so a restart does not lose them.
+ * them up. They are remembered durably (in the set ledger, never capped) and
+ * handed to the store's existing embedding queue with the provider the lane
+ * would use, its scope binding included, until they are embedded.
  */
-function handOffToEmbedding(set: TieredStoreSet, localItemIds: readonly string[]): void {
+function addPendingEmbeddings(set: TieredStoreSet, localItemIds: readonly string[]): void {
   try {
     const pending = new Set(readPendingEmbed(set));
-    for (const id of localItemIds) pending.add(id);
-    set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify([...pending].slice(-PENDING_EMBED_LIMIT)));
-    resumePendingEmbeddings(set);
+    let added = false;
+    for (const id of localItemIds) {
+      if (!pending.has(id)) {
+        pending.add(id);
+        added = true;
+      }
+    }
+    if (added) set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify([...pending]));
   } catch {
-    // The next call resumes them.
+    // Reconciliation from the stores finds it again.
   }
 }
 
@@ -507,7 +522,16 @@ function readPendingEmbed(set: TieredStoreSet): string[] {
   }
 }
 
-/** Re-queue (after a restart) what is still unembedded; forget what is embedded or gone. */
+/**
+ * Re-queue what is still unembedded. Completion is judged per id, by asking the
+ * store whether THAT item still owes vectors (never by absence from a capped
+ * page): an id leaves the list only when it is embedded or gone. An id that
+ * cannot be judged right now (no provider, store not open) stays.
+ *
+ * Limitation: the lane's scope binding is checked for the whole binding
+ * (`assertBindingCurrent` on the queued provider when the sweep runs); the
+ * runtime offers no per-item scope-membership check here.
+ */
 function resumePendingEmbeddings(set: TieredStoreSet): void {
   try {
     const pending = readPendingEmbed(set);
@@ -515,8 +539,11 @@ function resumePendingEmbeddings(set: TieredStoreSet): void {
     const provider = set.privateEmbeddingProvider();
     const store = set.store('secure_local');
     if (!provider || !store) return;
-    const missing = new Set(store.missingEmbeddingItemIds(provider, PENDING_EMBED_LIMIT));
-    const still = pending.filter((id) => missing.has(id));
+    const owed = new Set<string>();
+    for (let index = 0; index < pending.length; index += PENDING_EMBED_BATCH) {
+      for (const id of store.embeddingOwedItemIds(provider.modelId, pending.slice(index, index + PENDING_EMBED_BATCH))) owed.add(id);
+    }
+    const still = pending.filter((id) => owed.has(id));
     if (still.length > 0) store.queueEmbedding(still, provider);
     if (still.length !== pending.length) set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify(still));
   } catch {

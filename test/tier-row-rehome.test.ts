@@ -729,6 +729,58 @@ describe('Private-row re-home', () => {
       expect(JSON.parse(ledger.readMeta('private_row_rehome_refused') ?? 'x')).toEqual([]);
     });
 
+    test('a crash right after the flip (before the note) still gets the row queued for embedding by the next pass', async () => {
+      const fixture = fixtureIn();
+      await seedLegacy(fixture, [ORCHID]);
+      // The note cannot be written (the path is a directory): the move flips, then throws.
+      const badPath = join(fixture.dir, 'not-a-file');
+      require('node:fs').mkdirSync(badPath);
+      const crashed = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: badPath });
+      expect(crashed).toMatchObject({ queued: 1, moved: 0, failed: 1 });
+      expect(currentCorpora(fixture, 'orchid')).toEqual([CORPORA.secure_local]);
+      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([]);
+      // Restart, then the next pass reconciles from the stores and also replays the note.
+      const next = reopen(fixture);
+      const recovered = await rehomePrivateTierRows({ set: next.set, embeddingLedgerPath: ledgerPath(next) });
+      expect(recovered.receiptsReplayed).toBe(1);
+      expect(next.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([localId('orchid')]);
+      const [run] = await embedPendingChunks([{ store: next.stores.secure_local!, provider: next.local }], { maxItems: 10 });
+      expect(run!.chunksEmbedded).toBeGreaterThan(0);
+    });
+
+    test('a sniffer-style completion (primitive called directly) is queued for embedding by the next pass', async () => {
+      const fixture = fixtureIn();
+      await seedLegacy(fixture, [ORCHID]);
+      await rehomePrivateTierRows({ set: fixture.set, maxMoves: 0, embeddingLedgerPath: ledgerPath(fixture) });
+      await moveTieredItem({
+        set: fixture.set,
+        identity: { ...identityOf('orchid'), localItemId: localId('orchid') },
+        target: { metadataTier: 'secure', contentTier: 'secure' },
+        embeddingLedger: { path: ledgerPath(fixture), approvedBy: 'system-automatic' },
+        replaceOwnSupersededCopy: true,
+      });
+      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([]);
+      await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([localId('orchid')]);
+    });
+
+    test('a newly moved id is not forgotten behind 5,000+ older missing items', async () => {
+      const fixture = fixtureIn('olympus-row-rehome-5000-');
+      const older: FixtureSpec[] = Array.from({ length: 5_010 }, (_, index) => ({ id: `old${index}`, name: `old${index}.txt`, text: `older ${index}` }));
+      await fixture.stores.secure_local!.syncFromConnector(fixtureConnector(() => older), {
+        fetchContent: true,
+        placement: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
+      });
+      expect(fixture.stores.secure_local!.missingEmbeddingItemIds(fixture.local, 6_000).length).toBeGreaterThan(5_000);
+      await seedLegacy(fixture, [ORCHID]);
+      await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      // Restart drops the in-memory queue; recovery must still find the one pending id.
+      const next = reopen(fixture);
+      await rehomePrivateTierRows({ set: next.set, embeddingLedgerPath: ledgerPath(next) });
+      expect(next.stores.secure_local!.queuedEmbeddingItemIds()).toContain(localId('orchid'));
+      expect(JSON.parse(next.ledger.readMeta('private_row_rehome_pending_embed') ?? '[]')).toContain(localId('orchid'));
+    });
+
     for (const boundary of ['decision', 'staging', 'import'] as const) {
       test(`restart at the ${boundary} boundary: fresh handles resume to one serving copy, source bytes kept, destination searchable`, async () => {
         let fixture = fixtureIn();

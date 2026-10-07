@@ -7214,6 +7214,28 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Of these items, the ones that still owe an embedding on `modelId`: live
+   * (not tombstoned) with at least one chunk lacking a current vector. A
+   * targeted currency check for named items, not a capped scan, so an item is
+   * never reported done merely because other, older items fill a page. It
+   * ignores the visibility exclusions on purpose: an item hidden or held right
+   * now still owes its vectors once released.
+   */
+  embeddingOwedItemIds(modelId: string, localItemIds: readonly string[]): string[] {
+    if (localItemIds.length === 0) return [];
+    const rows = this.db.query(`
+      SELECT DISTINCT i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND i.local_item_id IN (SELECT value FROM json_each(?))
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+    `).all(modelId, JSON.stringify(localItemIds)) as Array<{ local_item_id: string }>;
+    return rows.map((row) => row.local_item_id);
+  }
+
+  /**
    * The chunks still waiting for a vector on `modelId`, and a token estimate of
    * embedding them (characters / 4, the estimate every planner here uses).
    * Same exclusions as missingEmbeddingItemIds; with the embedder named, rows

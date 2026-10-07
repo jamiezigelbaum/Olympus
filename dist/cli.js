@@ -22512,6 +22512,20 @@ var init_local_index = __esm(() => {
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
       return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
     }
+    embeddingOwedItemIds(modelId, localItemIds) {
+      if (localItemIds.length === 0)
+        return [];
+      const rows = this.db.query(`
+      SELECT DISTINCT i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND i.local_item_id IN (SELECT value FROM json_each(?))
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+    `).all(modelId, JSON.stringify(localItemIds));
+      return rows.map((row) => row.local_item_id);
+    }
     embeddingBacklogEstimate(modelId, embedder, scope) {
       const tierExclusion = this.embeddingTierExclusionFilter();
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
@@ -25595,6 +25609,10 @@ async function rehomePrivateTierRows(options) {
   pruneRefused(ledger);
   resumePendingEmbeddings(set);
   await runQueuedMoves(options, report, ours);
+  if (completed.length > 0) {
+    addPendingEmbeddings(set, completed.map((move) => move.localItemId));
+    resumePendingEmbeddings(set);
+  }
   await replayMissingReceipts(options, report, completed);
   set.recordRowRehomeReport(report);
   return report;
@@ -25634,7 +25652,7 @@ function considerRow(set, domain, row, report, ours, completed) {
     const left = copies.find((copy) => copy.state === "superseded" && copy.corpusId === store.corpusId && copy.supersededByGeneration === generation);
     const arrived = copies.find((copy) => copy.state === "current" && copy.trustDomain === "secure_local");
     if (left && arrived)
-      completed.push({ identity, generation, from: left.corpusId, to: arrived.corpusId });
+      completed.push({ identity, localItemId: row.localItemId, generation, from: left.corpusId, to: arrived.corpusId });
     return void (report.skipped += 1);
   }
   if (record && (openQuestion(record) || record.state === "moving" || forced(record) || record.contentTier === "secrets" || record.metadataTier === "secrets")) {
@@ -25803,6 +25821,7 @@ async function runQueuedMoves(options, report, found) {
       });
       report.moved += 1;
       moved.push(exported.identity.localItemId);
+      addPendingEmbeddings(set, [exported.identity.localItemId]);
     } catch (error) {
       if (error instanceof TierLedgerGenerationConflictError) {
         continue;
@@ -25822,16 +25841,21 @@ async function runQueuedMoves(options, report, found) {
   }
   ledger.writeMeta(QUEUE_CURSOR_META_KEY, waiting > 0 ? lastLooked : "");
   if (moved.length > 0)
-    handOffToEmbedding(set, moved);
+    resumePendingEmbeddings(set);
   ledger.writeMeta(OUTSTANDING_META_KEY, waiting + report.failed > 0 ? "1" : "");
 }
-function handOffToEmbedding(set, localItemIds) {
+function addPendingEmbeddings(set, localItemIds) {
   try {
     const pending = new Set(readPendingEmbed(set));
-    for (const id of localItemIds)
-      pending.add(id);
-    set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify([...pending].slice(-PENDING_EMBED_LIMIT)));
-    resumePendingEmbeddings(set);
+    let added = false;
+    for (const id of localItemIds) {
+      if (!pending.has(id)) {
+        pending.add(id);
+        added = true;
+      }
+    }
+    if (added)
+      set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify([...pending]));
   } catch {}
 }
 function readPendingEmbed(set) {
@@ -25851,8 +25875,12 @@ function resumePendingEmbeddings(set) {
     const store = set.store("secure_local");
     if (!provider || !store)
       return;
-    const missing = new Set(store.missingEmbeddingItemIds(provider, PENDING_EMBED_LIMIT));
-    const still = pending.filter((id) => missing.has(id));
+    const owed = new Set;
+    for (let index = 0;index < pending.length; index += PENDING_EMBED_BATCH) {
+      for (const id of store.embeddingOwedItemIds(provider.modelId, pending.slice(index, index + PENDING_EMBED_BATCH)))
+        owed.add(id);
+    }
+    const still = pending.filter((id) => owed.has(id));
     if (still.length > 0)
       store.queueEmbedding(still, provider);
     if (still.length !== pending.length)
@@ -25903,7 +25931,7 @@ function setEmbedsWithBuiltInOnly(set) {
     return false;
   }
 }
-var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, DEFAULT_ROW_REHOME_LOOKED = 2000, CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY, REFUSED_META_KEY = "private_row_rehome_refused", OUTSTANDING_META_KEY = "private_row_rehome_outstanding", REFUSED_PRUNE_PER_CALL = 200, PENDING_EMBED_META_KEY = "private_row_rehome_pending_embed", QUEUE_CURSOR_META_KEY = "private_row_rehome_queue_cursor", PENDING_EMBED_LIMIT = 5000;
+var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, DEFAULT_ROW_REHOME_LOOKED = 2000, CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY, REFUSED_META_KEY = "private_row_rehome_refused", OUTSTANDING_META_KEY = "private_row_rehome_outstanding", REFUSED_PRUNE_PER_CALL = 200, PENDING_EMBED_META_KEY = "private_row_rehome_pending_embed", QUEUE_CURSOR_META_KEY = "private_row_rehome_queue_cursor", PENDING_EMBED_BATCH = 500;
 var init_tier_row_rehome = __esm(() => {
   init_provider();
   init_types();
