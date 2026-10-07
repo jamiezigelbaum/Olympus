@@ -19,16 +19,20 @@ import {
   writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
   BUILT_IN_EMBEDDING_MODEL,
+  builtInEmbeddingModelFiles,
+  LITERT_RUNTIME_PACK,
   ONNX_RUNTIME_PACK,
+  type LiteRtRuntimePackSpec,
   type BuiltInEmbeddingModelSpec,
   type OnnxRuntimePackSpec,
   type PinnedDownload,
   type PinnedNpmPackage,
 } from './manifest.ts';
 import { readTarGz } from './tar.ts';
+import { readZipEntry } from './zip.ts';
 
 export type BuiltInEmbeddingState = 'not_started' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'failed';
 
@@ -63,15 +67,22 @@ export interface BuiltInEmbeddingPaths {
 
 export interface InstalledBuiltInEmbedding {
   modelPath: string;
-  vocabularyPath: string;
-  /** Directory whose `node_modules` holds onnxruntime-node and onnxruntime-common. */
+  /** An ONNX model's vocabulary; a LiteRT model carries its own tokenizer. */
+  vocabularyPath?: string;
+  /**
+   * ONNX: the directory whose `node_modules` holds onnxruntime-node and
+   * onnxruntime-common. LiteRT: the directory holding the library.
+   */
   runtimeDir: string;
+  /** The LiteRT-LM library, for a LiteRT model. */
+  libraryPath?: string;
 }
 
 export interface BuiltInEmbeddingInstallerOptions {
   env?: Record<string, string | undefined>;
   model?: BuiltInEmbeddingModelSpec;
   runtime?: OnnxRuntimePackSpec;
+  liteRtRuntime?: LiteRtRuntimePackSpec;
   /** `${platform}-${arch}`; defaults to this process. */
   platform?: string;
   fetchImpl?: typeof fetch;
@@ -116,9 +127,27 @@ export function builtInEmbeddingPaths(
   return {
     root,
     modelDir: join(root, model.modelId),
-    runtimeDir: join(root, `onnxruntime-${runtime.version}-${platform}`),
+    runtimeDir: model.runtime === 'litert'
+      ? join(root, `litert-lm-${LITERT_RUNTIME_PACK.version}-${platform}`)
+      : join(root, `onnxruntime-${runtime.version}-${platform}`),
     statusPath: join(root, 'status.json'),
     lockPath: join(root, 'install.lock'),
+  };
+}
+
+/** Where an installed model's files are, whether or not they are there yet. */
+export function installedBuiltInEmbedding(
+  paths: BuiltInEmbeddingPaths,
+  model: BuiltInEmbeddingModelSpec = BUILT_IN_EMBEDDING_MODEL,
+  platform = currentPlatform(),
+  liteRtRuntime: LiteRtRuntimePackSpec = LITERT_RUNTIME_PACK,
+): InstalledBuiltInEmbedding {
+  const liteRt = model.runtime === 'litert' ? liteRtRuntime.platforms[platform] : undefined;
+  return {
+    modelPath: join(paths.modelDir, model.model.name),
+    ...(model.vocabulary ? { vocabularyPath: join(paths.modelDir, model.vocabulary.name) } : {}),
+    runtimeDir: paths.runtimeDir,
+    ...(liteRt ? { libraryPath: join(paths.runtimeDir, basename(liteRt.library)) } : {}),
   };
 }
 
@@ -160,12 +189,9 @@ export async function installBuiltInEmbedding(
   const platform = options.platform ?? currentPlatform();
   const paths = builtInEmbeddingPaths(options.env, model, runtime, platform);
   const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
-  const installed: InstalledBuiltInEmbedding = {
-    modelPath: join(paths.modelDir, model.model.name),
-    vocabularyPath: join(paths.modelDir, model.vocabulary.name),
-    runtimeDir: paths.runtimeDir,
-  };
+  const installed = installedBuiltInEmbedding(paths, model, platform, options.liteRtRuntime);
 
+  if (model.runtime === 'litert') return installLiteRt(options, model, paths, platform, reporter, installed);
   try {
     if (!options.skipRuntime && !runtime.platforms.includes(platform)) {
       throw new BuiltInEmbeddingInstallError(
@@ -175,7 +201,7 @@ export async function installBuiltInEmbedding(
     }
     ensureDirectory(paths.root);
 
-    const modelFiles = [model.model, model.vocabulary];
+    const modelFiles = builtInEmbeddingModelFiles(model);
     const runtimePackages = options.skipRuntime ? [] : [runtime.common, runtime.runtime];
     if (installComplete(paths, modelFiles, runtimePackages)) {
       await verifyModelFiles(paths.modelDir, modelFiles, reporter);
@@ -219,6 +245,102 @@ export async function installBuiltInEmbedding(
       : new BuiltInEmbeddingInstallError('disk_write_failed', error instanceof Error ? error.message : String(error));
     reporter.fail(failure.reason, failure.message);
     throw failure;
+  }
+}
+
+async function installLiteRt(
+  options: BuiltInEmbeddingInstallerOptions,
+  model: BuiltInEmbeddingModelSpec,
+  paths: BuiltInEmbeddingPaths,
+  platform: string,
+  reporter: ProgressReporter,
+  installed: InstalledBuiltInEmbedding,
+): Promise<InstalledBuiltInEmbedding> {
+  const pack = options.liteRtRuntime ?? LITERT_RUNTIME_PACK;
+  const wheel = pack.platforms[platform];
+  try {
+    if (!wheel && !options.skipRuntime) {
+      throw new BuiltInEmbeddingInstallError('unsupported_platform', `The built-in search model does not run on ${platform}.`);
+    }
+    ensureDirectory(paths.root);
+    const modelFiles = builtInEmbeddingModelFiles(model);
+    const wantsRuntime = Boolean(wheel) && !options.skipRuntime;
+    const complete = () => modelFiles.every((file) => existsSync(join(paths.modelDir, file.name)))
+      && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel!));
+    if (!complete()) {
+      await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+        if (complete()) return;
+        const fetchImpl = options.fetchImpl ?? fetch;
+        const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS;
+        const pending = modelFiles.filter((file) => !existsSync(join(paths.modelDir, file.name)));
+        const runtimePending = wantsRuntime && !liteRtInstalled(paths.runtimeDir, wheel!);
+        reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0) + (runtimePending ? wheel!.bytes : 0));
+        ensureDirectory(paths.modelDir);
+        for (const file of pending) {
+          await downloadVerified(fetchImpl, file.url, join(paths.modelDir, file.name), file.bytes, {
+            kind: 'sha256',
+            expected: file.sha256,
+          }, reporter, 'Downloading the built-in search model', stallMs);
+        }
+        if (runtimePending) await installLiteRtRuntime(fetchImpl, paths.runtimeDir, wheel!, reporter, stallMs);
+      });
+    }
+    await verifyModelFiles(paths.modelDir, modelFiles, reporter);
+    if (wantsRuntime && !liteRtInstalled(paths.runtimeDir, wheel!)) {
+      throw new BuiltInEmbeddingInstallError('runtime_load_failed', 'The built-in search runtime did not install completely.');
+    }
+    return installed;
+  } catch (error) {
+    const failure = error instanceof BuiltInEmbeddingInstallError
+      ? error
+      : new BuiltInEmbeddingInstallError('disk_write_failed', error instanceof Error ? error.message : String(error));
+    reporter.fail(failure.reason, failure.message);
+    throw failure;
+  }
+}
+
+interface LiteRtMarker {
+  wheel: string;
+  sha256: string;
+}
+
+function liteRtInstalled(runtimeDir: string, wheel: PinnedDownload & { library: string }): boolean {
+  try {
+    const marker = JSON.parse(readFileSync(join(runtimeDir, RUNTIME_MARKER), 'utf8')) as LiteRtMarker;
+    return marker.sha256 === wheel.sha256 && existsSync(join(runtimeDir, basename(wheel.library)));
+  } catch {
+    return false;
+  }
+}
+
+/** Downloads the pinned wheel, takes the one library out of it, and installs it whole or not at all. */
+async function installLiteRtRuntime(
+  fetchImpl: typeof fetch,
+  runtimeDir: string,
+  wheel: PinnedDownload & { library: string },
+  reporter: ProgressReporter,
+  stallMs: number,
+): Promise<void> {
+  const staging = `${runtimeDir}.staging-${randomUUID()}`;
+  ensureDirectory(staging);
+  try {
+    const archivePath = join(staging, wheel.name);
+    await downloadVerified(fetchImpl, wheel.url, archivePath, wheel.bytes, {
+      kind: 'sha256',
+      expected: wheel.sha256,
+    }, reporter, 'Downloading the search runtime', stallMs);
+    reporter.set('verifying', 'Unpacking the search runtime');
+    const library = readZipEntry(readFileSync(archivePath), wheel.library);
+    if (!library) throw new BuiltInEmbeddingInstallError('runtime_load_failed', `${wheel.name} has no ${wheel.library}.`);
+    writeFileSync(join(staging, basename(wheel.library)), library, { mode: 0o755 });
+    rmSync(archivePath, { force: true });
+    const marker: LiteRtMarker = { wheel: wheel.name, sha256: wheel.sha256 };
+    writeFileSync(join(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}\n`);
+    rmSync(runtimeDir, { recursive: true, force: true });
+    renameSync(staging, runtimeDir);
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    throw error;
   }
 }
 

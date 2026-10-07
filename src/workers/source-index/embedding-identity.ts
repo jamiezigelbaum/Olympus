@@ -188,10 +188,18 @@ export const CANONICAL_EMBEDDING_IDENTITIES: readonly CanonicalEmbeddingIdentity
     backend: 'cloud',
     dimension: 4096,
   }),
-  // Owner-approved 2026-10-01: the zero-setup default for new installs.
+  // Owner-approved 2026-10-01: the zero-setup default for new installs until
+  // 2026-10-06; installs that embedded with it keep it.
   canonicalIdentity({
     provider: 'built-in',
     modelId: 'arctic-embed-m-v1.5-int8-e58a8f7',
+    backend: 'local',
+    dimension: 768,
+  }),
+  // Owner-approved 2026-10-06: EmbeddingGemma 2, the zero-setup default for new installs.
+  canonicalIdentity({
+    provider: 'built-in',
+    modelId: 'embeddinggemma-2-litert-24d962e',
     backend: 'local',
     dimension: 768,
   }),

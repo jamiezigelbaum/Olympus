@@ -162,17 +162,12 @@ async function runPanel(model: ReturnType<typeof createBuiltInAnalystModel>, mod
   const embeddingDir = arg('embedding-dir');
   let relevance: ReturnType<typeof embeddingPanelRelevance> | undefined;
   if (embeddingDir) {
-    const { BUILT_IN_EMBEDDING_MODEL } = await import('../src/workers/source-index/built-in-embedding/manifest.ts');
-    const { builtInEmbeddingPaths } = await import('../src/workers/source-index/built-in-embedding/assets.ts');
+    const { builtInEmbeddingPaths, installedBuiltInEmbedding } = await import('../src/workers/source-index/built-in-embedding/assets.ts');
     const paths = builtInEmbeddingPaths({ OLYMPUS_BUILT_IN_EMBEDDING_DIR: embeddingDir });
     const provider = new BuiltInSourceEmbeddingProvider({
       // Status writes stay out of the real install's directory.
       env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: join(process.env.TMPDIR ?? '/tmp', 'olympus-bench-embedding') },
-      install: async () => ({
-        modelPath: join(paths.modelDir, BUILT_IN_EMBEDDING_MODEL.model.name),
-        vocabularyPath: join(paths.modelDir, BUILT_IN_EMBEDDING_MODEL.vocabulary.name),
-        runtimeDir: paths.runtimeDir,
-      }),
+      install: async () => installedBuiltInEmbedding(paths),
     });
     // Loaded first, as in a running engine (a query before the model is loaded falls back to keyword search).
     await provider.prepare();

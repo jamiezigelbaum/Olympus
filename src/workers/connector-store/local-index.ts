@@ -113,7 +113,7 @@ import {
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
-import { BUILT_IN_EMBEDDING_MODEL } from '../source-index/built-in-embedding/manifest.ts';
+import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../source-index/built-in-embedding/manifest.ts';
 import type {
   SourceIndexCorpusSearchAdapter,
   SourceIndexCorpusSearchRequest,
@@ -191,9 +191,31 @@ const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map(
 // against the Private items and 0.37 against the Personal ones, while true
 // positives and paraphrases start at 0.40 (most at 0.43 to 0.56; the weaker
 // true positives are lexical matches, which stand on their own merit).
+//
+// EmbeddingGemma 2 (Google's LiteRT build), calibrated 2026-10-07 on fresh
+// copies of the same two stores (288 chunks), scoring each true positive and
+// paraphrase against the store that holds its answer. Its cosines sit on a
+// higher, narrower scale: off-topic questions peak at 0.63 for everyday topics
+// and 0.68 for medical topics the corpus does not hold (eye exam, dental
+// x-ray); true positives start at 0.74 (median 0.83) and paraphrases at 0.71
+// (median 0.74), save one at 0.66 ("do I have worms", which Arctic also
+// missed). 0.69 sits between. The same question set put Arctic's off-topic
+// peak at 0.37, under its 0.40 bar; Arctic found 13 of the 20 paraphrases,
+// this model 19.
+//
+// Every built-in model needs its own bar before it ships: cosine scales differ
+// by model, and a bar carried over from another model either lets everything
+// match or hides true positives. `test/built-in-embedding.test.ts` fails for a
+// registered built-in model without one.
 const CALIBRATED_SEMANTIC_RELEVANCE_BARS: ReadonlyMap<string, number> = new Map([
-  [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4],
+  [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
+  [EMBEDDINGGEMMA_2.modelId, 0.69],
 ]);
+
+/** The relevance bar calibrated for a model's vector lane, if one has been. */
+export function calibratedSemanticRelevanceBar(modelId: string): number | undefined {
+  return CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
+}
 
 /** The relevance bar that gates a model's vector lane: the adapter's own, else the model's calibrated one. */
 function semanticRelevanceBarFor(modelId: string, adapterBar?: number): number | undefined {

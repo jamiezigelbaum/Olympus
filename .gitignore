@@ -5,6 +5,7 @@ node_modules/.package-lock.json
 dist/*
 !dist/index.js
 !dist/cli.js
+!dist/litert-helper.js
 !dist/control-ui/
 dist/control-ui/*
 !dist/control-ui/index.js
