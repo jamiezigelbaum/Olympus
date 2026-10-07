@@ -117,6 +117,69 @@ describe('backlog continuation', () => {
   });
 });
 
+describe('backed-off retries', () => {
+  test('a task that names when its deferred work is due runs then, not after its interval', async () => {
+    const clock = { now: T0 };
+    const runs: number[] = [];
+    const due = new Date(T0 + 9 * 60_000).toISOString();
+    const sched = scheduler([source([
+      task('extract', 'extract', async () => {
+        runs.push(clock.now);
+        return runs.length === 1 ? { status: 'progress', wakeAt: due } : { status: 'idle' };
+      }),
+    ])], clock);
+
+    let status = await sched.runDueTasks(new Date(clock.now));
+    expect(nextRunAt(status, 'extract')).toBe(due);
+
+    clock.now = Date.parse(due);
+    status = await sched.runDueTasks(new Date(clock.now));
+    expect(runs).toEqual([T0, Date.parse(due)]);
+    expect(Date.parse(nextRunAt(status, 'extract')!)).toBe(Date.parse(due) + INTERVAL);
+  });
+
+  test('a wake time later than the cadence changes nothing, and one in the past is clamped to now', async () => {
+    const clock = { now: T0 };
+    let wakeAt = new Date(T0 + 2 * INTERVAL).toISOString();
+    const sched = scheduler([source([
+      task('extract', 'extract', async () => ({ status: 'idle', wakeAt })),
+    ])], clock);
+    let status = await sched.runDueTasks(new Date(clock.now));
+    expect(Date.parse(nextRunAt(status, 'extract')!)).toBe(T0 + INTERVAL);
+
+    clock.now = T0 + INTERVAL;
+    wakeAt = new Date(T0).toISOString();
+    status = await sched.runDueTasks(new Date(clock.now));
+    expect(Date.parse(nextRunAt(status, 'extract')!)).toBe(T0 + INTERVAL);
+  });
+
+  test('the extraction pass passes the lane\'s next due retry through as its wake time', async () => {
+    const nextRetryAt = '2026-10-07T17:41:35.777Z';
+    const fake = {
+      async plan() {
+        return {
+          candidates: 0, jobsQueued: 0, jobsExisting: 0, jobsForced: 0,
+          jobsSkippedTooLarge: 0, jobsUnroutable: 0, extractorKinds: [], done: true,
+        };
+      },
+      async run() {
+        return {
+          processedJobs: 1,
+          paused: false,
+          nextRetryAt,
+          counts: {
+            indexed: 0, metadata_only: 0, skipped_unsupported: 0, skipped_too_large: 0,
+            blocked_policy: 0, failed_retryable: 1, failed_terminal: 0,
+          },
+        };
+      },
+    } as unknown as FileExtractionRunner;
+    const lane = { corpusId: 'c', provider: 'fixture', accountScope: 'personal', approvedScopeKey: 'fixture.personal:/x' };
+    const result = await fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 5, batchSize: 4 }).run();
+    expect(result.wakeAt).toBe(nextRetryAt);
+  });
+});
+
 describe('extraction pass over a shared candidate store', () => {
   // Pages of one shared store: two pages of another lane's files, then this
   // lane's own files, then the end. The old pass stopped after the first page

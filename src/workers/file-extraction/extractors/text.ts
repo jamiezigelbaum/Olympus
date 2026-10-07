@@ -68,6 +68,7 @@ import {
   officeTableSummary,
   parseDelimitedRows,
   pdfAppearsImageOnly,
+  OfficeDocumentUnreadableError,
   readZipEntries,
   readZipEntryText,
   sheetXmlHasFormula,
@@ -267,15 +268,20 @@ export function missingBytesFailure(): ExtractorOutput {
 }
 
 /**
- * A malformed container throws out of the decoders. The production lane caught
- * it here and reported a retryable failure carrying the exception message;
- * `errorKind` is a bounded categorical token on the landed seam, so the message
- * is dropped and the category is kept.
+ * A malformed container throws out of the decoders. `errorKind` is a bounded
+ * categorical token on the landed seam, so the message is dropped and the
+ * category is kept. A container the decoders recognise as unreadable (damaged,
+ * password-protected, unsupported) settles terminal at once: the same bytes
+ * fail the same way on every attempt, and retrying them only delayed the
+ * honest answer. Anything else stays retryable.
  */
 function structuredExtractionOrFailure(extract: () => ExtractorOutput): ExtractorOutput {
   try {
     return extract();
-  } catch {
+  } catch (error) {
+    if (error instanceof OfficeDocumentUnreadableError) {
+      return { status: 'failed_terminal', errorKind: `office_document_${error.reason}` };
+    }
     return { status: 'failed_retryable', errorKind: 'structured_extraction_failed' };
   }
 }
