@@ -364,6 +364,14 @@ describe('the settings module stays off the hosted surfaces', () => {
     'src/workers/chatgpt/consult-orchestrator.ts',
     'src/workers/chatgpt/private-answer-jobs.ts',
     'src/workers/email-source/server.ts',
+    // The C5 writer (its own module) reuses the reader's parser and re-reads
+    // the file under its lease for compare-and-swap; it only writes through
+    // the Mac dashboard adapter below.
+    'src/core/consult-settings-writer.ts',
+    // The C5 Outside help adapter reads the settings for the card's state;
+    // it is also the writer's one caller (test/consult-settings-writer.test.ts
+    // holds that the adapter is reachable only from the composition root).
+    'src/workers/email-source/dashboard-consult.ts',
   ];
 
   function sourceFiles(dir: string): string[] {

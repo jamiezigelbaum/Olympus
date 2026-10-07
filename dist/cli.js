@@ -101,7 +101,7 @@ async function writePrivateFileAtomic(path, text) {
   }
   await syncDirectory(dirname2(path));
 }
-function writePrivateFileAtomicSync(path, text) {
+function writePrivateFileAtomicSync(path, text, options = {}) {
   const temp = temporaryPathFor(path);
   try {
     const descriptor = openSync2(temp, "wx", 384);
@@ -112,6 +112,7 @@ function writePrivateFileAtomicSync(path, text) {
       closeSync2(descriptor);
     }
     renameSync(temp, path);
+    options.onPublished?.();
   } catch (error) {
     try {
       rmSync(temp, { force: true });
@@ -7850,6 +7851,7 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/control/launch" },
     { method: "POST", path: "/dashboard/control/launch/redeem" },
     { method: "POST", path: "/dashboard/control/session" },
+    { method: "POST", path: "/dashboard/control/session/local" },
     { method: "GET", path: "/dashboard/dispositions" },
     { method: "GET", path: "/dashboard/dispositions.json" },
     { method: "POST", path: "/dashboard/dispositions" },
@@ -7867,7 +7869,12 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/agents/pairing-code" },
     { method: "POST", path: "/dashboard/agents/keys" },
     { method: "POST", path: "/dashboard/agents/revoke" },
-    { method: "POST", path: "/dashboard/agents/remote-access" }
+    { method: "POST", path: "/dashboard/agents/remote-access" },
+    { method: "POST", path: "/dashboard/consult" },
+    { method: "POST", path: "/dashboard/consult/route" },
+    { method: "POST", path: "/dashboard/consult/route/add" },
+    { method: "POST", path: "/dashboard/consult/recover" },
+    { method: "POST", path: "/dashboard/consult/abandon" }
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -30763,7 +30770,7 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync as chmodSync5, existsSync as existsSync17, mkdirSync as mkdirSync12, readFileSync as readFileSync17, writeFileSync as writeFileSync5 } from "node:fs";
+import { chmodSync as chmodSync5, existsSync as existsSync17, mkdirSync as mkdirSync12, readFileSync as readFileSync17 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
 import { dirname as dirname17, join as join24 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
@@ -31031,13 +31038,69 @@ function writeSovereigntyConfigFile(input) {
     throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
   }
   const config = validateSovereigntyConfig(input.config);
+  publishSovereigntyConfigFile(path, config);
+  return path;
+}
+function publishSovereigntyConfigFile(path, config, onPublished) {
   const directory = dirname17(path);
   mkdirSync12(directory, { recursive: true, mode: 448 });
   chmodSync5(directory, 448);
-  writeFileSync5(path, `${JSON.stringify(config, null, 2)}
-`, { mode: 384 });
+  __sovereigntyFileTestHooks.beforePublish?.(path);
+  writePrivateFileAtomicSync(path, `${JSON.stringify(config, null, 2)}
+`, {
+    onPublished: () => {
+      onPublished?.();
+      __sovereigntyFileTestHooks.afterPublish?.(path);
+    }
+  });
   chmodSync5(path, 384);
-  return path;
+}
+function updateSovereigntyConfigFile(input) {
+  let published = false;
+  let validated;
+  const afterPublish = () => {
+    try {
+      const actual = validateSovereigntyConfig(JSON.parse(readFileSync17(input.path, "utf8")));
+      if (validated && JSON.stringify(actual) === JSON.stringify(validated)) {
+        return { ok: true, config: actual, changed: true, publishedDespiteError: true };
+      }
+      return { ok: false, reason: "uncertain", current: actual };
+    } catch {
+      return { ok: false, reason: "uncertain" };
+    }
+  };
+  try {
+    return withFileLeaseSync(input.path, (lease) => {
+      let current;
+      try {
+        current = validateSovereigntyConfig(JSON.parse(readFileSync17(input.path, "utf8")));
+      } catch {
+        return { ok: false, reason: "unreadable" };
+      }
+      if (input.expect && JSON.stringify(validateSovereigntyConfig(input.expect)) !== JSON.stringify(current)) {
+        return { ok: false, reason: "conflict", current };
+      }
+      const next = input.patch(current);
+      if (next === current)
+        return { ok: true, config: current, changed: false };
+      const toPublish = validateSovereigntyConfig(next);
+      validated = toPublish;
+      try {
+        lease.commit(() => publishSovereigntyConfigFile(input.path, toPublish, () => {
+          published = true;
+        }));
+      } catch (error) {
+        if (!published)
+          throw error;
+        return afterPublish();
+      }
+      return { ok: true, config: toPublish, changed: true };
+    }, { acquireTimeoutMs: 5000 });
+  } catch (error) {
+    if (published)
+      return afterPublish();
+    throw error;
+  }
 }
 function loadSovereigntyPreset(name) {
   const sourceLayoutPath = join24(dirname17(fileURLToPath4(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
@@ -31427,8 +31490,10 @@ function stringArrayField(value, label) {
   }
   return value.map((item) => item.trim()).filter(Boolean);
 }
-var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SOVEREIGNTY_PRESETS, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SOVEREIGNTY_PRESETS, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER, __sovereigntyFileTestHooks;
 var init_sovereignty = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
   init_operation_error();
   init_local_model_policy();
   init_config();
@@ -31466,6 +31531,7 @@ var init_sovereignty = __esm(() => {
     encrypted_cloud: 2,
     standard_cloud: 1
   };
+  __sovereigntyFileTestHooks = { beforePublish: undefined, afterPublish: undefined };
 });
 
 // src/workers/source-index/analyst-pool.ts
@@ -43125,7 +43191,7 @@ import {
   renameSync as renameSync5,
   statSync as statSync9,
   unlinkSync as unlinkSync2,
-  writeFileSync as writeFileSync6
+  writeFileSync as writeFileSync5
 } from "node:fs";
 import { dirname as dirname24 } from "node:path";
 async function runXBookmarksWindowDiagnostic(options) {
@@ -43364,7 +43430,7 @@ function writePrivateReport(pathValue, contents) {
   mkdirSync17(parent, { recursive: true, mode: 448 });
   const temporaryPath = `${reportPath}.tmp-${randomUUID11()}`;
   try {
-    writeFileSync6(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
+    writeFileSync5(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync9(temporaryPath, 384);
     renameSync5(temporaryPath, reportPath);
     chmodSync9(reportPath, 384);
@@ -43792,7 +43858,7 @@ import {
   chmodSync as chmodSync10,
   renameSync as renameSync6,
   rmSync as rmSync7,
-  writeFileSync as writeFileSync7
+  writeFileSync as writeFileSync6
 } from "node:fs";
 import { resolve as resolve5 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
@@ -44084,7 +44150,7 @@ function writeReceipt(pathValue, receipt) {
   const path = resolve5(pathValue);
   const temporary = `${path}.tmp-${randomUUID12()}`;
   try {
-    writeFileSync7(temporary, `${JSON.stringify(receipt, null, 2)}
+    writeFileSync6(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
       encoding: "utf8",
       flag: "wx",
@@ -50353,7 +50419,7 @@ function unknownStatus(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_PICKER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_PICKER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -51088,6 +51154,133 @@ var init_vocabulary = __esm(() => {
     discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
     folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
     undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
+  };
+  DASHBOARD_OUTSIDE_HELP_COPY = {
+    crumb: "Outside help",
+    title: "Outside help",
+    experimental: "Experimental · network route not verified on macOS",
+    intro: "Olympus does not upload the evidence pack. With outside help enabled, it may send a short question derived from your private answer; that question can still reveal private information.",
+    state: {
+      off: "Outside help is off.",
+      on: "Outside help is on.",
+      invalid: "Outside help is off: the settings file on this computer is damaged.",
+      route_not_configured: "Outside help is off: no zkAPI route is set up yet.",
+      fence_held: "Consults are paused: an earlier request has not been seen to settle."
+    },
+    restartPending: "A change is saved but not applied: ask your agent to restart the managed Olympus worker.",
+    disclosureTitle: "Before you turn this on",
+    disclosure: [
+      "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. Each can cost up to $6 from your zkAPI balance; Olympus counts the full $6.",
+      "A question is sent only if the panel was recently active, but closing the panel does not guarantee nothing is sent in that window.",
+      "There is no daily limit unless you set one. Your deposit is the hard limit.",
+      "Depositing and withdrawing are each an expensive on-chain transaction (about $7 at review), paid separately. An unwithdrawn balance becomes claimable by the operator after about 30 days. There is no top-up: each deposit is a new note with its own fee and clock.",
+      "The outside provider reads the question; zkAPI hides who paid. The route is experimental and its network path is not verified on macOS.",
+      "There is no approval step: consults are automatic while this is on. Turn it off here at any time."
+    ],
+    routeTitle: "zkAPI route",
+    routeMissing: "No zkAPI route is set up. Add it here, then follow the steps below in Terminal.",
+    policyNotFile: "Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.",
+    addRoute: "Add the zkAPI route",
+    addRouteConfirm: "This adds a consult-only zkAPI route to your privacy policy and restarts the Olympus worker. No money moves. Continue?",
+    ready: "The route is ready to send.",
+    blocked: "The route is not ready yet:",
+    readinessUnavailable: "Olympus could not check the route right now.",
+    facts: {
+      daemon: "zkapi-clientd {version} found",
+      versionUnknown: "(version unknown)",
+      daemonMissing: "zkapi-clientd not installed",
+      tor: "Tor found (a fresh Tor client per consult)",
+      torOff: "Tor off: the route is direct and your network address is visible to the provider",
+      torMissing: "Tor not installed",
+      key: "API key configured",
+      keyMissing: "API key not configured",
+      today: "{n} requests today (${usd} reserved)",
+      todayOne: "1 request today (${usd} reserved)",
+      expiry: "balance estimated to expire {date} ({days} days left)",
+      expired: "balance past its estimated expiry",
+      expiryUnknown: "balance expiry unknown until you enter the funding date"
+    },
+    routeLabel: "Route: {label}.",
+    blockers: {
+      daemon_not_found: "The zkapi-clientd program is not installed.",
+      daemon_version_unsupported: "This zkapi-clientd version is not one Olympus has reviewed (0.1.5 or 0.1.6).",
+      tor_not_found: "Tor is not installed.",
+      daemon_api_key_missing: "The daemon's API key is not configured in Olympus. Put it where the route's key reference points, then restart the worker.",
+      acknowledgements_incomplete: "The cost and risk statements below are not all acknowledged.",
+      funding_date_missing: "Enter the funding date below so Olympus can estimate when the balance expires.",
+      funding_date_invalid: "The funding date you entered is in the future.",
+      note_expired: "By the funding date you gave, the balance is past its estimated 30-day expiry.",
+      unresolved_session: "An earlier request has not been seen to settle. Use Recover below.",
+      unresolved_session_other_wallet: "A held request belongs to another wallet folder. Recover it there, or abandon it below.",
+      stranded_processes: "Programs from an earlier session could not be confirmed stopped.",
+      daemon_already_running: "Something is already serving on the zkAPI port. Stop your own zkapi-clientd serve; Olympus runs its own for each consult.",
+      tor_port_busy: "Something already listens on the Tor port. Olympus needs it free to start a fresh Tor client.",
+      daily_cap_reached: "Today's request limit you set is reached.",
+      spend_cap_reached: "Another request would exceed today's spending limit you set.",
+      state_unavailable: "The consult ledger on this computer could not be read.",
+      key_reuse_on: "The daemon's key-reuse window is on; run zkapi-clientd config --key-reuse-window-seconds 0."
+    },
+    blockerOther: "The route is not ready ({code}).",
+    stepsTitle: "How to set up the zkAPI route",
+    stepsIntro: "In Terminal, in this order. This is the order that worked live.",
+    steps: [
+      "Install zkapi-clientd (version 0.1.5 or 0.1.6) and Tor.",
+      "Run: zkapi-clientd config --usd N. Send ONE transfer in total: the deposit plus the fee buffer the tool shows. Gas prices move, so the buffer can fall short; a shortfall means another transfer.",
+      'Wait until the tool prints "Private inference balance activated".',
+      "Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050",
+      "Run: zkapi-clientd config --require-api-key",
+      "Run: zkapi-clientd config --api-key <key>. Store the same key where the route's key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.",
+      "Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
+    ],
+    costTitle: "Cost and risk",
+    costIntro: "Read and tick every statement once. They are recorded with the route; the wording version moves when a statement changes, and you are asked again.",
+    acknowledged: "All statements acknowledged.",
+    notAcknowledged: "Not yet acknowledged.",
+    fundingDate: "Funding date: the day your deposit was confirmed (YYYY-MM-DD)",
+    capRequests: "Daily request limit (optional)",
+    capUsd: "Daily spending limit in dollars, counted at $6 per consult (optional)",
+    saveRestarts: "Saving restarts the Olympus worker to apply it.",
+    saveRoute: "Save",
+    fenceTitle: "Held request",
+    fenceIntro: "An earlier request has not been seen to settle. Until it does, no consult is sent.",
+    fenceThis: "Held since {at} (this wallet)",
+    fenceOther: "Held since {at} (another wallet folder)",
+    recover: "Recover",
+    recoverHint: "Sends one fixed request with no content and reserves up to $6.",
+    recoverConfirm: "Recovery sends one fixed request with no content through the same route and reserves up to $6. Continue?",
+    abandon: "Abandon",
+    abandonHint: "Stops the block without settling; the unsettled request may later link two sessions.",
+    abandonConfirm: "Abandoning means the unsettled request may later settle under another session's network identity, linking the two. It stops blocking consults and stays in the ledger as a record. Continue?",
+    languagesTitle: "Languages",
+    languagesIntro: "The outside question may use these languages. Only languages with a vocabulary pack installed on this computer can be chosen.",
+    packMissing: "pack not installed",
+    domainsOn: "Besides everyday words in these languages, a question may use: {list}.",
+    domainsOff: "Not admitted: {list}.",
+    domainsNone: "no extra word lists",
+    domainNames: {
+      units: "units of measure",
+      countries: "country names",
+      places: "place names",
+      technical: "technical terms",
+      medicines: "medicine names",
+      medicineBrands: "medicine brand names"
+    },
+    automatic: "While on, consults run automatically when a private answer in ChatGPT is incomplete. Only this computer can change this setting.",
+    turnOn: "Turn on outside help",
+    turnOff: "Turn off outside help",
+    replaceFile: "Replace the damaged settings file (outside help stays off)",
+    enableBlockedRoute: "Add the zkAPI route first.",
+    enableBlockedAcks: "Tick and save every cost and risk statement first.",
+    edit: "Edit",
+    setUp: "Set up",
+    saving: "Saving…",
+    saveFailed: "Olympus could not save this. Try again.",
+    restarting: "Restarting the worker…",
+    locked: "Unlock dashboard controls in Setup to see and change outside help.",
+    unlockIntro: "Changing outside help needs a session opened from this computer itself, not one an agent or the launch link could open. One click, in this browser, on this Mac.",
+    unlock: "Unlock outside help on this Mac",
+    native: "Outside help is set up on this computer's own dashboard only, never from an agent or ChatGPT.",
+    unavailable: "Outside help is not available from this worker."
   };
 });
 
@@ -55271,7 +55464,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn3, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash37, randomUUID as randomUUID15 } from "node:crypto";
-import { accessSync as accessSync3, chmodSync as chmodSync13, constants as constants3, existsSync as existsSync32, mkdirSync as mkdirSync25, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync9, statSync as statSync13, writeFileSync as writeFileSync8 } from "node:fs";
+import { accessSync as accessSync3, chmodSync as chmodSync13, constants as constants3, existsSync as existsSync32, mkdirSync as mkdirSync25, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync9, statSync as statSync13, writeFileSync as writeFileSync7 } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir as homedir37, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter3, dirname as dirname33, join as join46, resolve as resolvePath2 } from "node:path";
@@ -55406,7 +55599,7 @@ function defaultZkapiConfinement() {
       wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
       selfTest: async (workDir, env) => {
         const script = join46(workDir, "confinement-self-test.cjs");
-        writeFileSync8(script, SELF_TEST_SCRIPT, { mode: 384 });
+        writeFileSync7(script, SELF_TEST_SCRIPT, { mode: 384 });
         const outside = runSelfTestProbe([process.execPath, script], env);
         const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
         return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
@@ -56319,7 +56512,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   let sendDeadline;
   result = await (async () => {
     try {
-      writeFileSync8(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
+      writeFileSync7(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
       const supervisorInstance = processInstanceIdentity(process.pid);
       updateState(statePath, now(), (state) => ({
         ...state,
@@ -59903,7 +60096,7 @@ var init_consult_settings = __esm(() => {
 
 // src/core/doctor.ts
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync34, mkdirSync as mkdirSync26, readFileSync as readFileSync30, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync34, mkdirSync as mkdirSync26, readFileSync as readFileSync30, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname35, join as join49 } from "node:path";
 import { homedir as homedir39 } from "node:os";
 function defaultDoctorHostProbe(env = process.env, options = {}) {
@@ -61034,7 +61227,7 @@ function readIngestionHealthState(path) {
 }
 function writeIngestionHealthState(path, state) {
   mkdirSync26(dirname35(path), { recursive: true });
-  writeFileSync9(path, `${JSON.stringify(state, null, 2)}
+  writeFileSync8(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function ingestionHealthHint(ledger) {
@@ -63161,7 +63354,7 @@ var init_tier_rules = __esm(() => {
 
 // src/workers/classification/tier-migration.ts
 import { createHash as createHash43 } from "node:crypto";
-import { chmodSync as chmodSync17, existsSync as existsSync39, mkdirSync as mkdirSync30, readFileSync as readFileSync36, renameSync as renameSync10, writeFileSync as writeFileSync11 } from "node:fs";
+import { chmodSync as chmodSync17, existsSync as existsSync39, mkdirSync as mkdirSync30, readFileSync as readFileSync36, renameSync as renameSync10, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 import { dirname as dirname41, join as join56 } from "node:path";
 function domainTier(domain) {
@@ -63189,7 +63382,7 @@ function writeTierMigrationState(statePath, state) {
 function writeOwnerOnlyFile(path, text) {
   mkdirSync30(dirname41(path), { recursive: true, mode: 448 });
   const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync11(temp, text, { mode: 384 });
+  writeFileSync10(temp, text, { mode: 384 });
   chmodSync17(temp, 384);
   renameSync10(temp, path);
 }
@@ -65993,7 +66186,7 @@ var init_native_process_service = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync32, readFileSync as readFileSync37, rmSync as rmSync11, writeFileSync as writeFileSync12 } from "node:fs";
+import { mkdirSync as mkdirSync32, readFileSync as readFileSync37, rmSync as rmSync11, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname43, join as join58 } from "node:path";
 import { homedir as homedir46 } from "node:os";
 function guardStateDir(env) {
@@ -66042,7 +66235,7 @@ function writeEmbeddingOperatorOverride(path, on) {
     return;
   }
   mkdirSync32(dirname43(path), { recursive: true });
-  writeFileSync12(path, `${EMBEDDING_PRIORITY_TOKEN}
+  writeFileSync11(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
 function asRecord11(value) {
@@ -81951,7 +82144,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync19, existsSync as existsSync42, lstatSync as lstatSync17, mkdirSync as mkdirSync34, readFileSync as readFileSync40, renameSync as renameSync11, writeFileSync as writeFileSync13 } from "node:fs";
+import { chmodSync as chmodSync19, existsSync as existsSync42, lstatSync as lstatSync17, mkdirSync as mkdirSync34, readFileSync as readFileSync40, renameSync as renameSync11, writeFileSync as writeFileSync12 } from "node:fs";
 import { join as join62 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync34(stateDir, { recursive: true, mode: 448 });
@@ -81966,7 +82159,7 @@ function ensureStateDir(stateDir) {
 }
 function writePrivateFile(path, contents) {
   const temporary = `${path}.tmp.${process.pid}`;
-  writeFileSync13(temporary, contents, { mode: 384 });
+  writeFileSync12(temporary, contents, { mode: 384 });
   chmodSync19(temporary, 384);
   renameSync11(temporary, path);
 }
@@ -82992,6 +83185,54 @@ function createModelKeyReload(options) {
   };
 }
 
+// src/core/dashboard-session-secret.ts
+import { randomBytes as randomBytes13 } from "node:crypto";
+import { chmodSync as chmodSync20, lstatSync as lstatSync18, mkdirSync as mkdirSync35, readFileSync as readFileSync41 } from "node:fs";
+import { dirname as dirname45, join as join63 } from "node:path";
+function dashboardSessionSecretPath(options = {}) {
+  return join63(dirname45(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
+}
+function newDashboardSessionSecret() {
+  return randomBytes13(32).toString("base64url");
+}
+function loadOrCreateDashboardSessionSecret(options = {}) {
+  const path = options.path ?? dashboardSessionSecretPath(options);
+  let existing = "missing";
+  try {
+    const stats = lstatSync18(path);
+    if (!stats.isFile() || stats.isSymbolicLink())
+      existing = "invalid";
+    else if (typeof process.getuid === "function" && stats.uid !== process.getuid())
+      existing = "invalid";
+    else if ((stats.mode & 63) !== 0)
+      existing = "invalid";
+    else {
+      const text = readFileSync41(path, "utf8").trim();
+      if (SECRET_PATTERN.test(text))
+        return { secret: text, source: "file", path };
+      existing = "invalid";
+    }
+  } catch (error2) {
+    existing = error2?.code === "ENOENT" ? "missing" : "invalid";
+  }
+  const secret = newDashboardSessionSecret();
+  try {
+    mkdirSync35(dirname45(path), { recursive: true, mode: 448 });
+    writePrivateFileAtomicSync(path, `${secret}
+`);
+    chmodSync20(path, 384);
+    return { secret, source: existing === "missing" ? "created" : "regenerated", path };
+  } catch {
+    return { secret, source: "memory", path };
+  }
+}
+var DASHBOARD_SESSION_SECRET_FILE = "dashboard-session.secret", SECRET_PATTERN;
+var init_dashboard_session_secret = __esm(() => {
+  init_atomic_file();
+  init_worker_auth();
+  SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+});
+
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile7, realpath as realpath2, stat as stat3 } from "node:fs/promises";
 import { relative as relative6, resolve as resolve8, sep as sep6 } from "node:path";
@@ -83468,17 +83709,17 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync20, mkdirSync as mkdirSync35 } from "node:fs";
+import { chmodSync as chmodSync21, mkdirSync as mkdirSync36 } from "node:fs";
 import { createHash as createHash47, randomUUID as randomUUID20 } from "node:crypto";
 import { homedir as homedir48 } from "node:os";
-import { dirname as dirname45, join as join63 } from "node:path";
+import { dirname as dirname46, join as join64 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
     return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join63(homedir48(), ".local", "share");
-  return join63(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join64(homedir48(), ".local", "share");
+  return join64(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
 }
 
 class LocalFileExtractionJobStore {
@@ -83491,11 +83732,11 @@ class LocalFileExtractionJobStore {
     this.readonly = options.readonly === true;
     const inMemory = dbPath === ":memory:";
     if (!inMemory && !this.readonly) {
-      mkdirSync35(dirname45(dbPath), { recursive: true, mode: 448 });
+      mkdirSync36(dirname46(dbPath), { recursive: true, mode: 448 });
     }
     this.db = this.readonly ? new Database15(dbPath, { readonly: true }) : new Database15(dbPath, { create: true });
     if (!inMemory && !this.readonly)
-      chmodSync20(dbPath, 384);
+      chmodSync21(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -85249,7 +85490,7 @@ var init_document_formats = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { join as join64 } from "node:path";
+import { join as join65 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -85516,9 +85757,9 @@ function pdfTextLooksUndecoded(text) {
   return total > 0 && unreadable / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp2(join64(tmpdir5(), TEMP_DIR_PREFIX2));
+  const tempDir = await mkdtemp2(join65(tmpdir5(), TEMP_DIR_PREFIX2));
   try {
-    const inputPath = join64(tempDir, "input.pdf");
+    const inputPath = join65(tempDir, "input.pdf");
     await writeFile2(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
@@ -85769,15 +86010,15 @@ var init_text = __esm(() => {
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync43 } from "node:fs";
-import { dirname as dirname46, join as join65 } from "node:path";
+import { dirname as dirname47, join as join66 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync43) {
-  let directory = dirname46(fileURLToPath9(moduleUrl));
+  let directory = dirname47(fileURLToPath9(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
-    const candidate = join65(directory, APPLE_VISION_OCR_SCRIPT);
+    const candidate = join66(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
-    const parent = dirname46(directory);
+    const parent = dirname47(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -86019,7 +86260,7 @@ var init_apple_vision_ocr = __esm(() => {
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp3, readFile as readFile8, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir6 } from "node:os";
-import { join as join66 } from "node:path";
+import { join as join67 } from "node:path";
 function createOcrEngine(input) {
   const options = input.options ?? {};
   let vision;
@@ -86164,9 +86405,9 @@ async function visionImage(input, vision) {
   }, vision));
 }
 async function withTempInput(bytes, extension, read) {
-  const tempDir = await mkdtemp3(join66(tmpdir6(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join67(tmpdir6(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join66(tempDir, `input${extension}`);
+    const inputPath = join67(tempDir, `input${extension}`);
     await writeFile3(inputPath, bytes);
     return await read(inputPath);
   } finally {
@@ -86186,11 +86427,11 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp3(join66(tmpdir6(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join67(tmpdir6(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join66(tempDir, "input.pdf");
-    const outputPath = join66(tempDir, "output.pdf");
-    const sidecarPath = join66(tempDir, "sidecar.txt");
+    const inputPath = join67(tempDir, "input.pdf");
+    const outputPath = join67(tempDir, "output.pdf");
+    const sidecarPath = join67(tempDir, "sidecar.txt");
     await writeFile3(inputPath, input.bytes);
     try {
       await input.commandRunner({
@@ -86247,9 +86488,9 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp3(join66(tmpdir6(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join67(tmpdir6(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join66(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    const inputPath = join67(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile3(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
@@ -86535,7 +86776,7 @@ var init_remote_vlm = __esm(() => {
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp4, readFile as readFile9, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir7 } from "node:os";
-import { extname, join as join67 } from "node:path";
+import { extname, join as join68 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -86610,8 +86851,8 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp4(join67(tmpdir7(), tempDirPrefix));
-          inputPath = join67(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          tempDir = await mkdtemp4(join68(tmpdir7(), tempDirPrefix));
+          inputPath = join68(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile4(inputPath, bytes);
         }
         const transcribed = await transcriber.transcribe({
@@ -89017,19 +89258,19 @@ var init_analyst_openai = __esm(() => {
 // src/core/venice-model-catalog.ts
 import {
   existsSync as existsSync44,
-  mkdirSync as mkdirSync36,
-  readFileSync as readFileSync41,
+  mkdirSync as mkdirSync37,
+  readFileSync as readFileSync42,
   renameSync as renameSync12,
   rmSync as rmSync12,
-  writeFileSync as writeFileSync14
+  writeFileSync as writeFileSync13
 } from "node:fs";
 import { randomUUID as randomUUID21 } from "node:crypto";
 import { homedir as homedir49 } from "node:os";
-import { dirname as dirname47, isAbsolute as isAbsolute12, join as join68 } from "node:path";
+import { dirname as dirname48, isAbsolute as isAbsolute12, join as join69 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir49(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute12(configuredRoot) ? configuredRoot : join68(homeDir, ".cache");
-  return join68(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute12(configuredRoot) ? configuredRoot : join69(homeDir, ".cache");
+  return join69(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -89203,7 +89444,7 @@ function readCatalogCache(path, type) {
     return;
   let payload;
   try {
-    payload = JSON.parse(readFileSync41(path, "utf8"));
+    payload = JSON.parse(readFileSync42(path, "utf8"));
   } catch {
     return;
   }
@@ -89235,9 +89476,9 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID21()}.tmp`;
   try {
-    mkdirSync36(dirname47(path), { recursive: true, mode: 448 });
+    mkdirSync37(dirname48(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync14(tempPath, `${JSON.stringify({
+    writeFileSync13(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
@@ -89724,7 +89965,7 @@ var init_openai_compatible_client = __esm(() => {
 });
 
 // src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes13 } from "node:crypto";
+import { randomBytes as randomBytes14 } from "node:crypto";
 function hostnameOf(host) {
   try {
     return new URL(`https://${host}`).hostname;
@@ -89754,7 +89995,7 @@ function consentSecurityHeaders(nonce, redirectOrigin) {
   };
 }
 function renderConsentPage(input) {
-  const nonce = randomBytes13(16).toString("base64");
+  const nonce = randomBytes14(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const provenance = input.verifiedHost ? `<div class="host">${escapeHtml(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
@@ -89799,7 +90040,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderLoopbackConsentPage(input) {
-  const nonce = randomBytes13(16).toString("base64");
+  const nonce = randomBytes14(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const body = `<!doctype html>
 <html lang="en">
@@ -89838,7 +90079,7 @@ ${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${esca
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderDemoSignInPage(input) {
-  const nonce = randomBytes13(16).toString("base64");
+  const nonce = randomBytes14(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const error2 = input.error ? `<p class="err" role="alert">${escapeHtml(input.error)}</p>` : "";
   const body = `<!doctype html>
@@ -89877,7 +90118,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderConsentErrorPage(message) {
-  const nonce = randomBytes13(16).toString("base64");
+  const nonce = randomBytes14(16).toString("base64");
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -89953,7 +90194,7 @@ import {
   unlink as unlink2
 } from "node:fs/promises";
 import { homedir as homedir50 } from "node:os";
-import { dirname as dirname48, join as join69 } from "node:path";
+import { dirname as dirname49, join as join70 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped2 = audit.skipped_corpora.map((skip) => ({
@@ -90067,7 +90308,7 @@ async function appendSourceAnswerLatencyLine(path, record3, options = {}) {
   const line = `${JSON.stringify(record3)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir5(dirname48(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname49(path), { recursive: true, mode: 448 });
   await makeExistingLedgerPrivate(path);
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line), maxBytes);
@@ -90120,8 +90361,8 @@ function resolveSourceAnswerLatencyLogPath(env = process.env) {
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join69(homedir50(), ".local", "share");
-  return join69(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join70(homedir50(), ".local", "share");
+  return join70(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
 }
 async function makeExistingLedgerPrivate(path) {
   try {
@@ -90224,7 +90465,7 @@ var init_answer_latency_log = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash50 } from "node:crypto";
-import { readFileSync as readFileSync42 } from "node:fs";
+import { readFileSync as readFileSync43 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir51 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
@@ -90391,7 +90632,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync42(trustPath, "utf8");
+        this.caPem = readFileSync43(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -90494,7 +90735,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url, init, timeoutMs, readFileSync42(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync43(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
 }
@@ -91355,6 +91596,24 @@ details.models .modelsbody { margin-top: 12px; }
 /* The confirm and conflict steps: a tinted box with a 1px border, never a stripe. */
 .pprompt { padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; display: grid; gap: 8px; }
 .pprompt p { margin: 0; color: var(--t1); }
+`, DASHBOARD_OUTSIDE_HELP_CSS = `
+.outside .ohlabel { color: var(--t3); font-size: var(--fs-caption); margin: -2px 0 10px; }
+.outside .ohstate { font-weight: 600; color: var(--t1); margin: 0 0 12px; }
+.outside .ohready { color: var(--good, var(--t1)); font-weight: 600; margin: 0 0 8px; }
+.outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
+.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; }
+.outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
+.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); }
+.outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
+.outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
+.outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
+.outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.outside .ohoff { color: var(--t3); }
+.outside .ohfence { display: grid; gap: 10px; margin: 8px 0 0; }
+.outside .ohfence .ohform { grid-template-columns: auto 1fr; align-items: center; }
+.outside .ohfence .ohform .actmsg { grid-column: 1 / -1; }
+.outside .actmsg[data-state="error"] { color: var(--bad); }
 `;
 
 // src/control-ui/browser-controller.ts
@@ -99420,6 +99679,230 @@ var init_agents = __esm(() => {
   MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 });
 
+// src/workers/dashboard/outside-help.ts
+function outsideHelpHref(basePath = "/dashboard") {
+  return `${basePath}${basePath.includes("?") ? "&" : "?"}${DASHBOARD_OUTSIDE_HELP_QUERY_PARAM}`;
+}
+function outsideHelpStateLine(summary) {
+  return DASHBOARD_OUTSIDE_HELP_COPY.state[summary.state];
+}
+function summaryOf(status) {
+  if (status.settings.state === "invalid")
+    return { state: "invalid" };
+  if (status.route.state === "not_configured")
+    return { state: "route_not_configured" };
+  if (status.route.state === "configured" && status.route.readiness && status.route.readiness.fences.length > 0)
+    return { state: "fence_held" };
+  return { state: status.settings.state };
+}
+function outsideHelpBlockerWords(code) {
+  return DASHBOARD_OUTSIDE_HELP_COPY.blockers[code] ?? fill(DASHBOARD_OUTSIDE_HELP_COPY.blockerOther, { code });
+}
+function renderOutsideHelpCard(status, input) {
+  const summary = summaryOf(status);
+  const canEdit = input.csrfToken !== undefined && input.localSession === true;
+  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
+  const route = status.route;
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const parts = [];
+  parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
+  parts.push(`<p class="ohlabel">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`);
+  parts.push(`<p class="pintro">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>`);
+  parts.push(`<p class="ohstate" data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</p>`);
+  if (status.restartPending)
+    parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
+  if (canUnlock) {
+    parts.push(`<form class="ohform" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
+  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div><ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`);
+  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeTitle)}</div>`);
+  if (route.state === "not_configured") {
+    parts.push(`<p class="pnote" data-outside-route="not_configured">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing)}</p>`);
+    if (route.policyWritable) {
+      parts.push(`<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}">` + `<button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+    } else {
+      parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile)}</p>`);
+    }
+  } else {
+    parts.push(renderReadiness(route));
+  }
+  parts.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`));
+  if (route.state === "configured") {
+    parts.push(renderAcknowledgements(route, canEdit));
+  }
+  if (route.state === "configured" && route.readiness && route.readiness.fences.length > 0) {
+    parts.push(renderFence(route.readiness, canEdit));
+  }
+  parts.push(renderEnable(status, summary, canEdit));
+  const config2 = { csrfToken: input.csrfToken ?? "", paths: DASHBOARD_OUTSIDE_HELP_PATHS, copy: { saving: DASHBOARD_OUTSIDE_HELP_COPY.saving, failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed, restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting } };
+  const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config2)}</script>` : "";
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
+}
+function renderReadiness(route) {
+  if (route.readinessUnavailable || !route.readiness) {
+    return `<p class="pnote ohwarn" data-outside-route="unknown">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.readinessUnavailable)}</p>`;
+  }
+  const ready = route.readiness;
+  const facts = [
+    ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
+    ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
+    ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
+    fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
+    ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown
+  ];
+  const blockers = ready.blockers.map((code) => `<li>${escapeHtml2(outsideHelpBlockerWords(code))}</li>`).join("");
+  const head = ready.ready ? `<p class="ohready" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.ready)}</p>` : `<p class="pnote ohwarn" data-outside-route="blocked">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.blocked)}</p><ul class="ohlist" data-outside-blockers>${blockers}</ul>`;
+  return `${head}<ul class="ohfacts">${facts.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>` + `<p class="pnote ohsmall">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }))}</p>`;
+}
+function renderSetupSteps(secretRef) {
+  const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => fill(step, { secretRef }));
+  return `<details class="howto" data-outside-steps><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle)}</summary>` + `<p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></details>`;
+}
+function renderAcknowledgements(route, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const accepted = new Set(route.acknowledgements.complete ? route.acknowledgements.accepted : []);
+  const boxes = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<label class="ohack"><input type="checkbox" name="acknowledged" value="${escapeHtml2(entry.id)}"` + `${accepted.has(entry.id) ? " checked" : ""}${disabled}><span>${escapeHtml2(entry.statement)}</span></label>`).join("");
+  const state = route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.acknowledged : DASHBOARD_OUTSIDE_HELP_COPY.notAcknowledged;
+  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>` + `<p class="pnote" data-outside-acknowledged="${route.acknowledgements.complete ? "yes" : "no"}">${escapeHtml2(state)}</p>` + `<form class="ohform" data-outside-form="route">${boxes}` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</p>` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></div></form>`;
+}
+function renderFence(ready, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const mine = ready.fences.some((fence) => fence.thisWallet);
+  const rows = ready.fences.map((fence) => `<li>${escapeHtml2(fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: fence.at.slice(0, 16).replace("T", " ") }))}</li>`).join("");
+  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceTitle)}</div><p class="pnote ohwarn" data-outside-fence>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceIntro)}</p><ul class="ohlist">${rows}</ul>` + `<div class="ohfence">` + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary"${mine ? "" : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}</span><span class="actmsg" data-action-message role="status"></span></form>` + ready.fences.map((fence) => `<form class="ohform" data-outside-form="abandon" data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join("") + `</div>`;
+}
+function renderEnable(status, summary, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const chosen = new Set(status.settings.languages);
+  const languages = status.languages.map((entry) => {
+    const name = LANGUAGE_NAMES[entry.language];
+    const off = !entry.installed;
+    return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled}>` + `<span>${escapeHtml2(name)}${off ? ` <span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
+  }).join("");
+  const on = status.settings.state === "on";
+  const route = status.route;
+  const blockedReason = status.settings.state === "invalid" ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
+  const invalid2 = status.settings.state === "invalid";
+  const button = invalid2 ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
+  const domainsOn = Object.entries(status.settings.domains).filter(([, on2]) => on2).map(([key]) => domainNames[key] ?? key);
+  const domainsOff = Object.entries(status.settings.domains).filter(([, on2]) => !on2).map(([key]) => domainNames[key] ?? key);
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on2]) => on2).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
+  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p>${domains}` + `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">${languages}` + `<div class="pfooter"><p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.automatic)}</p><div class="pbuttons">${button}</div>` + `<span class="actmsg" data-action-message role="status"></span></div></form>` + (summary.state === "fence_held" ? "" : "");
+}
+function outsideHelpClientScript(config2) {
+  return `(function () {
+  var config = ${escapeScriptJson(JSON.stringify(config2))};
+  var root = document.querySelector('[data-outside-help]');
+  if (!root) return;
+  function message(form, text, bad) {
+    var out = form.querySelector('[data-action-message]');
+    if (!out) return;
+    out.textContent = text;
+    out.setAttribute('data-state', bad ? 'error' : 'ok');
+  }
+  function numberOrNull(value) {
+    var trimmed = String(value || '').trim();
+    if (trimmed === '') return null;
+    var n = Number(trimmed);
+    return isFinite(n) ? n : NaN;
+  }
+  function bodyFor(form, kind, submitter) {
+    var data = new FormData(form);
+    if (kind === 'enable') {
+      var invalid = form.getAttribute('data-outside-invalid') === 'yes';
+      var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
+      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: data.getAll('languages') };
+      if (invalid) body.replace_invalid = true;
+      return body;
+    }
+    if (kind === 'route') {
+      return {
+        acknowledged: data.getAll('acknowledged'),
+        funding_date: String(data.get('funding_date') || ''),
+        daily_request_cap: numberOrNull(data.get('daily_request_cap')),
+        daily_spend_cap_usd: numberOrNull(data.get('daily_spend_cap_usd')),
+      };
+    }
+    if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
+    if (kind === 'unlock') return {};
+    return { confirm: true };
+  }
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
+  root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var kind = form.getAttribute('data-outside-form');
+      var confirmText = form.getAttribute('data-outside-confirm');
+      if (confirmText && !window.confirm(confirmText)) return;
+      var buttons = form.querySelectorAll('button');
+      buttons.forEach(function (button) { button.disabled = true; });
+      message(form, config.copy.saving, false);
+      try {
+        // The local unlock presents no credential at all: the boundary wants a
+        // loopback browser and nothing else. Every other form carries the CSRF token.
+        var response = await fetch(paths[kind], kind === 'unlock'
+          ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+          : {
+            method: 'POST', credentials: 'same-origin', cache: 'no-store',
+            headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify(bodyFor(form, kind, event.submitter)),
+          });
+        var result = {};
+        try { result = await response.json(); } catch (error) { result = {}; }
+        if (!response.ok || !result.ok) {
+          message(form, (result.error && result.error.message) || config.copy.failed, true);
+          buttons.forEach(function (button) { button.disabled = false; });
+          return;
+        }
+        message(form, result.status_message || '', false);
+        if (result.restarting) {
+          message(form, (result.status_message || '') + ' ' + config.copy.restarting, false);
+          setTimeout(function () { window.location.reload(); }, 6000);
+        } else {
+          setTimeout(function () { window.location.reload(); }, 1200);
+        }
+      } catch (error) {
+        message(form, config.copy.failed, true);
+        buttons.forEach(function (button) { button.disabled = false; });
+      }
+    });
+  });
+})();`;
+}
+function renderOutsideHelpSection(summary, basePath) {
+  if (!summary)
+    return "";
+  const href = outsideHelpHref(basePath);
+  const label = summary.state === "route_not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.setUp : DASHBOARD_OUTSIDE_HELP_COPY.edit;
+  return `<div class="sect" id="outside-help">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</div>` + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml2(outsideHelpStateLine(summary))}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a></div></div></div>`;
+}
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES;
+var init_outside_help = __esm(() => {
+  init_zkapi_consult_settings();
+  init_components();
+  init_vocabulary();
+  init_source_rows();
+  DASHBOARD_OUTSIDE_HELP_PATHS = {
+    unlock: "/dashboard/control/session/local",
+    enable: "/dashboard/consult",
+    route: "/dashboard/consult/route",
+    addRoute: "/dashboard/consult/route/add",
+    recover: "/dashboard/consult/recover",
+    abandon: "/dashboard/consult/abandon"
+  };
+  LANGUAGE_NAMES = {
+    en: "English",
+    nl: "Dutch",
+    fr: "French",
+    es: "Spanish",
+    "pt-PT": "Portuguese (Portugal)",
+    "pt-BR": "Portuguese (Brazil)",
+    de: "German",
+    it: "Italian"
+  };
+});
+
 // src/workers/dashboard/pages/setup.ts
 function renderDashboardSetupPage(view, options) {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
@@ -99450,6 +99933,7 @@ function renderDashboardSetupPage(view, options) {
       copyButtonLabel: CONNECTOR_SHEET_COPY_LABEL
     }),
     dashboardPrivacySection(rowOptions),
+    options?.controlMode === "native" ? "" : renderOutsideHelpSection(options?.outsideHelpSummary, basePath),
     dashboardModelsSection(states, view),
     ...options?.agents ? [renderDashboardAgentsSection({ view: options.agents, now: new Date(view.generated_at) })] : []
   ].filter((block) => block !== "").join(`
@@ -99586,6 +100070,7 @@ var init_setup = __esm(() => {
   init_source_dashboard();
   init_vocabulary();
   init_components();
+  init_outside_help();
   init_nav();
   init_source_rows();
   CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears on this page like any " + "built-in.";
@@ -99780,6 +100265,51 @@ var init_privacy = __esm(() => {
   };
 });
 
+// src/workers/dashboard/pages/outside-help.ts
+function renderDashboardOutsideHelpPage(view, options) {
+  const now = options?.now ?? new Date;
+  const basePath = options?.basePath;
+  return pageShell({
+    title: "Olympus",
+    crumb: DASHBOARD_OUTSIDE_HELP_COPY.crumb,
+    ...basePath === undefined ? {} : { basePath },
+    meta: dashboardCheckedLabel(view.generated_at, now),
+    body: [
+      renderDashboardNav("setup", { ...basePath === undefined ? {} : { basePath } }),
+      renderOutsideHelpBody(options)
+    ].join(`
+`),
+    styles: [DASHBOARD_NAV_CSS, DASHBOARD_SOURCE_ROWS_CSS, DASHBOARD_PRIVACY_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
+    ...options?.format === undefined ? {} : { format: options.format }
+  });
+}
+function renderOutsideHelpBody(options) {
+  const head = `<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`;
+  if (options?.controlMode === "native") {
+    return `<div class="privacy outside" data-outside-native>${head}<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.native)}</p></div>`;
+  }
+  const csrfToken = options?.controlSessionCsrfToken;
+  if (csrfToken === undefined) {
+    return `<div class="privacy outside" data-outside-locked>${head}` + `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.locked)} <a href="${escapeHtml2(`${setupHref(options?.basePath)}#${DASHBOARD_CONTROL_GATE_ID}`)}">Setup →</a></p></div>`;
+  }
+  const status = options?.outsideHelp;
+  if (!status) {
+    return `<div class="privacy outside" data-outside-unavailable>${head}<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unavailable)}</p></div>`;
+  }
+  return renderOutsideHelpCard(status, {
+    csrfToken,
+    localSession: options?.outsideHelpLocalSession === true,
+    ...options?.basePath === undefined ? {} : { basePath: options.basePath }
+  });
+}
+var init_outside_help2 = __esm(() => {
+  init_components();
+  init_nav();
+  init_outside_help();
+  init_source_rows();
+  init_vocabulary();
+});
+
 // src/workers/dashboard/index.ts
 function dashboardHtmlRoutePage(url) {
   const params = url.searchParams;
@@ -99791,6 +100321,8 @@ function dashboardHtmlRoutePage(url) {
     return "sensitivity";
   if (params.has(DASHBOARD_PRIVACY_QUERY_PARAM))
     return "privacy";
+  if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM))
+    return "outside_help";
   if (params.has(DASHBOARD_SETUP_QUERY_PARAM))
     return "setup";
   return "home";
@@ -99811,6 +100343,8 @@ function renderDashboardHtmlRoute(input) {
       return { html: renderDashboardSensitivityPage(view, options), status: 200 };
     case "privacy":
       return { html: renderDashboardPrivacyPage(view, options), status: 200 };
+    case "outside_help":
+      return { html: renderDashboardOutsideHelpPage(view, options), status: 200 };
     case "setup":
       return { html: renderDashboardSetupPage(view, options), status: 200 };
     case "home":
@@ -99915,12 +100449,15 @@ var init_dashboard = __esm(() => {
   init_background();
   init_sensitivity();
   init_privacy();
+  init_outside_help2();
+  init_outside_help();
   init_home();
   init_detail();
   init_setup();
   init_background();
   init_sensitivity();
   init_privacy();
+  init_outside_help2();
   init_vocabulary();
 });
 
@@ -99938,8 +100475,45 @@ var init_control_ui_contract = __esm(() => {
   ];
 });
 
+// src/core/request-peer.ts
+var exports_request_peer = {};
+__export(exports_request_peer, {
+  withRequestPeer: () => withRequestPeer,
+  requestPeerAddress: () => requestPeerAddress,
+  recordRequestPeer: () => recordRequestPeer,
+  isLoopbackAddress: () => isLoopbackAddress
+});
+function recordRequestPeer(request, address) {
+  if (address)
+    peers.set(request, address);
+}
+function requestPeerAddress(request) {
+  return peers.get(request);
+}
+function isLoopbackAddress(address) {
+  if (!address)
+    return false;
+  const value = address.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (value === "::1" || value === "0:0:0:0:0:0:0:1")
+    return true;
+  const v4 = value.startsWith("::ffff:") ? value.slice("::ffff:".length) : value;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
+}
+function withRequestPeer(handler) {
+  return (request, server) => {
+    try {
+      recordRequestPeer(request, server?.requestIP(request)?.address);
+    } catch {}
+    return handler(request);
+  };
+}
+var peers;
+var init_request_peer = __esm(() => {
+  peers = new WeakMap;
+});
+
 // src/workers/http.ts
-import { createHmac as createHmac3, randomBytes as randomBytes14, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes15, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -99959,6 +100533,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
+  const sessionSecret = createHmac3("sha256", options.sessionSecret?.trim() || randomBytes15(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -99992,13 +100567,13 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return dashboardControlForbiddenResponse("origin_mismatch");
       const consumed = launchTickets.consume(await dashboardLaunchTicketFromBody(request), origin);
       if (consumed.status === "ok") {
-        const minted = mintDashboardControlSession(authToken, origin, now());
+        const minted = mintDashboardControlSession(sessionSecret, origin, now());
         return dashboardLaunchRedeemedResponse(minted, now());
       }
       return dashboardLaunchRefusedResponse(consumed.status);
     }
     if (isDashboardControlLockRequest(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), true);
       if (authorization.status === "origin_mismatch" || authorization.status === "csrf_mismatch") {
         return dashboardControlForbiddenResponse(authorization.status);
       }
@@ -100006,9 +100581,23 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return unauthorizedWorkerResponse();
       return dashboardControlLockedResponse();
     }
+    if (isDashboardLocalControlSessionRequest(request)) {
+      if (request.headers.has("Authorization"))
+        return dashboardConsultMacOnlyResponse();
+      if (request.headers.has("X-Forwarded-Proto") || request.headers.has("X-Forwarded-For") || request.headers.has("X-Forwarded-Host")) {
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      }
+      const origin = sameRequestOrigin(request);
+      if (!origin || !isLoopbackOrigin(origin))
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      if (!isLoopbackAddress(requestPeerAddress(request)))
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      const minted = mintDashboardControlSession(sessionSecret, origin, now(), "local");
+      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
+    }
     if (isDashboardControlSessionRequest(request)) {
       if (!hasValidWorkerBearerToken(request.headers.get("Authorization"), authToken)) {
-        const renewal = authorizeDashboardControlSession(request, authToken, now(), true);
+        const renewal = authorizeDashboardControlSession(request, sessionSecret, now(), true);
         if (renewal.status === "allowed") {
           return dashboardControlSessionResponse(renewal.sessionId, renewal.csrfToken, renewal.expiresAtMs, now());
         }
@@ -100020,21 +100609,23 @@ function withWorkerBearerAuth(fetchHandler, options) {
       const origin = sameRequestOrigin(request);
       if (!origin)
         return dashboardControlForbiddenResponse("origin_mismatch");
-      const minted = mintDashboardControlSession(authToken, origin, now());
+      const minted = mintDashboardControlSession(sessionSecret, origin, now());
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
     if (isOAuthCallbackRequest(request)) {
       return fetchHandler(withAuthenticatedGatewayPublicOrigin(request, presentedAuthorization, authToken, presentedGatewayPublicOrigin, presentedGatewayCallbackPeer));
     }
     if (isDashboardQueryTokenRequest(request, authToken)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false);
       if (authorization.status === "allowed") {
-        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
+        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
       }
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      if (isDashboardConsultControlRoute(request))
+        return dashboardConsultMacOnlyResponse();
       if (isAgentMintRoute(request) && !agentMintAllowed("bearer"))
         return agentMintLimitedResponse();
       if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed("bearer"))
@@ -100042,7 +100633,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
       return fetchHandler(isGatewayPublicOriginContextRoute(request) ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin) : request);
     }
     if (isDashboardControlReadRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false);
       if (authorization.status === "allowed") {
         const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
         return withRenewedDashboardControlCookie(response, authorization, now());
@@ -100052,9 +100643,9 @@ function withWorkerBearerAuth(fetchHandler, options) {
       }
     }
     if (isDashboardHtmlNavigationRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false, true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false, true);
       if (authorization.status === "allowed") {
-        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
+        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
       }
       if (authorization.status === "origin_mismatch") {
@@ -100062,13 +100653,18 @@ function withWorkerBearerAuth(fetchHandler, options) {
       }
     }
     if (isDashboardControlRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), true);
       if (authorization.status === "allowed") {
         if (isAgentMintRoute(request) && !agentMintAllowed(`session:${authorization.sessionId}`)) {
           return agentMintLimitedResponse();
         }
         if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed(`session:${authorization.sessionId}`)) {
           return remoteAccessToggleLimitedResponse();
+        }
+        if (isDashboardConsultControlRoute(request)) {
+          if (authorization.grade !== "local")
+            return dashboardConsultMacOnlyResponse();
+          return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
         }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
@@ -100196,6 +100792,17 @@ function dashboardLaunchRefusedResponse(status) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
   });
 }
+function isDashboardLocalControlSessionRequest(request) {
+  return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
+}
+function isLoopbackOrigin(origin) {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
 function isDashboardControlLockRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === "/dashboard/control/session/lock";
 }
@@ -100256,9 +100863,26 @@ function agentMintLimitedResponse() {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "Retry-After": "600" }
   });
 }
+function isDashboardConsultControlRoute(request) {
+  return request.method === "POST" && DASHBOARD_CONSULT_CONTROL_PATHS.includes(new URL(request.url).pathname);
+}
+function dashboardConsultMacOnlyResponse() {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: "mac_dashboard_only",
+      message: "Outside help can be changed only from the dashboard on this computer, in an unlocked browser."
+    }
+  }), {
+    status: 403,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+  });
+}
 function isDashboardControlRoute(request) {
   if (request.method !== "POST")
     return false;
+  if (isDashboardConsultControlRoute(request))
+    return true;
   return new Set([
     "/dashboard/dispositions",
     "/dashboard/connect/oauth/start",
@@ -100283,23 +100907,26 @@ function hmacTag(authToken, context, ...parts) {
     mac2.update("\x00").update(part);
   return mac2.digest("base64url");
 }
-function dashboardControlOriginTag(authToken, origin) {
-  return hmacTag(authToken, DASHBOARD_CONTROL_ORIGIN_CONTEXT, origin).slice(0, 22);
+function dashboardControlOriginTag(sessionSecret, origin) {
+  return hmacTag(sessionSecret, DASHBOARD_CONTROL_ORIGIN_CONTEXT, origin).slice(0, 22);
 }
-function dashboardControlSignature(authToken, parts) {
-  return hmacTag(authToken, DASHBOARD_CONTROL_SIGNATURE_CONTEXT, parts.nonce, String(parts.issuedSeconds), parts.originTag);
+function dashboardControlSignature(sessionSecret, parts) {
+  return hmacTag(sessionSecret, DASHBOARD_CONTROL_SIGNATURE_CONTEXT, parts.nonce, String(parts.issuedSeconds), parts.originTag, parts.grade);
 }
-function dashboardControlCsrfToken(authToken, nonce) {
-  return hmacTag(authToken, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
+function dashboardControlCsrfToken(sessionSecret, nonce) {
+  return hmacTag(sessionSecret, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
 }
 function encodeDashboardControlSession(parts) {
-  return [parts.nonce, parts.issuedSeconds, parts.originTag, parts.signature].join(".");
+  return [parts.nonce, parts.issuedSeconds, parts.originTag, GRADE_CODES[parts.grade], parts.signature].join(".");
 }
 function decodeDashboardControlSession(value) {
   const fields = value.split(".");
-  if (fields.length !== 4)
+  if (fields.length !== 5)
     return;
-  const [nonce, issued, originTag, signature] = fields;
+  const [nonce, issued, originTag, gradeCode, signature] = fields;
+  const grade = gradeCode === "b" ? "bearer" : gradeCode === "l" ? "local" : undefined;
+  if (!grade)
+    return;
   const issuedSeconds = Number(issued);
   if (!/^[A-Za-z0-9_-]{32}$/.test(nonce))
     return;
@@ -100307,34 +100934,36 @@ function decodeDashboardControlSession(value) {
     return;
   if (!/^[A-Za-z0-9_-]{22}$/.test(originTag) || !/^[A-Za-z0-9_-]{43}$/.test(signature))
     return;
-  return { nonce, issuedSeconds, originTag, signature };
+  return { nonce, issuedSeconds, originTag, grade, signature };
 }
 function dashboardControlExpiresAtMs(parts) {
   return (parts.issuedSeconds + DASHBOARD_CONTROL_SESSION_TTL_SECONDS) * 1000;
 }
-function mintDashboardControlSession(authToken, origin, nowMs) {
+function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bearer") {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes14(24).toString("base64url"),
+    nonce: randomBytes15(24).toString("base64url"),
     issuedSeconds: nowSeconds,
-    originTag: dashboardControlOriginTag(authToken, origin)
+    originTag: dashboardControlOriginTag(sessionSecret, origin),
+    grade
   };
-  const parts = { ...unsigned, signature: dashboardControlSignature(authToken, unsigned) };
+  const parts = { ...unsigned, signature: dashboardControlSignature(sessionSecret, unsigned) };
   return {
     status: "allowed",
     sessionId: encodeDashboardControlSession(parts),
-    csrfToken: dashboardControlCsrfToken(authToken, parts.nonce),
-    expiresAtMs: dashboardControlExpiresAtMs(parts)
+    csrfToken: dashboardControlCsrfToken(sessionSecret, parts.nonce),
+    expiresAtMs: dashboardControlExpiresAtMs(parts),
+    grade
   };
 }
-function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf, allowOriginlessNavigation = false) {
+function authorizeDashboardControlSession(request, sessionSecret, nowMs, requireCsrf, allowOriginlessNavigation = false) {
   const cookie = cookieValue(request.headers.get("Cookie"), DASHBOARD_CONTROL_COOKIE);
   if (!cookie)
     return { status: "missing" };
   const parts = decodeDashboardControlSession(cookie);
   if (!parts)
     return { status: "missing" };
-  const expected = dashboardControlSignature(authToken, parts);
+  const expected = dashboardControlSignature(sessionSecret, parts);
   if (!constantTimeStringEqual(parts.signature, expected))
     return { status: "missing" };
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
@@ -100343,10 +100972,10 @@ function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf
   const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined)
     return { status: "origin_mismatch" };
-  if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(authToken, origin))) {
+  if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin))) {
     return { status: "origin_mismatch" };
   }
-  const csrfToken = dashboardControlCsrfToken(authToken, parts.nonce);
+  const csrfToken = dashboardControlCsrfToken(sessionSecret, parts.nonce);
   if (requireCsrf) {
     const presented = request.headers.get("X-Olympus-CSRF");
     if (!presented || !constantTimeStringEqual(presented, csrfToken))
@@ -100356,7 +100985,8 @@ function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf
     status: "allowed",
     sessionId: encodeDashboardControlSession(parts),
     csrfToken,
-    expiresAtMs
+    expiresAtMs,
+    grade: parts.grade
   };
 }
 function withRenewedDashboardControlCookie(response, session, nowMs) {
@@ -100411,9 +101041,10 @@ function requestTargetOrigin(request) {
   return forwardedProto === "http" || forwardedProto === "https" ? `${forwardedProto}://${url.host}` : url.origin;
 }
 function withoutDashboardInternalContextHeaders(request) {
-  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER))
+  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER))
     return request;
   request.headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  request.headers.delete(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
   return request;
@@ -100475,8 +101106,10 @@ function normalizeGatewayPublicOrigin(value) {
     return;
   }
 }
-function withDashboardControlContextHeader(request, csrfToken) {
+function withDashboardControlContextHeader(request, csrfToken, grade) {
   request.headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
+  if (grade)
+    request.headers.set(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, grade);
   return request;
 }
 function cookieValue(header, name) {
@@ -100605,14 +101238,23 @@ function optionalEnv(value) {
   const trimmed2 = value?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, GRADE_CODES;
 var init_http = __esm(() => {
+  init_request_peer();
   init_worker_auth();
   init_dashboard_launch();
   DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
   AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
   AGENT_MINT_WINDOW_MS = 10 * 60000;
   REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
+  DASHBOARD_CONSULT_CONTROL_PATHS = [
+    "/dashboard/consult",
+    "/dashboard/consult/route",
+    "/dashboard/consult/route/add",
+    "/dashboard/consult/recover",
+    "/dashboard/consult/abandon"
+  ];
+  GRADE_CODES = { bearer: "b", local: "l" };
 });
 
 // src/workers/dashboard/pages/embedding-ledger.ts
@@ -100759,8 +101401,8 @@ var init_embedding_ledger2 = __esm(() => {
 });
 
 // src/workers/dashboard/background-runtime.ts
-import { readFileSync as readFileSync43 } from "node:fs";
-import { join as join70 } from "node:path";
+import { readFileSync as readFileSync44 } from "node:fs";
+import { join as join71 } from "node:path";
 function resolveLaneReportDir(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim();
   if (explicit)
@@ -100778,7 +101420,7 @@ function asRecord15(value) {
 }
 function readJsonFile2(path) {
   try {
-    return asRecord15(JSON.parse(readFileSync43(path, "utf8")));
+    return asRecord15(JSON.parse(readFileSync44(path, "utf8")));
   } catch {
     return;
   }
@@ -100872,7 +101514,7 @@ function readBackgroundRuntime(options = {}) {
   const guard = readGuardArbitration(resolveGuardReportPath(env));
   const lanes = [];
   for (const spec of LANE_REPORTS) {
-    const record3 = readJsonFile2(join70(dir, spec.file));
+    const record3 = readJsonFile2(join71(dir, spec.file));
     if (record3 === undefined)
       continue;
     const updatedAt = readStamp(record3.updated_at) ?? readStamp(record3.generated_at);
@@ -101397,8 +102039,8 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync21, copyFileSync, existsSync as existsSync45, lstatSync as lstatSync18, mkdirSync as mkdirSync37, readFileSync as readFileSync44 } from "node:fs";
-import { dirname as dirname49 } from "node:path";
+import { chmodSync as chmodSync22, copyFileSync, existsSync as existsSync45, lstatSync as lstatSync19, mkdirSync as mkdirSync38, readFileSync as readFileSync45 } from "node:fs";
+import { dirname as dirname50 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
   const scopeSourceIds = new Set((options.folderScopes ?? []).map((source) => source.disposition_source_id));
@@ -101463,7 +102105,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text = readFileSync44(path, "utf8");
+  const text = readFileSync45(path, "utf8");
   const raw = JSON.parse(text);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -101505,15 +102147,15 @@ function writeSourceIngestionExclusionsFile(options) {
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
   if (existsSync45(path)) {
-    const stat5 = lstatSync18(path);
+    const stat5 = lstatSync19(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
     }
     backupPath = `${path}.${stamp}.bak`;
     copyFileSync(path, backupPath);
-    chmodSync21(backupPath, 384);
+    chmodSync22(backupPath, 384);
   } else {
-    mkdirSync37(dirname49(path), { recursive: true });
+    mkdirSync38(dirname50(path), { recursive: true });
   }
   writePrivateFileAtomicSync(path, text);
   return {
@@ -102209,9 +102851,9 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash53, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { readFileSync as readFileSync45, statSync as statSync19 } from "node:fs";
+import { readFileSync as readFileSync46, statSync as statSync19 } from "node:fs";
 import { homedir as homedir52 } from "node:os";
-import { join as join71, resolve as resolve9 } from "node:path";
+import { join as join72, resolve as resolve9 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -102677,6 +103319,11 @@ function createEmailSourceWorker(options = {}) {
           const privacyRead = sourceDashboard.privacy && dashboardPage === "privacy" && writeAuthority ? await sourceDashboard.privacy.read().catch(() => {
             return;
           }) : undefined;
+          const outsideHelp = sourceDashboard.consult && !dashboardUi && dashboardPage === "outside_help" && controlSessionCsrfToken !== undefined ? await sourceDashboard.consult.status().catch(() => {
+            return;
+          }) : undefined;
+          const outsideHelpLocalSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local";
+          const outsideHelpSummary = sourceDashboard.consult && !dashboardUi && dashboardPage === "setup" ? safeOutsideHelpSummary(sourceDashboard.consult) : undefined;
           let modelInstalls;
           try {
             modelInstalls = sourceDashboard.modelInstalls?.();
@@ -102687,6 +103334,8 @@ function createEmailSourceWorker(options = {}) {
             ...modelInstalls ? { modelInstalls } : {},
             ...sourceDashboard.privacy && privacyShown ? { privacy: privacySummary?.ok ? privacySummary.summary : "unreadable" } : {},
             ...privacyRead?.ok ? { privacySettings: privacyRead.settings } : {},
+            ...outsideHelp ? { outsideHelp, outsideHelpLocalSession } : {},
+            ...outsideHelpSummary ? { outsideHelpSummary } : {},
             embeddingRuntime,
             backgroundRuntime,
             ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
@@ -102937,6 +103586,26 @@ function createEmailSourceWorker(options = {}) {
             }, 409);
           }
           return json({ ok: true, settings: outcome.settings, status_message: "Privacy saved." });
+        }
+        if (request.method === "POST" && DASHBOARD_CONSULT_CONTROL_PATHS.includes(url.pathname)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
+            return json({ ok: false, error: { code: "mac_dashboard_only", message: "Outside help can be changed only from the dashboard on this computer, in an unlocked browser." } }, 403);
+          }
+          if (!sourceDashboard?.consult) {
+            throw new EmailSourceWorkerError(501, "consult_not_supported", "This worker does not support outside help.");
+          }
+          const record3 = await parseObjectBody(request);
+          const backend = sourceDashboard.consult;
+          const outcome = url.pathname === "/dashboard/consult" ? await backend.setEnabled(record3) : url.pathname === "/dashboard/consult/route" ? await backend.saveRoute(record3) : url.pathname === "/dashboard/consult/route/add" ? await backend.addRoute(record3) : url.pathname === "/dashboard/consult/recover" ? await backend.recover(record3) : await backend.abandon(record3);
+          if (!outcome.ok) {
+            return json({ ok: false, error: { code: outcome.code, message: outcome.message }, ...outcome.revision !== undefined ? { revision: outcome.revision } : {} }, outcome.httpStatus);
+          }
+          return json({
+            ok: true,
+            status_message: outcome.status_message,
+            ...outcome.restarting !== undefined ? { restarting: outcome.restarting } : {},
+            ...outcome.revision !== undefined ? { revision: outcome.revision } : {}
+          });
         }
         if (request.method === "POST" && url.pathname === "/dashboard/models/retry") {
           if (!sourceDashboard?.retryModel) {
@@ -104115,6 +104784,13 @@ async function retrySqliteBusy(operation) {
     }
   }
   throw lastError;
+}
+function safeOutsideHelpSummary(backend) {
+  try {
+    return backend.summary();
+  } catch {
+    return;
+  }
 }
 function sqliteBusyRetryDelays() {
   const configured = process.env.OLYMPUS_SQLITE_BUSY_RETRY_DELAYS_MS;
@@ -105487,7 +106163,7 @@ function readDashboardRegistryOutcome(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync45(join71(homedir52(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync46(join72(homedir52(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -106225,31 +106901,31 @@ import {
   closeSync as closeSync13,
   createReadStream as createReadStream2,
   existsSync as existsSync46,
-  mkdirSync as mkdirSync38,
+  mkdirSync as mkdirSync39,
   openSync as openSync13,
-  readFileSync as readFileSync46,
+  readFileSync as readFileSync47,
   readdirSync as readdirSync7,
   renameSync as renameSync13,
   rmSync as rmSync13,
   statSync as statSync20,
   statfsSync,
-  writeFileSync as writeFileSync15,
+  writeFileSync as writeFileSync14,
   writeSync as writeSync3
 } from "node:fs";
 import { homedir as homedir53 } from "node:os";
-import { dirname as dirname50, isAbsolute as isAbsolute13, join as join72 } from "node:path";
+import { dirname as dirname51, isAbsolute as isAbsolute13, join as join73 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const configured = env[BUILT_IN_REASONING_DIR_ENV]?.trim();
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join72(env.HOME?.trim() || homedir53(), ".local", "share");
-  const root = configured || join72(dataRoot, "openclaw", "olympus", "models", "built-in-reasoning");
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join73(env.HOME?.trim() || homedir53(), ".local", "share");
+  const root = configured || join73(dataRoot, "openclaw", "olympus", "models", "built-in-reasoning");
   if (!isAbsolute13(root))
     throw new TypeError("The built-in reasoning directory must be an absolute path.");
   return {
     root,
-    modelDir: join72(root, model.modelId),
-    runtimeDir: join72(root, `llama.cpp-${runtime.release}-${platform2}`),
-    statusPath: join72(root, "status.json"),
-    lockPath: join72(root, "install.lock")
+    modelDir: join73(root, model.modelId),
+    runtimeDir: join73(root, `llama.cpp-${runtime.release}-${platform2}`),
+    statusPath: join73(root, "status.json"),
+    lockPath: join73(root, "install.lock")
   };
 }
 function currentPlatform2() {
@@ -106266,7 +106942,7 @@ function readBuiltInReasoningStatus(model, env = process.env) {
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync46(builtInReasoningPaths(model, env).statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync47(builtInReasoningPaths(model, env).statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -106278,7 +106954,7 @@ async function installBuiltInReasoning(options) {
   const platform2 = options.platform ?? currentPlatform2();
   const paths = builtInReasoningPaths(model, options.env, runtime, platform2);
   const reporter = new ProgressReporter2(paths.statusPath, model.modelId, options.now, options.onProgress);
-  const modelPath = join72(paths.modelDir, model.file.name);
+  const modelPath = join73(paths.modelDir, model.file.name);
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
@@ -106408,7 +107084,7 @@ function reportBuiltInReasoningState(options, state, failure2) {
 function findServerBinary(runtimeDir) {
   const marker = readRuntimeMarker(runtimeDir);
   if (marker?.serverPath)
-    return join72(runtimeDir, marker.serverPath);
+    return join73(runtimeDir, marker.serverPath);
   throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
 }
 async function verifyModelFile(path, model, reporter, timeoutMs) {
@@ -106427,27 +107103,27 @@ async function verifyModelFile(path, model, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync46(join72(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    return JSON.parse(readFileSync47(join73(runtimeDir, RUNTIME_MARKER2), "utf8"));
   } catch {
     return;
   }
 }
 function runtimeInstalled2(runtimeDir, archive) {
   const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync46(join72(runtimeDir, marker.serverPath));
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync46(join73(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
   const staging = `${runtimeDir}.staging-${randomUUID22()}`;
   ensureDirectory2(staging);
   try {
-    const archivePath = join72(staging, archive.name);
+    const archivePath = join73(staging, archive.name);
     await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
       extract(archivePath, staging);
     } catch (error2) {
       if (isNoSpaceError(error2)) {
-        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname50(runtimeDir)) ?? 0, "the disk filled up while unpacking");
+        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname51(runtimeDir)) ?? 0, "the disk filled up while unpacking");
       }
       throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error2 instanceof Error ? error2.message : String(error2)}).`);
     }
@@ -106457,7 +107133,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync15(join72(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync14(join73(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync13(runtimeDir, { recursive: true, force: true });
     renameSync13(staging, runtimeDir);
@@ -106480,14 +107156,14 @@ function extractWithTar(archivePath, targetDir) {
 function locateFile(root, name, depth = 0, prefix = "") {
   let entries;
   try {
-    entries = readdirSync7(join72(root, prefix));
+    entries = readdirSync7(join73(root, prefix));
   } catch {
     return;
   }
   if (entries.includes(name)) {
     const relative7 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync20(join72(root, relative7)).isFile())
+      if (statSync20(join73(root, relative7)).isFile())
         return relative7;
     } catch {}
   }
@@ -106496,7 +107172,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   for (const entry of entries) {
     const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync20(join72(root, child)).isDirectory())
+      if (!statSync20(join73(root, child)).isDirectory())
         continue;
     } catch {
       continue;
@@ -106572,7 +107248,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     });
     if (isNoSpaceError(error2)) {
       rmSync13(partial2, { force: true });
-      throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname50(target)) ?? 0, "the disk is full");
+      throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname51(target)) ?? 0, "the disk is full");
     }
     throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write ${partial2}: ${String(error2)}`);
   }
@@ -106610,7 +107286,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
             closeSync13(fd);
           } catch {}
           rmSync13(partial2, { force: true });
-          throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname50(target)) ?? 0, "the disk filled up during the download");
+          throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname51(target)) ?? 0, "the disk filled up during the download");
         }
         throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error2)}`);
       }
@@ -106686,7 +107362,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, run) {
 }
 function lockHolder(lockPath) {
   try {
-    return JSON.parse(readFileSync46(lockPath, "utf8"));
+    return JSON.parse(readFileSync47(lockPath, "utf8"));
   } catch {
     return;
   }
@@ -106696,7 +107372,7 @@ function refreshLock(lockPath, token) {
     return;
   try {
     const temporary = `${lockPath}.${process.pid}.tmp`;
-    writeFileSync15(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
+    writeFileSync14(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
     renameSync13(temporary, lockPath);
   } catch {}
 }
@@ -106716,7 +107392,7 @@ function tryAcquireLock2(lockPath, token) {
 }
 function lockIsStale2(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync46(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync47(lockPath, "utf8"));
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
         process.kill(holder.pid, 0);
@@ -106736,7 +107412,7 @@ function lockIsStale2(lockPath) {
 }
 function ensureDirectory2(path) {
   try {
-    mkdirSync38(path, { recursive: true, mode: 448 });
+    mkdirSync39(path, { recursive: true, mode: 448 });
   } catch (error2) {
     throw new BuiltInReasoningInstallError("disk_write_failed", `Could not create ${path}: ${String(error2)}`);
   }
@@ -106804,9 +107480,9 @@ class ProgressReporter2 {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync38(dirname50(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync39(dirname51(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync15(temporary, `${JSON.stringify(this.status)}
+      writeFileSync14(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync13(temporary, this.statusPath);
     } catch {}
@@ -106835,11 +107511,11 @@ var init_install = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/server.ts
 import { spawn as spawn5 } from "node:child_process";
-import { randomBytes as randomBytes15 } from "node:crypto";
-import { mkdtempSync as mkdtempSync3, rmSync as rmSync14, writeFileSync as writeFileSync16 } from "node:fs";
+import { randomBytes as randomBytes16 } from "node:crypto";
+import { mkdtempSync as mkdtempSync3, rmSync as rmSync14, writeFileSync as writeFileSync15 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
 import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir8 } from "node:os";
-import { join as join73 } from "node:path";
+import { join as join74 } from "node:path";
 function llamaServerEnvironment(parent, alias) {
   const env = {};
   for (const name of LLAMA_SERVER_ENV_ALLOWLIST) {
@@ -106991,13 +107667,13 @@ function createLlamaServerHandle(launch, options = {}) {
     superseded();
     const port = await freeLoopbackPort();
     superseded();
-    const token = randomBytes15(24).toString("base64url");
-    const alias = `olympus-${randomBytes15(12).toString("hex")}`;
-    const tokenDir = mkdtempSync3(join73(tmpdir8(), "olympus-built-in-model-"));
-    const tokenFile = join73(tokenDir, "token");
+    const token = randomBytes16(24).toString("base64url");
+    const alias = `olympus-${randomBytes16(12).toString("hex")}`;
+    const tokenDir = mkdtempSync3(join74(tmpdir8(), "olympus-built-in-model-"));
+    const tokenFile = join74(tokenDir, "token");
     let spawnedProcess;
     try {
-      writeFileSync16(tokenFile, `${token}
+      writeFileSync15(tokenFile, `${token}
 `, { mode: 384 });
       spawnedProcess = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
         stdio: ["ignore", "ignore", "pipe"],
@@ -110055,12 +110731,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname51, join as join74 } from "node:path";
+import { dirname as dirname52, join as join75 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join74(dirname51(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join75(dirname52(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -110519,11 +111195,11 @@ var init_answer_activity = __esm(() => {
 
 // src/workers/classification/privacy-profile.ts
 import { createHash as createHash56 } from "node:crypto";
-import { mkdirSync as mkdirSync39 } from "node:fs";
+import { mkdirSync as mkdirSync40 } from "node:fs";
 import { homedir as homedir54 } from "node:os";
-import { dirname as dirname52, join as join75 } from "node:path";
+import { dirname as dirname53, join as join76 } from "node:path";
 function defaultPrivacyProfilePath() {
-  return join75(homedir54(), ".olympus", "privacy.json");
+  return join76(homedir54(), ".olympus", "privacy.json");
 }
 function resolvePrivacyProfilePath(options = {}) {
   const env = options.env ?? process.env;
@@ -110679,7 +111355,7 @@ function writePrivacyProfile(update, options = {}) {
   if (!unchanged)
     writeOwnerTierRules([...kept, ...owned], rulesOptions);
   const path = resolvePrivacyProfilePath(options);
-  mkdirSync39(dirname52(path), { recursive: true, mode: 448 });
+  mkdirSync40(dirname53(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}
 `);
   return next;
@@ -110712,8 +111388,8 @@ var init_privacy_profile = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync40, readFileSync as readFileSync47 } from "node:fs";
-import { dirname as dirname53 } from "node:path";
+import { mkdirSync as mkdirSync41, readFileSync as readFileSync48 } from "node:fs";
+import { dirname as dirname54 } from "node:path";
 function defaultSnifferMaxCallsPerPass(kind) {
   return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
 }
@@ -110730,7 +111406,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync47(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync48(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -110750,7 +111426,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync40(dirname53(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync41(dirname54(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -119159,43 +119835,6 @@ var init_remote_mcp = __esm(() => {
   init_tokens();
 });
 
-// src/core/request-peer.ts
-var exports_request_peer = {};
-__export(exports_request_peer, {
-  withRequestPeer: () => withRequestPeer,
-  requestPeerAddress: () => requestPeerAddress,
-  recordRequestPeer: () => recordRequestPeer,
-  isLoopbackAddress: () => isLoopbackAddress
-});
-function recordRequestPeer(request, address) {
-  if (address)
-    peers.set(request, address);
-}
-function requestPeerAddress(request) {
-  return peers.get(request);
-}
-function isLoopbackAddress(address) {
-  if (!address)
-    return false;
-  const value = address.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  if (value === "::1" || value === "0:0:0:0:0:0:0:1")
-    return true;
-  const v4 = value.startsWith("::ffff:") ? value.slice("::ffff:".length) : value;
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
-}
-function withRequestPeer(handler) {
-  return (request, server) => {
-    try {
-      recordRequestPeer(request, server?.requestIP(request)?.address);
-    } catch {}
-    return handler(request);
-  };
-}
-var peers;
-var init_request_peer = __esm(() => {
-  peers = new WeakMap;
-});
-
 // src/workers/remote-oauth/pinned-clients.ts
 var exports_pinned_clients = {};
 __export(exports_pinned_clients, {
@@ -119367,7 +120006,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash58, randomBytes as randomBytes16, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash58, randomBytes as randomBytes17, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -119485,8 +120124,8 @@ function createRemoteOAuthHandler(options) {
     }
     sweep();
     admitPending();
-    const requestId = randomBytes16(16).toString("hex");
-    const csrf = randomBytes16(32).toString("base64url");
+    const requestId = randomBytes17(16).toString("hex");
+    const csrf = randomBytes17(32).toString("base64url");
     const entry = {
       client,
       redirectUri,
@@ -119516,7 +120155,7 @@ function createRemoteOAuthHandler(options) {
   const issueCode = (requestId, entry, u) => {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = u.installId ? mintCredential("code", u.installId) : randomBytes16(32).toString("base64url");
+    const code = u.installId ? mintCredential("code", u.installId) : randomBytes17(32).toString("base64url");
     codes.set(sha2566(code), {
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -120378,8 +121017,8 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_CLAIM_HOLD_MS: () => PRIVATE_ANSWER_CLAIM_HOLD_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
-import { randomBytes as randomBytes17 } from "node:crypto";
-import { lstatSync as lstatSync19 } from "node:fs";
+import { randomBytes as randomBytes18 } from "node:crypto";
+import { lstatSync as lstatSync20 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
   if (timing.outcome === "failed")
@@ -120536,7 +121175,7 @@ class PrivateAnswerJobs {
         break;
       this.drop(oldest);
     }
-    const id = `oly2p.${installId}.${randomBytes17(32).toString("base64url")}`;
+    const id = `oly2p.${installId}.${randomBytes18(32).toString("base64url")}`;
     const at = this.now();
     const policy = this.bindPolicy();
     const job = {
@@ -120829,7 +121468,7 @@ class PrivateAnswerJobs {
       return gone();
     let isFile = false;
     try {
-      isFile = lstatSync19(path).isFile();
+      isFile = lstatSync20(path).isFile();
     } catch {
       isFile = false;
     }
@@ -121384,7 +122023,7 @@ class PrivateAnswerJobs {
       const path = localPaths[index];
       if (!path)
         return citation;
-      const token = randomBytes17(32).toString("base64url");
+      const token = randomBytes18(32).toString("base64url");
       opens.set(token, path);
       return { ...citation, open: { kind: "mac", token } };
     });
@@ -122036,9 +122675,9 @@ __export(exports_open_target, {
   createDropboxOpenTargets: () => createDropboxOpenTargets,
   OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
 });
-import { existsSync as existsSync49, lstatSync as lstatSync20, readFileSync as readFileSync48, readdirSync as readdirSync8, realpathSync as realpathSync3, statSync as statSync21 } from "node:fs";
+import { existsSync as existsSync49, lstatSync as lstatSync21, readFileSync as readFileSync49, readdirSync as readdirSync8, realpathSync as realpathSync3, statSync as statSync21 } from "node:fs";
 import { homedir as homedir55 } from "node:os";
-import { extname as extname2, join as join76, sep as sep7 } from "node:path";
+import { extname as extname2, join as join77, sep as sep7 } from "node:path";
 function dropboxPreviewUrl(displayPath) {
   const segments = dropboxSegments(displayPath);
   if (!segments || segments.length === 0)
@@ -122063,7 +122702,7 @@ function localDropboxRoots(options = {}) {
     }
   } catch {}
   try {
-    const info = JSON.parse(readFileSync48(join76(home, ".dropbox", "info.json"), "utf8"));
+    const info = JSON.parse(readFileSync49(join77(home, ".dropbox", "info.json"), "utf8"));
     if (info && typeof info === "object") {
       for (const account of Object.values(info)) {
         const path = account && typeof account === "object" ? account.path : undefined;
@@ -122073,13 +122712,13 @@ function localDropboxRoots(options = {}) {
     }
   } catch {}
   try {
-    const cloud = join76(home, "Library", "CloudStorage");
+    const cloud = join77(home, "Library", "CloudStorage");
     for (const entry of readdirSync8(cloud).sort()) {
       if (/^Dropbox/.test(entry))
-        candidates.push(join76(cloud, entry));
+        candidates.push(join77(cloud, entry));
     }
   } catch {}
-  candidates.push(join76(home, "Dropbox"));
+  candidates.push(join77(home, "Dropbox"));
   const roots = [];
   for (const candidate of candidates) {
     try {
@@ -122116,7 +122755,7 @@ function localOpenArguments(path, roots) {
   if (!path.startsWith("/") || path.includes("\x00"))
     return;
   try {
-    const link = lstatSync20(path);
+    const link = lstatSync21(path);
     if (link.isSymbolicLink() || !link.isFile())
       return;
     if (realpathSync3.native(path) !== path)
@@ -122130,7 +122769,7 @@ function localOpenArguments(path, roots) {
   return OPENABLE_EXTENSIONS.has(extension) ? [path] : ["-R", path];
 }
 function localFileUnder(root, segments) {
-  const path = join76(root, ...segments);
+  const path = join77(root, ...segments);
   try {
     if (!existsSync49(path))
       return;
@@ -123318,18 +123957,23 @@ function createChatGptSetupBackend(options) {
         venice: options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile("venice")),
         local: Object.values(policy.modelProfiles).some((profile) => profile.provider === "local-openai-compatible" && profile.purpose !== "embedding")
       };
-      const next = applyModelChoice(policy, choice, configured);
+      const decided = applyModelChoice(policy, choice, configured);
       let restarting = false;
-      if (next.changed) {
+      if (decided.changed) {
         if (options.sovereignty.source !== "file" || !options.sovereignty.path)
           throw new ModelChoiceRefusal("model_not_configured");
-        writeSovereigntyConfigFile({ config: next.config, path: options.sovereignty.path, force: true });
-        policy = next.config;
-        restarting = options.requestReload();
+        const update = updateSovereigntyConfigFile({
+          path: options.sovereignty.path,
+          patch: (current) => applyModelChoice(current, choice, configured).config
+        });
+        if (!update.ok)
+          throw new ModelChoiceRefusal("model_not_configured");
+        policy = update.config;
+        restarting = update.changed ? options.requestReload() : false;
       }
       const answers = currentAnswerChoice(policy);
       return {
-        changed: next.changed,
+        changed: decided.changed,
         embedding: embeddingIsBuiltIn(policy) ? "built_in" : "custom",
         ...answers ? { answers } : {},
         restarting
@@ -123460,6 +124104,504 @@ var init_dashboard_privacy = __esm(() => {
   init_shared_privacy();
 });
 
+// src/core/consult-settings-writer.ts
+import { chmodSync as chmodSync23, lstatSync as lstatSync22, mkdirSync as mkdirSync42, statSync as statSync22 } from "node:fs";
+import { dirname as dirname55, isAbsolute as isAbsolute14 } from "node:path";
+function writeConsultSettings(input, location = {}) {
+  const path = location.path ?? consultSettingsPath(location.env ?? process.env);
+  if (path === undefined || !isAbsolute14(path))
+    return { ok: false, reason: "no_home" };
+  const nextRevision = input.expectedRevision + 1;
+  const candidate = parseConsultSettings({
+    v: CONSULT_SETTINGS_VERSION,
+    revision: nextRevision,
+    enabled: input.enabled,
+    languages: [...input.languages],
+    domains: { ...input.domains },
+    strict: input.strict
+  });
+  if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+    return { ok: false, reason: "invalid_input" };
+  const custody = ensureSettingsDirectory(dirname55(path));
+  if (custody !== "ok")
+    return { ok: false, reason: custody };
+  let published = false;
+  const afterPublish = () => {
+    const actual = readConsultSettings({ path });
+    if (actual.state === "valid" && actual.settings.revision === nextRevision) {
+      return { ok: true, settings: actual.settings, publishedDespiteError: true };
+    }
+    return { ok: false, reason: "write_uncertain", current: actual };
+  };
+  try {
+    return withFileLeaseSync(path, (lease) => {
+      const current = readConsultSettings({ path });
+      if (current.state === "invalid") {
+        if (input.replaceInvalid !== true)
+          return { ok: false, reason: "invalid_current", current, invalidReason: current.reason };
+      } else {
+        const currentRevision = current.state === "absent" ? 0 : current.settings.revision;
+        if (currentRevision !== input.expectedRevision)
+          return { ok: false, reason: "revision_conflict", current };
+      }
+      try {
+        lease.commit(() => {
+          writePrivateFileAtomicSync(path, `${JSON.stringify(candidate)}
+`, { onPublished: () => {
+            published = true;
+          } });
+          __consultSettingsWriterTestHooks.afterPublish?.(path);
+          chmodSync23(path, 384);
+        });
+      } catch {
+        if (!published)
+          return { ok: false, reason: "write_failed" };
+        return afterPublish();
+      }
+      const written = readConsultSettings({ path });
+      if (written.state !== "valid")
+        return { ok: false, reason: "write_uncertain", current: written };
+      return { ok: true, settings: written.settings };
+    }, { acquireTimeoutMs: CONSULT_SETTINGS_LEASE_TIMEOUT_MS });
+  } catch (error2) {
+    if (published)
+      return afterPublish();
+    if (error2 instanceof FileLeaseBusyError || error2?.code === "file_lease_busy")
+      return { ok: false, reason: "lease_busy" };
+    return { ok: false, reason: "write_failed" };
+  }
+}
+function ensureSettingsDirectory(directory) {
+  let stats;
+  try {
+    stats = lstatSync22(directory);
+  } catch (error2) {
+    if (error2?.code !== "ENOENT")
+      return "directory_unavailable";
+    try {
+      statSync22(dirname55(directory));
+    } catch {
+      return "home_missing";
+    }
+    try {
+      mkdirSync42(directory, { mode: 448 });
+      chmodSync23(directory, 448);
+    } catch {
+      return "directory_unavailable";
+    }
+    try {
+      stats = lstatSync22(directory);
+    } catch {
+      return "directory_unavailable";
+    }
+  }
+  if (stats.isSymbolicLink())
+    return "directory_symlink";
+  if (!stats.isDirectory())
+    return "directory_custody";
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid())
+    return "directory_custody";
+  if ((stats.mode & 63) !== 0)
+    return "directory_custody";
+  return "ok";
+}
+var __consultSettingsWriterTestHooks, CONSULT_SETTINGS_LEASE_TIMEOUT_MS = 2000;
+var init_consult_settings_writer = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_consult_settings();
+  __consultSettingsWriterTestHooks = { afterPublish: undefined };
+});
+
+// src/workers/email-source/dashboard-consult.ts
+var exports_dashboard_consult = {};
+__export(exports_dashboard_consult, {
+  createDashboardConsultAdapter: () => createDashboardConsultAdapter,
+  DASHBOARD_ZKAPI_PROFILE_ID: () => DASHBOARD_ZKAPI_PROFILE_ID,
+  DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
+  DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
+});
+function createDashboardConsultAdapter(options) {
+  const env = options.env ?? process.env;
+  const now = options.now ?? (() => new Date);
+  const statePath = options.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
+  const location = options.settingsLocation ?? { env };
+  const readiness = options.readiness ?? zkapiConsultReadiness;
+  let policy = options.sovereignty.config;
+  let restartPending = false;
+  const zkapiProfile = () => {
+    const entries = Object.entries(policy.modelProfiles).filter(([, profile2]) => profile2.provider === "zkapi");
+    if (entries.length !== 1)
+      return;
+    const [id, profile] = entries[0];
+    return { id, profile };
+  };
+  const transport = () => resolveZkapiConsultTransport(policy.modelProfiles, () => {
+    return;
+  }, { env, statePath });
+  const fenceHeld = () => {
+    try {
+      return Object.keys(zkapiOutstandingFences(statePath)).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  const settingsView = () => {
+    const read = readConsultSettings(location);
+    const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS;
+    return {
+      state: read.state === "invalid" ? "invalid" : read.state === "valid" && read.settings.enabled ? "on" : "off",
+      revision: read.state === "valid" ? read.settings.revision : 0,
+      languages: [...settings.languages],
+      domains: { ...settings.domains },
+      strict: settings.strict,
+      ...read.state === "invalid" ? { invalidReason: read.reason } : {}
+    };
+  };
+  const languages = () => {
+    const status = consultVocabularyFileStatus({ languages: ALL_LANGUAGES, domains: Object.fromEntries(Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS).map((key) => [key, false])) }, env);
+    return ALL_LANGUAGES.map((language) => {
+      const pack = CONSULT_LANGUAGE_PACKS[language];
+      const entry = status.find((item) => item.id === pack);
+      return { language, pack, state: entry?.state ?? "missing", installed: entry?.state === "verified" };
+    });
+  };
+  const routeView = async () => {
+    const route = zkapiProfile();
+    if (!route)
+      return { state: "not_configured", policyWritable: policyWritable() };
+    const settings = route.profile.zkapi;
+    const acknowledgements = settings?.acknowledgements ?? { version: 0, accepted: [] };
+    const complete = acknowledgements.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
+    const base = {
+      state: "configured",
+      profileId: route.id,
+      model: "model" in route.profile && typeof route.profile.model === "string" ? route.profile.model : "",
+      policyWritable: policyWritable(),
+      secretRef: route.profile.secretRef ?? "",
+      acknowledgements: { version: acknowledgements.version, accepted: [...acknowledgements.accepted], complete },
+      ...settings?.fundingDate ? { fundingDate: settings.fundingDate } : {},
+      ...settings?.depositUsd !== undefined ? { depositUsd: settings.depositUsd } : {},
+      ...settings?.dailyRequestCap !== undefined ? { dailyRequestCap: settings.dailyRequestCap } : {},
+      ...settings?.dailySpendCapUsd !== undefined ? { dailySpendCapUsd: settings.dailySpendCapUsd } : {}
+    };
+    const transportOptions = transport();
+    if (!transportOptions)
+      return base;
+    try {
+      const ready = await readiness({ ...transportOptions, apiKeyPresent: options.secretPresent(route.profile.secretRef), now: () => now() });
+      return {
+        ...base,
+        readiness: {
+          ready: ready.blockers.length === 0,
+          blockers: [...ready.blockers],
+          daemonFound: ready.daemonExecutable !== undefined,
+          ...ready.daemonVersion ? { daemonVersion: ready.daemonVersion } : {},
+          torMode: ready.tor,
+          torFound: ready.torExecutable !== undefined,
+          apiKeyConfigured: ready.apiKeyConfigured,
+          expiry: {
+            state: ready.money.expiryEstimate.state,
+            ...ready.money.expiryEstimate.daysLeft !== undefined ? { daysLeft: ready.money.expiryEstimate.daysLeft } : {},
+            ...ready.money.expiryEstimate.expiryDate ? { expiryDate: ready.money.expiryEstimate.expiryDate } : {}
+          },
+          requestsToday: { ...ready.requestsToday },
+          spendToday: { ...ready.spendToday },
+          fences: fencesView(),
+          routeLabel: ready.routeLabel,
+          ...ready.lastSession ? { lastSession: { at: ready.lastSession.at, result: ready.lastSession.result } } : {}
+        }
+      };
+    } catch {
+      return { ...base, readinessUnavailable: true };
+    }
+  };
+  const fencesView = () => {
+    try {
+      const mine = zkapiFenceScope({ env });
+      return Object.entries(zkapiOutstandingFences(statePath)).map(([scope, fence]) => ({ scope, at: fence.at, thisWallet: scope === mine }));
+    } catch {
+      return [];
+    }
+  };
+  const policyWritable = () => options.sovereignty.source === "file" && Boolean(options.sovereignty.path);
+  const writePolicy = (patch) => {
+    if (!policyWritable())
+      return { ok: false, httpStatus: 409, code: "policy_not_file", message: MESSAGES2.policyNotFile };
+    const update = updateSovereigntyConfigFile({ path: options.sovereignty.path, expect: policy, patch });
+    if (!update.ok) {
+      if (update.current)
+        policy = update.current;
+      if (update.reason === "conflict")
+        return { ok: false, httpStatus: 409, code: "policy_changed", message: MESSAGES2.policyChanged };
+      if (update.reason === "uncertain")
+        return { ok: false, httpStatus: 500, code: "policy_uncertain", message: MESSAGES2.policyUncertain };
+      return { ok: false, httpStatus: 500, code: "policy_unreadable", message: MESSAGES2.policyUnreadable };
+    }
+    policy = update.config;
+    return;
+  };
+  const invalid3 = (message, code = "invalid_params") => ({ ok: false, httpStatus: 400, code, message });
+  return {
+    summary() {
+      const settings = settingsView();
+      if (settings.state === "invalid")
+        return { state: "invalid" };
+      if (!zkapiProfile())
+        return { state: "route_not_configured" };
+      if (fenceHeld())
+        return { state: "fence_held" };
+      return { state: settings.state };
+    },
+    async status() {
+      return {
+        settings: settingsView(),
+        route: await routeView(),
+        languages: languages(),
+        restartPending
+      };
+    },
+    async setEnabled(update) {
+      const enabled = update.enabled;
+      if (typeof enabled !== "boolean")
+        return invalid3("Say whether outside help should be on or off.");
+      const revision = update.revision;
+      if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
+        return invalid3(MESSAGES2.needsRevision, "needs_revision");
+      const replaceInvalid = update.replace_invalid === true;
+      const current = readConsultSettings(location);
+      const base = current.state === "valid" ? current.settings : DEFAULT_CONSULT_SETTINGS;
+      let chosen = [...base.languages];
+      if (enabled && update.languages !== undefined) {
+        if (!Array.isArray(update.languages) || update.languages.length === 0)
+          return invalid3(MESSAGES2.languagesEmpty, "languages_empty");
+        if (!update.languages.every((item) => typeof item === "string" && ALL_LANGUAGES.includes(item))) {
+          return invalid3("An unknown language was chosen.", "language_unknown");
+        }
+        chosen = [...new Set(update.languages)];
+      }
+      if (enabled) {
+        const route = zkapiProfile();
+        if (!route)
+          return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
+        const acknowledgements = route.profile.zkapi?.acknowledgements;
+        const complete = acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
+        if (!complete)
+          return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES2.acknowledgementsIncomplete };
+        const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
+        if (!chosen.every((language) => installed2.has(language)))
+          return invalid3(MESSAGES2.languageMissing, "language_pack_missing");
+      }
+      const result = writeConsultSettings({
+        enabled,
+        languages: chosen,
+        domains: { ...base.domains },
+        strict: base.strict,
+        expectedRevision: revision,
+        ...replaceInvalid ? { replaceInvalid: true } : {}
+      }, location);
+      if (result.ok) {
+        return { ok: true, status_message: enabled ? MESSAGES2.turnedOn : MESSAGES2.turnedOff, revision: result.settings.revision };
+      }
+      return writeRefusal(result.reason, result.current?.state === "valid" ? result.current.settings.revision : 0);
+    },
+    async saveRoute(update) {
+      const route = zkapiProfile();
+      if (!route)
+        return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
+      const acknowledged = update.acknowledged;
+      if (!Array.isArray(acknowledged) || !acknowledged.every((item) => typeof item === "string"))
+        return invalid3(MESSAGES2.tickAll, "acknowledgements_incomplete");
+      const accepted = new Set(acknowledged);
+      if (!ACKNOWLEDGEMENT_IDS.every((id) => accepted.has(id)))
+        return invalid3(MESSAGES2.tickAll, "acknowledgements_incomplete");
+      const zkapi = {};
+      const cleared = [];
+      zkapi.acknowledgements = { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [...ACKNOWLEDGEMENT_IDS] };
+      if (update.funding_date !== undefined && update.funding_date !== null && update.funding_date !== "") {
+        if (typeof update.funding_date !== "string" || parseIsoDate(update.funding_date) === undefined)
+          return invalid3(MESSAGES2.fundingDate, "funding_date_invalid");
+        zkapi.fundingDate = update.funding_date;
+      }
+      for (const [field, key] of [["daily_request_cap", "dailyRequestCap"], ["daily_spend_cap_usd", "dailySpendCapUsd"], ["deposit_usd", "depositUsd"]]) {
+        const raw = update[field];
+        if (raw === undefined)
+          continue;
+        if (raw === null || raw === "") {
+          cleared.push(key);
+          continue;
+        }
+        if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || key === "dailyRequestCap" && !Number.isInteger(raw))
+          return invalid3(MESSAGES2.caps, "cap_invalid");
+        zkapi[key] = raw;
+      }
+      try {
+        const refused = writePolicy((current) => {
+          const next = structuredClone(current);
+          const profile = next.modelProfiles[route.id];
+          if (!profile || profile.provider !== "zkapi")
+            throw new OperationError("config_error", "The zkAPI route is no longer in the policy file.");
+          const block = { ...profile.zkapi ?? {}, ...zkapi };
+          for (const key of cleared)
+            delete block[key];
+          profile.zkapi = block;
+          return next;
+        });
+        if (refused)
+          return refused;
+      } catch (error2) {
+        return { ok: false, httpStatus: 400, code: "config_error", message: error2.message };
+      }
+      const restarting = options.requestReload();
+      restartPending = !restarting;
+      return { ok: true, status_message: restarting ? MESSAGES2.routeSavedRestart : MESSAGES2.routeSavedNoRestart, restarting };
+    },
+    async addRoute(update) {
+      if (update.confirm !== true)
+        return invalid3(MESSAGES2.confirm, "confirmation_required");
+      if (zkapiProfile())
+        return { ok: false, httpStatus: 409, code: "route_exists", message: MESSAGES2.routeExists };
+      try {
+        const refused = writePolicy((current) => {
+          if (Object.values(current.modelProfiles).some((profile) => profile.provider === "zkapi")) {
+            throw new OperationError("config_error", "A zkAPI route is already in the policy file.");
+          }
+          const next = structuredClone(current);
+          next.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID] = {
+            provider: "zkapi",
+            trust: "standard_cloud",
+            purpose: "consult",
+            baseUrl: ZKAPI_DAEMON_DEFAULT_BASE_URL,
+            model: DASHBOARD_ZKAPI_DEFAULT_MODEL,
+            secretRef: `env:${DASHBOARD_ZKAPI_API_KEY_ENV}`,
+            zkapi: {}
+          };
+          return next;
+        });
+        if (refused)
+          return refused;
+      } catch (error2) {
+        return { ok: false, httpStatus: 400, code: "config_error", message: error2.message };
+      }
+      const restarting = options.requestReload();
+      restartPending = !restarting;
+      return { ok: true, status_message: MESSAGES2.routeAdded, restarting };
+    },
+    async recover(update) {
+      if (update.confirm !== true)
+        return invalid3(MESSAGES2.confirm, "confirmation_required");
+      const transportOptions = transport();
+      if (!transportOptions)
+        return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
+      let fences;
+      try {
+        fences = zkapiOutstandingFences(statePath);
+      } catch {
+        return { ok: false, httpStatus: 500, code: "state_unavailable", message: "The consult ledger on this computer could not be read." };
+      }
+      const scopes = Object.keys(fences);
+      if (scopes.length === 0)
+        return { ok: false, httpStatus: 409, code: "no_unresolved_session", message: MESSAGES2.noFence };
+      if (!scopes.includes(zkapiFenceScope({ env })))
+        return { ok: false, httpStatus: 409, code: "unresolved_session_other_wallet", message: MESSAGES2.otherWallet };
+      const result = await options.recoverSession(transportOptions, zkapiProfile()?.profile.secretRef);
+      const receipt = result.ok ? result.receipt : result.error.receipt;
+      if (!result.ok)
+        return { ok: false, httpStatus: 502, code: result.error.code, message: MESSAGES2.recoveryFailed };
+      if (receipt?.fence !== "clear" || receipt.settlement !== "confirmed") {
+        return { ok: false, httpStatus: 502, code: "recovery_incomplete", message: MESSAGES2.recoveryIncomplete };
+      }
+      return { ok: true, status_message: MESSAGES2.recovered };
+    },
+    async abandon(update) {
+      if (update.confirm !== true)
+        return invalid3(MESSAGES2.confirm, "confirmation_required");
+      if (typeof update.scope !== "string" || !/^[0-9a-f]{32}$/.test(update.scope))
+        return invalid3(MESSAGES2.scope, "scope_invalid");
+      let found;
+      try {
+        found = abandonZkapiFence(statePath, update.scope, now());
+      } catch {
+        return { ok: false, httpStatus: 500, code: "state_unavailable", message: "The consult ledger on this computer could not be written." };
+      }
+      if (!found)
+        return { ok: false, httpStatus: 409, code: "no_unresolved_session", message: MESSAGES2.noFence };
+      return { ok: true, status_message: MESSAGES2.abandoned };
+    }
+  };
+}
+function writeRefusal(reason, revision) {
+  switch (reason) {
+    case "revision_conflict":
+      return { ok: false, httpStatus: 409, code: "conflict", message: MESSAGES2.conflict, revision };
+    case "invalid_current":
+      return { ok: false, httpStatus: 409, code: "settings_invalid", message: MESSAGES2.invalidCurrent, revision: 0 };
+    case "no_home":
+    case "home_missing":
+      return { ok: false, httpStatus: 500, code: "no_home", message: MESSAGES2.noHome };
+    case "directory_symlink":
+    case "directory_custody":
+    case "directory_unavailable":
+      return { ok: false, httpStatus: 409, code: "directory_custody", message: MESSAGES2.custody };
+    case "lease_busy":
+      return { ok: false, httpStatus: 503, code: "busy", message: MESSAGES2.busy };
+    case "invalid_input":
+      return { ok: false, httpStatus: 400, code: "invalid_params", message: MESSAGES2.languagesEmpty };
+    case "write_failed":
+      return { ok: false, httpStatus: 500, code: "write_failed", message: MESSAGES2.writeFailed };
+    case "write_uncertain":
+      return { ok: false, httpStatus: 500, code: "write_uncertain", message: MESSAGES2.writeUncertain };
+  }
+}
+var DASHBOARD_ZKAPI_PROFILE_ID = "zkapi-consult", DASHBOARD_ZKAPI_API_KEY_ENV = "OLYMPUS_ZKAPI_API_KEY", DASHBOARD_ZKAPI_DEFAULT_MODEL = "openai/gpt-5-mini", ALL_LANGUAGES, ACKNOWLEDGEMENT_IDS, MESSAGES2;
+var init_dashboard_consult = __esm(() => {
+  init_consult_gate();
+  init_consult_settings();
+  init_consult_settings_writer();
+  init_consult_transport_zkapi();
+  init_sovereignty();
+  init_zkapi_consult_settings();
+  init_operation_error();
+  init_consult_orchestrator();
+  ALL_LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
+  ACKNOWLEDGEMENT_IDS = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);
+  MESSAGES2 = {
+    needsRevision: "This change needs the settings revision the page was built from. Reload the page and try again.",
+    conflict: "Outside help was changed somewhere else since this page loaded. Reload the page to see the current setting.",
+    invalidCurrent: "The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.",
+    routeMissing: "Add the zkAPI route before turning outside help on.",
+    acknowledgementsIncomplete: "Read and tick every statement about cost and risk before turning outside help on.",
+    languageMissing: "A chosen language has no vocabulary pack installed on this computer.",
+    languagesEmpty: "Choose at least one language.",
+    noHome: "Olympus cannot find your home folder, so it cannot write the settings file.",
+    custody: "The folder ~/.olympus must belong to you alone (owner-only, not a link). Fix its permissions, then try again.",
+    busy: "Another change is being written right now. Try again in a moment.",
+    writeFailed: "Olympus could not write the settings file. Nothing was changed.",
+    writeUncertain: "Olympus could not confirm whether the settings file changed. Reload the page to see the current setting.",
+    policyNotFile: "Your privacy policy is not kept in a file on this computer, so Olympus cannot record this here.",
+    policyChanged: "Your privacy policy file changed since this page loaded. Nothing was written; reload the page and try again.",
+    policyUnreadable: "Your privacy policy file could not be read. Nothing was written.",
+    policyUncertain: "Olympus could not confirm whether your privacy policy file changed. Reload the page to see the current state.",
+    routeExists: "A zkAPI route is already configured.",
+    tickAll: "Tick every statement to record your acknowledgement.",
+    fundingDate: "Enter the funding date as YYYY-MM-DD, the day the deposit was confirmed.",
+    caps: "A daily limit must be a whole number of requests, or a positive number of dollars.",
+    confirm: "This action needs your confirmation.",
+    noFence: "There is no held request to recover.",
+    otherWallet: "The held request belongs to another wallet folder. Recover it there, or abandon it.",
+    scope: "Name which held request to abandon.",
+    turnedOn: "Outside help is on. When a private answer in ChatGPT is incomplete, Olympus may send one outside question for it.",
+    turnedOff: "Outside help is off. No outside question is sent.",
+    routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
+    routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
+    routeAdded: "The zkAPI route is added. Put the daemon's API key in the worker environment file, then finish the steps below.",
+    recovered: "Recovered: the held request settled and consults can run again.",
+    recoveryIncomplete: "The recovery session ran, but settlement was not confirmed. The request is still held; try again later.",
+    recoveryFailed: "The recovery session did not complete. The request is still held.",
+    abandoned: "The held request is marked abandoned. It no longer blocks consults and stays in the ledger as a record."
+  };
+});
+
 // src/workers/email-source/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
@@ -123509,7 +124651,7 @@ __export(exports_server2, {
 });
 import { execFile } from "node:child_process";
 import { existsSync as existsSync50 } from "node:fs";
-import { dirname as dirname54, isAbsolute as isAbsolute14, join as join77 } from "node:path";
+import { dirname as dirname56, isAbsolute as isAbsolute15, join as join78 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -124405,6 +125547,10 @@ async function main() {
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
   const authToken = workerAuthTokenFromEnv(process.env);
+  const dashboardSessionSecret = loadOrCreateDashboardSessionSecret({ env: process.env });
+  if (dashboardSessionSecret.source !== "file") {
+    console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === "memory" ? " (could not be written; sessions end with this worker)" : ""}`);
+  }
   const olympusConfig = loadConfig();
   const sourceCorpusRegistry2 = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
@@ -125982,6 +127128,15 @@ async function main() {
           read: () => dashboardPrivacy.read(),
           save: (update) => dashboardPrivacy.save(update)
         },
+        consult: {
+          summary: () => dashboardConsult.summary(),
+          status: () => dashboardConsult.status(),
+          setEnabled: (update) => dashboardConsult.setEnabled(update),
+          saveRoute: (update) => dashboardConsult.saveRoute(update),
+          addRoute: (update) => dashboardConsult.addRoute(update),
+          recover: (update) => dashboardConsult.recover(update),
+          abandon: (update) => dashboardConsult.abandon(update)
+        },
         modelInstalls: () => {
           const embedding = chatgptEmbeddingState();
           const privateModel = chatgptPrivateModelState();
@@ -126247,6 +127402,31 @@ async function main() {
     readSettings: (pending) => readChatGptPrivacySettings2(process.env, pending),
     pendingCount: pendingClassificationCount
   });
+  const { createDashboardConsultAdapter: createDashboardConsultAdapter2 } = await Promise.resolve().then(() => (init_dashboard_consult(), exports_dashboard_consult));
+  const consultRouteKey = (secretRef) => {
+    if (!secretRef)
+      return;
+    try {
+      return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...readWorkerSetupEnv() ?? {} } })?.trim() || undefined;
+    } catch {
+      return;
+    }
+  };
+  const dashboardConsult = createDashboardConsultAdapter2({
+    sovereignty: {
+      config: sovereigntyEngine.config,
+      source: sovereigntyEngine.source,
+      ...sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}
+    },
+    secretPresent: (secretRef) => consultRouteKey(secretRef) !== undefined,
+    recoverSession: async (route, secretRef) => {
+      const { recoverZkapiSession: recoverZkapiSession2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
+      const apiKey = consultRouteKey(secretRef);
+      return recoverZkapiSession2({ ...route, ...apiKey ? { apiKey } : {} });
+    },
+    requestReload: () => requestModelReload(),
+    env: process.env
+  });
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === "1";
   const chatgptAnswerModelAvailable = () => {
     if (!sourceAnswer || !getModelSetup().ready)
@@ -126326,7 +127506,7 @@ async function main() {
           return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
         }
       }
-    }), withWorkerBearerAuth(worker.fetch, { authToken })))))))
+    }), withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret })))))))
   });
   sourceScheduler?.start();
   await reconcileCaptures();
@@ -126348,7 +127528,7 @@ async function main() {
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join77(dirname54(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join78(dirname56(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -126843,7 +128023,7 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!dbPath || !corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
-  if (!isAbsolute14(dbPath)) {
+  if (!isAbsolute15(dbPath)) {
     throw new Error("Connector store dbPath must be absolute.");
   }
   if (!isDeclarableSourceFamily(family)) {
@@ -126900,6 +128080,7 @@ var init_server5 = __esm(async () => {
   init_model_setup();
   init_connect();
   init_worker_auth();
+  init_dashboard_session_secret();
   init_file_extraction_runtime();
   init_readiness_ledger();
   init_venice_client();
@@ -127320,8 +128501,8 @@ init_messaging_pairing();
 init_messaging_capture();
 init_config();
 init_dashboard_launch();
-import { randomBytes as randomBytes18 } from "node:crypto";
-import { readFileSync as readFileSync49, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
+import { randomBytes as randomBytes19 } from "node:crypto";
+import { readFileSync as readFileSync50, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface2 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve10 } from "node:path";
@@ -128159,7 +129340,7 @@ import {
   renameSync as renameSync9,
   rmSync as rmSync10,
   statSync as statSync15,
-  writeFileSync as writeFileSync10
+  writeFileSync as writeFileSync9
 } from "node:fs";
 import { tmpdir as tmpdir4 } from "node:os";
 import { basename as basename7, isAbsolute as isAbsolute8, join as join51 } from "node:path";
@@ -128177,7 +129358,7 @@ function prepareWorkerUpgradeArtifact(options) {
   const artifactPath = join51(snapshotDir, "artifact.tgz");
   const descriptor = openSync12(artifactPath, "wx", 384);
   try {
-    writeFileSync10(descriptor, artifactBytes);
+    writeFileSync9(descriptor, artifactBytes);
     fsyncSync4(descriptor);
   } finally {
     closeSync12(descriptor);
@@ -130813,7 +131994,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync49("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync50("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -131158,7 +132339,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync49(resolve10(input2), "utf8");
+    raw = readFileSync50(resolve10(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -131784,7 +132965,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes18(32).toString("base64url");
+  return randomBytes19(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};

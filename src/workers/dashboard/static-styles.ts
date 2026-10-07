@@ -476,3 +476,23 @@ export const DASHBOARD_PRIVACY_CSS = `
 .pprompt { padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; display: grid; gap: 8px; }
 .pprompt p { margin: 0; color: var(--t1); }
 `;
+
+export const DASHBOARD_OUTSIDE_HELP_CSS = `
+.outside .ohlabel { color: var(--t3); font-size: var(--fs-caption); margin: -2px 0 10px; }
+.outside .ohstate { font-weight: 600; color: var(--t1); margin: 0 0 12px; }
+.outside .ohready { color: var(--good, var(--t1)); font-weight: 600; margin: 0 0 8px; }
+.outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
+.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; }
+.outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
+.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); }
+.outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
+.outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
+.outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
+.outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.outside .ohoff { color: var(--t3); }
+.outside .ohfence { display: grid; gap: 10px; margin: 8px 0 0; }
+.outside .ohfence .ohform { grid-template-columns: auto 1fr; align-items: center; }
+.outside .ohfence .ohform .actmsg { grid-column: 1 / -1; }
+.outside .actmsg[data-state="error"] { color: var(--bad); }
+`;

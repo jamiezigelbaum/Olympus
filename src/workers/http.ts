@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { isLoopbackAddress, requestPeerAddress } from '../core/request-peer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
 import {
   DASHBOARD_LAUNCH_MINT_PATH,
@@ -22,6 +23,14 @@ export interface WorkerBearerAuthOptions {
    * store per wrapper, which is one per worker process.
    */
   launchTickets?: DashboardLaunchTickets;
+  /**
+   * The worker-private secret that signs control sessions
+   * (core/dashboard-session-secret.ts): independent of the bearer, durable
+   * across restarts when the worker loads it from its state file. Absent, an
+   * in-memory random secret is used for this wrapper's lifetime; never the
+   * bearer.
+   */
+  sessionSecret?: string;
 }
 
 /**
@@ -40,6 +49,12 @@ export interface WorkerBearerAuthOptions {
  */
 export const DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = 'X-Olympus-Control-Session-CSRF';
+/**
+ * Internal, like the CSRF context header: how the live control session was
+ * minted (`bearer` or `local`), injected on dashboard reads so a page can say
+ * which controls this session reaches. Stripped from every incoming request.
+ */
+export const DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = 'X-Olympus-Control-Session-Grade';
 /**
  * Internal context carried from the native Gateway bridge to the worker.
  *
@@ -91,6 +106,20 @@ export function withWorkerBearerAuth(
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
+  // Control sessions are signed with a worker-private secret: never derived
+  // from, nor exposed through, the worker bearer, so a bearer holder cannot
+  // forge a cookie (a local grade least of all). The worker passes the one it
+  // keeps in its state file, so sessions survive a restart; without one, a
+  // random secret for this wrapper's lifetime.
+  // The signing key is the secret bound to the bearer: the bearer alone
+  // cannot forge a cookie (it lacks the secret), and rotating the worker
+  // token still revokes every session at once (the key changes with it).
+  const sessionSecret = createHmac('sha256', options.sessionSecret?.trim() || randomBytes(32).toString('base64url'))
+    .update('olympus-dashboard-control-key-v1')
+    .update('\0')
+    // No bearer configured: the wrapper refuses everything but health anyway.
+    .update(authToken ?? '')
+    .digest('base64url');
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request: Request): Promise<Response> => {
@@ -134,7 +163,7 @@ export function withWorkerBearerAuth(
       if (consumed.status === 'ok') {
         // The existing control session, minted the same way the manual unlock
         // mints it: HttpOnly, SameSite=Strict, origin-tagged, 30 days.
-        const minted = mintDashboardControlSession(authToken, origin, now());
+        const minted = mintDashboardControlSession(sessionSecret, origin, now());
         return dashboardLaunchRedeemedResponse(minted, now());
       }
       return dashboardLaunchRefusedResponse(consumed.status);
@@ -143,7 +172,7 @@ export function withWorkerBearerAuth(
       // Lock this browser: proven the same way any control is (cookie, same
       // origin, CSRF), then the cookie is cleared. Copies elsewhere are not
       // reachable from here; rotating the worker token is what revokes those.
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), true);
       if (authorization.status === 'origin_mismatch' || authorization.status === 'csrf_mismatch') {
         return dashboardControlForbiddenResponse(authorization.status);
       }
@@ -152,13 +181,31 @@ export function withWorkerBearerAuth(
       if (authorization.status !== 'allowed') return unauthorizedWorkerResponse();
       return dashboardControlLockedResponse();
     }
+    if (isDashboardLocalControlSessionRequest(request)) {
+      // The local-only mint (Outside help). No Authorization header of any
+      // kind may be presented, the request must target a loopback origin and
+      // come from that same origin with no proxy headers; the session is
+      // marked `local` at mint time and the mark is signed. The sessions a
+      // bearer can mint stay `bearer` and never reach the consult routes.
+      if (request.headers.has('Authorization')) return dashboardConsultMacOnlyResponse();
+      if (request.headers.has('X-Forwarded-Proto') || request.headers.has('X-Forwarded-For') || request.headers.has('X-Forwarded-Host')) {
+        return dashboardControlForbiddenResponse('origin_mismatch');
+      }
+      const origin = sameRequestOrigin(request);
+      if (!origin || !isLoopbackOrigin(origin)) return dashboardControlForbiddenResponse('origin_mismatch');
+      // The socket peer, as the server recorded it (core/request-peer.ts):
+      // loopback, or no mint. A request with no recorded peer is remote.
+      if (!isLoopbackAddress(requestPeerAddress(request))) return dashboardControlForbiddenResponse('origin_mismatch');
+      const minted = mintDashboardControlSession(sessionSecret, origin, now(), 'local');
+      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
+    }
     if (isDashboardControlSessionRequest(request)) {
       if (!hasValidWorkerBearerToken(request.headers.get('Authorization'), authToken)) {
         // Keepalive from a page that is still being worked on. A live session
         // may extend itself with the custody it already proves on every control
         // POST — HttpOnly cookie, matching CSRF token, same origin — so the
         // picker never has to handle the worker bearer to stay alive.
-        const renewal = authorizeDashboardControlSession(request, authToken, now(), true);
+        const renewal = authorizeDashboardControlSession(request, sessionSecret, now(), true);
         if (renewal.status === 'allowed') {
           return dashboardControlSessionResponse(renewal.sessionId, renewal.csrfToken, renewal.expiresAtMs, now());
         }
@@ -169,7 +216,7 @@ export function withWorkerBearerAuth(
       }
       const origin = sameRequestOrigin(request);
       if (!origin) return dashboardControlForbiddenResponse('origin_mismatch');
-      const minted = mintDashboardControlSession(authToken, origin, now());
+      const minted = mintDashboardControlSession(sessionSecret, origin, now());
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
     if (isOAuthCallbackRequest(request)) {
@@ -187,14 +234,17 @@ export function withWorkerBearerAuth(
       // ever putting the worker bearer in the URL or page storage. The internal
       // header is stripped from the incoming request above and injected only
       // after cookie plus same-origin Referer prove the live session.
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false);
       if (authorization.status === 'allowed') {
-        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
+        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
       }
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      // Outside help: control session only, never the bearer (see
+      // DASHBOARD_CONSULT_CONTROL_PATHS).
+      if (isDashboardConsultControlRoute(request)) return dashboardConsultMacOnlyResponse();
       // The Gateway bridge holds the bearer for every operator it serves, so
       // its mints share one budget.
       if (isAgentMintRoute(request) && !agentMintAllowed('bearer')) return agentMintLimitedResponse();
@@ -204,7 +254,7 @@ export function withWorkerBearerAuth(
         : request);
     }
     if (isDashboardControlReadRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false);
       if (authorization.status === 'allowed') {
         const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
         return withRenewedDashboardControlCookie(response, authorization, now());
@@ -223,9 +273,9 @@ export function withWorkerBearerAuth(
       //
       // Only the HTML page, never `/dashboard.json`: the page is the surface a
       // human navigates to, and the JSON keeps its existing two proofs.
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false, true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false, true);
       if (authorization.status === 'allowed') {
-        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
+        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
       }
       if (authorization.status === 'origin_mismatch') {
@@ -233,13 +283,25 @@ export function withWorkerBearerAuth(
       }
     }
     if (isDashboardControlRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), true);
       if (authorization.status === 'allowed') {
         if (isAgentMintRoute(request) && !agentMintAllowed(`session:${authorization.sessionId}`)) {
           return agentMintLimitedResponse();
         }
         if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed(`session:${authorization.sessionId}`)) {
           return remoteAccessToggleLimitedResponse();
+        }
+        // The consult routes carry the proof into the worker: the handler
+        // refuses without this header, and nothing else can set it.
+        // A local-grade session only: never one a bearer minted, nor one a
+        // bearer's launch ticket redeemed.
+        if (isDashboardConsultControlRoute(request)) {
+          if (authorization.grade !== 'local') return dashboardConsultMacOnlyResponse();
+          return withRenewedDashboardControlCookie(
+            await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)),
+            authorization,
+            now(),
+          );
         }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
@@ -382,6 +444,22 @@ function dashboardLaunchRefusedResponse(status: 'unknown' | 'expired' | 'origin_
   });
 }
 
+/** The local-only mint for Outside help (see DASHBOARD_CONSULT_CONTROL_PATHS). */
+export const DASHBOARD_LOCAL_CONTROL_SESSION_PATH = '/dashboard/control/session/local';
+
+function isDashboardLocalControlSessionRequest(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
+}
+
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
 function isDashboardControlLockRequest(request: Request): boolean {
   return request.method === 'POST' && new URL(request.url).pathname === '/dashboard/control/session/lock';
 }
@@ -472,8 +550,44 @@ function agentMintLimitedResponse(): Response {
   });
 }
 
+/**
+ * The Outside help card's routes (dashboard/outside-help.ts): accepted from
+ * an authenticated local control session only. The Gateway bearer, which
+ * every other control route also takes, is refused here, because that bearer
+ * is held by the OpenClaw bridge for the agents it serves, and a hosted agent
+ * must never switch on egress (design frontier-consult-lane.md §A.9). The
+ * worker's handler additionally requires the control-session context header,
+ * which this boundary strips from every incoming request and injects only
+ * after the cookie, same origin and CSRF token have been proven.
+ */
+export const DASHBOARD_CONSULT_CONTROL_PATHS: readonly string[] = [
+  '/dashboard/consult',
+  '/dashboard/consult/route',
+  '/dashboard/consult/route/add',
+  '/dashboard/consult/recover',
+  '/dashboard/consult/abandon',
+];
+
+export function isDashboardConsultControlRoute(request: Request): boolean {
+  return request.method === 'POST' && DASHBOARD_CONSULT_CONTROL_PATHS.includes(new URL(request.url).pathname);
+}
+
+function dashboardConsultMacOnlyResponse(): Response {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: 'mac_dashboard_only',
+      message: 'Outside help can be changed only from the dashboard on this computer, in an unlocked browser.',
+    },
+  }), {
+    status: 403,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
 function isDashboardControlRoute(request: Request): boolean {
   if (request.method !== 'POST') return false;
+  if (isDashboardConsultControlRoute(request)) return true;
   return new Set([
     '/dashboard/dispositions',
     '/dashboard/connect/oauth/start',
@@ -499,12 +613,24 @@ interface AuthorizedDashboardControlSession {
   sessionId: string;
   csrfToken: string;
   expiresAtMs: number;
+  grade: DashboardControlSessionGrade;
 }
+
+/**
+ * How a control session was minted. `bearer`: by the worker bearer (the
+ * direct mint, or the launch ticket a bearer minted). `local`: by the
+ * local-only mint, which refuses any bearer and any non-loopback origin. The
+ * five Outside help routes accept `local` only (design frontier-consult-lane
+ * §A.9): consult authority must not derive from the bearer the Gateway bridge
+ * holds for the agents it serves.
+ */
+export type DashboardControlSessionGrade = 'bearer' | 'local';
 
 interface DashboardControlSessionParts {
   nonce: string;
   issuedSeconds: number;
   originTag: string;
+  grade: DashboardControlSessionGrade;
   signature: string;
 }
 
@@ -514,37 +640,44 @@ function hmacTag(authToken: string, context: string, ...parts: string[]): string
   return mac.digest('base64url');
 }
 
-function dashboardControlOriginTag(authToken: string, origin: string): string {
-  return hmacTag(authToken, DASHBOARD_CONTROL_ORIGIN_CONTEXT, origin).slice(0, 22);
+function dashboardControlOriginTag(sessionSecret: string, origin: string): string {
+  return hmacTag(sessionSecret, DASHBOARD_CONTROL_ORIGIN_CONTEXT, origin).slice(0, 22);
 }
 
-function dashboardControlSignature(authToken: string, parts: Omit<DashboardControlSessionParts, 'signature'>): string {
+function dashboardControlSignature(sessionSecret: string, parts: Omit<DashboardControlSessionParts, 'signature'>): string {
+  // Keyed by the worker-private secret, grade included: a bearer-minted
+  // cookie cannot be relabelled local, and the bearer cannot re-sign it.
   return hmacTag(
-    authToken,
+    sessionSecret,
     DASHBOARD_CONTROL_SIGNATURE_CONTEXT,
     parts.nonce,
     String(parts.issuedSeconds),
     parts.originTag,
+    parts.grade,
   );
 }
 
-function dashboardControlCsrfToken(authToken: string, nonce: string): string {
-  return hmacTag(authToken, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
+function dashboardControlCsrfToken(sessionSecret: string, nonce: string): string {
+  return hmacTag(sessionSecret, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
 }
 
+const GRADE_CODES: Readonly<Record<DashboardControlSessionGrade, string>> = { bearer: 'b', local: 'l' };
+
 function encodeDashboardControlSession(parts: DashboardControlSessionParts): string {
-  return [parts.nonce, parts.issuedSeconds, parts.originTag, parts.signature].join('.');
+  return [parts.nonce, parts.issuedSeconds, parts.originTag, GRADE_CODES[parts.grade], parts.signature].join('.');
 }
 
 function decodeDashboardControlSession(value: string): DashboardControlSessionParts | undefined {
   const fields = value.split('.');
-  if (fields.length !== 4) return undefined;
-  const [nonce, issued, originTag, signature] = fields as [string, string, string, string];
+  if (fields.length !== 5) return undefined;
+  const [nonce, issued, originTag, gradeCode, signature] = fields as [string, string, string, string, string];
+  const grade = gradeCode === 'b' ? 'bearer' : gradeCode === 'l' ? 'local' : undefined;
+  if (!grade) return undefined;
   const issuedSeconds = Number(issued);
   if (!/^[A-Za-z0-9_-]{32}$/.test(nonce)) return undefined;
   if (!/^\d{1,12}$/.test(issued) || !Number.isInteger(issuedSeconds)) return undefined;
   if (!/^[A-Za-z0-9_-]{22}$/.test(originTag) || !/^[A-Za-z0-9_-]{43}$/.test(signature)) return undefined;
-  return { nonce, issuedSeconds, originTag, signature };
+  return { nonce, issuedSeconds, originTag, grade, signature };
 }
 
 function dashboardControlExpiresAtMs(parts: Pick<DashboardControlSessionParts, 'issuedSeconds'>): number {
@@ -552,28 +685,31 @@ function dashboardControlExpiresAtMs(parts: Pick<DashboardControlSessionParts, '
 }
 
 function mintDashboardControlSession(
-  authToken: string,
+  sessionSecret: string,
   origin: string,
   nowMs: number,
+  grade: DashboardControlSessionGrade = 'bearer',
 ): AuthorizedDashboardControlSession {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
     nonce: randomBytes(24).toString('base64url'),
     issuedSeconds: nowSeconds,
-    originTag: dashboardControlOriginTag(authToken, origin),
+    originTag: dashboardControlOriginTag(sessionSecret, origin),
+    grade,
   };
-  const parts = { ...unsigned, signature: dashboardControlSignature(authToken, unsigned) };
+  const parts = { ...unsigned, signature: dashboardControlSignature(sessionSecret, unsigned) };
   return {
     status: 'allowed',
     sessionId: encodeDashboardControlSession(parts),
-    csrfToken: dashboardControlCsrfToken(authToken, parts.nonce),
+    csrfToken: dashboardControlCsrfToken(sessionSecret, parts.nonce),
     expiresAtMs: dashboardControlExpiresAtMs(parts),
+    grade,
   };
 }
 
 function authorizeDashboardControlSession(
   request: Request,
-  authToken: string,
+  sessionSecret: string,
   nowMs: number,
   requireCsrf: boolean,
   /**
@@ -602,17 +738,17 @@ function authorizeDashboardControlSession(
   if (!parts) return { status: 'missing' };
   // Signature first: a cookie this worker's token did not sign is no session
   // at all, whatever else it claims. Then lifetime, then origin, then CSRF.
-  const expected = dashboardControlSignature(authToken, parts);
+  const expected = dashboardControlSignature(sessionSecret, parts);
   if (!constantTimeStringEqual(parts.signature, expected)) return { status: 'missing' };
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
   // A cookie dated in the future was not issued by this worker's clock.
   if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60_000) return { status: 'missing' };
   const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined) return { status: 'origin_mismatch' };
-  if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(authToken, origin))) {
+  if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin))) {
     return { status: 'origin_mismatch' };
   }
-  const csrfToken = dashboardControlCsrfToken(authToken, parts.nonce);
+  const csrfToken = dashboardControlCsrfToken(sessionSecret, parts.nonce);
   if (requireCsrf) {
     const presented = request.headers.get('X-Olympus-CSRF');
     if (!presented || !constantTimeStringEqual(presented, csrfToken)) return { status: 'csrf_mismatch' };
@@ -624,6 +760,7 @@ function authorizeDashboardControlSession(
     sessionId: encodeDashboardControlSession(parts),
     csrfToken,
     expiresAtMs,
+    grade: parts.grade,
   };
 }
 
@@ -711,6 +848,7 @@ function requestTargetOrigin(request: Request): string {
 function withoutDashboardInternalContextHeaders(request: Request): Request {
   if (
     !request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)
+    && !request.headers.has(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)
     && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)
     && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER)
   ) return request;
@@ -718,6 +856,7 @@ function withoutDashboardInternalContextHeaders(request: Request): Request {
   // when `new Request(existing, { headers })` is used, so a copy-and-delete
   // looks correct but leaves a forged internal header in place.
   request.headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  request.headers.delete(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
   return request;
@@ -794,8 +933,9 @@ function normalizeGatewayPublicOrigin(value: string | null): string | undefined 
   }
 }
 
-function withDashboardControlContextHeader(request: Request, csrfToken: string): Request {
+function withDashboardControlContextHeader(request: Request, csrfToken: string, grade?: DashboardControlSessionGrade): Request {
   request.headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
+  if (grade) request.headers.set(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, grade);
   return request;
 }
 

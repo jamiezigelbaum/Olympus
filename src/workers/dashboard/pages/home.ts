@@ -39,6 +39,7 @@ import {
   type DashboardPrivacySummary,
 } from '../source-rows.ts';
 import type { PrivacySettings } from '../../chatgpt/dashboard-contract.ts';
+import type { DashboardOutsideHelpStatus, DashboardOutsideHelpSummary } from '../outside-help.ts';
 
 export {
   dashboardRefusalNotice,
@@ -95,6 +96,20 @@ export interface DashboardPageOptions extends DashboardVocabularyOptions {
    * locations already left out by the engine).
    */
   privacySettings?: PrivacySettings;
+  /**
+   * The Outside help card's facts (outside-help.ts), for that page only, and
+   * only for a standalone reader with the control session: the worker reads
+   * them (a daemon version call and two port probes) for no other render.
+   */
+  outsideHelp?: DashboardOutsideHelpStatus;
+  /**
+   * True when the live control session was minted by the local-only mint
+   * (workers/http.ts), the only grade the consult routes accept. False: the
+   * card offers that one-click unlock instead of controls.
+   */
+  outsideHelpLocalSession?: boolean;
+  /** One word for Setup's Outside help row; absent, the row is not shown. */
+  outsideHelpSummary?: DashboardOutsideHelpSummary;
   /** Private builds retain the append-only embedding decision ledger. */
 }
 

@@ -18,6 +18,8 @@ import { renderDashboardSetupPage } from './pages/setup.ts';
 import { renderDashboardBackgroundPage } from './pages/background.ts';
 import { renderDashboardSensitivityPage } from './pages/sensitivity.ts';
 import { renderDashboardPrivacyPage } from './pages/privacy.ts';
+import { renderDashboardOutsideHelpPage } from './pages/outside-help.ts';
+import { DASHBOARD_OUTSIDE_HELP_QUERY_PARAM } from './outside-help.ts';
 
 export const DASHBOARD_HTML_PATH = '/dashboard';
 /** ?source=<DashboardSourceCard.source_id> selects the detail page. */
@@ -48,7 +50,7 @@ export function isDashboardHtmlRoute(url: URL): boolean {
 }
 
 /** Which page a dashboard URL names, in the order the renderer serves them. */
-export type DashboardHtmlRoutePage = 'source' | 'background' | 'sensitivity' | 'privacy' | 'setup' | 'home';
+export type DashboardHtmlRoutePage = 'source' | 'background' | 'sensitivity' | 'privacy' | 'outside_help' | 'setup' | 'home';
 
 /**
  * The one precedence for a dashboard URL: a named source first, then
@@ -62,6 +64,9 @@ export function dashboardHtmlRoutePage(url: URL): DashboardHtmlRoutePage {
   if (params.has(DASHBOARD_BACKGROUND_QUERY_PARAM)) return 'background';
   if (params.has(DASHBOARD_SENSITIVITY_QUERY_PARAM)) return 'sensitivity';
   if (params.has(DASHBOARD_PRIVACY_QUERY_PARAM)) return 'privacy';
+  // The Mac-only Outside help card. The native Control UI never builds this
+  // URL (dashboardControlUiUrl), so the card has no native rendering at all.
+  if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM)) return 'outside_help';
   if (params.has(DASHBOARD_SETUP_QUERY_PARAM)) return 'setup';
   return 'home';
 }
@@ -86,6 +91,8 @@ export function renderDashboardHtmlRoute(input: DashboardHtmlRouteInput): Dashbo
       return { html: renderDashboardSensitivityPage(view, options), status: 200 };
     case 'privacy':
       return { html: renderDashboardPrivacyPage(view, options), status: 200 };
+    case 'outside_help':
+      return { html: renderDashboardOutsideHelpPage(view, options), status: 200 };
     case 'setup':
       return { html: renderDashboardSetupPage(view, options), status: 200 };
     case 'home':
@@ -222,4 +229,5 @@ export {
   renderDashboardSensitivityPage,
 } from './pages/sensitivity.ts';
 export { renderDashboardPrivacyPage } from './pages/privacy.ts';
+export { renderDashboardOutsideHelpPage } from './pages/outside-help.ts';
 export { DASHBOARD_STATUS_ORDER, type DashboardStatus } from './vocabulary.ts';
