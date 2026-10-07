@@ -313,6 +313,8 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
     'dayNumber',
     'yearNumber',
     'figureKeys',
+    // Address spans: a house number near a street word (a shape, any language).
+    'addressSpans',
   ])],
   ['src/core/source-index/selected-item-safety.ts', new Set([
     'normalizeSelectedItemField',

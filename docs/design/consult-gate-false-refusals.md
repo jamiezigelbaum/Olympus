@@ -127,6 +127,15 @@ no output that passes carries a canary. Re-identification
 (`eval/consult-reid/`): 3 of 10 pass the gate, none narrows to a person,
 keeps all three quasi-identifiers, an exact figure or a canary.
 
+**Review round 2 (both levels, stricter).** "7 Park street" beside "a park"
+let "Is 7 park street safe?" through at the unnamed level (lower-case "park"
+exempted the capital, a one-digit house number is under the figure threshold,
+and mixed case defeated the pair match). Address spans (a house number within
+five words of a street word, in every configured language) are now protected
+at both levels whatever their capitalization. The unnamed false refusals
+stayed at 16 of 30, the general and held-out rates did not move, and the
+real-writer pass counts stayed 20 (unnamed) and 6 (general).
+
 **Gate fix found on the way (both levels, stricter).** A snapshot amount with
 a zero fraction ("2,400.00") was keyed only as "240000" and "24", so "2,400"
 in a question was not matched; it now also keys as "2400" and is refused.

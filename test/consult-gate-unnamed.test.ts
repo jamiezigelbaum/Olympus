@@ -27,7 +27,7 @@ function context(documents: string[] = [DOCUMENT], answer: string = ANSWER, titl
   return consultWriterContextFromPack(pack, { writerVisibleTexts: [QUESTION], writerAnswerTexts: [answer, 'Whether a landlord may keep a full deposit for short notice.'] });
 }
 
-const verdict = (questions: string[], level?: ConsultLevel, built = context()) => evaluateConsultRequest(questions, built, {}, {}, { languages: ['en', 'pt-PT'], ...(level ? { level } : {}) });
+const verdict = (questions: string[], level?: ConsultLevel, built = context()) => evaluateConsultRequest(questions, built, {}, {}, { languages: ['en', 'pt-PT', 'fr'], ...(level ? { level } : {}) });
 
 describe('the unnamed level widens its rules', () => {
   test("the owner's example, with its duration named, passes at the unnamed level and is refused at the general level", () => {
@@ -107,6 +107,31 @@ describe('review round 1 counterexamples', () => {
     const built = context(['The lease covers the ground floor.'], 'The landlord pays for repairs in the red lion.');
     expect(verdict(['Are repairs in the red lion covered?'], 'unnamed', built)).toEqual({ decision: 'pass', reasons: [] });
     expect(verdict(['Are repairs in the red lion covered?'], 'general', built).reasons).toContain('shared_token_run');
+  });
+});
+
+describe('review round 2: addresses are protected at both levels, whatever their capitalization', () => {
+  test('"7 Park street" beside "a park": the house number with a street word refuses', () => {
+    const built = context(['The flat at 7 Park street needs repairs beside a park.'], 'The flat needs repairs.');
+    for (const level of ['unnamed', 'general'] as const) {
+      expect(verdict(['Is 7 park street safe?'], level, built).reasons).toContain('snapshot_identifier');
+      expect(verdict(['Is number 7 on that street safe?'], level, built).decision).toBe('refuse');
+    }
+    // The ordinary word alone, without the number or the street word, still passes at the unnamed level.
+    expect(verdict(['Is the flat beside a park safe?'], 'unnamed', built)).toEqual({ decision: 'pass', reasons: [] });
+  });
+
+  test('Portuguese: "Rua da Rosa 12" refuses "a rosa 12 rua" and "rua da rosa"', () => {
+    const built = context(['O apartamento fica na Rua da Rosa 12, perto do rio.'], 'O apartamento precisa de obras.');
+    for (const level of ['unnamed', 'general'] as const) {
+      expect(verdict(['A rosa 12 rua tem problemas?'], level, built).decision).toBe('refuse');
+      expect(verdict(['A rua da rosa tem problemas?'], level, built).reasons).toContain('snapshot_identifier');
+    }
+  });
+
+  test('French order: "7 rue des Tanneurs"', () => {
+    const built = context(['La maison au 7 rue des Tanneurs est vendue.'], 'La maison est vendue.');
+    expect(verdict(['Quelle est la valeur au 7 tanneurs?'], 'unnamed', built).decision).toBe('refuse');
   });
 });
 

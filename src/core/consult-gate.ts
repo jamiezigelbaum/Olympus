@@ -2098,6 +2098,15 @@ function compareWithSnapshot(
         for (const key of hostKeysOf(host)) if (model.hostKeys.has(key)) reasons.add('snapshot_hostname');
       }
     }
+    // Addresses, both levels and any capitalization: the same house number
+    // with any word of the span, or the span's name words with its street
+    // word, refuses.
+    for (const span of addressSpans(normalized)) {
+      const asked = new Set(model.tokens.map((token) => token.replace(/^0+(?=\d)/u, '')));
+      const sameNumber = asked.has(span.number) && (span.words.some((word) => asked.has(word)) || asked.has(span.suffix));
+      const sameName = asked.has(span.suffix) && span.words.every((word) => asked.has(word));
+      if (sameNumber || sameName) reasons.add('snapshot_identifier');
+    }
     for (const value of labelledSecretValues(normalized)) {
       if (formHit(compact(value))) reasons.add('secret_detected');
     }
@@ -2582,6 +2591,59 @@ function mergeFigureSeen(left: FigureSeen | undefined, right: FigureSeen): Figur
  * how the number was seen (FigureSeen); `unit` is true when a unit or currency
  * sits next to the number. Keys shorter than two digits are not produced.
  */
+/**
+ * Street-name words after or before a house number, in every configured
+ * language (accents removed, sharp s folded): an address span in the snapshot
+ * is protected at both levels whatever its capitalization (review round 2:
+ * "7 Park street" beside "a park").
+ */
+const STREET_SUFFIXES: ReadonlySet<string> = new Set([
+  'street', 'st', 'road', 'rd', 'avenue', 'ave', 'av', 'lane', 'ln', 'way', 'drive', 'dr', 'court', 'ct', 'place', 'pl',
+  'square', 'sq', 'boulevard', 'blvd', 'terrace', 'crescent', 'close', 'row', 'quay', 'gardens',
+  'rua', 'travessa', 'avenida', 'largo', 'praca', 'alameda', 'estrada',
+  'rue', 'chemin', 'allee', 'impasse', 'quai',
+  'calle', 'plaza', 'paseo', 'carrer', 'camino',
+  'via', 'viale', 'piazza', 'corso', 'vicolo',
+  'strasse', 'str', 'gasse', 'platz', 'weg',
+  'straat', 'laan', 'plein', 'gracht', 'kade', 'singel',
+]);
+
+// An address in snapshot text: its house number, its name words and street word.
+interface AddressSpan {
+  readonly number: string;
+  readonly words: readonly string[];
+  readonly suffix: string;
+}
+
+/**
+ * Address spans in normalized text, read clause by clause: a house number
+ * (any digits, one included) within five words of a street word, before it
+ * ("7 Park street", "12 Heron Quay") or after it ("Rua da Rosa 12"). The name
+ * words are the content words between the two; when they touch ("7 rue des
+ * Tanneurs"), the up to three words that follow the later one.
+ */
+function addressSpans(normalized: string): AddressSpan[] {
+  const spans: AddressSpan[] = [];
+  for (const clause of normalized.split(/[,.;:!?()\n]+/u)) {
+    const tokens = clause.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    tokens.forEach((token, at) => {
+      if (!STREET_SUFFIXES.has(token)) return;
+      for (let gap = 1; gap <= 5; gap += 1) {
+        for (const other of [at - gap, at + gap]) {
+          const number = tokens[other];
+          if (number === undefined || !/^\d{1,5}[a-z]?$/u.test(number)) continue;
+          const [from, to] = other < at ? [other, at] : [at, other];
+          let words = tokens.slice(from + 1, to);
+          if (words.length === 0) words = tokens.slice(to + 1, to + 4);
+          words = words.filter((word) => isContent(word) && !/^\d+$/u.test(word));
+          if (words.length > 0) spans.push({ number: number.replace(/^0+(?=\d)/u, ''), words, suffix: token });
+        }
+      }
+    });
+  }
+  return spans;
+}
+
 function figureKeys(normalized: string, needUnits: boolean): Map<string, FigureSeen> {
   const keys = new Map<string, FigureSeen>();
   for (const match of normalized.matchAll(/([^\s\d]?)\s?(\d+(?:[.,'\u2019_ ]\d+)*)\s?(%|[\p{L}$\u20AC\u00A3\u00A5\u20B9]{1,8})?/gu)) {

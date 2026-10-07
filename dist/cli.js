@@ -59634,6 +59634,13 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord) {
             reasons.add("snapshot_hostname");
       }
     }
+    for (const span of addressSpans(normalized)) {
+      const asked = new Set(model.tokens.map((token) => token.replace(/^0+(?=\d)/u, "")));
+      const sameNumber = asked.has(span.number) && (span.words.some((word) => asked.has(word)) || asked.has(span.suffix));
+      const sameName = asked.has(span.suffix) && span.words.every((word) => asked.has(word));
+      if (sameNumber || sameName)
+        reasons.add("snapshot_identifier");
+    }
     for (const value of labelledSecretValues(normalized)) {
       if (formHit(compact(value)))
         reasons.add("secret_detected");
@@ -59998,6 +60005,31 @@ function mergeFigureSeen(left, right) {
     return right;
   return { unit: left.unit || right.unit, rule: left.rule || right.rule, bare: left.bare || right.bare, other: left.other || right.other };
 }
+function addressSpans(normalized) {
+  const spans = [];
+  for (const clause of normalized.split(/[,.;:!?()\n]+/u)) {
+    const tokens = clause.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    tokens.forEach((token, at) => {
+      if (!STREET_SUFFIXES.has(token))
+        return;
+      for (let gap = 1;gap <= 5; gap += 1) {
+        for (const other of [at - gap, at + gap]) {
+          const number2 = tokens[other];
+          if (number2 === undefined || !/^\d{1,5}[a-z]?$/u.test(number2))
+            continue;
+          const [from, to] = other < at ? [other, at] : [at, other];
+          let words = tokens.slice(from + 1, to);
+          if (words.length === 0)
+            words = tokens.slice(to + 1, to + 4);
+          words = words.filter((word) => isContent(word) && !/^\d+$/u.test(word));
+          if (words.length > 0)
+            spans.push({ number: number2.replace(/^0+(?=\d)/u, ""), words, suffix: token });
+        }
+      }
+    });
+  }
+  return spans;
+}
 function figureKeys(normalized, needUnits) {
   const keys = new Map;
   for (const match of normalized.matchAll(/([^\s\d]?)\s?(\d+(?:[.,'\u2019_ ]\d+)*)\s?(%|[\p{L}$\u20AC\u00A3\u00A5\u20B9]{1,8})?/gu)) {
@@ -60028,7 +60060,7 @@ function figureKeys(normalized, needUnits) {
   }
   return keys;
 }
-var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS;
+var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS, STREET_SUFFIXES;
 var init_consult_gate = __esm(() => {
   init_opsec();
   init_types();
@@ -61374,6 +61406,67 @@ var init_consult_gate = __esm(() => {
     "pourcent"
   ]);
   FIGURE_PREFIX_SYMBOLS = new Set(["$", "€", "£", "¥", "₹", "%"]);
+  STREET_SUFFIXES = new Set([
+    "street",
+    "st",
+    "road",
+    "rd",
+    "avenue",
+    "ave",
+    "av",
+    "lane",
+    "ln",
+    "way",
+    "drive",
+    "dr",
+    "court",
+    "ct",
+    "place",
+    "pl",
+    "square",
+    "sq",
+    "boulevard",
+    "blvd",
+    "terrace",
+    "crescent",
+    "close",
+    "row",
+    "quay",
+    "gardens",
+    "rua",
+    "travessa",
+    "avenida",
+    "largo",
+    "praca",
+    "alameda",
+    "estrada",
+    "rue",
+    "chemin",
+    "allee",
+    "impasse",
+    "quai",
+    "calle",
+    "plaza",
+    "paseo",
+    "carrer",
+    "camino",
+    "via",
+    "viale",
+    "piazza",
+    "corso",
+    "vicolo",
+    "strasse",
+    "str",
+    "gasse",
+    "platz",
+    "weg",
+    "straat",
+    "laan",
+    "plein",
+    "gracht",
+    "kade",
+    "singel"
+  ]);
 });
 
 // src/core/consult-settings.ts

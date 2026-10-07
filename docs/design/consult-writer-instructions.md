@@ -419,7 +419,11 @@ through"); the full list is the comment on
 
 Personal names outside the dictionaries, exact dates and years, ages, exact
 amounts, account, phone and ID numbers, addresses, mail addresses and handles
-are refused exactly as at the general level.
+are refused exactly as at the general level. Addresses are also protected
+as spans at both levels, whatever their capitalization (review round 2): a
+house number within five words of a street word ("7 Park street", "Rua da
+Rosa 12", "7 rue des Tanneurs") refuses a question that repeats the number
+with any word of the span, or the span's name words with its street word.
 
 **Accepted residuals (owner ruling).** A name, venue or project written in
 lower-case or dictionary words ("the red lion") and copied from the documents
