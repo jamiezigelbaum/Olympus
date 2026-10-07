@@ -18,11 +18,13 @@
 
 Status: approved writer instructions for the frontier consult lane
 (`docs/design/frontier-consult-lane.md` on the design proposal branch, sections Z.2 and A.4).
-They live here, not under `skills/`, until the consult orchestration that
-loads them lands: a `skills/` directory is part of the public skill list the
-calling agent sees, and these instructions are for the local writer model,
-not for the calling agent. The orchestration pull request moves them to their
-loaded home.
+They live here, not under `skills/`: a `skills/` directory is part of the
+public skill list the calling agent sees, and these instructions are for the
+local writer model, not for the calling agent. The loaded form is the
+condensed rule block `CONSULT_WRITER_SYSTEM` in `src/core/consult-writer.ts`
+(stage C4b), which must fit the 2,048-token prompt bound beside the inputs;
+this document is the full text it is condensed from. A rule added here is
+added there too.
 
 The mechanical subset of these rules is enforced by the outbound gate
 (`src/core/consult-gate.ts`). What the gate guarantees is narrow and exact
@@ -128,6 +130,16 @@ yourself.
   number-word form. It does not catch number words in other languages, Han
   numerals, a figure re-expressed by arithmetic, or relative dates. Bands are
   your job.
+- **Never name what the answer only implies.** The gate compares your
+  question against what you saw, so it cannot see a name you inferred: a
+  country from a city in an itinerary, a country from a currency or a
+  language, an employer from a job title, a product from its features, a
+  person from a role. In the first measured run (M0, round 2) the writer
+  named "Portugal" for a trip whose answer only mentioned Lisbon. Such a
+  name is as identifying as a copied one. Ask about the class instead ("the
+  entry rules most countries apply to short visits"). The writer code also
+  refuses any reply with a capitalised word after the first in a question,
+  acronyms excepted.
 - **The place can be the identifier.** A well-known city is unremarkable; a
   rare place combined with one niche attribute (a single employer, one
   specialty school, one hospital, one museum, an airport with two flights a

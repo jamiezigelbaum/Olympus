@@ -732,8 +732,10 @@ The panel protocol's compatibility record, AD-2 of the design
 `docs/design/frontier-consult-lane.md` §A.11 (revision 8, on its proposal
 branch until the lane ships; owner-accepted 2026-10-07). The authoritative text is the header of
 `src/workers/chatgpt/private-answer-contract.ts`; this is the narrative.
-**No consult is written or sent yet** (that is stage C4b); this stage lands
-the protocol the consult will ride on, and the limits it needs.
+This stage landed the protocol the consult rides on, and the limits it
+needs; stage C4b (below, "Consult scheduling") added the writer, the gate
+call and the dispatch that use it. No user-facing path enables outside help
+yet (the Mac dashboard card is C5, the public CLI command C8).
 
 - **One payload contract, every install** (`private-answer-payload.ts`,
   design §A.5.1). The jobs boundary now enforces, before first delivery:
@@ -824,6 +826,62 @@ the protocol the consult will ride on, and the limits it needs.
   clocks (`firstDeliveredAt`, `followUntil`, `lastCollectedAt`) are
   published only with a `ready` actually returned: a seal that fails
   leaves no window and no writable state.
+
+### Consult scheduling (added 2026-10-07, stage C4b)
+
+Design `docs/design/frontier-consult-lane.md` §A.2, §A.3, §A.7 (candidate
+B2), §A.8 and §A.5.6. The code is `src/core/consult-writer.ts` (the writer
+and its own server) and `src/workers/chatgpt/consult-orchestrator.ts` (the
+trigger, gate, transport session and panel seams), wired in the worker beside
+the jobs engine. Nothing here is reachable until outside help is enabled.
+
+- **Verdict metadata.** `answerPrivately` (analyst-built-in.ts) returns,
+  beside the answer, the model's own `sufficient` verdict, a no-answer flag
+  and the fitted pack its main call received; the panel model passes it
+  through as `PrivateAnswerModelResult.consult`. None of it enters the
+  plaintext.
+- **Snapshot handoff.** At the claim's seal, a follow-up job keeps a
+  deep-frozen consult snapshot: that pack, the question, the answer and gaps
+  exactly as retained, the verdict and the identities of the items read. A
+  reused precompute brings its search-time pack. Its retention clock starts
+  at first delivery and ends after five minutes, at the dispatch decision,
+  at withdrawal or when the job ends.
+- **Trigger** (`onFirstDelivered`): policy on, capability 2, state `answer`,
+  block idle, verdict insufficient or gaps (never "these items do not
+  answer"), a collection within 75 s, and a dispatch window with delivery
+  room for the writer, the configured completion timeout and a two-minute
+  margin. `markOutside('pending')` is the schedule mark.
+- **Writer** (B2): its own `llama-server` on the answer model's files,
+  `--parallel 1`, batch and ubatch 64, a distinct random port, started on
+  demand and SIGKILLed after the call, on a fresh private answer
+  (`onAnswerActivity`) or at its 60 s deadline. The answer server is never
+  touched. Memory rule before every start: at least 20% free after the
+  0.6 GB footprint and no swap pressure (kernel level normal), else the
+  consult is skipped. Prompt: the rules plus the bounded question, answer
+  and gaps, at most 2,048 tokens by the server's tokenizer (a conservative
+  estimate when it is unavailable); reply schema `{"questions": null | [1–3]}`.
+  A reply naming any capitalised entity after the first word is refused
+  (the implied-place rule, M0 round 2).
+- **Gate, session, dispatch.** The session opens (lease, Tor, daemon, policy
+  warm) while the writer runs. The gate compares the questions against the
+  snapshot pack plus the question, answer and gaps; a refusal is silent.
+  `send` runs final authorization immediately before the reservation:
+  settings revision (`recheckConsultJobPolicy`), panel activity, window and
+  delivery room, state, eligibility (E2) and the send-once latch
+  (`takeConsultLatch`). The reply is appended at completion, before
+  settlement (`appendOutsideBlock`, fitted, with the question and route
+  label); `finished` runs on. `busy` or any failure skips; nothing is queued.
+  Every end that is not an appended block is `markOutside('failed')`: the
+  block reads idle and the panel shows nothing more.
+- **M0 harness against the real scheduler.** The isolation script
+  (`scripts/measure-consult-writer-isolation.ts` on `claude/consult-m0`) can
+  exercise the shipped writer by importing `runConsultWriter` and
+  `createConsultWriterServer` from `src/core/consult-writer.ts` in place of
+  its own `startWriter` for candidate B2 (`--writer-server separate`,
+  on-arrival `kill`): the real prompt replaces the 2,039-token stand-in, and
+  the kill is the orchestrator's `onFreshAnswer` signal. The quiet-machine
+  B2 rerun (load below 3, n ≥ 20 per phase, 30 control pairs) is still owed
+  before the lane ships.
 
 ### Relay
 

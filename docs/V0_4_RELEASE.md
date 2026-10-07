@@ -115,7 +115,10 @@ waits for a calendar slot.
   zkAPI; design `docs/design/frontier-consult-lane.md`, owner decisions of
   2026-10-07). Not in 1.0; a candidate for the release after. Its build
   stages land behind the internal settings mechanism (no public enable
-  path): C1 gate and packs, C3 settings, C4a the panel collection protocol.
+  path): C1 gate and packs, C2 the transport session, C3 settings, C4a the
+  panel collection protocol, C4b the writer scheduling and dispatch
+  orchestration (wired, never triggered until C5 lands an enable path; the
+  quiet-machine B2 rerun of §A.7 is still owed before release).
 
 ## Outcome (0.4, OpenClaw)
 
