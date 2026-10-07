@@ -14,7 +14,7 @@
     "src/workers/source-dashboard.ts",
     "src/workers/source-dispositions.ts"
   ],
-  "reviewed_visual_files_sha256": "45ec1b81b1bce5ff9c10b177170ca7e888e801266574cca3cc7685ca59eff949",
+  "reviewed_visual_files_sha256": "7e3b66e05ea628fa30a43f193dcf0df44e1929ae7378a9407fb0f7f5cda8664c",
   "implementation_guard_paths": [
     "dist/control-ui",
     "scripts/control-ui-preview.ts",
