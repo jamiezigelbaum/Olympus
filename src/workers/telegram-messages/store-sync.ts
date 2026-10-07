@@ -10,6 +10,7 @@ import {
 } from '../connector-store/index.ts';
 import { createLaneTieredStoreSet, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -144,6 +145,8 @@ export function createTelegramConnectorStoreSyncHandler(options: {
   /** The lanes' per-tier stores. Omitted: a set over the two stores, kept whole per message. */
   tierSet?: TieredStoreSet;
   secretLocations?: SecretLocationsIndex;
+  /** The runtime's live Private embedder, told to the set so the Private-row re-home pass knows whether it is local. */
+  privateEmbedder?: SourceEmbeddingProvider;
 }): TelegramConnectorStoreSyncHandler {
   const env = options.env ?? process.env;
   const spoolDir = options.spoolDir?.trim() || defaultTelegramCaptureSpoolDir(env);
@@ -154,6 +157,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
     splitLayers: false,
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
   });
+  if (options.privateEmbedder) tierSet.declarePrivateEmbedder(options.privateEmbedder);
 
   return {
     async pull(request = {}): Promise<TelegramConnectorStoreSyncReceipt> {
