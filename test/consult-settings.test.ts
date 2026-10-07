@@ -348,6 +348,9 @@ describe('the settings module stays off the hosted surfaces', () => {
   const SETTINGS_MODULE = 'src/core/consult-settings.ts';
   const SETTINGS_IMPORTERS: readonly string[] = [
     'src/core/doctor.ts',
+    // The C4b orchestrator re-reads the settings at the gate and inside
+    // final authorization (recheckConsultJobPolicy); it only reads.
+    'src/workers/chatgpt/consult-orchestrator.ts',
     'src/workers/chatgpt/private-answer-jobs.ts',
     'src/workers/email-source/server.ts',
   ];

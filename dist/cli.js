@@ -55238,6 +55238,37 @@ var init_source_ingestion_ledger = __esm(() => {
 });
 
 // src/core/consult-transport-zkapi.ts
+var exports_consult_transport_zkapi = {};
+__export(exports_consult_transport_zkapi, {
+  zkapiWalletDirectory: () => zkapiWalletDirectory,
+  zkapiUsageToday: () => zkapiUsageToday,
+  zkapiUnresolvedSession: () => zkapiUnresolvedSession,
+  zkapiStageRows: () => zkapiStageRows,
+  zkapiRouteLabel: () => zkapiRouteLabel,
+  zkapiOutstandingFences: () => zkapiOutstandingFences,
+  zkapiMoneyStatus: () => zkapiMoneyStatus,
+  zkapiLastSession: () => zkapiLastSession,
+  zkapiFenceScope: () => zkapiFenceScope,
+  zkapiConsultReadiness: () => zkapiConsultReadiness,
+  validZkapiConsultQuestion: () => validZkapiConsultQuestion,
+  sendZkapiConsult: () => sendZkapiConsult,
+  resolveExecutable: () => resolveExecutable,
+  reserveZkapiRequest: () => reserveZkapiRequest,
+  recoverZkapiSession: () => recoverZkapiSession,
+  openZkapiConsultSession: () => openZkapiConsultSession,
+  inspectLoopbackListener: () => inspectLoopbackListener,
+  formatZkapiStageTable: () => formatZkapiStageTable,
+  defaultZkapiStatePath: () => defaultZkapiStatePath,
+  defaultZkapiConfinement: () => defaultZkapiConfinement,
+  darwinSandboxProfile: () => darwinSandboxProfile,
+  confinementStatement: () => confinementStatement,
+  confinementLevel: () => confinementLevel,
+  abandonZkapiFence: () => abandonZkapiFence,
+  ZKAPI_SUPPORTED_DAEMON_VERSIONS: () => ZKAPI_SUPPORTED_DAEMON_VERSIONS,
+  ZKAPI_STAGE_LABELS: () => ZKAPI_STAGE_LABELS,
+  ZKAPI_SESSION_READY_TIMEOUT_MS: () => ZKAPI_SESSION_READY_TIMEOUT_MS,
+  ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD
+});
 import { spawn as spawn3, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash37, randomUUID as randomUUID15 } from "node:crypto";
 import { accessSync as accessSync3, chmodSync as chmodSync13, constants as constants3, existsSync as existsSync32, mkdirSync as mkdirSync25, mkdtempSync, readdirSync as readdirSync5, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync9, statSync as statSync13, writeFileSync as writeFileSync8 } from "node:fs";
@@ -55248,6 +55279,18 @@ function zkapiStageRows(timings) {
   if (!timings)
     return [];
   return ZKAPI_STAGE_LABELS.filter(([key]) => typeof timings[key] === "number").map(([key, label]) => ({ label, ms: timings[key] }));
+}
+function formatZkapiStageTable(timings) {
+  const rows = zkapiStageRows(timings);
+  if (rows.length === 0)
+    return "no stage timings recorded";
+  const width = Math.max(...rows.map((row) => row.label.length));
+  const msWidth = Math.max(...rows.map((row) => String(row.ms).length));
+  return rows.map((row) => `${row.label.padEnd(width)}  ${String(row.ms).padStart(msWidth)} ms`).join(`
+`);
+}
+function failure(code, outcome, networkIdentity, extra = {}) {
+  return { ok: false, error: { code, message: MESSAGES[code], outcome, networkIdentity, ...extra } };
 }
 function zkapiRouteLabel(receipt) {
   if (receipt.keyReuse !== "verified_off" || receipt.inferenceAuth !== "verified") {
@@ -55264,6 +55307,11 @@ function zkapiRouteLabel(receipt) {
   }
   const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : receipt.settlement === "pending" ? "; lease settlement pending" : "";
   return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
+}
+function networkIdentityFor(receipt) {
+  if (receipt.tor === "off" || receipt.postStopProbe === "still_reachable")
+    return "visible";
+  return zkapiRouteLabel(receipt).startsWith("anonymous route") ? "hidden" : "not_verified";
 }
 function zkapiMoneyStatus(settings, now) {
   const required3 = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id);
@@ -55394,6 +55442,13 @@ function zkapiUsageToday(path, now) {
 function zkapiLastSession(path) {
   return readState4(path)?.lastSession;
 }
+function zkapiOutstandingFences(path) {
+  return readState4(path)?.fences ?? {};
+}
+function zkapiUnresolvedSession(path, scope) {
+  const fences = zkapiOutstandingFences(path);
+  return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
+}
 function zkapiWalletDirectory(env) {
   const home = env.HOME?.trim() || homedir37();
   const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join46(home, "Library", "Application Support", "zkapi-clientd") : join46(env.XDG_CONFIG_HOME?.trim() || join46(home, ".config"), "zkapi-clientd"));
@@ -55407,14 +55462,213 @@ function zkapiWalletDirectory(env) {
 function zkapiFenceScope(input) {
   return createHash37("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
+function abandonZkapiFence(path, scope, now) {
+  let found = false;
+  updateState(path, now, (state) => {
+    const fence = state.fences?.[scope];
+    if (!fence)
+      return;
+    found = true;
+    const { [scope]: _abandoned, ...others } = state.fences ?? {};
+    const { fences: _all, ...rest } = state;
+    return {
+      ...rest,
+      ...Object.keys(others).length > 0 ? { fences: others } : {},
+      abandonedFences: { ...state.abandonedFences, [scope]: { ...fence, abandonedAt: now.toISOString() } }
+    };
+  });
+  return found;
+}
+function updateState(path, now, mutate) {
+  mkdirSync25(dirname33(path), { recursive: true, mode: 448 });
+  return withFileLeaseSync(path, (lease) => {
+    const day = utcDay(now);
+    const current = readState4(path);
+    const base = current && current.day === day ? current : {
+      version: 1,
+      day,
+      count: 0,
+      reservedMicroUsd: 0,
+      ...current?.lastSession ? { lastSession: current.lastSession } : {},
+      ...current?.fences ? { fences: current.fences } : {},
+      ...current?.abandonedFences ? { abandonedFences: current.abandonedFences } : {},
+      ...current?.running ? { running: current.running } : {}
+    };
+    const next = mutate(base);
+    if (!next)
+      return base;
+    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify(next)}
+`));
+    return next;
+  }, { acquireTimeoutMs: 5000 });
+}
 function ownerLimits(settings) {
   return {
     ...settings.dailyRequestCap !== undefined ? { requestCap: settings.dailyRequestCap } : {},
     ...settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1e6) } : {}
   };
 }
+function reserveZkapiRequest(path, limits, now, fence = { scope: "default", configDir: "unknown" }) {
+  let refusal;
+  updateState(path, now, (state) => {
+    if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
+      refusal = "daily_cap_reached";
+      return;
+    }
+    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limits.spendCapMicroUsd) {
+      refusal = "spend_cap_reached";
+      return;
+    }
+    return {
+      ...state,
+      count: state.count + 1,
+      reservedMicroUsd: state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD,
+      fences: (() => {
+        const { scope, ...facts } = fence;
+        return { ...state.fences, [scope]: { ...facts, at: now.toISOString() } };
+      })()
+    };
+  });
+  return refusal ? { reserved: false, reason: refusal } : { reserved: true };
+}
+function supervise(role, watchdog, argv, env, onLine, onExit) {
+  const child = spawn3(process.execPath, [watchdog, String(process.pid), ...argv], { env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  const handle = {
+    role,
+    child,
+    pgid: child.pid ?? -1,
+    leader: child.pid ? processInstanceIdentity(child.pid) : undefined,
+    gone: false,
+    leaderExited: false,
+    childExited: false,
+    deliberate: false,
+    go: () => {
+      child.stdin?.write(`go
+`);
+    }
+  };
+  let reported = false;
+  const report = () => {
+    if (reported)
+      return;
+    reported = true;
+    onExit(handle);
+  };
+  const exited = () => {
+    handle.leaderExited = true;
+    report();
+  };
+  child.on("exit", exited);
+  child.on("error", exited);
+  child.stdin?.on("error", () => {
+    return;
+  });
+  for (const stream of [child.stdout, child.stderr]) {
+    let pending = "";
+    stream?.setEncoding("utf8");
+    stream?.on("data", (chunk) => {
+      pending += chunk;
+      let index = pending.indexOf(`
+`);
+      while (index >= 0) {
+        const line = pending.slice(0, index);
+        if (line === WATCHDOG_CHILD_EXITED) {
+          handle.childExited = true;
+          report();
+        } else {
+          onLine(line);
+        }
+        pending = pending.slice(index + 1);
+        index = pending.indexOf(`
+`);
+      }
+      if (pending.length > 64 * 1024)
+        pending = "";
+    });
+  }
+  return handle;
+}
+function groupAlive(pgid) {
+  if (pgid <= 0)
+    return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+async function stopGroup(pgid, stillOurs = () => true) {
+  if (!groupAlive(pgid))
+    return true;
+  if (!stillOurs())
+    return false;
+  try {
+    process.kill(-pgid, "SIGTERM");
+  } catch {}
+  const deadline = Date.now() + STOP_GRACE_MS;
+  while (groupAlive(pgid) && Date.now() < deadline)
+    await sleep2(POLL_MS);
+  if (!groupAlive(pgid))
+    return true;
+  if (!stillOurs())
+    return false;
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {}
+  const killDeadline = Date.now() + KILL_GRACE_MS;
+  while (groupAlive(pgid) && Date.now() < killDeadline)
+    await sleep2(POLL_MS);
+  return !groupAlive(pgid);
+}
+function activeGroupIsOurs(handle) {
+  if (!handle.leader)
+    return false;
+  try {
+    process.kill(handle.pgid, 0);
+  } catch (error) {
+    if (error.code !== "EPERM")
+      return false;
+  }
+  const current = processInstanceIdentity(handle.pgid);
+  if (!current)
+    return false;
+  if (handle.leader.bootId && current.bootId && handle.leader.bootId !== current.bootId)
+    return false;
+  return current.platform === handle.leader.platform && current.mechanism === handle.leader.mechanism && current.startTime === handle.leader.startTime;
+}
+async function stopOwned(handle) {
+  if (handle.gone)
+    return true;
+  const stopped = await stopGroup(handle.pgid, () => activeGroupIsOurs(handle));
+  if (stopped)
+    handle.gone = true;
+  return stopped;
+}
 function currentBootId() {
   return processInstanceIdentity(process.pid)?.bootId;
+}
+function recordedGroupState(group, recordedBootId) {
+  const boot = currentBootId();
+  const groupBoot = group.leader?.bootId ?? recordedBootId;
+  if (groupBoot && boot && groupBoot !== boot)
+    return "gone";
+  if (!groupAlive(group.pgid))
+    return "gone";
+  let leaderAlive = true;
+  try {
+    process.kill(group.pgid, 0);
+  } catch (error) {
+    leaderAlive = error.code === "EPERM";
+  }
+  if (!leaderAlive)
+    return "unknown";
+  const current = processInstanceIdentity(group.pgid);
+  if (!group.leader || !current)
+    return "unknown";
+  if (group.leader.platform !== current.platform || group.leader.mechanism !== current.mechanism)
+    return "unknown";
+  return group.leader.startTime === current.startTime ? "ours" : "gone";
 }
 function supervisorAlive(supervisor) {
   if (supervisor.pid === process.pid)
@@ -55432,6 +55686,55 @@ function supervisorAlive(supervisor) {
   if (!supervisor.instance || !current)
     return true;
   return supervisor.instance.mechanism !== current.mechanism || supervisor.instance.startTime === current.startTime;
+}
+async function recoverStrandedGroups(statePath, now) {
+  const running = readState4(statePath)?.running;
+  if (!running)
+    return "clear";
+  if (supervisorAlive(running.supervisor))
+    return "busy";
+  const recordedBoot = running.supervisor.instance?.bootId;
+  let allGone = true;
+  for (const group of running.groups) {
+    const state = recordedGroupState(group, recordedBoot);
+    if (state === "unknown") {
+      allGone = false;
+      continue;
+    }
+    if (state === "ours" && !await stopGroup(group.pgid, () => recordedGroupState(group, recordedBoot) === "ours")) {
+      allGone = false;
+    }
+  }
+  if (!allGone)
+    return "stranded";
+  if (running.workDir) {
+    try {
+      rmSync9(running.workDir, { recursive: true, force: true });
+    } catch {}
+  }
+  updateState(statePath, now, (state) => {
+    const { running: _gone, ...rest } = state;
+    return rest;
+  });
+  return "clear";
+}
+function processGroupOf(pid) {
+  try {
+    if (process.platform === "linux") {
+      const stat3 = readFileSync28(`/proc/${pid}/stat`, "utf8");
+      const fields = stat3.slice(stat3.lastIndexOf(")") + 1).trim().split(/\s+/);
+      const pgrp = Number(fields[2]);
+      return Number.isInteger(pgrp) ? pgrp : undefined;
+    }
+    const out = execFileSync2("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    return /^\d+$/.test(out) ? Number(out) : undefined;
+  } catch {
+    return;
+  }
 }
 function childEnvironment(env) {
   const out = {};
@@ -55453,6 +55756,21 @@ function resolveExecutable(name, explicit, env) {
   }
   return;
 }
+function sleep2(ms) {
+  return new Promise((resolve8) => setTimeout(resolve8, ms));
+}
+async function waitFor(condition, timeoutMs, options = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;; ) {
+    if (await condition(Math.max(0, deadline - Date.now())))
+      return true;
+    if (options.signal?.aborted || options.giveUp?.())
+      return false;
+    if (Date.now() >= deadline)
+      return false;
+    await sleep2(Math.min(options.pollMs ?? POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+}
 function portAnswers(port) {
   return new Promise((resolve8) => {
     const socket = createConnection({ host: "127.0.0.1", port });
@@ -55464,6 +55782,171 @@ function portAnswers(port) {
     socket.once("connect", () => done(true));
     socket.once("error", () => done(false));
   });
+}
+function parseDaemonLine(facts, line) {
+  let match = /zkAPI client (\S+) listening at http:\/\/(\S+)\/v1 \(zkapi\); (.+)$/.exec(line);
+  if (match) {
+    facts.version = match[1];
+    facts.listen = match[2];
+    facts.transport = match[3].trim();
+    return;
+  }
+  if (line.includes("Ephemeral key isolation: fresh OpenRouter key for every completion")) {
+    facts.keyReuse = "off";
+    return;
+  }
+  if (/Ephemeral key reuse enabled for up to \d+ seconds/.test(line)) {
+    facts.keyReuse = "on";
+    return;
+  }
+  if (line.includes("Use zkapi-clientd config --api-key to configure your client")) {
+    facts.inferenceAuth = "required";
+    return;
+  }
+  if (line.includes("Localhost inference needs no API key")) {
+    facts.inferenceAuth = "not_required";
+    return;
+  }
+  match = /request started method=\S+ route=(\S+) request=(\d+)/.exec(line);
+  if (match) {
+    facts.requests.set(Number(match[2]), { route: match[1], keys: [] });
+    return;
+  }
+  match = /request key selected request=(\d+) key_ref=(\d+) source=(fresh|reused)/.exec(line);
+  if (match) {
+    facts.requests.get(Number(match[1]))?.keys.push({ keyRef: Number(match[2]), source: match[3] });
+    return;
+  }
+  match = /request \S+ method=\S+ route=\S+ status=(\d+) duration=\S+ request=(\d+)/.exec(line);
+  if (match) {
+    const request = facts.requests.get(Number(match[2]));
+    if (request)
+      request.finished = { status: Number(match[1]) };
+    return;
+  }
+  match = /automatic settlement result key_ref=(\d+) ready=(true|false)/.exec(line);
+  if (match)
+    facts.settled.set(Number(match[1]), match[2] === "true");
+}
+async function probeRequest(fetchImpl, url, init, signal, timeoutMs = PROBE_TIMEOUT_MS) {
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const response = await fetchImpl(url, { ...init, redirect: "error", signal: controller.signal });
+    const body = await readBounded(response, PROBE_MAX_BYTES);
+    return { status: response.status, headers: response.headers, body: body.ok ? body.text : "" };
+  } catch {
+    return;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function daemonErrorEnvelope(body) {
+  try {
+    const error = JSON.parse(body).error;
+    if (!error || typeof error.code !== "string" || error.type !== error.code || typeof error.message !== "string" || error.param !== null) {
+      return;
+    }
+    return error.code;
+  } catch {
+    return;
+  }
+}
+function healthFingerprint(response) {
+  return Boolean(response) && response.status === 200 && response.body === '{"status":"ok"}' && response.headers.get("cache-control") === "no-store" && response.headers.get("x-content-type-options") === "nosniff";
+}
+function modelListing(body, model) {
+  try {
+    const data = JSON.parse(body).data;
+    if (!Array.isArray(data) || data.length === 0)
+      return { listed: false };
+    const entry = data.find((item) => item.id === model);
+    const allowance = entry?.oa_request_limit_micro_usd;
+    return typeof allowance === "number" && Number.isInteger(allowance) && allowance > 0 ? { listed: true, allowance } : { listed: true };
+  } catch {
+    return { listed: false };
+  }
+}
+function inspectLoopbackListener(port) {
+  let pids;
+  if (process.platform === "darwin") {
+    try {
+      const out = execFileSync2("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
+        encoding: "utf8",
+        timeout: 5000,
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      pids = [...new Set(out.split(`
+`).filter((line) => /^p\d+$/.test(line)).map((line) => Number(line.slice(1))))];
+    } catch (error) {
+      return error.status === 1 ? { kind: "not_visible" } : { kind: "unavailable" };
+    }
+  } else if (process.platform === "linux") {
+    const found = linuxListenerPids(port);
+    if (!Array.isArray(found))
+      return found;
+    pids = found;
+  } else {
+    return { kind: "unavailable" };
+  }
+  if (pids.length === 0)
+    return { kind: "not_visible" };
+  const pgids = new Set(pids.map((pid) => processGroupOf(pid)));
+  const [pgid] = [...pgids];
+  return pgids.size === 1 && pgid !== undefined ? { kind: "found", pid: pids[0], pgid } : { kind: "found", pid: pids[0] };
+}
+function linuxListenerPids(port) {
+  const inodes = new Set;
+  const hexPort = port.toString(16).toUpperCase().padStart(4, "0");
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text;
+    try {
+      text = readFileSync28(table, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split(`
+`).slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 10 || fields[3] !== "0A" || !fields[1]?.endsWith(`:${hexPort}`))
+        continue;
+      if (fields[9] && fields[9] !== "0")
+        inodes.add(fields[9]);
+    }
+  }
+  if (inodes.size === 0)
+    return { kind: "not_visible" };
+  let entries;
+  try {
+    entries = readdirSync5("/proc").filter((name) => /^\d+$/.test(name));
+  } catch {
+    return { kind: "unavailable" };
+  }
+  const owners = new Set;
+  const seen = new Set;
+  for (const pid of entries) {
+    let fds;
+    try {
+      fds = readdirSync5(`/proc/${pid}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        const match = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`));
+        if (match && inodes.has(match[1])) {
+          owners.add(Number(pid));
+          seen.add(match[1]);
+        }
+      } catch {}
+    }
+  }
+  if (seen.size !== inodes.size)
+    return { kind: "unavailable" };
+  return [...owners];
 }
 async function zkapiConsultReadiness(options) {
   const now = (options.now ?? (() => new Date))();
@@ -55561,7 +56044,845 @@ async function zkapiConsultReadiness(options) {
     blockers
   };
 }
-var DAY_MS, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, CHILD_ENV_KEYS, ZKAPI_STAGE_LABELS, DARWIN_POLICY, SELF_TEST_SCRIPT = `
+function deferred() {
+  let settled = false;
+  let resolve8;
+  const promise = new Promise((done) => {
+    resolve8 = (value) => {
+      if (settled)
+        return;
+      settled = true;
+      done(value);
+    };
+  });
+  return { promise, resolve: resolve8, settled: () => settled };
+}
+async function openZkapiConsultSession(options, control = {}) {
+  return openSession(options, control, false);
+}
+async function sendZkapiConsult(question, options, control = {}) {
+  const initialIdentity = options.settings.tor === "off" ? "visible" : "not_verified";
+  if (typeof question !== "string" || !validQuestion(question)) {
+    return failure("invalid_question", "not_sent", initialIdentity);
+  }
+  return oneShot(question, false, options, control.signal);
+}
+async function recoverZkapiSession(options, control = {}) {
+  return oneShot(RECOVERY_QUESTION, true, options, control.signal);
+}
+async function oneShot(question, recovery, options, signal) {
+  const opened = await openSession(options, { signal }, recovery);
+  if (!opened.ok)
+    return opened;
+  await opened.session.send(question, { signal });
+  const result = await opened.session.finished;
+  if (signal?.aborted && (result.ok || result.error.outcome !== "not_sent" && !SESSION_OWNED_FAILURES.has(result.error.code))) {
+    const receipt = result.ok ? result.receipt : result.error.receipt;
+    const identity = result.ok ? result.networkIdentity : result.error.networkIdentity;
+    return failure("aborted", "unknown", identity, receipt ? { receipt } : {});
+  }
+  return result;
+}
+async function openSession(options, control, recovery) {
+  const initialIdentity = options.settings.tor === "off" ? "visible" : "not_verified";
+  if (zkapiConsultInFlight)
+    return failure("busy", "not_sent", initialIdentity);
+  zkapiConsultInFlight = true;
+  const statePath = options.statePath ?? defaultZkapiStatePath();
+  const sent = { dispatched: false };
+  const clock = options.clock ?? (() => performance.now());
+  const startedAt = sampleClock(clock);
+  const bridge = {
+    state: "opening",
+    openSignal: control.signal,
+    readyTimeoutMs: control.readyTimeoutMs ?? ZKAPI_SESSION_READY_TIMEOUT_MS,
+    cancelRequested: undefined,
+    cancel: undefined,
+    ready: deferred(),
+    dispatch: deferred(),
+    reply: deferred()
+  };
+  const requestCancel = (reason) => {
+    if (bridge.cancel)
+      bridge.cancel(reason);
+    else
+      bridge.cancelRequested ??= reason;
+  };
+  const openDeadline = control.deadlineMs !== undefined ? setTimeout(() => {
+    if (bridge.state === "opening")
+      requestCancel("deadline");
+  }, control.deadlineMs) : undefined;
+  let leaseHeld = false;
+  const finished = (async () => {
+    try {
+      mkdirSync25(dirname33(statePath), { recursive: true, mode: 448 });
+      const result2 = await withFileLease(`${statePath}.session`, () => {
+        leaseHeld = true;
+        return runSession(recovery, options, statePath, bridge, sent, clock, startedAt);
+      }, { acquireTimeoutMs: 50 });
+      const receipt = result2.ok ? result2.receipt : result2.error.receipt;
+      if (receipt && receipt.stageMs?.totalMs === undefined) {
+        receipt.stageMs = withTiming(receipt.stageMs ?? {}, "totalMs", elapsedMs(clock, startedAt));
+        if (Object.keys(receipt.stageMs).length === 0)
+          delete receipt.stageMs;
+      }
+      return result2;
+    } catch (error) {
+      const total = elapsedMs(clock, startedAt);
+      let stageMs = withTiming({}, "totalMs", total);
+      if (!leaseHeld)
+        stageMs = withTiming(stageMs, "leaseAcquireMs", total);
+      const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
+      if (error instanceof FileLeaseBusyError)
+        return failure("busy", "not_sent", initialIdentity, timed);
+      return failure("internal_error", sent.dispatched ? "unknown" : "not_sent", initialIdentity, timed);
+    } finally {
+      zkapiConsultInFlight = false;
+    }
+  })().then((result2) => {
+    clearTimeout(openDeadline);
+    bridge.state = sent.dispatched ? "finished" : "cancelled";
+    if (!result2.ok)
+      bridge.reply.resolve({ kind: "failed", error: result2.error });
+    return result2;
+  });
+  const session = {
+    get state() {
+      return bridge.state;
+    },
+    finished,
+    cancel: () => requestCancel("cancel"),
+    send: async (question, sendControl = {}) => {
+      if (typeof question !== "string" || !validQuestion(question)) {
+        return { kind: "failed", error: failure("invalid_question", "not_sent", initialIdentity).error };
+      }
+      if (bridge.state !== "ready") {
+        return { kind: "failed", error: failure("session_spent", "not_sent", initialIdentity).error };
+      }
+      bridge.state = "authorizing";
+      const deadlineAt = sendControl.deadlineMs !== undefined ? performance.now() + sendControl.deadlineMs : undefined;
+      bridge.dispatch.resolve({
+        question,
+        signal: sendControl.signal,
+        authorize: sendControl.authorize,
+        deadlineAt
+      });
+      return bridge.reply.promise;
+    }
+  };
+  const ready = await Promise.race([
+    bridge.ready.promise.then(() => true),
+    finished.then(() => false)
+  ]);
+  if (ready) {
+    clearTimeout(openDeadline);
+    return { ok: true, session };
+  }
+  const result = await finished;
+  return result.ok ? failure("internal_error", "unknown", result.networkIdentity, { receipt: result.receipt }) : result;
+}
+async function runSession(recovery, options, statePath, bridge, sent, clock, startedAt) {
+  let timings = withTiming({}, "leaseAcquireMs", elapsedMs(clock, startedAt));
+  let openStage;
+  let lastSampleAt;
+  const stage = (key) => {
+    const at = sampleClock(clock);
+    lastSampleAt = at;
+    if (openStage)
+      timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
+    openStage = key ? { key, at } : undefined;
+  };
+  const now = options.now ?? (() => new Date);
+  const settings = options.settings;
+  const env = options.env ?? process.env;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const inspect = options.inspectListener ?? inspectLoopbackListener;
+  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const origin = new URL(options.baseUrl).origin;
+  const daemonPort = Number(new URL(options.baseUrl).port || 80);
+  const perConsultTor = settings.tor === "per_consult";
+  const receipt = {
+    recovery,
+    keyReuse: "not_verified",
+    inferenceAuth: "not_verified",
+    tor: perConsultTor ? "per_consult" : "off",
+    freshTorClient: false,
+    confinement: perConsultTor ? confinement.level : "none",
+    confinementSelfTest: "not_run",
+    postStopProbe: "not_run",
+    settlement: "no_lease",
+    fence: "clear"
+  };
+  const snapshot = () => Object.keys(timings).length > 0 ? { ...receipt, stageMs: { ...timings } } : { ...receipt };
+  const pendingSnapshot3 = () => ({ ...snapshot(), settlement: "pending", fence: "held" });
+  const identity = () => perConsultTor ? networkIdentityFor(receipt) : "visible";
+  const fail = (code, extra = {}) => failure(code, sent.dispatched ? extra.httpStatus ? "sent_failed" : "unknown" : "not_sent", identity(), { ...extra, receipt: snapshot() });
+  const sessionAbort = new AbortController;
+  const sessionSignal = sessionAbort.signal;
+  let abortCause = "aborted";
+  const cancelBeforeDispatch = (reason) => {
+    if (sessionSignal.aborted)
+      return;
+    abortCause = reason === "deadline" ? "timeout" : "aborted";
+    sessionAbort.abort();
+  };
+  let detachCaller;
+  bridge.cancel = (reason) => {
+    if (sent.dispatched)
+      detachCaller?.();
+    else
+      cancelBeforeDispatch(reason);
+  };
+  const onCallerAbort = () => bridge.cancel("cancel");
+  bridge.openSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  if (bridge.openSignal?.aborted)
+    cancelBeforeDispatch("cancel");
+  if (bridge.cancelRequested)
+    cancelBeforeDispatch(bridge.cancelRequested);
+  let sendSignal;
+  const cleanupCallerSignals = () => {
+    bridge.openSignal?.removeEventListener("abort", onCallerAbort);
+    sendSignal?.removeEventListener("abort", onCallerAbort);
+  };
+  const scope = zkapiFenceScope({ env });
+  let fences;
+  try {
+    fences = zkapiOutstandingFences(statePath);
+  } catch {
+    cleanupCallerSignals();
+    return fail("state_unavailable");
+  }
+  const fenced = Boolean(fences[scope]);
+  const fencedElsewhere = Object.keys(fences).some((key) => key !== scope);
+  if (fenced || fencedElsewhere)
+    receipt.fence = "held";
+  if (fenced)
+    receipt.settlement = "not_confirmed";
+  const refuse2 = (code) => {
+    cleanupCallerSignals();
+    return fail(code);
+  };
+  const blocked = settingsBlockers(zkapiMoneyStatus(settings, now()))[0];
+  if (blocked)
+    return refuse2(blocked);
+  if (!options.apiKey)
+    return refuse2("daemon_api_key_missing");
+  const daemonExecutable = resolveExecutable("zkapi-clientd", settings.daemonExecutable, env);
+  if (!daemonExecutable)
+    return refuse2("daemon_not_found");
+  const torExecutable = perConsultTor ? resolveExecutable("tor", settings.torExecutable, env) : undefined;
+  if (perConsultTor && !torExecutable)
+    return refuse2("tor_not_found");
+  try {
+    const stranded = await recoverStrandedGroups(statePath, now());
+    if (stranded === "busy")
+      return refuse2("busy");
+    if (stranded === "stranded")
+      return refuse2("stranded_processes");
+    if (!recovery && fenced)
+      return refuse2("unresolved_session");
+    if (fencedElsewhere && !fenced)
+      return refuse2("unresolved_session_other_wallet");
+    if (!fenced && recovery)
+      return refuse2("no_unresolved_session");
+    const usage = zkapiUsageToday(statePath, now());
+    const limit = ownerLimits(settings);
+    if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
+      return refuse2("daily_cap_reached");
+    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
+      return refuse2("spend_cap_reached");
+    }
+  } catch {
+    return refuse2("state_unavailable");
+  }
+  if (await portAnswers(daemonPort))
+    return refuse2("daemon_already_running");
+  if (perConsultTor && await portAnswers(settings.torSocksPort))
+    return refuse2("tor_port_busy");
+  if (sessionSignal.aborted)
+    return refuse2(abortCause);
+  const sessionId = randomUUID15();
+  const workDir = mkdtempSync(join46(tmpdir3(), "olympus-zkapi-"));
+  chmodSync13(workDir, 448);
+  const watchdog = join46(workDir, "watchdog.cjs");
+  const childEnv = childEnvironment(env);
+  const groups = [];
+  let tor;
+  let daemon;
+  let result = failure("internal_error", "not_sent", "not_verified");
+  const unexpectedExit = () => groups.some((group) => (group.leaderExited || group.childExited) && !group.deliberate);
+  const onChildExit = (handle) => {
+    if (!handle.deliberate)
+      sessionAbort.abort();
+  };
+  const interrupted = () => unexpectedExit() ? "session_process_exited" : abortCause;
+  let sendDeadline;
+  result = await (async () => {
+    try {
+      writeFileSync8(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
+      const supervisorInstance = processInstanceIdentity(process.pid);
+      updateState(statePath, now(), (state) => ({
+        ...state,
+        running: { sessionId, supervisor: { pid: process.pid, ...supervisorInstance ? { instance: supervisorInstance } : {} }, workDir, groups: [] }
+      }));
+      const recordAndStart = (handle) => {
+        groups.push(handle);
+        const leader = handle.leader;
+        updateState(statePath, now(), (state) => ({
+          ...state,
+          ...state.running ? { running: { ...state.running, groups: [...state.running.groups, { role: handle.role, pgid: handle.pgid, ...leader ? { leader } : {} }] } } : {}
+        }));
+        handle.go();
+      };
+      const anyExited = unexpectedExit;
+      if (perConsultTor) {
+        stage("confinementSelfTestMs");
+        if (await confinement.selfTest(workDir, childEnv)) {
+          receipt.confinementSelfTest = "passed";
+        } else if (confinement.level !== "none") {
+          receipt.confinementSelfTest = "failed";
+          return result = fail("confinement_self_test_failed");
+        }
+        if (sessionSignal.aborted)
+          return result = fail(interrupted());
+        const torDataDir = join46(workDir, "tor");
+        mkdirSync25(torDataDir, { mode: 448 });
+        let bootstrapped = false;
+        stage("torBootstrapMs");
+        tor = supervise("tor", watchdog, [
+          torExecutable,
+          "--ClientOnly",
+          "1",
+          "--PublishServerDescriptor",
+          "0",
+          "--DataDirectory",
+          torDataDir,
+          "--SocksPort",
+          `127.0.0.1:${settings.torSocksPort}`,
+          "--SafeLogging",
+          "1",
+          "--__OwningControllerProcess",
+          String(process.pid)
+        ], childEnv, (line) => {
+          if (line.includes("Bootstrapped 100"))
+            bootstrapped = true;
+        }, onChildExit);
+        recordAndStart(tor);
+        if (!await waitFor(() => bootstrapped, settings.torBootstrapTimeoutMs, { signal: sessionSignal, giveUp: anyExited })) {
+          return result = fail(sessionSignal.aborted ? interrupted() : "tor_bootstrap_failed");
+        }
+        receipt.freshTorClient = true;
+      }
+      const facts = { requests: new Map, settled: new Map };
+      const daemonArgv = [daemonExecutable, "serve"];
+      stage("daemonReadyMs");
+      daemon = supervise("daemon", watchdog, perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv, childEnv, (line) => parseDaemonLine(facts, line), onChildExit);
+      recordAndStart(daemon);
+      const daemonGone = () => daemon.leaderExited || daemon.childExited;
+      const owned = async (includeTor = true) => {
+        if (includeTor ? anyExited() : daemonGone())
+          return false;
+        const listener = await inspect(daemonPort);
+        if (listener.kind !== "found" || listener.pgid !== daemon.pgid)
+          return false;
+        if (tor && includeTor) {
+          const socks = await inspect(settings.torSocksPort);
+          if (socks.kind !== "found" || socks.pgid !== tor.pgid)
+            return false;
+        }
+        return includeTor ? !anyExited() : !daemonGone();
+      };
+      const guard = async () => {
+        if (sessionSignal.aborted)
+          return interrupted();
+        if (anyExited())
+          return "session_process_exited";
+        if (await owned())
+          return;
+        await sleep2(300);
+        return anyExited() ? "session_process_exited" : "daemon_identity_failed";
+      };
+      const ready = await waitFor(async (remainingMs) => Boolean(facts.listen) && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: "GET" }, sessionSignal, Math.min(2000, remainingMs))), settings.daemonReadyTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: 250 });
+      if (!ready)
+        return result = fail(sessionSignal.aborted ? interrupted() : "daemon_start_failed");
+      stage("daemonVerifyMs");
+      receipt.daemonVersion = facts.version;
+      if (!versionSupported(facts.version))
+        return result = fail("daemon_version_unsupported");
+      if (facts.listen !== new URL(options.baseUrl).host)
+        return result = fail("daemon_identity_failed");
+      const expectedTransport = perConsultTor ? "SOCKS5 proxy required" : "direct HTTPS (network proxy off)";
+      if (facts.transport !== expectedTransport)
+        return result = fail("relay_mismatch");
+      if (facts.keyReuse === "on")
+        return result = fail("key_reuse_on");
+      if (facts.keyReuse !== "off")
+        return result = fail("key_reuse_unverified");
+      receipt.keyReuse = "verified_off";
+      if (facts.inferenceAuth !== "required")
+        return result = fail("daemon_keyless");
+      let problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      const unauthenticated = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "POST" }, sessionSignal);
+      if (!unauthenticated || unauthenticated.status !== 401 || daemonErrorEnvelope(unauthenticated.body) !== "invalid_api_key" || unauthenticated.headers.get("www-authenticate") !== "Bearer") {
+        return result = fail(unauthenticated?.status === 405 ? "daemon_keyless" : "daemon_identity_failed");
+      }
+      const authorization = { Authorization: `Bearer ${options.apiKey}` };
+      problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      const status = await probeRequest(fetchImpl, `${origin}/admin/status`, { method: "GET", headers: authorization }, sessionSignal);
+      if (sessionSignal.aborted)
+        return result = fail(interrupted());
+      if (!status || status.status === 401)
+        return result = fail("daemon_api_key_rejected");
+      const network = adminStatusNetwork(status);
+      if (!network)
+        return result = fail("daemon_identity_failed");
+      receipt.inferenceAuth = "verified";
+      receipt.network = network;
+      let listing = { listed: false };
+      let guardProblem;
+      stage("policyWarmMs");
+      await waitFor(async (remainingMs) => {
+        guardProblem = await guard();
+        if (guardProblem)
+          return true;
+        const models = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "GET", headers: authorization }, sessionSignal, Math.min(MODELS_PROBE_TIMEOUT_MS, remainingMs));
+        if (models?.status !== 200)
+          return false;
+        listing = modelListing(models.body, options.model);
+        return listing.listed;
+      }, settings.policyWarmTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: POLICY_POLL_MS });
+      if (guardProblem)
+        return result = fail(guardProblem);
+      if (!listing.listed)
+        return result = fail(sessionSignal.aborted ? interrupted() : "policy_unavailable");
+      if (listing.allowance === undefined)
+        return result = fail("model_unavailable");
+      receipt.listedAllowanceUsd = listing.allowance / 1e6;
+      stage(undefined);
+      timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
+      bridge.state = "ready";
+      bridge.ready.resolve();
+      const aborted = new Promise((resolve8) => {
+        if (sessionSignal.aborted)
+          resolve8(undefined);
+        else
+          sessionSignal.addEventListener("abort", () => resolve8(undefined), { once: true });
+      });
+      const readyTimer = setTimeout(() => cancelBeforeDispatch("deadline"), bridge.readyTimeoutMs);
+      const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
+      clearTimeout(readyTimer);
+      if (!dispatch || sessionSignal.aborted)
+        return result = fail(interrupted());
+      stage("reservationMs");
+      const prepared = prepareCompletionRequest(dispatch.question, options, origin);
+      sendSignal = dispatch.signal;
+      sendSignal?.addEventListener("abort", onCallerAbort, { once: true });
+      if (sendSignal?.aborted)
+        cancelBeforeDispatch("cancel");
+      const deadlineAt = dispatch.deadlineAt;
+      const pastDeadline = () => deadlineAt !== undefined && performance.now() >= deadlineAt;
+      if (pastDeadline())
+        return result = fail("timeout");
+      if (deadlineAt !== undefined)
+        sendDeadline = setTimeout(() => cancelBeforeDispatch("deadline"), Math.max(0, deadlineAt - performance.now()));
+      problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      let authorized = true;
+      if (dispatch.authorize) {
+        let pending;
+        try {
+          pending = Promise.resolve(dispatch.authorize(sessionSignal));
+        } catch {
+          return result = fail("internal_error");
+        }
+        const settled = await Promise.race([
+          pending.then((value) => ({ ok: true, value }), () => ({ ok: false })),
+          aborted.then(() => {
+            return;
+          })
+        ]);
+        if (settled === undefined) {
+          pending.catch(() => {
+            return;
+          });
+          return result = fail(interrupted());
+        }
+        if (!settled.ok)
+          return result = fail("internal_error");
+        authorized = settled.value;
+      }
+      if (sessionSignal.aborted)
+        return result = fail(interrupted());
+      if (pastDeadline())
+        return result = fail("timeout");
+      if (!authorized)
+        return result = fail("authorization_refused");
+      if (anyExited())
+        return result = fail("session_process_exited");
+      clearTimeout(sendDeadline);
+      let reservation;
+      try {
+        reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
+          scope,
+          configDir: zkapiWalletDirectory(env),
+          daemonExecutable,
+          daemonPort
+        });
+      } catch {
+        return result = fail("state_unavailable");
+      }
+      if (!reservation.reserved)
+        return result = fail(reservation.reason);
+      receipt.reservedUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD / 1e6;
+      receipt.fence = "held";
+      const requestsBefore = new Set(facts.requests.keys());
+      sent.dispatched = true;
+      bridge.state = "dispatched";
+      detachCaller = () => bridge.reply.resolve({ kind: "failed", error: failure("aborted", "unknown", identity(), { receipt: pendingSnapshot3() }).error });
+      const completion = await sendCompletion(prepared, options, sessionSignal, stage, pastDeadline);
+      if (!completion.ok && completion.error.outcome === "not_sent") {
+        sent.dispatched = false;
+        detachCaller = undefined;
+        try {
+          releaseZkapiReservation(statePath, scope, fences[scope], now());
+          delete receipt.reservedUsd;
+          receipt.fence = fenced || fencedElsewhere ? "held" : "clear";
+        } catch {}
+        return result = fail(completion.error.code);
+      }
+      if (completion.ok)
+        timings = withTiming(timings, "replyHandedOverAtMs", durationMs(startedAt, lastSampleAt));
+      bridge.state = "replied";
+      bridge.reply.resolve(completion.ok ? {
+        kind: "reply",
+        text: completion.text,
+        routeLabel: zkapiRouteLabel(pendingSnapshot3()),
+        networkIdentity: identity(),
+        receipt: pendingSnapshot3(),
+        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
+        elapsedMs: completion.elapsedMs
+      } : {
+        kind: "failed",
+        error: failure(completion.error.code, completion.error.outcome, identity(), {
+          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
+          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
+          receipt: pendingSnapshot3()
+        }).error
+      });
+      stage("correlationWaitMs");
+      const correlated = await waitFor(() => {
+        const ours2 = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
+        return ours2.length === 1 && ours2[0][1].finished !== undefined;
+      }, settings.settleTimeoutMs, { giveUp: unexpectedExit });
+      const ours = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
+      const request = correlated && ours.length === 1 ? ours[0][1] : undefined;
+      if (request && request.keys.some((key) => key.source !== "fresh"))
+        receipt.keyReuse = "not_verified";
+      const keyRef = request?.keys.length === 1 ? request.keys[0].keyRef : undefined;
+      let fenceClears = false;
+      if (keyRef !== undefined) {
+        stage("settlementWaitMs");
+        receipt.settlement = await waitFor(() => facts.settled.get(keyRef) === true, settings.settleTimeoutMs, { giveUp: unexpectedExit }) ? "confirmed" : "not_confirmed";
+        fenceClears = receipt.settlement === "confirmed" && request.keys[0].source === "fresh";
+      } else {
+        const preLease = !recovery && request !== undefined && request.keys.length === 0 && request.finished?.status === 400 && !completion.ok && (completion.error.daemonCode === "invalid_model" || completion.error.daemonCode === "model_budget_unavailable");
+        receipt.settlement = preLease ? "no_lease" : "not_confirmed";
+        fenceClears = preLease;
+      }
+      stage(undefined);
+      if (fenceClears) {
+        try {
+          updateState(statePath, now(), (state) => {
+            const { [scope]: _cleared, ...others } = state.fences ?? {};
+            const { fences: _all, ...rest } = state;
+            return Object.keys(others).length > 0 ? { ...rest, fences: others } : rest;
+          });
+          receipt.fence = "clear";
+        } catch {}
+      }
+      if (perConsultTor && !unexpectedExit()) {
+        tor.deliberate = true;
+        stage("torStopMs");
+        const torStopped = await stopOwned(tor);
+        stage(undefined);
+        let after;
+        if (torStopped && !daemonGone() && await owned(false)) {
+          stage("postStopProbeMs");
+          after = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "GET", headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS);
+          stage(undefined);
+        }
+        receipt.postStopProbe = after?.status === 200 ? "still_reachable" : after?.status === 502 && daemonErrorEnvelope(after.body) === "models_unavailable" ? "route_lost" : "inconclusive";
+      }
+      if (unexpectedExit())
+        return result = fail("session_process_exited");
+      if (!completion.ok) {
+        result = failure(completion.error.code, completion.error.outcome, identity(), {
+          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
+          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
+          receipt: snapshot()
+        });
+        return result;
+      }
+      result = {
+        ok: true,
+        text: completion.text,
+        routeLabel: zkapiRouteLabel(receipt),
+        networkIdentity: identity(),
+        receipt: snapshot(),
+        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
+        elapsedMs: completion.elapsedMs
+      };
+      return result;
+    } catch {
+      return result = fail("internal_error");
+    }
+  })();
+  clearTimeout(sendDeadline);
+  cleanupCallerSignals();
+  stage("teardownMs");
+  let allStopped = true;
+  for (const group of [...groups].reverse()) {
+    group.deliberate = true;
+    try {
+      if (!await stopOwned(group))
+        allStopped = false;
+    } catch {
+      allStopped = false;
+    }
+  }
+  if (allStopped) {
+    try {
+      rmSync9(workDir, { recursive: true, force: true });
+    } catch {}
+  } else {
+    result = fail("teardown_incomplete");
+  }
+  stage(undefined);
+  timings = withTiming(timings, "totalMs", elapsedMs(clock, startedAt));
+  const final = result;
+  const finalReceipt = final.ok ? final.receipt : final.error.receipt;
+  if (finalReceipt && Object.keys(timings).length > 0)
+    finalReceipt.stageMs = { ...timings };
+  try {
+    updateState(statePath, now(), (state) => {
+      const { running, ...rest } = state;
+      return {
+        ...rest,
+        ...allStopped ? {} : running ? { running } : {},
+        lastSession: { ...snapshot(), at: now().toISOString(), result: final.ok ? "ok" : final.error.code }
+      };
+    });
+  } catch {}
+  return final;
+}
+function releaseZkapiReservation(path, scope, earlierFence, now) {
+  updateState(path, now, (state) => {
+    const { [scope]: _ours, ...others } = state.fences ?? {};
+    const fences = earlierFence ? { ...others, [scope]: earlierFence } : others;
+    const { fences: _all, ...rest } = state;
+    return {
+      ...rest,
+      count: Math.max(0, state.count - 1),
+      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - ZKAPI_MAX_ALLOWANCE_MICRO_USD),
+      ...Object.keys(fences).length > 0 ? { fences } : {}
+    };
+  });
+}
+function sampleClock(clock) {
+  try {
+    const value = clock();
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function durationMs(from, to) {
+  if (from === undefined || to === undefined)
+    return;
+  const ms = Math.round(to - from);
+  return Number.isFinite(ms) ? Math.max(0, ms) : undefined;
+}
+function elapsedMs(clock, since) {
+  return since === undefined ? undefined : durationMs(since, sampleClock(clock));
+}
+function withTiming(timings, key, ms) {
+  return ms === undefined ? timings : { ...timings, [key]: ms };
+}
+function adminStatusNetwork(response) {
+  if (response.status !== 200)
+    return;
+  try {
+    const parsed = JSON.parse(response.body);
+    if (parsed.backend !== "zkapi")
+      return;
+    return parsed.network === "mainnet" || parsed.network === "sepolia" ? parsed.network : undefined;
+  } catch {
+    return;
+  }
+}
+function prepareCompletionRequest(question, options, origin) {
+  return {
+    url: `${origin}/v1/chat/completions`,
+    init: {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${options.apiKey}`
+      },
+      body: JSON.stringify({
+        model: options.model,
+        messages: [{ role: "user", content: question }],
+        stream: false
+      })
+    }
+  };
+}
+async function sendCompletion(prepared, options, signal, stage, pastDeadline = () => false) {
+  const settings = options.settings;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const started = Date.now();
+  const controller = new AbortController;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, settings.timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const bad = (code, outcome, extra = {}) => ({ ok: false, error: { code, outcome, ...extra } });
+  try {
+    let response;
+    stage("dispatchToFirstByteMs");
+    if (pastDeadline())
+      return bad("timeout", "not_sent");
+    try {
+      response = await fetchImpl(prepared.url, { ...prepared.init, signal: controller.signal });
+    } catch (error) {
+      if (timedOut)
+        return bad("timeout", "unknown");
+      if (controller.signal.aborted)
+        return bad("aborted", "unknown");
+      if (isRedirectError(error))
+        return bad("redirect_refused", "unknown");
+      return bad("transport_failed", "unknown");
+    }
+    stage("firstByteToCompletionMs");
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => {
+        return;
+      });
+      return bad("redirect_refused", "unknown", { httpStatus: response.status });
+    }
+    const body = await readBounded(response, settings.maxResponseBytes).catch(() => {
+      return;
+    });
+    stage(undefined);
+    if (!body) {
+      if (timedOut)
+        return bad("timeout", "unknown");
+      if (controller.signal.aborted)
+        return bad("aborted", "unknown");
+      return bad("transport_failed", "unknown");
+    }
+    if (!body.ok)
+      return bad("response_too_large", "unknown", { httpStatus: response.status });
+    if (response.status < 200 || response.status >= 300) {
+      return bad("daemon_error", "sent_failed", {
+        httpStatus: response.status,
+        daemonCode: knownDaemonCode(daemonErrorEnvelope(body.text))
+      });
+    }
+    const text = completionText(body.text);
+    if (text === undefined)
+      return bad("invalid_response", "unknown", { httpStatus: response.status });
+    const verification = response.headers.get("x-oa-verification-status");
+    return {
+      ok: true,
+      text,
+      ...verification === "verified" || verification === "verifier-unavailable" ? { providerVerification: verification } : {},
+      elapsedMs: Date.now() - started
+    };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function validZkapiConsultQuestion(question) {
+  return typeof question === "string" && validQuestion(question);
+}
+function validQuestion(question) {
+  if (!question.trim())
+    return false;
+  if (new TextEncoder().encode(question).byteLength > MAX_QUESTION_BYTES)
+    return false;
+  return !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(question);
+}
+function knownDaemonCode(code) {
+  return KNOWN_DAEMON_ERROR_CODES.includes(code ?? "") ? code : "unrecognized";
+}
+function completionText(body) {
+  try {
+    const parsed = JSON.parse(body);
+    if (!Array.isArray(parsed.choices) || parsed.choices.length !== 1)
+      return;
+    const choice = parsed.choices[0];
+    const content = choice.message?.content;
+    if (choice.message?.role !== undefined && choice.message.role !== "assistant")
+      return;
+    return typeof content === "string" && content.trim() ? content : undefined;
+  } catch {
+    return;
+  }
+}
+function isRedirectError(error) {
+  const seen = new Set;
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const record = current;
+    if (record.code === "UnexpectedRedirect")
+      return true;
+    if (typeof record.message === "string" && /redirect/i.test(record.message))
+      return true;
+    current = record.cause;
+  }
+  return false;
+}
+async function readBounded(response, maxBytes) {
+  const reader = response.body?.getReader();
+  if (!reader)
+    return { ok: true, text: "" };
+  const chunks = [];
+  let total = 0;
+  for (;; ) {
+    const { done, value } = await reader.read();
+    if (done)
+      break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {
+        return;
+      });
+      return { ok: false };
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(joined) };
+}
+var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
 const loopback = () => new Promise((resolve) => {
@@ -55592,7 +56913,7 @@ const resolver = () => new Promise((resolve) => {
   const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
   process.stdout.write(JSON.stringify(result));
 })();
-`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, SESSION_OWNED_FAILURES;
+`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES;
 var init_consult_transport_zkapi = __esm(() => {
   init_atomic_file();
   init_file_lease();
@@ -55611,6 +56932,25 @@ var init_consult_transport_zkapi = __esm(() => {
     "XDG_CONFIG_HOME",
     "ZKAPI_CLIENTD_CONFIG_DIR",
     "OA_CHAT_CONFIG_DIR"
+  ];
+  KNOWN_DAEMON_ERROR_CODES = [
+    "busy",
+    "request_cancelled",
+    "funding_required",
+    "model_budget_unavailable",
+    "model_policy_unavailable",
+    "invalid_model",
+    "anonymous_access_failed",
+    "upstream_error",
+    "invalid_upstream_response",
+    "withdrawal_pending",
+    "wallet_conflict",
+    "invalid_request_error",
+    "invalid_body",
+    "testnet_password_required",
+    "invalid_api_key",
+    "local_connection_required",
+    "browser_origin_denied"
   ];
   ZKAPI_STAGE_LABELS = [
     ["leaseAcquireMs", "lease acquire"],
@@ -55631,6 +56971,50 @@ var init_consult_transport_zkapi = __esm(() => {
     ["teardownMs", "teardown"],
     ["totalMs", "total"]
   ];
+  MESSAGES = {
+    invalid_question: "The consult question is empty, too long, or contains control characters.",
+    busy: "Another zkAPI consult is in flight; consults are sent one at a time.",
+    acknowledgements_incomplete: "The zkAPI risk acknowledgements are not all accepted for the current version.",
+    funding_date_missing: "No owner-confirmed funding date is recorded, so the note expiry cannot be estimated.",
+    funding_date_invalid: "The recorded funding date is in the future.",
+    note_expired: "By the owner-confirmed funding date, the note is past its estimated 30-day expiry.",
+    daemon_api_key_missing: "No local API key for the daemon is configured in Olympus.",
+    daemon_not_found: "The zkapi-clientd executable was not found.",
+    tor_not_found: 'The tor executable was not found; install Tor or set tor to "off".',
+    unresolved_session: "An earlier zkAPI session may have left a lease unsettled; run a recovery-only session before another consult.",
+    unresolved_session_other_wallet: "An unresolved zkAPI session belongs to another wallet directory; recover it there, or abandon it explicitly, before another consult.",
+    no_unresolved_session: "There is no unresolved zkAPI session to recover.",
+    stranded_processes: "Processes from an earlier zkAPI session could not be confirmed stopped.",
+    daemon_already_running: "Something already serves on the zkAPI port; stop your own zkapi-clientd serve, because Olympus runs and verifies its own for each consult.",
+    tor_port_busy: "Something already listens on the zkAPI Tor port; Olympus needs it free to start a fresh Tor client.",
+    tor_bootstrap_failed: "The per-consult Tor client did not finish bootstrapping.",
+    daemon_start_failed: "zkapi-clientd serve did not become ready.",
+    daemon_version_unsupported: "This zkapi-clientd version is not a reviewed version (0.1.5 or 0.1.6).",
+    relay_mismatch: "The daemon is not configured for the expected route (SOCKS5 when Tor is on, direct when Tor is off).",
+    key_reuse_on: "The daemon key-reuse window is on, so requests would be linkable; Olympus refuses to send.",
+    key_reuse_unverified: "The daemon did not confirm a fresh key for every request.",
+    daemon_keyless: "The daemon accepts inference without a local API key, so any local process can spend the balance.",
+    daemon_identity_failed: "A port of this session is not held by the process group Olympus started.",
+    daemon_api_key_rejected: "The daemon rejected the configured local API key.",
+    session_process_exited: "The Tor client or the daemon of this session stopped unexpectedly.",
+    confinement_self_test_failed: "The network confinement for this platform did not pass its self-test, so the session was refused.",
+    policy_unavailable: "The daemon could not load the model policy in time.",
+    model_unavailable: "The selected model is not in the daemon's live model list.",
+    daily_cap_reached: "The daily zkAPI request limit you set is reached.",
+    spend_cap_reached: "Another request would exceed the daily worst-case zkAPI spend limit you set.",
+    state_unavailable: "The persistent zkAPI session ledger could not be read or written.",
+    timeout: "The zkAPI consult timed out; it may still have been charged.",
+    aborted: "The zkAPI consult was cancelled; it may still have been charged.",
+    redirect_refused: "The daemon answered with a redirect, which is never followed.",
+    response_too_large: "The zkAPI response exceeded the size limit and was cut off.",
+    invalid_response: "The zkAPI response was not a single non-empty chat completion.",
+    daemon_error: "The zkAPI daemon returned an error.",
+    transport_failed: "The request to the zkAPI daemon failed.",
+    teardown_incomplete: "The session's processes could not be confirmed stopped; the next session will not start until they are.",
+    authorization_refused: "The final authorization immediately before dispatch refused the consult; nothing was reserved or sent.",
+    session_spent: "This zkAPI session has already sent, was cancelled, or has ended; each session sends at most once.",
+    internal_error: "The zkAPI session failed inside Olympus."
+  };
   DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "any" };
   WATCHDOG_SCRIPT = `
 const { spawn, execFileSync } = require('node:child_process');
@@ -55703,6 +57087,354 @@ import { existsSync as existsSync33, readFileSync as readFileSync29, statSync as
 import { homedir as homedir38 } from "node:os";
 import { basename as basename6, dirname as dirname34, join as join47 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
+import { gunzipSync as gunzipSync2 } from "node:zlib";
+function classifyPath(path, isNumber) {
+  const key = path.slice(path.lastIndexOf(".") + 1).replace(/\[\]$/u, "");
+  for (const root of PROVENANCE_ROOTS) {
+    if (path === root || path.startsWith(`${root}.`)) {
+      const relative6 = path.slice(root.length + 1);
+      const kind2 = PROVENANCE_PATH_KINDS.get(relative6);
+      return { kind: kind2 ?? "identifier", known: kind2 !== undefined || isKnownProvenancePath(relative6), key, relative: relative6 };
+    }
+  }
+  const kind = PACK_PATH_KINDS.get(path);
+  return { kind: kind ?? (isNumber ? "text" : "identifier"), known: kind !== undefined || BOOLEAN_PATHS.has(path), key, relative: path };
+}
+function isKnownProvenancePath(relative6) {
+  return /^(?:chunk\.)?sourceItem\.(?:provider|providerItemId|providerThreadId|providerConversationId|providerFileId|providerEventId|localItemId|sourceVersion)$/u.test(relative6) || /^(?:chunk\.(?:chunkId|contentHash)|providerIds\.\*|localIds\.\*|syncRunId|syncCheckpoint|citation\.(?:title|sourceLabel|uri|authoredAt|updatedAt))$/u.test(relative6);
+}
+function pathSegment(key) {
+  return /^[A-Za-z0-9_]+$/u.test(key) ? key : `{${JSON.stringify(key)}}`;
+}
+function consultWriterContextFromPack(pack, options = {}) {
+  const entries = [];
+  const state = { bytes: 0, nodes: 0, overflow: false, malformed: false };
+  const ancestors = new Set;
+  const push = (kind, text, path, group) => {
+    const bytes = utf8Bytes(text);
+    if (entries.length + 1 > CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES || state.bytes + bytes > CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES) {
+      state.overflow = true;
+      return;
+    }
+    state.bytes += bytes;
+    if (text.length > 0)
+      entries.push(Object.freeze({ kind, text, path, group }));
+  };
+  const walk = (value, path, group, depth) => {
+    if (state.overflow)
+      return;
+    state.nodes += 1;
+    if (state.nodes > CONSULT_GATE_MAX_WRITER_CONTEXT_NODES || depth > MAX_WALK_DEPTH) {
+      state.overflow = true;
+      return;
+    }
+    const isLeaf = typeof value === "string" || typeof value === "number" || typeof value === "bigint" || typeof value === "boolean";
+    const shape2 = classifyPath(path, typeof value === "number" || typeof value === "bigint");
+    if (shape2.known) {
+      const wantsNumber = NUMBER_PATHS.has(shape2.relative);
+      const wantsBoolean = BOOLEAN_PATHS.has(shape2.relative);
+      const typeOk = wantsBoolean ? typeof value === "boolean" : wantsNumber ? typeof value === "number" : typeof value === "string";
+      if (!typeOk)
+        state.malformed = true;
+      const closed = CLOSED_VALUES.get(shape2.key);
+      if (closed && shape2.kind === "vocabulary" && typeof value === "string" && !closed.includes(value) && !(EXTENSIBLE_CLOSED_KEYS.has(shape2.key) && /^x-[a-z0-9-]+$/u.test(value))) {
+        state.malformed = true;
+      }
+    }
+    if (isLeaf) {
+      if (typeof value !== "boolean")
+        push(shape2.kind, String(value), path, group);
+      return;
+    }
+    if (value === null || typeof value !== "object")
+      return;
+    if (ancestors.has(value))
+      return;
+    ancestors.add(value);
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => {
+        const itemGroup = path === "candidates" ? index : group;
+        walk(item, `${path}[]`, itemGroup, depth + 1);
+      });
+    } else {
+      const parentKey = path.slice(path.lastIndexOf(".") + 1);
+      const isMap = MAP_KEYS.has(parentKey);
+      for (const [key, child] of Object.entries(value)) {
+        const segment = isMap ? "*" : pathSegment(key);
+        const childPath = path ? `${path}.${segment}` : segment;
+        if (isMap || !SCHEMA_FIELD_NAMES.has(key))
+          push("identifier", key, `${childPath}#key`, group);
+        walk(child, childPath, group, depth + 1);
+      }
+    }
+    ancestors.delete(value);
+  };
+  const shape = pack;
+  if (!shape || typeof shape !== "object" || typeof shape.question !== "string" || !Array.isArray(shape.candidates) || !shape.coverage || typeof shape.coverage !== "object" || !Array.isArray(shape.coverage.searchedCorpora) || !Array.isArray(shape.coverage.skippedCorpora) || !Array.isArray(shape.coverage.extractionGaps)) {
+    state.malformed = true;
+  }
+  walk(pack, "", -1, 0);
+  for (const text of options.writerVisibleTexts ?? [])
+    push("text", text, "writerVisible[]", -2);
+  for (const identifier of options.connectedAccountIdentifiers ?? []) {
+    push("person_identifier", identifier, "connectedAccount[]", -3);
+  }
+  return Object.freeze({ entries: Object.freeze(entries), overflow: state.overflow, malformed: state.malformed });
+}
+function evaluateConsultRequest(subQuestions, context, limits = {}, history = {}, options = {}) {
+  try {
+    return evaluateCheckedRequest(subQuestions, context, limits, history, options);
+  } catch {
+    return refuse2(["gate_internal_error"]);
+  }
+}
+function evaluateCheckedRequest(subQuestions, context, limits, history, options) {
+  const effective = clampLimits(limits ?? {});
+  const recent = history?.recentApprovedQuestions ?? [];
+  if (!context || typeof context !== "object" || Array.isArray(context) || !Array.isArray(context.entries)) {
+    return refuse2(["writer_context_malformed"]);
+  }
+  if (context.overflow === true || context.entries.length > effective.maxWriterContextEntries)
+    return refuse2(["writer_context_too_large"]);
+  if (!writerContextShapeValid(context))
+    return refuse2(["writer_context_malformed"]);
+  if (!writerContextWithinLimits(context, effective))
+    return refuse2(["writer_context_too_large"]);
+  if (context.malformed)
+    return refuse2(["writer_context_malformed"]);
+  const vocabulary = consultVocabulary(options ?? {});
+  if (!vocabulary)
+    return refuse2(["vocabulary_unavailable"]);
+  if (!Array.isArray(subQuestions))
+    return refuse2(["not_plain_text"]);
+  if (!Array.isArray(recent) || recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS || recent.some((text) => typeof text !== "string" || utf8Bytes(text) > CONSULT_GATE_MAX_QUESTION_BYTES)) {
+    return refuse2(["recent_consults_too_large"]);
+  }
+  if (subQuestions.length === 0)
+    return refuse2(["question_empty"]);
+  if (subQuestions.length > CONSULT_GATE_MAX_SUB_QUESTIONS)
+    return refuse2(["too_many_sub_questions"]);
+  if (subQuestions.some((question) => typeof question !== "string"))
+    return refuse2(["not_plain_text"]);
+  if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > effective.maxQuestionBytes) {
+    return refuse2(["question_too_many_bytes"]);
+  }
+  const reasons = new Set;
+  let tokenCount = 0;
+  for (const question of subQuestions) {
+    if (question.trim().length === 0) {
+      reasons.add("question_empty");
+      continue;
+    }
+    for (const reason of characterReasons(question))
+      reasons.add(reason);
+    const nfkc = question.normalize("NFKC");
+    for (const reason of scriptReasons(nfkc))
+      reasons.add(reason);
+    for (const reason of questionStructureReasons(nfkc))
+      reasons.add(reason);
+    if (hasEncodedBlob(nfkc))
+      reasons.add("encoded_blob");
+    if (secretLabelsInText(question).length > 0 || secretLabelsInText(nfkc).length > 0)
+      reasons.add("secret_detected");
+    if (hasIdentifierShape(nfkc))
+      reasons.add("identifier_shape");
+    if (hasTechnicalFingerprint(nfkc))
+      reasons.add("technical_fingerprint");
+    if (hasUnknownWord(nfkc, vocabulary))
+      reasons.add("unknown_word");
+    let count = 0;
+    forEachToken(foldText(nfkc), () => {
+      count += 1;
+    });
+    if (count === 0)
+      reasons.add("question_empty");
+    tokenCount += count;
+  }
+  if (tokenCount > effective.maxQuestionTokens)
+    reasons.add("question_too_many_tokens");
+  if (reasons.size > 0)
+    return refuse2([...reasons]);
+  const model = questionModel(subQuestions);
+  for (const reason of compareWithSnapshot(model, context))
+    reasons.add(reason);
+  for (const reason of compareWithRecent(model, subQuestions, recent))
+    reasons.add(reason);
+  return reasons.size > 0 ? refuse2([...reasons]) : { decision: "pass", reasons: [] };
+}
+function refuse2(reasons) {
+  return Object.freeze({ decision: "refuse", reasons: Object.freeze([...new Set(reasons)]) });
+}
+function clampLimits(limits) {
+  const pick = (value, ceiling) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(value, ceiling) : ceiling;
+  return {
+    maxQuestionBytes: pick(limits.maxQuestionBytes, DEFAULT_CONSULT_GATE_LIMITS.maxQuestionBytes),
+    maxQuestionTokens: pick(limits.maxQuestionTokens, DEFAULT_CONSULT_GATE_LIMITS.maxQuestionTokens),
+    maxWriterContextBytes: pick(limits.maxWriterContextBytes, DEFAULT_CONSULT_GATE_LIMITS.maxWriterContextBytes),
+    maxWriterContextEntries: pick(limits.maxWriterContextEntries, DEFAULT_CONSULT_GATE_LIMITS.maxWriterContextEntries)
+  };
+}
+function writerContextShapeValid(context) {
+  if (typeof context.overflow !== "boolean")
+    return false;
+  if (context.malformed !== undefined && typeof context.malformed !== "boolean")
+    return false;
+  for (const entry of context.entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const { kind, text, path, group } = entry;
+    if (typeof kind !== "string" || !WRITER_CONTEXT_KINDS.has(kind))
+      return false;
+    if (typeof text !== "string" || typeof path !== "string" || !Number.isSafeInteger(group))
+      return false;
+  }
+  return true;
+}
+function writerContextWithinLimits(context, limits) {
+  if (context.entries.length > limits.maxWriterContextEntries)
+    return false;
+  let bytes = 0;
+  for (const entry of context.entries) {
+    if (typeof entry.text !== "string")
+      return false;
+    bytes += utf8Bytes(entry.text);
+    if (bytes > limits.maxWriterContextBytes)
+      return false;
+  }
+  return true;
+}
+function utf8Bytes(text) {
+  return Buffer.byteLength(text, "utf8");
+}
+function characterReasons(question) {
+  const reasons = [];
+  if (question !== question.normalize("NFKC"))
+    reasons.push("not_nfkc_normalized");
+  if (/\p{Cc}/u.test(question))
+    reasons.push("control_character");
+  if (/[\p{Cf}\p{Co}\p{Cn}\p{Cs}]/u.test(question) || /[\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/u.test(question)) {
+    reasons.push("invisible_or_format_character");
+  }
+  if (/[^\S ]/u.test(question.replace(/\p{Cc}/gu, "")) || /^ | $| {2,}/u.test(question))
+    reasons.push("irregular_whitespace");
+  const marksPerBase = new RegExp(`\\p{M}{${CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE + 1},}`, "u");
+  if (marksPerBase.test(question.normalize("NFD")))
+    reasons.push("combining_mark_stack");
+  if (/[<>{}`\\|]/u.test(question) || /&#?[a-z0-9]+;/iu.test(question))
+    reasons.push("not_plain_text");
+  if (/%[0-9a-f]{2}/iu.test(question))
+    reasons.push("encoded_blob");
+  return reasons;
+}
+function scriptReasons(text) {
+  const reasons = new Set;
+  for (const word of text.split(/[^\p{L}\p{M}]+/u)) {
+    if (!word)
+      continue;
+    const scripts = new Set;
+    for (const char of word) {
+      if (!/\p{L}/u.test(char))
+        continue;
+      const script = scriptOf(char);
+      scripts.add(script);
+      if (script === "latin") {
+        const base = char.normalize("NFD").replace(/\p{M}+/gu, "");
+        if (!/^[A-Za-z\u00DF\u00E6\u00C6\u0153\u0152\u00F8\u00D8\u00F0\u00D0\u00FE\u00DE\u0142\u0141\u0111\u0110\u0127\u0126\u014B\u014A\u0131]$/u.test(base)) {
+          reasons.add("unusual_letter");
+        }
+      }
+    }
+    if (scripts.size > 1)
+      reasons.add("mixed_script_token");
+  }
+  return [...reasons];
+}
+function scriptOf(char) {
+  if (/\p{Script=Latin}/u.test(char))
+    return "latin";
+  if (/\p{Script=Cyrillic}/u.test(char))
+    return "cyrillic";
+  if (/\p{Script=Greek}/u.test(char))
+    return "greek";
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(char))
+    return "cjk";
+  for (const script of ["Arabic", "Hebrew", "Armenian", "Georgian", "Devanagari", "Bengali", "Thai", "Ethiopic", "Tamil", "Cherokee"]) {
+    if (new RegExp(`\\p{Script=${script}}`, "u").test(char))
+      return script;
+  }
+  return `other:${char}`;
+}
+function questionStructureReasons(text) {
+  const trimmed2 = text.trim();
+  const reasons = [];
+  const marks = (trimmed2.match(/[?\u061F]/gu) ?? []).length;
+  if (marks !== 1 || !/[?\u061F]$/u.test(trimmed2))
+    reasons.push("not_a_question");
+  const boundaries = (trimmed2.match(/[.!;](?=\s|$)|[\u3002\uFF01]/gu) ?? []).length;
+  if (boundaries > CONSULT_GATE_MAX_PREAMBLE_SENTENCES)
+    reasons.push("too_many_sentences");
+  let content = 0;
+  forEachToken(foldText(trimmed2), (token) => {
+    if (isContent(token.norm))
+      content += 1;
+  });
+  if (content > CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION)
+    reasons.push("too_many_content_words");
+  return reasons;
+}
+function hasEncodedBlob(text) {
+  if (/[A-Za-z0-9]=+(?![A-Za-z0-9])/u.test(text) || /\p{L}\d+\p{L}/u.test(text))
+    return true;
+  if (/(?:^|[^\p{L}\p{N}])\p{L}(?:[^\p{L}\p{N}]{1,2}\p{L}){2,}(?![\p{L}\p{N}])/u.test(text))
+    return true;
+  for (const word of text.split(/[^A-Za-z0-9+/=_-]+/u)) {
+    if (word.length < CONSULT_GATE_ENCODED_MIXED_RUN_CHARS)
+      continue;
+    if (/[0-9]/u.test(word) && /[A-Za-z]/u.test(word))
+      return true;
+    if (word.length < CONSULT_GATE_ENCODED_RUN_CHARS)
+      continue;
+    if (/^[a-f]+$/iu.test(word))
+      return true;
+    const humps = (word.match(/[a-z][A-Z]/gu) ?? []).length;
+    if (/[+/=]/u.test(word) || humps >= 2)
+      return true;
+  }
+  return false;
+}
+function hasIdentifierShape(text) {
+  if (text.includes("@"))
+    return true;
+  if (/\b[a-z][a-z0-9+.-]*:\/\//iu.test(text) || /\bwww\./iu.test(text))
+    return true;
+  for (const sequence of text.match(/\+?\d(?:\d|[\s().\-/_](?=[\d(]))*\d/gu) ?? []) {
+    const digits = sequence.replace(/\D/gu, "");
+    if (digits.length <= CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE)
+      continue;
+    if (/^\d{1,3}(?:([,. ])\d{3})(?:\1\d{3})*$/u.test(sequence))
+      continue;
+    return true;
+  }
+  return false;
+}
+function hasTechnicalFingerprint(text) {
+  const lower = text.toLowerCase();
+  if (/\blocalhost\b/u.test(lower))
+    return true;
+  if (/[\p{L}\p{N}-]\.(?:local|internal|lan|corp|intranet|test|localhost|home\.arpa)\b/u.test(lower))
+    return true;
+  if (/\b(?:staging|stage|dev|internal|intranet|corp)[.-][\p{L}\p{N}-]+\.[\p{L}]{2,}/u.test(lower))
+    return true;
+  if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/u.test(lower))
+    return true;
+  if (/[\p{L}\p{N}]\/[\p{L}\p{N}]/u.test(lower.replace(/\b(?:and\/or|mg\/dl|mmol\/l|mg\/l|g\/l|mg\/kg|km\/h|m\/s|kb\/s|mb\/s|gb\/s|24\/7)\b/gu, " ")))
+    return true;
+  if (/\.[a-z]{1,5}:\d+\b/u.test(lower))
+    return true;
+  if (/\bv?\d+\.\d+\.\d+/u.test(lower))
+    return true;
+  return /\b0x[0-9a-f]{4,}\b/u.test(lower);
+}
 function consultVocabularySelection(options = {}) {
   const languages = [...new Set(options.languages && options.languages.length > 0 ? options.languages : DEFAULT_CONSULT_LANGUAGES)];
   const domains = { ...DEFAULT_CONSULT_DOMAIN_PACKS, ...options.domains };
@@ -55723,6 +57455,89 @@ function consultVocabularySelection(options = {}) {
 function consultUserVocabularyDir(env = process.env) {
   return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || join47(env.HOME?.trim() || homedir38(), ".olympus", "consult", "vocabulary");
 }
+function sortedPack(bytes) {
+  let tooLong = false;
+  const scan = (visit) => {
+    let lineStart = 0;
+    for (let index = bytes.indexOf(10);index !== -1; index = bytes.indexOf(10, lineStart)) {
+      if (index > lineStart && bytes[lineStart] !== 35) {
+        if (index - lineStart > CONSULT_VOCABULARY_MAX_WORD_BYTES)
+          tooLong = true;
+        visit(lineStart);
+      }
+      lineStart = index + 1;
+    }
+    if (lineStart < bytes.length && bytes[lineStart] !== 35) {
+      if (bytes.length - lineStart > CONSULT_VOCABULARY_MAX_WORD_BYTES)
+        tooLong = true;
+      visit(lineStart);
+    }
+  };
+  let count = 0;
+  scan(() => {
+    count += 1;
+  });
+  if (tooLong)
+    return;
+  const starts = new Uint32Array(count);
+  let next = 0;
+  scan((start) => {
+    starts[next] = start;
+    next += 1;
+  });
+  return { bytes, starts };
+}
+function packHas(pack, word) {
+  let low = 0;
+  let high = pack.starts.length - 1;
+  while (low <= high) {
+    const middle = low + high >>> 1;
+    const start = pack.starts[middle];
+    let order = 0;
+    let offset = 0;
+    for (;; offset += 1) {
+      const byte = pack.bytes[start + offset];
+      const atEnd = byte === undefined || byte === 10;
+      if (offset === word.length) {
+        order = atEnd ? 0 : 1;
+        break;
+      }
+      if (atEnd) {
+        order = -1;
+        break;
+      }
+      const diff = byte - word.charCodeAt(offset);
+      if (diff !== 0) {
+        order = diff;
+        break;
+      }
+    }
+    if (order === 0)
+      return true;
+    if (order < 0)
+      low = middle + 1;
+    else
+      high = middle - 1;
+  }
+  return false;
+}
+function selectionKey(options) {
+  const selection = consultVocabularySelection(options);
+  return `${selection.shipped.join(",")}|${selection.user.join(",")}|${consultUserVocabularyDir()}`;
+}
+function consultVocabulary(options) {
+  if (evaluationVocabulary)
+    return evaluationVocabulary;
+  const key = selectionKey(options);
+  let loaded = vocabularyCache.get(key);
+  if (!loaded) {
+    const selection = consultVocabularySelection(options);
+    const shipped = Object.fromEntries(selection.shipped.map((id) => [id, CONSULT_VOCABULARY_PACKS[id]]));
+    loaded = loadConsultVocabulary(shipped, consultUserVocabularyDir(), selection.user);
+    vocabularyCache.set(key, loaded);
+  }
+  return loaded.vocabulary;
+}
 function verifiedPackFile(path, sha2563) {
   try {
     if (!existsSync33(path))
@@ -55731,6 +57546,22 @@ function verifiedPackFile(path, sha2563) {
       return "too_large";
     const gz = readFileSync29(path);
     return createHash38("sha256").update(gz).digest("hex") === sha2563 ? gz : "hash_mismatch";
+  } catch {
+    return "unreadable";
+  }
+}
+function readPack(path, sha2563) {
+  try {
+    const gz = verifiedPackFile(path, sha2563);
+    if (typeof gz === "string")
+      return gz;
+    let bytes;
+    try {
+      bytes = gunzipSync2(gz, { maxOutputLength: CONSULT_VOCABULARY_MAX_EXPANDED_BYTES });
+    } catch (error) {
+      return error instanceof RangeError || error.code === "ERR_BUFFER_TOO_LARGE" ? "too_large" : "unreadable";
+    }
+    return sortedPack(bytes) ?? "too_large";
   } catch {
     return "unreadable";
   }
@@ -55758,6 +57589,49 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
   }
   return status;
 }
+function loadConsultVocabulary(packs = CONSULT_VOCABULARY_PACKS, userDir = null, userPacks = "all") {
+  const root = consultVocabularyRoot();
+  const loaded = [];
+  const status = [];
+  let complete = root !== undefined;
+  for (const [id, sha2563] of Object.entries(packs)) {
+    const result = root ? readPack(join47(root, ...VOCABULARY_DIR, `${id}.txt.gz`), sha2563) : "missing";
+    if (typeof result === "string") {
+      status.push({ id, origin: "shipped", state: result, words: 0 });
+      complete = false;
+      continue;
+    }
+    loaded.push(result);
+    status.push({ id, origin: "shipped", state: "loaded", words: result.starts.length });
+  }
+  for (const [id, sha2563] of userManifestEntries(userDir)) {
+    if (id in CONSULT_VOCABULARY_PACKS || userPacks !== "all" && !userPacks.includes(id))
+      continue;
+    if (status.filter((entry) => entry.origin === "user").length >= CONSULT_VOCABULARY_MAX_USER_PACKS)
+      break;
+    const result = sha2563 === undefined ? "hash_mismatch" : readPack(join47(userDir, `${id}.txt.gz`), sha2563);
+    if (typeof result === "string") {
+      status.push({ id, origin: "user", state: result, words: 0 });
+      continue;
+    }
+    loaded.push(result);
+    status.push({ id, origin: "user", state: "loaded", words: result.starts.length });
+  }
+  if (userPacks !== "all") {
+    for (const id of userPacks) {
+      if (!status.some((entry) => entry.id === id))
+        status.push({ id, origin: "user", state: "missing", words: 0 });
+    }
+  }
+  if (!complete)
+    return { vocabulary: null, status };
+  const curated = new Set(CURATED_VOCABULARY);
+  const words = curated.size + loaded.reduce((total, pack) => total + pack.starts.length, 0);
+  return {
+    vocabulary: { has: (word) => curated.has(word) || loaded.some((pack) => packHas(pack, word)), words },
+    status
+  };
+}
 function userManifestEntries(userDir) {
   if (!userDir)
     return [];
@@ -55779,6 +57653,640 @@ function userManifestEntries(userDir) {
     return [];
   }
 }
+function hasUnknownWord(text, vocabulary) {
+  let unknown = false;
+  forEachToken(foldText(text), (token) => {
+    if (unknown)
+      return;
+    const folded = mapCharacters(token.norm, VOCABULARY_LETTER_FOLDS);
+    for (const run of folded.split(/[0-9]+/u)) {
+      if (run.length === 0)
+        continue;
+      if (!/^[a-z]+$/u.test(run) || run.length > 1 && !vocabulary.has(run)) {
+        unknown = true;
+        return;
+      }
+    }
+  });
+  return unknown;
+}
+function mapCharacters(text, table) {
+  let out = "";
+  for (const char of text)
+    out += table[char] ?? char;
+  return out;
+}
+function asciiDigits(text) {
+  if (!/[^\x00-\x7F]/u.test(text))
+    return text;
+  let out = "";
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code < 128 || !/\p{Nd}/u.test(char)) {
+      out += char;
+      continue;
+    }
+    let start = code;
+    while (start > code - 100 && /\p{Nd}/u.test(String.fromCodePoint(start - 1)))
+      start -= 1;
+    out += String((code - start) % 10);
+  }
+  return out;
+}
+function foldText(text) {
+  const nfkc = text.normalize("NFKC");
+  if (!/[^\x00-\x7F]/u.test(nfkc))
+    return nfkc;
+  const unmarked = asciiDigits(nfkc).normalize("NFD").replace(/\p{M}+/gu, "").normalize("NFC");
+  let out = "";
+  for (const char of unmarked) {
+    const lower = char.toLowerCase();
+    const mapped = LOOKALIKES[lower];
+    out += mapped === undefined ? char : char === lower ? mapped : mapped.toUpperCase();
+  }
+  return out;
+}
+function caseFold(text) {
+  const lower = text.toLowerCase();
+  return /[\u00DF\u03C2]/u.test(lower) ? mapCharacters(lower, { "ß": "ss", "ς": "σ" }) : lower;
+}
+function compact(text) {
+  let out = "";
+  forEachToken(foldText(text), (token) => {
+    out += token.norm;
+  });
+  return out;
+}
+function forEachToken(folded, visit) {
+  const pattern = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]|(?:(?![\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}])[\p{L}\p{N}])+/gu;
+  let previousEnd = -1;
+  for (const match of folded.matchAll(pattern)) {
+    const raw = match[0];
+    const start = match.index ?? 0;
+    const simpleGap = start - previousEnd === 1 && folded.charCodeAt(previousEnd) === 32;
+    const gap = previousEnd < 0 || simpleGap ? "" : folded.slice(previousEnd, start);
+    const firstCode = raw.charCodeAt(0);
+    const lower = raw.toLowerCase();
+    visit({
+      norm: lower === raw && firstCode < 128 ? raw : caseFold(raw),
+      capitalized: firstCode < 128 ? firstCode >= 65 && firstCode <= 90 : /^[\p{Lu}\p{Lt}]/u.test(raw),
+      initial: previousEnd < 0 || !simpleGap && /[.!?;:]/u.test(gap),
+      joined: simpleGap || previousEnd >= 0 && /^[\s'\u2019-]*$/u.test(gap),
+      labelled: !simpleGap && previousEnd >= 0 && (/:\s*["'\u201C\u2018\u00AB]?$/u.test(gap) || /(?:^|\s)["'\u201C\u2018\u00AB]$/u.test(gap))
+    });
+    previousEnd = start + raw.length;
+  }
+}
+function isContent(token) {
+  return !FUNCTION_WORDS.has(token);
+}
+function questionModel(subQuestions) {
+  const joined = subQuestions.join(" ");
+  const folded = foldText(joined);
+  const tokens = [];
+  forEachToken(folded, (token) => tokens.push(token.norm));
+  const forms = new Map;
+  const tokenKeys = [];
+  const addView = (viewTokens, source) => {
+    tokenKeys.push(`\x01${viewTokens.join("\x01")}\x01`);
+    const variants = [viewTokens, viewTokens.map((token) => /\p{L}/u.test(token) ? mapCharacters(token, LEET) : token)];
+    for (const variant of variants) {
+      for (let start = 0;start < variant.length; start += 1) {
+        let concat = "";
+        let onlyFunctionWords = true;
+        for (let end = start;end < variant.length && end - start < CONSULT_GATE_COMPACT_WINDOW_TOKENS; end += 1) {
+          concat += variant[end];
+          onlyFunctionWords &&= FUNCTION_WORDS.has(viewTokens[end] ?? "");
+          if (concat.length > CONSULT_GATE_COMPACT_WINDOW_CHARS)
+            break;
+          if (!forms.has(concat))
+            forms.set(concat, source);
+          if (onlyFunctionWords)
+            continue;
+          const reversed = [...concat].reverse().join("");
+          if (!forms.has(reversed))
+            forms.set(reversed, source);
+        }
+      }
+    }
+  };
+  const uninflected = tokens.map((token) => token.length >= 5 && token.endsWith("es") ? token.slice(0, -2) : token.length >= 4 && token.endsWith("s") ? token.slice(0, -1) : token);
+  addView(tokens, "plain");
+  addView(uninflected, "plain");
+  addView(tokens.map((token) => FUNCTION_WORDS.has(token) ? String.fromCharCode(2) : rot13(token)), "decoded");
+  const compactViews = [tokens.join("")];
+  const decoded = decodedViews(joined.normalize("NFKC"));
+  for (const view of decoded) {
+    const viewTokens = [];
+    forEachToken(foldText(view), (token) => viewTokens.push(token.norm));
+    addView(viewTokens, "decoded");
+    compactViews.push(viewTokens.join(""));
+  }
+  const numberKeys = new Set;
+  const dates = { full: new Set, monthDay: new Set };
+  let digitConcat = "";
+  for (const text of [joined, ...decoded]) {
+    const viewFolded = foldText(text);
+    const normalized2 = caseFold(viewFolded);
+    const wordDigits = numberWordsToDigits(wordsOf(viewFolded));
+    for (const key of figureKeys(normalized2, false).keys())
+      numberKeys.add(key);
+    for (const key of figureKeys(wordDigits.join(" "), false).keys())
+      numberKeys.add(key);
+    digitConcat += (normalized2.match(/\d/gu) ?? []).join("");
+    const viewDates = dateKeys(normalized2, wordDigits);
+    for (const key of viewDates.full)
+      dates.full.add(key);
+    for (const key of viewDates.monthDay)
+      dates.monthDay.add(key);
+  }
+  const normalized = caseFold(folded);
+  const hostKeys = new Set;
+  const spelled = normalized.replace(/\s+dot\s+/gu, ".").replace(/[\u3002\uFF0E\uFF61]/gu, ".");
+  for (const host of hostnames(spelled))
+    for (const key of hostKeysOf(host))
+      hostKeys.add(key);
+  return { tokens, forms, tokenKeys, numberKeys, digitConcat, dates, hostKeys, compactViews };
+}
+function rot13(word) {
+  let out = "";
+  for (const char of word) {
+    const code = char.charCodeAt(0);
+    out += code >= 97 && code <= 122 ? String.fromCharCode((code - 97 + 13) % 26 + 97) : char;
+  }
+  return out;
+}
+function decodedViews(text) {
+  const views = [];
+  const keep = (bytes) => {
+    const decoded = bytes.toString("utf8");
+    if (decoded.length < 2 || decoded.includes("�"))
+      return;
+    if (/\p{Cc}/u.test(decoded))
+      return;
+    views.push(decoded);
+  };
+  text = text.replace(/\b0x([0-9a-f]{2})\b/giu, "$1");
+  for (const match of text.matchAll(/(?:[0-9a-f]{2}[\s:,.-]?){2,}/giu)) {
+    const hex = match[0].replace(/[^0-9a-f]/giu, "");
+    if (hex.length % 2 === 0)
+      keep(Buffer.from(hex, "hex"));
+  }
+  return views;
+}
+function gluedNumberParts(token) {
+  if (token.length < 6 || token.length > 40 || NUMBER_WORDS.has(token) || SCALE_WORDS.has(token))
+    return;
+  const memo = new Map;
+  const solve = (at) => {
+    if (at === token.length)
+      return [];
+    const known = memo.get(at);
+    if (known !== undefined)
+      return known;
+    let found = null;
+    for (const part of NUMBER_PARTS) {
+      if (!token.startsWith(part, at))
+        continue;
+      const rest = solve(at + part.length);
+      if (rest) {
+        found = [part, ...rest];
+        break;
+      }
+    }
+    memo.set(at, found);
+    return found;
+  };
+  const parts = solve(0);
+  return parts && parts.length >= 2 && parts.some((part) => NUMBER_WORDS.has(part) || SCALE_WORDS.has(part)) ? parts : undefined;
+}
+function numberWordsToDigits(input) {
+  const tokens = [];
+  for (const token of input) {
+    const glued = gluedNumberParts(token);
+    if (glued)
+      tokens.push(...glued);
+    else
+      tokens.push(token);
+  }
+  const out = [];
+  let index = 0;
+  while (index < tokens.length) {
+    const start = index;
+    let total = 0;
+    let current = 0;
+    let scaled = false;
+    let decimal = "";
+    let inDecimal = false;
+    let previousValue;
+    const groups = [];
+    while (index < tokens.length) {
+      const word = tokens[index];
+      const value = NUMBER_WORDS.get(word);
+      const scale = SCALE_WORDS.get(word);
+      const startsScale = index === start && SCALE_ARTICLES.has(word) && SCALE_WORDS.has(tokens[index + 1] ?? "");
+      if (startsScale) {
+        current = 0;
+      } else if (inDecimal && value !== undefined && value < 10) {
+        decimal += String(value);
+      } else if (DECIMAL_WORDS.has(word) && index > start && !inDecimal) {
+        inDecimal = true;
+      } else if (value !== undefined && !inDecimal) {
+        if (value === 20 && previousValue === 4 && (word === "vingt" || word === "vingts")) {
+          current += 76;
+          groups[groups.length - 1] = 80;
+        } else {
+          const last = groups.length > 0 ? groups[groups.length - 1] : undefined;
+          if (last !== undefined && last % 10 === 0 && last >= 20 && last < 100 && value < 10) {
+            groups[groups.length - 1] = last + value;
+          } else {
+            groups.push(value);
+          }
+          current += value;
+        }
+        previousValue = value;
+      } else if (scale !== undefined && !inDecimal && (index > start || tokens.length > 0)) {
+        scaled = true;
+        if (scale === 100)
+          current = (current || 1) * 100;
+        else {
+          total += (current || 1) * scale;
+          current = 0;
+        }
+        previousValue = undefined;
+      } else if (NUMBER_CONNECTORS.has(word) && index > start && !inDecimal && (NUMBER_WORDS.has(tokens[index + 1] ?? "") || SCALE_WORDS.has(tokens[index + 1] ?? ""))) {} else
+        break;
+      index += 1;
+    }
+    if (index === start) {
+      out.push(tokens[index]);
+      index += 1;
+      continue;
+    }
+    const integer = String(total + current);
+    if (!scaled && groups.length > 1)
+      out.push(groups.map(String).join(""));
+    out.push(decimal ? `${integer}.${decimal}` : integer);
+  }
+  return out;
+}
+function runMatcher(question, minLength, minContent) {
+  const positions = new Map;
+  question.forEach((token, index) => {
+    const list = positions.get(token) ?? [];
+    list.push(index);
+    positions.set(token, list);
+  });
+  let previousLength = new Int32Array(question.length);
+  let previousContent = new Int32Array(question.length);
+  let currentLength = new Int32Array(question.length);
+  let currentContent = new Int32Array(question.length);
+  let previousActive = [];
+  const clear = () => {
+    for (const position of previousActive) {
+      previousLength[position] = 0;
+      previousContent[position] = 0;
+    }
+  };
+  return {
+    feed(token) {
+      const active = positions.get(token) ?? [];
+      const content = isContent(token) ? 1 : 0;
+      let hit = false;
+      for (const position of active) {
+        const length = (position > 0 ? previousLength[position - 1] : 0) + 1;
+        const contentCount = (position > 0 ? previousContent[position - 1] : 0) + content;
+        currentLength[position] = length;
+        currentContent[position] = contentCount;
+        if (length >= minLength && contentCount >= minContent)
+          hit = true;
+      }
+      clear();
+      [previousLength, currentLength] = [currentLength, previousLength];
+      [previousContent, currentContent] = [currentContent, previousContent];
+      previousActive = active;
+      return hit;
+    },
+    reset() {
+      clear();
+      previousActive = [];
+    }
+  };
+}
+function compareWithSnapshot(model, context) {
+  const reasons = new Set;
+  const fullRun = runMatcher(model.tokens, CONSULT_GATE_SHARED_RUN_TOKENS, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
+  const contentTokens = model.tokens.filter(isContent);
+  const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
+  const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS);
+  const longestCompact = Math.max(...model.compactViews.map((view) => view.length));
+  const formHit = (form) => form.length >= CONSULT_GATE_MIN_IDENTIFIER_CHARS ? model.forms.get(form) : undefined;
+  const identifierHit = (source) => {
+    if (source)
+      reasons.add(source === "decoded" ? "encoded_identifier" : "snapshot_identifier");
+  };
+  const stats = new Map;
+  const pairCandidates = new Map;
+  const questionContent = new Set(contentTokens);
+  const contentCounts = new Map;
+  const overlapCandidates = [];
+  let sentenceContent = new Set;
+  let sentenceTokens = 0;
+  const closeOverlap = () => {
+    if (sentenceContent.size >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS)
+      overlapCandidates.push([...sentenceContent]);
+    sentenceContent = new Set;
+    sentenceTokens = 0;
+  };
+  const singleCandidates = new Map;
+  const componentCandidates = new Map;
+  let group = Number.NaN;
+  let previous;
+  for (const entry of context.entries) {
+    if (reasons.size > 0)
+      break;
+    if (entry.kind === "metadata")
+      continue;
+    if (entry.group !== group) {
+      group = entry.group;
+      fullRun.reset();
+      contentRun.reset();
+      contentSpan.reset();
+      previous = undefined;
+    }
+    const folded = foldText(entry.text);
+    const normalized = caseFold(folded);
+    const words = hasNumberWord(normalized) ? numberWordsToDigits(wordsOf(folded)) : undefined;
+    const snapshotFigures = figureKeys(normalized, true);
+    if (words)
+      for (const [key] of figureKeys(words.join(" "), false))
+        snapshotFigures.set(key, snapshotFigures.get(key) ?? false);
+    for (const [key, unit] of snapshotFigures) {
+      if (model.numberKeys.has(key) && (key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS || unit))
+        reasons.add("snapshot_figure");
+    }
+    for (const run of normalized.match(/\d(?:[\d]|[\s.\-/_](?=\d))*/gu) ?? []) {
+      const digits = run.replace(/\D/gu, "");
+      if (digits.length >= CONSULT_GATE_MIN_JOINT_DIGITS && model.digitConcat.includes(digits))
+        reasons.add("snapshot_figure");
+    }
+    if (model.dates.full.size > 0 || model.dates.monthDay.size > 0) {
+      const snapshotDates = dateKeys(normalized, words);
+      for (const key of model.dates.full)
+        if (snapshotDates.full.has(key))
+          reasons.add("snapshot_date");
+      for (const key of model.dates.monthDay)
+        if (snapshotDates.monthDay.has(key))
+          reasons.add("snapshot_date");
+    }
+    if (model.hostKeys.size > 0) {
+      for (const host of hostnames(normalized)) {
+        for (const key of hostKeysOf(host))
+          if (model.hostKeys.has(key))
+            reasons.add("snapshot_hostname");
+      }
+    }
+    for (const value of labelledSecretValues(normalized)) {
+      if (formHit(compact(value)))
+        reasons.add("secret_detected");
+    }
+    if (reasons.size > 0)
+      break;
+    const isIdentifier = entry.kind === "identifier" || entry.kind === "person_identifier" || entry.kind === "account_scope";
+    if (isIdentifier) {
+      const whole = compact(entry.text);
+      const exempt = entry.kind === "account_scope" && PRODUCT_DEFAULT_SCOPES.has(whole);
+      if (!exempt && whole.length <= longestCompact) {
+        identifierHit(formHit(whole));
+        if (whole.length >= CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS) {
+          model.compactViews.forEach((view, index) => {
+            if (view.includes(whole))
+              identifierHit(index === 0 ? "plain" : "decoded");
+          });
+        }
+      }
+      if (!exempt) {
+        for (const segment of entry.text.split(/[/\\?#&=:@]+/u)) {
+          if (segment.length === 0 || segment.length > longestCompact * 4)
+            continue;
+          const segmentForm = compact(segment);
+          let segmentWords = 0;
+          forEachToken(foldText(segment), () => {
+            segmentWords += 1;
+          });
+          if (segmentForm !== whole && (segmentWords > 1 || /\d/u.test(segmentForm)))
+            identifierHit(formHit(segmentForm));
+        }
+        forEachToken(folded, (token) => {
+          if (token.norm.length < 3 || NAME_STOPWORDS.has(token.norm) || componentCandidates.has(token.norm))
+            return;
+          const source = formHit(token.norm);
+          if (!source)
+            return;
+          if (entry.kind === "person_identifier" || /\d/u.test(token.norm) && /\p{L}/u.test(token.norm))
+            identifierHit(source);
+          else if (token.capitalized || token.labelled)
+            componentCandidates.set(token.norm, source);
+        });
+      }
+    }
+    if (reasons.size > 0)
+      break;
+    let sentence = [];
+    const closeSentence = () => {
+      if (sentence.length === CONSULT_GATE_SHARED_RUN_TOKENS - 1 && sentence.filter(isContent).length >= CONSULT_GATE_RUN_MIN_CONTENT_TOKENS && model.tokenKeys[0].includes(`${SEP}${sentence.join(SEP)}${SEP}`)) {
+        reasons.add("shared_token_run");
+      }
+      sentence = [];
+    };
+    let first = true;
+    forEachToken(folded, (token) => {
+      if (first || token.initial) {
+        closeSentence();
+        closeOverlap();
+      }
+      sentenceTokens += 1;
+      if (sentenceTokens > SENTENCE_OVERLAP_SPAN_TOKENS)
+        closeOverlap();
+      if (questionContent.has(token.norm)) {
+        sentenceContent.add(token.norm);
+        contentCounts.set(token.norm, (contentCounts.get(token.norm) ?? 0) + 1);
+      }
+      if (sentence.length < CONSULT_GATE_SHARED_RUN_TOKENS)
+        sentence.push(token.norm);
+      if (fullRun.feed(token.norm))
+        reasons.add("shared_token_run");
+      if (isContent(token.norm) && (contentRun.feed(token.norm) || contentSpan.feed(token.norm)))
+        reasons.add("shared_token_run");
+      if (entry.kind === "vocabulary") {
+        previous = token;
+        first = false;
+        return;
+      }
+      const watched = model.forms.has(token.norm);
+      if (watched) {
+        const stat3 = stats.get(token.norm) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
+        const prose = entry.kind === "text" || entry.kind === "user_question";
+        if (token.capitalized)
+          stat3.capitalized += 1;
+        else {
+          if (entry.kind !== "user_question")
+            stat3.lower += 1;
+          if (prose && !token.labelled)
+            stat3.lowerAnywhere += 1;
+        }
+        stats.set(token.norm, stat3);
+      }
+      const joined = first ? previous !== undefined : token.joined;
+      if (previous && joined && previous.capitalized && token.capitalized && !NAME_STOPWORDS.has(previous.norm) && !NAME_STOPWORDS.has(token.norm) && previous.norm.length >= 2 && token.norm.length >= 2) {
+        const known = model.forms.has(previous.norm + token.norm) || model.forms.has(token.norm + previous.norm) || model.forms.has(previous.norm) || model.forms.has(token.norm);
+        if (known) {
+          const midSentence = !(first || token.initial) || !previous.initial;
+          const key = `${previous.norm} ${token.norm}`;
+          const existing = pairCandidates.get(key);
+          pairCandidates.set(key, { left: previous.norm, right: token.norm, midSentence: midSentence || (existing?.midSentence ?? false) });
+        }
+      }
+      const initial = first || token.initial;
+      if (watched && token.norm.length >= 2 && !NAME_STOPWORDS.has(token.norm) && !FUNCTION_WORDS.has(token.norm) && (token.labelled || entry.kind === "text" && token.capitalized && token.norm.length >= 3 && (!initial || PROSE_PATHS.has(entry.path)))) {
+        const existing = singleCandidates.get(token.norm);
+        singleCandidates.set(token.norm, {
+          source: model.forms.get(token.norm),
+          labelled: token.labelled || (existing?.labelled ?? false),
+          initialOnly: (existing?.initialOnly ?? true) && initial && !token.labelled
+        });
+      }
+      previous = token;
+      first = false;
+    });
+    closeSentence();
+    closeOverlap();
+  }
+  if (reasons.size > 0)
+    return reasons;
+  for (const words of overlapCandidates) {
+    const rare = words.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES);
+    if (rare.length >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) {
+      reasons.add("shared_token_run");
+      return reasons;
+    }
+  }
+  const statOf = (token) => stats.get(token) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
+  const neverLower = (token) => statOf(token).lower === 0;
+  const nameHit = (source) => {
+    reasons.add(source === "decoded" ? "encoded_identifier" : "snapshot_name");
+  };
+  for (const pair of pairCandidates.values()) {
+    if (!pair.midSentence) {
+      const namelike = (part) => statOf(part).capitalized >= statOf(part).lower;
+      if (!namelike(pair.left) && !namelike(pair.right))
+        continue;
+    }
+    const pairSource = model.forms.get(pair.left + pair.right) ?? model.forms.get(pair.right + pair.left);
+    if (pairSource)
+      nameHit(pairSource);
+    if (!pair.midSentence)
+      continue;
+    for (const part of [pair.left, pair.right]) {
+      const partSource = model.forms.get(part);
+      if (partSource && part.length >= 3 && neverLower(part))
+        nameHit(partSource);
+    }
+  }
+  for (const [token, single] of singleCandidates) {
+    const stat3 = statOf(token);
+    const dominatedByLower = stat3.lower >= 3 && stat3.lower >= 3 * stat3.capitalized;
+    if (single.labelled || (single.initialOnly ? stat3.lower === 0 && stat3.lowerAnywhere === 0 : !dominatedByLower))
+      nameHit(single.source);
+  }
+  for (const [token, source] of componentCandidates)
+    if (statOf(token).lowerAnywhere === 0)
+      identifierHit(source);
+  return reasons;
+}
+function spanMatcher(question, size) {
+  const key = (tokens) => [...tokens].sort().join(" ");
+  const wanted = new Set;
+  for (let start = 0;start + size <= question.length; start += 1)
+    wanted.add(key(question.slice(start, start + size)));
+  const vocabulary = new Set(question);
+  let window2 = [];
+  let inQuestion = 0;
+  return {
+    feed(token) {
+      if (wanted.size === 0)
+        return false;
+      window2.push(token);
+      if (vocabulary.has(token))
+        inQuestion += 1;
+      if (window2.length > size && vocabulary.has(window2.shift()))
+        inQuestion -= 1;
+      return window2.length === size && inQuestion === size && wanted.has(key(window2));
+    },
+    reset() {
+      window2 = [];
+      inQuestion = 0;
+    }
+  };
+}
+function wordsOf(folded) {
+  const words = [];
+  forEachToken(folded, (token) => words.push(token.norm));
+  return words;
+}
+function hasNumberWord(normalized) {
+  NUMBER_WORD_PREFIX ??= new RegExp(`\\b(?:${NUMBER_PARTS.filter((part) => part.length >= 3).join("|")})`, "u");
+  return NUMBER_WORD_PREFIX.test(normalized);
+}
+function compareWithRecent(model, subQuestions, recent) {
+  const reasons = new Set;
+  if (recent.length === 0)
+    return reasons;
+  const asked = new Set([...subQuestions, subQuestions.join(" ")].map(compact));
+  const fullRun = runMatcher(model.tokens, CONSULT_GATE_SHARED_RUN_TOKENS, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
+  const contentRun = runMatcher(model.tokens.filter(isContent), CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
+  for (const text of recent) {
+    if (asked.has(compact(text)))
+      reasons.add("repeats_recent_consult");
+    fullRun.reset();
+    contentRun.reset();
+    forEachToken(foldText(text), (token) => {
+      if (fullRun.feed(token.norm))
+        reasons.add("links_recent_consult");
+      if (isContent(token.norm) && contentRun.feed(token.norm))
+        reasons.add("links_recent_consult");
+    });
+  }
+  return reasons;
+}
+function labelledSecretValues(normalized) {
+  const values = [];
+  for (const match of normalized.matchAll(/\b(?:password|passcode|passphrase|pin|secret|token|api key|apikey|key)\s*[:=]\s*(\S{3,64})/gu)) {
+    values.push(match[1]);
+  }
+  return values;
+}
+function hostnames(normalized) {
+  const hosts = [];
+  for (const raw of normalized.split(/[^\p{L}\p{N}.-]+/u)) {
+    if (!raw.includes("."))
+      continue;
+    const piece = raw.replace(/^[.-]+|[.-]+$/gu, "");
+    if (piece.length > 253)
+      continue;
+    const labels = piece.split(".");
+    if (labels.length < 2 || labels.some((label) => label.length === 0 || label.length > 63))
+      continue;
+    if (!/^\p{L}{2,}$/u.test(labels[labels.length - 1]))
+      continue;
+    hosts.push(piece);
+  }
+  return hosts;
+}
+function hostKeysOf(host) {
+  const labels = host.split(".");
+  return labels.length > 2 ? [host, labels.slice(-2).join(".")] : [host];
+}
 function buildMonthNames() {
   const names = new Map;
   const lists = [
@@ -55796,7 +58304,100 @@ function buildMonthNames() {
   names.set("sept", 9);
   return names;
 }
-var CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, vocabularyCache, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, PROSE_PATHS, SEP, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS;
+function dateKeys(normalized, words) {
+  const keys = { full: new Set, monthDay: new Set };
+  const add = (year, month, day) => {
+    if (month < 1 || month > 12 || day < 1 || day > 31)
+      return;
+    keys.monthDay.add(`${month}-${day}`);
+    if (year !== undefined)
+      keys.full.add(`${year}-${month}-${day}`);
+  };
+  for (const match of normalized.matchAll(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)/gu)) {
+    add(Number(match[1]), Number(match[2]), Number(match[3]));
+  }
+  for (const match of normalized.matchAll(/(?<![\d\-/.])(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})(?!\d)/gu)) {
+    const year = expandYear(match[3]);
+    add(year, Number(match[2]), Number(match[1]));
+    add(year, Number(match[1]), Number(match[2]));
+  }
+  for (const match of normalized.matchAll(/(?:(\d{2,4})\s*[\u5E74\uB144]\s*)?(\d{1,2})\s*[\u6708\uC6D4]\s*(\d{1,2})\s*[\u65E5\uC77C]?/gu)) {
+    add(match[1] ? expandYear(match[1]) : undefined, Number(match[2]), Number(match[3]));
+  }
+  const tokens = words ?? (normalized.match(/[\p{L}\p{N}]+/gu) ?? []);
+  const at = (index) => tokens[index];
+  const skipJoiners = (index) => {
+    let cursor = index;
+    while (cursor < tokens.length && DATE_JOINERS.has(tokens[cursor]))
+      cursor += 1;
+    return cursor;
+  };
+  for (let index = 0;index < tokens.length; index += 1) {
+    const word = tokens[index];
+    const month = MONTH_NAMES.get(word);
+    if (month !== undefined) {
+      let back = index - 1;
+      while (back >= 0 && DATE_JOINERS.has(tokens[back]))
+        back -= 1;
+      const before = dayNumber(at(back));
+      const afterIndex = skipJoiners(index + 1);
+      const after = dayNumber(at(afterIndex));
+      if (before !== undefined)
+        add(yearNumber(at(skipJoiners(index + 1))), month, before);
+      if (after !== undefined)
+        add(yearNumber(at(skipJoiners(afterIndex + 1))), month, after);
+      continue;
+    }
+    const roman = ROMAN_MONTHS.get(word);
+    if (roman !== undefined) {
+      const day = dayNumber(at(index - 1));
+      const year = yearNumber(at(index + 1));
+      if (day !== undefined && year !== undefined)
+        add(year, roman, day);
+    }
+  }
+  return keys;
+}
+function dayNumber(word) {
+  const match = word?.match(/^(\d{1,2})(?:st|nd|rd|th|er|e|o)?$/u);
+  if (!match)
+    return;
+  const day = Number(match[1]);
+  return day >= 1 && day <= 31 ? day : undefined;
+}
+function yearNumber(word) {
+  if (word === undefined || !/^\d{4}$/u.test(word))
+    return;
+  return Number(word);
+}
+function expandYear(text) {
+  const value = Number(text);
+  if (text.length === 4)
+    return value;
+  return value < 70 ? 2000 + value : 1900 + value;
+}
+function figureKeys(normalized, needUnits) {
+  const keys = new Map;
+  for (const match of normalized.matchAll(/([^\s\d]?)\s?(\d+(?:[.,'\u2019_ ]\d+)*)\s?(%|[\p{L}$\u20AC\u00A3\u00A5\u20B9]{1,8})?/gu)) {
+    const before = match[1] ?? "";
+    const written = match[2];
+    const after = match[3] ?? "";
+    const unit = needUnits && (UNIT_WORDS.has(before) || UNIT_WORDS.has(after));
+    const parts = new Set([written]);
+    if (written.includes(" "))
+      for (const part of written.split(" "))
+        parts.add(part);
+    for (const part of parts) {
+      const digits = part.replace(/\D/gu, "");
+      for (const key of [digits, digits.replace(/^0+(?=\d)/u, ""), digits.replace(/0+$/u, "")]) {
+        if (key.length >= 2)
+          keys.set(key, (keys.get(key) ?? false) || unit);
+      }
+    }
+  }
+  return keys;
+}
+var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, PROSE_PATHS, SEP, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS;
 var init_consult_gate = __esm(() => {
   init_opsec();
   init_types();
@@ -55848,6 +58449,7 @@ var init_consult_gate = __esm(() => {
     ["chunk.span.lane", "vocabulary"],
     ["citation.authorLabel", "person_identifier"]
   ]);
+  PROVENANCE_ROOTS = ["candidates[].provenance", "candidates[].facts[].sourceProvenance[]"];
   MAP_KEYS = new Set(["providerIds", "localIds"]);
   PRODUCT_DEFAULT_SCOPES = new Set(["personal", "default", "primary"]);
   SOURCE_INSTRUCTION_FLAGS = [
@@ -55965,6 +58567,105 @@ var init_consult_gate = __esm(() => {
     "vocabulary",
     "metadata"
   ]);
+  CURATED_VOCABULARY = [
+    "mg",
+    "mcg",
+    "kg",
+    "km",
+    "cm",
+    "mm",
+    "ml",
+    "dl",
+    "mmol",
+    "kwh",
+    "kw",
+    "mw",
+    "hz",
+    "khz",
+    "mhz",
+    "ghz",
+    "kb",
+    "mb",
+    "gb",
+    "tb",
+    "kbps",
+    "mbps",
+    "gbps",
+    "ms",
+    "rpm",
+    "bpm",
+    "psi",
+    "kpa",
+    "mph",
+    "kph",
+    "ph",
+    "iso",
+    "iec",
+    "ieee",
+    "rfc",
+    "tls",
+    "ssl",
+    "http",
+    "https",
+    "html",
+    "css",
+    "api",
+    "apis",
+    "sql",
+    "url",
+    "urls",
+    "uri",
+    "dns",
+    "tcp",
+    "udp",
+    "vpn",
+    "ssh",
+    "oauth",
+    "json",
+    "xml",
+    "csv",
+    "pdf",
+    "cpu",
+    "gpu",
+    "ram",
+    "ssd",
+    "usb",
+    "wifi",
+    "ipv",
+    "mfa",
+    "otp",
+    "sms",
+    "gps",
+    "gdpr",
+    "hipaa",
+    "vat",
+    "gst",
+    "apr",
+    "apy",
+    "cpi",
+    "gdp",
+    "etf",
+    "etfs",
+    "ira",
+    "faq",
+    "dna",
+    "mri",
+    "ecg",
+    "ekg",
+    "bmi",
+    "adhd",
+    "ptsd",
+    "hiv",
+    "covid",
+    "uk",
+    "eu",
+    "un",
+    "usa",
+    "st",
+    "nd",
+    "rd",
+    "th"
+  ];
   CONSULT_VOCABULARY_PACKS = {
     "en-esdb": "9d04850bf1b3c1a70ddf4c706c9d69fd99c205de11c822bb5a5f7a8360a5b4cc",
     "nl-opentaal": "f3868461cc6dc9b758d7d4d11fd443e9f0310f10c5c4c7626cc9c2d523fade80",
@@ -56004,6 +58705,70 @@ var init_consult_gate = __esm(() => {
   CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
   CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
   vocabularyCache = new Map;
+  VOCABULARY_LETTER_FOLDS = {
+    "œ": "oe",
+    "æ": "ae",
+    "ø": "o",
+    "ł": "l",
+    "đ": "d",
+    "ð": "d",
+    "þ": "th",
+    "ß": "ss",
+    "ı": "i"
+  };
+  LOOKALIKES = {
+    "а": "a",
+    "е": "e",
+    "о": "o",
+    "р": "p",
+    "с": "c",
+    "у": "y",
+    "х": "x",
+    "ѕ": "s",
+    "і": "i",
+    "ј": "j",
+    "һ": "h",
+    "ԁ": "d",
+    "ԛ": "q",
+    "ԝ": "w",
+    "ӏ": "l",
+    "к": "k",
+    "в": "b",
+    "м": "m",
+    "н": "h",
+    "т": "t",
+    "ү": "y",
+    "ο": "o",
+    "α": "a",
+    "ν": "v",
+    "ρ": "p",
+    "ι": "i",
+    "κ": "k",
+    "υ": "u",
+    "χ": "x",
+    "ϲ": "c",
+    "ϳ": "j",
+    "β": "b",
+    "ε": "e",
+    "ζ": "z",
+    "η": "h",
+    "μ": "m",
+    "τ": "t",
+    "ı": "i",
+    "ɩ": "i",
+    "ɡ": "g",
+    "ɑ": "a",
+    "ʀ": "r",
+    "ƒ": "f",
+    "ø": "o",
+    "ł": "l",
+    "đ": "d",
+    "ð": "d",
+    "þ": "th",
+    "æ": "ae",
+    "œ": "oe"
+  };
+  LEET = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b" };
   FUNCTION_WORDS = new Set([
     "a",
     "an",
@@ -59749,8 +62514,8 @@ function snifferMaterialLooksLikeInjection(material) {
   if (wholeWordRunHas(normalized, WORD_RUN_MARKERS))
     return true;
   for (const run of letterSpacedRuns(normalized)) {
-    const compact = run.replace(/[^a-z0-9.]/g, "");
-    if (LETTER_SPACED_MARKERS.some((marker) => compact.includes(marker)))
+    const compact2 = run.replace(/[^a-z0-9.]/g, "");
+    if (LETTER_SPACED_MARKERS.some((marker) => compact2.includes(marker)))
       return true;
     if (INJECTION_PATTERNS.some((pattern) => pattern.test(run.replace(/ /g, ""))))
       return true;
@@ -59767,9 +62532,9 @@ function wholeWordRunHas(normalized, markers) {
     at += word.length;
     ends.add(at);
   }
-  const compact = words.join("");
+  const compact2 = words.join("");
   return markers.some((marker) => {
-    for (let index = compact.indexOf(marker);index >= 0; index = compact.indexOf(marker, index + 1)) {
+    for (let index = compact2.indexOf(marker);index >= 0; index = compact2.indexOf(marker, index + 1)) {
       if (starts.has(index) && ends.has(index + marker.length))
         return true;
     }
@@ -61132,7 +63897,7 @@ async function runTierMigration(options) {
   const secretsDeleted = {};
   const secretsKept = {};
   const authorityCache = new Map;
-  let failure;
+  let failure2;
   try {
     for (const { lane, proposal } of work) {
       if (options.maxItems !== undefined && processed >= options.maxItems) {
@@ -61201,10 +63966,10 @@ async function runTierMigration(options) {
       });
       persistBatch(options.paths.statePath, plan.planId, batchId, tally);
       if (options.itemDelayMs && options.itemDelayMs > 0)
-        await sleep2(options.itemDelayMs);
+        await sleep3(options.itemDelayMs);
     }
   } catch (error) {
-    failure = error;
+    failure2 = error;
     stopReason = "failed";
   }
   const remaining = options.lanes.reduce((sum2, lane) => sum2 + lane.set.ledger.migrationProposalCounts(plan.planId).proposed, 0);
@@ -61260,8 +64025,8 @@ async function runTierMigration(options) {
     if (record.state === "stopped")
       record.stoppedAt = now().toISOString();
   });
-  if (failure !== undefined) {
-    throw new OperationError("source_index_error", `Tier migration batch ${batchId} stopped on an error: ${failure instanceof Error ? failure.message : String(failure)}`, "Fix the cause and run the same command again: the batch resumes where it stopped.");
+  if (failure2 !== undefined) {
+    throw new OperationError("source_index_error", `Tier migration batch ${batchId} stopped on an error: ${failure2 instanceof Error ? failure2.message : String(failure2)}`, "Fix the cause and run the same command again: the batch resumes where it stopped.");
   }
   return {
     planId: plan.planId,
@@ -61322,10 +64087,10 @@ async function yieldToAnswers(options) {
   if (!options.shouldYield)
     return;
   for (let waits = 0;waits < 1e4 && await options.shouldYield(); waits += 1) {
-    await sleep2(options.yieldWaitMs ?? 1000);
+    await sleep3(options.yieldWaitMs ?? 1000);
   }
 }
-function sleep2(ms) {
+function sleep3(ms) {
   return new Promise((resolve8) => setTimeout(resolve8, ms));
 }
 function adoptedByThisPlan(record, proposal) {
@@ -78897,12 +81662,12 @@ function sourceAnswerJobLimitsFromEnv(env, surface) {
 function isSourceAnswerPending(value) {
   return typeof value === "object" && value !== null && value.status === "working" && typeof value.job_id === "string";
 }
-function pendingResult(jobId, elapsedMs, resultWaitMs) {
+function pendingResult(jobId, elapsedMs2, resultWaitMs) {
   const wait = Math.round(resultWaitMs / 1000);
   return {
     status: "working",
     job_id: jobId,
-    elapsed_ms: elapsedMs,
+    elapsed_ms: elapsedMs2,
     next_tool: "source_answer_result",
     message: "Olympus is still preparing this answer and it keeps running. " + `Call source_answer_result with this job_id to get it${wait > 0 ? ` (each call waits up to ${wait} s)` : ""}; ` + "repeat while it says working. Do not ask the question again."
   };
@@ -85093,9 +87858,9 @@ async function runHealthProbe(probes, extractorKind) {
 async function runHealthProbes(probes, extractorKind, preflightExtractorKinds) {
   const kinds = extractorKind === undefined ? [...new Set(preflightExtractorKinds ?? [])] : [extractorKind];
   for (const kind of kinds) {
-    const failure = await runHealthProbe(probes, kind);
-    if (failure !== undefined)
-      return failure;
+    const failure2 = await runHealthProbe(probes, kind);
+    if (failure2 !== undefined)
+      return failure2;
   }
   return;
 }
@@ -87677,13 +90442,13 @@ async function runSourceWatchDeliveryPass(input) {
         counts.deliveries_delivered += 1;
         continue;
       }
-      const failure = input.store.recordDeliveryFailure(input.executor, {
+      const failure2 = input.store.recordDeliveryFailure(input.executor, {
         ...leaseFence(lease),
         retryAfterMs: input.retryAfterMs ?? SOURCE_WATCH_DELIVERY_RETRY_MS,
         errorKind: safeErrorKind(result.errorKind),
         errorHash: sha2565(result.errorKind)
       });
-      if (failure.status === "dead_letter")
+      if (failure2.status === "dead_letter")
         counts.deliveries_dead_lettered += 1;
       else
         counts.deliveries_retried += 1;
@@ -95494,7 +98259,7 @@ function renderIngestionSelection(source) {
   const selection = source.ingestion_selection;
   if (!selection)
     return "";
-  const deferred = Math.max(0, selection.policy_deferred_files ?? 0);
+  const deferred2 = Math.max(0, selection.policy_deferred_files ?? 0);
   const noun = dashboardItemNoun(source);
   const count2 = (value) => `${dashboardCount(value)} ${value === 1 ? singularNoun(noun) : noun}`;
   return `
@@ -95502,7 +98267,7 @@ function renderIngestionSelection(source) {
         <div class="selectioncounts">
           <div><span>Names only</span><b>${escapeHtml2(count2(selection.metadata_only_files))}</b></div>
           <div><span>Fully indexed</span><b>${escapeHtml2(count2(selection.full_ingestion_files))}</b></div>
-        </div>${deferred > 0 ? `<p class="hint">${escapeHtml2(count2(deferred))} chosen to be fully indexed ${deferred === 1 ? "is" : "are"} not being processed because of a separate ingestion policy.</p>` : ""}`;
+        </div>${deferred2 > 0 ? `<p class="hint">${escapeHtml2(count2(deferred2))} chosen to be fully indexed ${deferred2 === 1 ? "is" : "are"} not being processed because of a separate ingestion policy.</p>` : ""}`;
 }
 function renderTotals(source) {
   const noun = dashboardItemNoun(source);
@@ -101262,7 +104027,7 @@ async function retrySqliteBusy(operation) {
         throw new EmailSourceWorkerError(503, "source_index_busy", "The source index is busy; retry the source request shortly.");
       }
       recordSourceAnswerSqliteRetry(retryDelays[attempt]);
-      await sleep3(retryDelays[attempt]);
+      await sleep4(retryDelays[attempt]);
     }
   }
   throw lastError;
@@ -101287,7 +104052,7 @@ function isSqliteBusyError(error2) {
   const candidate = error2;
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
-function sleep3(ms) {
+function sleep4(ms) {
   return new Promise((resolve10) => setTimeout(resolve10, ms));
 }
 async function parseSourceIndexAnswerRequest(request) {
@@ -103507,9 +106272,9 @@ async function installBuiltInReasoning(options) {
     finished();
     return installed();
   } catch (error2) {
-    const failure = error2 instanceof BuiltInReasoningInstallError ? error2 : new BuiltInReasoningInstallError("disk_write_failed", error2 instanceof Error ? error2.message : String(error2));
-    reporter.fail(failure.reason, failure.message, failure.shortfall);
-    throw failure;
+    const failure2 = error2 instanceof BuiltInReasoningInstallError ? error2 : new BuiltInReasoningInstallError("disk_write_failed", error2 instanceof Error ? error2.message : String(error2));
+    reporter.fail(failure2.reason, failure2.message, failure2.shortfall);
+    throw failure2;
   }
 }
 function volumeFreeBytes(path) {
@@ -103548,11 +106313,11 @@ function isNoSpaceError(error2) {
 function formatGb(bytes) {
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
-function reportBuiltInReasoningState(options, state, failure) {
+function reportBuiltInReasoningState(options, state, failure2) {
   const paths = builtInReasoningPaths(options.model, options.env);
   const reporter = new ProgressReporter2(paths.statusPath, options.model.modelId, options.now, options.onProgress);
-  if (state === "failed" && failure)
-    reporter.fail(failure.reason, failure.message);
+  if (state === "failed" && failure2)
+    reporter.fail(failure2.reason, failure2.message);
   else
     reporter.set(state, state === "ready" ? "Built-in private model ready" : "Starting the built-in private model", 100);
 }
@@ -104046,6 +106811,7 @@ function createLlamaServerHandle(launch, options = {}) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS2;
   const killWaitMs = options.killWaitMs ?? DEFAULT_KILL_WAIT_MS;
+  const immediateKill = options.immediateKill === true;
   let current;
   const retiring = new Set;
   let endpoint2;
@@ -104076,7 +106842,7 @@ function createLlamaServerHandle(launch, options = {}) {
     if (server.exited)
       return Promise.resolve();
     server.terminating ??= (async () => {
-      if (!server.killed) {
+      if (!server.killed && !immediateKill) {
         server.signal("SIGTERM");
         if (await server.waitExit(stopGraceMs))
           return;
@@ -104550,6 +107316,9 @@ function createBuiltInAnalystModel(options = {}) {
     async stop() {
       await server?.stop();
     },
+    installedRuntime() {
+      return installed;
+    },
     async complete(request) {
       let paths = installed;
       if (!paths) {
@@ -104703,11 +107472,19 @@ async function answerPrivately(question, evidence, options = {}) {
   const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
   const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
   const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
+  const consult = (noAnswer) => options.consultMetadata ? { consult: { verdict: { sufficient: verdict.sufficient, noAnswer }, pack } } : {};
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
-    return { answer: PRIVATE_ANSWER_NOT_FOUND, citations: [], unanswered: cleanUnanswered(unanswered, "", { maxChars: gapChars, complete: false }), modelId };
+    return {
+      answer: PRIVATE_ANSWER_NOT_FOUND,
+      citations: [],
+      unanswered: cleanUnanswered(unanswered, "", { maxChars: gapChars, complete: false }),
+      modelId,
+      ...consult(true)
+    };
   }
   return {
     answer: result.answer,
+    ...consult(false),
     unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
@@ -106142,18 +108919,18 @@ function embeddingSweepTask(source, targets) {
     run: async (context) => {
       const passTargets = targets();
       const runs = await embedPendingChunks(passTargets, { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
-      const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
+      const deferred2 = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
         chunks_embedded: runs.reduce((sum2, run) => sum2 + run.chunksEmbedded, 0),
         items_queued: passTargets.reduce((sum2, target) => sum2 + target.store.queuedEmbeddingItemIds().length, 0),
         items_failed: passTargets.reduce((sum2, target) => sum2 + target.store.embeddingFailedItemCount(), 0),
         items_out_of_scope: runs.reduce((sum2, run) => sum2 + run.itemsOutOfScope, 0),
-        stores_deferred: deferred,
+        stores_deferred: deferred2,
         stores_busy: runs.filter((run) => run.busy === true).length
       };
       const status = counts.chunks_embedded > 0 ? "progress" : "idle";
       const attemptedAt = Date.parse(context?.attemptedAt ?? "") || Date.now();
-      if (deferred === 0) {
+      if (deferred2 === 0) {
         if (counts.items_failed === 0)
           return { status, counts };
         return {
@@ -109585,7 +112362,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function howLink(fix, key) {
     const href = helpHref(fix && fix.href);
-    if (!href || compact())
+    if (!href || compact2())
       return null;
     const link = button(P.howOnMac, key + ":how", () => openLink(href), "plain");
     link.className = "btn link";
@@ -109597,7 +112374,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return "";
     return (C[current] || C.relay_unavailable).disabledReason;
   }
-  function compact() {
+  function compact2() {
     return state.displayMode !== "" && state.displayMode !== "fullscreen";
   }
   function fixControl(fix, key, style, allowConfirm, source) {
@@ -109616,7 +112393,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       busy.setAttribute("aria-busy", "true");
       return add(wrap, busy);
     }
-    const failure = state.actionError && state.actionError.key === key ? state.actionError.text : "";
+    const failure2 = state.actionError && state.actionError.key === key ? state.actionError.text : "";
     let action = null;
     if (privacy && privacy.handles(fix)) {
       action = () => openPrivacy(key);
@@ -109648,9 +112425,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         supersede();
         state.confirming = key;
         render(key + ":no");
-      }, "plain"), errorNote(failure));
+      }, "plain"), errorNote(failure2));
     }
-    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure));
+    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure2));
   }
   function errorNote(text) {
     if (!text)
@@ -109683,7 +112460,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(actions, state.busy === "refresh" ? button(P.working, "refresh", null, "main") : button(C.actions.retry.label, "refresh", refresh, "main"));
     } else if (current === "not_connected") {
       add(actions, state.busy === "connection-action" ? button(P.working, "connection-action", null, "main") : button(C.actions.connect.label, "connection-action", () => callTool(config2.toolName, {}, "connection-action"), "main"));
-      const install = compact() ? "" : helpHref(conn.installHref);
+      const install = compact2() ? "" : helpHref(conn.installHref);
       if (install)
         add(actions, button(C.not_connected.install, "connection-install", () => openLink(install), "plain"));
     } else if (current !== "installing" && conn.action && C.actions[conn.action.id]) {
@@ -110179,9 +112956,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       doc2.documentElement.removeAttribute("data-theme");
     const picking = !!picker && picker.active();
     const privacyOpen = !picking && !!privacy && privacy.active();
-    doc2.documentElement.setAttribute("data-mode", compact() && !picking && !privacyOpen ? "inline" : "fullscreen");
+    doc2.documentElement.setAttribute("data-mode", compact2() && !picking && !privacyOpen ? "inline" : "fullscreen");
     accentUsed = false;
-    const view = picking ? picker.view() : privacyOpen ? privacy.view() : compact() ? renderCompact() : renderFull();
+    const view = picking ? picker.view() : privacyOpen ? privacy.view() : compact2() ? renderCompact() : renderFull();
     root.textContent = "";
     root.appendChild(view);
     if (picking)
@@ -110222,7 +112999,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     render,
     reportHeight,
     openLink,
-    compact,
+    compact: compact2,
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
@@ -110269,7 +113046,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     count: count2,
     call: callRaw,
     render,
-    compact,
+    compact: compact2,
     fullscreen: goFullscreen,
     data: () => state.data,
     picker,
@@ -110364,7 +113141,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     tickStale();
   });
   function tickStale() {
-    if (pageHidden() || compact() || editorOpen())
+    if (pageHidden() || compact2() || editorOpen())
       return;
     if (staleWords() !== drawnStale)
       render();
@@ -115729,7 +118506,7 @@ function normalizeProbe(value) {
   return { count: 0, evidence: [] };
 }
 function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search") {
-  const timeoutMs = options.privateMatchProbeTimeoutMs ?? PROBE_TIMEOUT_MS;
+  const timeoutMs = options.privateMatchProbeTimeoutMs ?? PROBE_TIMEOUT_MS2;
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
@@ -115778,7 +118555,7 @@ async function defaultPrivateMatchProbe(question, ctx) {
     return none;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
   const timeout = new Promise((resolve10) => {
-    const timer = setTimeout(() => resolve10(none), PROBE_TIMEOUT_MS);
+    const timer = setTimeout(() => resolve10(none), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -115887,7 +118664,7 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
 }
 var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, defaultProbeLog = (line) => {
   console.warn(line);
-}, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
+}, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
   init_server2();
   init_types2();
@@ -116163,13 +118940,13 @@ function markAuthenticated(response) {
 }
 function authenticateRemoteRequest(request, options) {
   const urls = currentRemotePublicUrls(options.publicUrls);
-  const refuse2 = (error2) => ({ ok: false, response: unauthorized(error2, urls) });
+  const refuse3 = (error2) => ({ ok: false, response: unauthorized(error2, urls) });
   const token = bearerToken(request.headers.get("Authorization"));
   if (token === undefined)
-    return refuse2();
+    return refuse3();
   const oauthToken = urls !== undefined && isWellFormedOAuthAccessToken(token);
   if (!oauthToken && !isWellFormedRemoteConnectionToken(token))
-    return refuse2("invalid_token");
+    return refuse3("invalid_token");
   let store;
   try {
     store = options.connections();
@@ -116177,13 +118954,13 @@ function authenticateRemoteRequest(request, options) {
     return { ok: false, response: jsonResponse(503, { error: "remote_connections_unavailable" }) };
   }
   if (!store)
-    return refuse2("invalid_token");
+    return refuse3("invalid_token");
   if (oauthToken) {
     const verification2 = store.oauth.verifyAccessToken(token, urls.resource);
-    return verification2.ok ? { ok: true, connection: verification2.connection } : refuse2("invalid_token");
+    return verification2.ok ? { ok: true, connection: verification2.connection } : refuse3("invalid_token");
   }
   const verification = store.verifyToken(token);
-  return verification.ok ? { ok: true, connection: verification.connection } : refuse2("invalid_token");
+  return verification.ok ? { ok: true, connection: verification.connection } : refuse3("invalid_token");
 }
 function lazyRemoteConnectionStore(resolvePath4, open6) {
   let store;
@@ -116842,7 +119619,7 @@ function createRemoteOAuthHandler(options) {
     if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
       return oauthError(400, "invalid_client_metadata", "Registration must be application/json.");
     }
-    const text2 = await readBounded(request, MAX_REGISTRATION_BYTES);
+    const text2 = await readBounded2(request, MAX_REGISTRATION_BYTES);
     if (text2 === undefined)
       return oauthError(400, "invalid_client_metadata", "Registration is too large.");
     let body;
@@ -116948,7 +119725,7 @@ function createRemoteOAuthHandler(options) {
     }
   };
 }
-function pairingPacer(now, sleep4) {
+function pairingPacer(now, sleep5) {
   let failures = [];
   let nextAt = 0;
   return {
@@ -116959,7 +119736,7 @@ function pairingPacer(now, sleep4) {
     },
     async hold(ms) {
       if (ms > 0)
-        await sleep4(ms);
+        await sleep5(ms);
     },
     recordFailure() {
       const at = now();
@@ -117034,7 +119811,7 @@ function singleParams(params) {
   }
   return { get: (key) => out.get(key) ?? null };
 }
-async function readBounded(request, maxBytes) {
+async function readBounded2(request, maxBytes) {
   const body = await readBoundedRequestText(request, maxBytes, { deadlineMs: CONNECT_BODY_DEADLINE_MS });
   return body.ok ? body.text : undefined;
 }
@@ -117042,7 +119819,7 @@ async function readForm(request) {
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded")) {
     return;
   }
-  const text2 = await readBounded(request, MAX_FORM_BYTES);
+  const text2 = await readBounded2(request, MAX_FORM_BYTES);
   if (text2 === undefined)
     return;
   return singleParams(new URLSearchParams(text2));
@@ -117205,7 +119982,7 @@ var init_private_answer_crypto = __esm(() => {
 });
 
 // src/workers/chatgpt/private-answer-payload.ts
-function utf8Bytes(text2) {
+function utf8Bytes2(text2) {
   return encoder.encode(text2).byteLength;
 }
 function wellFormed(text2) {
@@ -117253,15 +120030,15 @@ function httpsUrl2(value) {
   return href;
 }
 function fitJsonString(text2, budget) {
-  if (utf8Bytes(JSON.stringify(text2)) <= budget)
+  if (utf8Bytes2(JSON.stringify(text2)) <= budget)
     return { text: text2, cut: false };
-  const markBytes = utf8Bytes(CUT_MARK);
+  const markBytes = utf8Bytes2(CUT_MARK);
   let room = budget - 2 - markBytes;
   if (room < 0)
     return { text: "", cut: true };
   let kept = "";
   for (const char of text2) {
-    const bytes = utf8Bytes(JSON.stringify(char)) - 2;
+    const bytes = utf8Bytes2(JSON.stringify(char)) - 2;
     if (bytes > room)
       break;
     room -= bytes;
@@ -117368,12 +120145,12 @@ function fitCitation(citation) {
     }
   }
   const budget = PRIVATE_ANSWER_BYTE_BUDGETS.citation;
-  const over = () => utf8Bytes(JSON.stringify(out)) - budget;
+  const over = () => utf8Bytes2(JSON.stringify(out)) - budget;
   if (over() <= 0)
     return out;
   if (out.title) {
     const excess = over();
-    const fitted = fitJsonString(out.title, Math.max(0, utf8Bytes(JSON.stringify(out.title)) - excess));
+    const fitted = fitJsonString(out.title, Math.max(0, utf8Bytes2(JSON.stringify(out.title)) - excess));
     if (fitted.text)
       out.title = fitted.text;
     else
@@ -117381,7 +120158,7 @@ function fitCitation(citation) {
   }
   if (over() > 0 && out.source) {
     const excess = over();
-    const fitted = fitJsonString(out.source, Math.max(0, utf8Bytes(JSON.stringify(out.source)) - excess));
+    const fitted = fitJsonString(out.source, Math.max(0, utf8Bytes2(JSON.stringify(out.source)) - excess));
     if (fitted.text)
       out.source = fitted.text;
     else
@@ -117417,9 +120194,9 @@ function fitOutsideBlock(block) {
       out.route = fitJsonString(route, limits.outsideRouteBytes).text;
   }
   const budget = PRIVATE_ANSWER_BYTE_BUDGETS.outside;
-  const over = () => utf8Bytes(JSON.stringify(out)) - budget;
+  const over = () => utf8Bytes2(JSON.stringify(out)) - budget;
   if (over() > 0 && out.text !== undefined) {
-    out.text = fitJsonString(out.text, Math.max(0, utf8Bytes(JSON.stringify(out.text)) - over())).text;
+    out.text = fitJsonString(out.text, Math.max(0, utf8Bytes2(JSON.stringify(out.text)) - over())).text;
     out.cut = true;
   }
   if (over() > 0)
@@ -117442,7 +120219,7 @@ function serializePrivateAnswerEnvelope(envelope) {
   return JSON.stringify({ v: 1, rev, state: "answer", ...answer, followSeconds, outside });
 }
 function padPrivateAnswerEnvelope(json2) {
-  const bytes = utf8Bytes(json2);
+  const bytes = utf8Bytes2(json2);
   if (bytes > PRIVATE_ANSWER_ENVELOPE_BYTES)
     throw new PrivateAnswerEnvelopeOverflowError(bytes);
   return json2 + " ".repeat(PRIVATE_ANSWER_ENVELOPE_BYTES - bytes);
@@ -117501,6 +120278,7 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS: () => PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS,
   PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS,
   PRIVATE_ANSWER_DEDUPE_MS: () => PRIVATE_ANSWER_DEDUPE_MS,
+  PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS: () => PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS,
   PRIVATE_ANSWER_CLAIM_HOLD_MS: () => PRIVATE_ANSWER_CLAIM_HOLD_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
@@ -117603,6 +120381,7 @@ class PrivateAnswerJobs {
   openRateGlobal;
   outsideHelpTtlMs;
   followUpWindowMs;
+  consultSnapshotMs;
   resetting;
   options;
   constructor(options) {
@@ -117631,6 +120410,7 @@ class PrivateAnswerJobs {
     this.openRefilledAt = this.now();
     this.outsideHelpTtlMs = options.outsideHelpTtlMs ?? PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS;
     this.followUpWindowMs = options.followUpWindowMs ?? PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS;
+    this.consultSnapshotMs = options.consultSnapshotMs ?? PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS;
   }
   get size() {
     return this.jobs.size;
@@ -117679,6 +120459,7 @@ class PrivateAnswerJobs {
       pollRefilledAt: at,
       rev: 0,
       outside: { state: "idle" },
+      consult: { snapshot: undefined, snapshotExpiresAt: undefined, latch: false, settled: false },
       openTokens: this.openRate.capacity,
       openRefilledAt: at
     };
@@ -117758,11 +120539,19 @@ class PrivateAnswerJobs {
         continue;
       if (job.followUntil !== undefined && job.followUntil !== followUntil)
         continue;
-      if (job.firstDeliveredAt === undefined) {
+      const first = job.firstDeliveredAt === undefined;
+      if (first) {
         job.firstDeliveredAt = at;
         job.followUntil = followUntil;
+        if (job.consult.snapshot)
+          job.consult.snapshotExpiresAt = at + this.consultSnapshotMs;
       }
       job.lastCollectedAt = Math.max(job.lastCollectedAt ?? 0, at);
+      if (first) {
+        try {
+          this.options.onFirstDelivered?.(job.id);
+        } catch {}
+      }
       return { status: 200, body: { status: "ready", v: 1, ...sealed } };
     }
   }
@@ -117805,7 +120594,44 @@ class PrivateAnswerJobs {
     job.question = undefined;
     job.sealedItems = undefined;
     job.opens = undefined;
+    this.forgetConsultSnapshot(job);
+    job.consult.settled = true;
     job.rev += 1;
+  }
+  consultSnapshot(jobId) {
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || !job.followUp || job.outcome?.kind !== "retained" || job.firstDeliveredAt === undefined)
+      return;
+    if (job.consult.settled)
+      return;
+    this.expireConsultSnapshot(job, this.now());
+    return job.consult.snapshot;
+  }
+  dropConsultSnapshot(jobId) {
+    const job = this.jobs.get(jobId);
+    if (job)
+      this.forgetConsultSnapshot(job);
+  }
+  takeConsultLatch(jobId) {
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || !job.followUp || job.outcome?.kind !== "retained" || job.firstDeliveredAt === undefined || job.followUntil === undefined)
+      return false;
+    if (job.consult.latch || job.consult.settled || job.outside.state !== "pending")
+      return false;
+    if (this.now() > job.followUntil)
+      return false;
+    job.consult.latch = true;
+    return true;
+  }
+  forgetConsultSnapshot(job) {
+    job.consult.snapshot = undefined;
+    job.consult.snapshotExpiresAt = undefined;
+  }
+  expireConsultSnapshot(job, at) {
+    if (job.consult.snapshotExpiresAt !== undefined && at >= job.consult.snapshotExpiresAt)
+      this.forgetConsultSnapshot(job);
   }
   outsideSeam(jobId) {
     this.sweep();
@@ -117827,10 +120653,31 @@ class PrivateAnswerJobs {
     };
   }
   markOutside(jobId, expectedRev, state) {
+    if (state === "failed") {
+      this.sweep();
+      const job2 = this.jobs.get(jobId);
+      if (!job2 || !job2.followUp)
+        return { ok: false, reason: "unknown" };
+      if (job2.outcome?.kind === "withdrawn")
+        return { ok: false, reason: "withdrawn" };
+      if (job2.outside.state === "appended")
+        return { ok: false, reason: "already_appended" };
+      if (job2.rev !== expectedRev)
+        return { ok: false, reason: "stale_rev" };
+      job2.consult.settled = true;
+      this.forgetConsultSnapshot(job2);
+      if (job2.outside.state === "idle")
+        return { ok: true, rev: job2.rev };
+      job2.outside = { state: "idle" };
+      job2.rev += 1;
+      return { ok: true, rev: job2.rev };
+    }
     const check = this.outsideWritable(jobId, expectedRev);
     if (!check.ok)
       return check;
     const job = check.job;
+    if (state === "pending" && job.consult.settled)
+      return { ok: false, reason: "already_appended" };
     if (job.outside.state === state)
       return { ok: true, rev: job.rev };
     job.outside = { state };
@@ -117848,6 +120695,8 @@ class PrivateAnswerJobs {
       ...typeof block.question === "string" ? { question: block.question } : {},
       ...typeof block.route === "string" ? { route: block.route } : {}
     });
+    job.consult.settled = true;
+    this.forgetConsultSnapshot(job);
     job.rev += 1;
     return { ok: true, rev: job.rev };
   }
@@ -117915,9 +120764,12 @@ class PrivateAnswerJobs {
     return false;
   }
   sweep(at = this.now()) {
-    for (const [id, job] of this.jobs)
+    for (const [id, job] of this.jobs) {
       if (job.expiresAt <= at)
         this.drop(id);
+      else
+        this.expireConsultSnapshot(job, at);
+    }
     for (const [key, analysis] of this.shared) {
       if (analysis.createdAt + this.dedupeMs <= at || analysis.state === "failed")
         this.shared.delete(key);
@@ -117936,6 +120788,7 @@ class PrivateAnswerJobs {
     job.outside = { state: "idle" };
     job.opens = undefined;
     job.sealedItems = undefined;
+    this.forgetConsultSnapshot(job);
     this.jobs.delete(id);
   }
   bindPolicy() {
@@ -118157,7 +121010,10 @@ class PrivateAnswerJobs {
           modelCall: (call) => {
             analysis.stats.calls.push(call);
           }
-        }, { detail: analysis.detail });
+        }, {
+          detail: analysis.detail,
+          ...[...analysis.jobs].some((job) => job.policy.outsideHelp) ? { consult: true } : {}
+        });
         return { result, used };
       } catch (error2) {
         if (error2 instanceof NoPrivateEvidenceError)
@@ -118186,7 +121042,8 @@ class PrivateAnswerJobs {
       analysis.result = {
         ...preparedAnswer(done.result),
         usedKeys: usedKeys(evidence, done.used),
-        usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity)
+        usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
+        consult: done.result.consult
       };
       this.finish(analysis, "done");
     } catch (error2) {
@@ -118330,8 +121187,11 @@ class PrivateAnswerJobs {
             timing.precomputed = precomputed;
             timing.waitAtClaimMs = this.now() - claimedAt;
             job.sealedItems = result.usedItems;
-            if (outcome.kind === "retained")
+            if (outcome.kind === "retained") {
               job.rev = 1;
+              const input = consultSnapshotInput(result.consult);
+              job.consult.snapshot = input ? consultSnapshot(question, outcome.answer, input, result.usedItems) : undefined;
+            }
             settle(outcome);
             return;
           }
@@ -118358,6 +121218,9 @@ class PrivateAnswerJobs {
     return detail === "full" ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }
   beginActivity() {
+    try {
+      this.options.onAnswerActivity?.();
+    } catch {}
     let release;
     try {
       release = this.options.activity?.begin();
@@ -118528,6 +121391,39 @@ function preparedAnswer(result) {
     localPaths: prepared.localPaths
   };
 }
+function consultSnapshotInput(value) {
+  const record3 = asRecord18(value);
+  const verdict = asRecord18(record3?.verdict);
+  const pack = asRecord18(record3?.pack);
+  if (!record3 || !verdict || !pack || typeof verdict.noAnswer !== "boolean")
+    return;
+  if (verdict.sufficient !== undefined && typeof verdict.sufficient !== "boolean")
+    return;
+  if (typeof pack.question !== "string" || !Array.isArray(pack.candidates))
+    return;
+  return deepFreeze({
+    verdict: { sufficient: verdict.sufficient, noAnswer: verdict.noAnswer },
+    pack: structuredClone(pack)
+  });
+}
+function consultSnapshot(question, retained, input, items) {
+  return deepFreeze({
+    question,
+    answer: retained.answer,
+    gaps: [...retained.unanswered ?? []],
+    verdict: { sufficient: input.verdict.sufficient, noAnswer: input.verdict.noAnswer },
+    pack: input.pack,
+    items: items.map((item) => structuredClone(item))
+  });
+}
+function deepFreeze(value) {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value))
+    return value;
+  Object.freeze(value);
+  for (const entry of Object.values(value))
+    deepFreeze(entry);
+  return value;
+}
 function retainedAnswer(plaintext) {
   const fitted = fitFirstAnswer(plaintext);
   return Object.freeze({
@@ -118609,7 +121505,7 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_QUESTION_CHARS = 4000, FOLLOW_UP_SEAL_ATTEMPTS = 8, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, OUTSIDE_HELP_OFF, defaultAudit = (event) => {
+}, MAX_QUESTION_CHARS = 4000, FOLLOW_UP_SEAL_ATTEMPTS = 8, OPEN_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS, OUTSIDE_HELP_OFF, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 }, IDENTITY_FIELDS, SOURCE_ITEM_FIELDS;
 var init_private_answer_jobs = __esm(() => {
@@ -118628,6 +121524,7 @@ var init_private_answer_jobs = __esm(() => {
   OPEN_TOKEN_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_LIMITS.openTokenChars}}$`);
   PRIVATE_ANSWER_DEDUPE_MS = 3 * 60000;
   PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60000;
+  PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS = 5 * 60000;
   OUTSIDE_HELP_OFF = bindConsultJobPolicy({ state: "absent", settings: DEFAULT_CONSULT_SETTINGS });
   IDENTITY_FIELDS = [
     "corpusId",
@@ -118743,7 +121640,7 @@ function createBuiltInPrivateAnswerModel(options) {
         observe?.evidence?.({
           items: items.length,
           unreadable,
-          bytes: items.reduce((sum2, item) => sum2 + utf8Bytes2(item.text), 0),
+          bytes: items.reduce((sum2, item) => sum2 + utf8Bytes3(item.text), 0),
           used: picked.map((index) => read.sources[index])
         });
       } catch {}
@@ -118777,6 +121674,7 @@ function createBuiltInPrivateAnswerModel(options) {
           maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
           audit: limits.audit,
           evidenceFormat: "compact",
+          ...request?.consult ? { consultMetadata: true } : {},
           ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
           ...signal ? { signal } : {}
         });
@@ -118816,7 +121714,12 @@ function createBuiltInPrivateAnswerModel(options) {
       const unanswered = [...result.unanswered];
       if (unreadable > 0)
         unanswered.push(unreadableNote(unreadable));
-      return { answer: withoutEvidenceMarkers(result.answer), citations, unanswered };
+      return {
+        answer: withoutEvidenceMarkers(result.answer),
+        citations,
+        unanswered,
+        ...result.consult ? { consult: { verdict: result.consult.verdict, pack: result.consult.pack } } : {}
+      };
     },
     async reset() {
       await model?.stop();
@@ -118999,7 +121902,7 @@ function unreadableNote(count2) {
 function unreadableAnswer(count2) {
   return count2 === 1 ? "The matching private item has no readable text on this computer, so there is no private answer." : `None of the ${count2} matching private items has readable text on this computer, so there is no private answer.`;
 }
-function utf8Bytes2(text3) {
+function utf8Bytes3(text3) {
   return Buffer.byteLength(text3, "utf8");
 }
 function record3(value) {
@@ -119196,6 +122099,636 @@ var init_open_target = __esm(() => {
     "m4v",
     "mov"
   ]);
+});
+
+// src/core/consult-writer.ts
+var exports_consult_writer = {};
+__export(exports_consult_writer, {
+  runConsultWriter: () => runConsultWriter,
+  parseConsultWriterReply: () => parseConsultWriterReply,
+  defaultConsultMemoryProbe: () => defaultConsultMemoryProbe,
+  createConsultWriterServer: () => createConsultWriterServer,
+  consultWriterMemoryDecision: () => consultWriterMemoryDecision,
+  buildConsultWriterPrompt: () => buildConsultWriterPrompt,
+  boundConsultWriterInput: () => boundConsultWriterInput,
+  CONSULT_WRITER_SYSTEM: () => CONSULT_WRITER_SYSTEM,
+  CONSULT_WRITER_RESPONSE_SCHEMA: () => CONSULT_WRITER_RESPONSE_SCHEMA,
+  CONSULT_WRITER_LIMITS: () => CONSULT_WRITER_LIMITS
+});
+import { execFileSync as execFileSync3 } from "node:child_process";
+import { freemem, platform as osPlatform4, totalmem as totalmem2 } from "node:os";
+function boundConsultWriterInput(input) {
+  const clean = (text3, max) => typeof text3 === "string" ? Array.from(text3.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim()).slice(0, max).join("") : "";
+  return Object.freeze({
+    question: clean(input.question, CONSULT_WRITER_LIMITS.questionChars),
+    answer: clean(input.answer, CONSULT_WRITER_LIMITS.answerChars),
+    gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : []).map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars)).filter(Boolean).slice(0, CONSULT_WRITER_LIMITS.gaps))
+  });
+}
+function buildConsultWriterPrompt(input) {
+  const bounded = boundConsultWriterInput(input);
+  const user = [
+    `Question: ${bounded.question}`,
+    `Answer:
+${bounded.answer}`,
+    bounded.gaps.length > 0 ? `Could not find:
+- ${bounded.gaps.join(`
+- `)}` : "Could not find: (the answer was marked incomplete without listing points)"
+  ].join(`
+
+`);
+  return Object.freeze([
+    Object.freeze({ role: "system", content: CONSULT_WRITER_SYSTEM }),
+    Object.freeze({ role: "user", content: user })
+  ]);
+}
+function parseConsultWriterReply(text3) {
+  const start = text3.indexOf("{");
+  const end = text3.lastIndexOf("}");
+  if (start === -1 || end <= start)
+    return { kind: "invalid", reason: "not_json" };
+  let parsed;
+  try {
+    parsed = JSON.parse(text3.slice(start, end + 1));
+  } catch {
+    return { kind: "invalid", reason: "not_json" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return { kind: "invalid", reason: "shape" };
+  const questions = parsed.questions;
+  if (questions === null)
+    return { kind: "declined" };
+  if (!Array.isArray(questions) || questions.length < 1 || questions.length > CONSULT_WRITER_LIMITS.maxQuestions)
+    return { kind: "invalid", reason: "shape" };
+  if (!questions.every((question) => typeof question === "string"))
+    return { kind: "invalid", reason: "shape" };
+  const cleaned = [];
+  for (const raw of questions) {
+    const question = raw.trim();
+    if (!question || question.length > CONSULT_WRITER_LIMITS.maxQuestionChars)
+      return { kind: "invalid", reason: "form" };
+    if (/[\r\n\t\u0000-\u001F\u007F]/.test(question))
+      return { kind: "invalid", reason: "form" };
+    if (!question.endsWith("?") || question.indexOf("?") !== question.length - 1)
+      return { kind: "invalid", reason: "form" };
+    const words = question.split(/\s+/);
+    if (words.length > CONSULT_WRITER_LIMITS.maxQuestionWords || words.length < CONSULT_WRITER_LIMITS.minQuestionWords)
+      return { kind: "invalid", reason: "form" };
+    cleaned.push(question);
+  }
+  if (new Set(cleaned.map((question) => question.toLowerCase())).size !== cleaned.length)
+    return { kind: "invalid", reason: "form" };
+  return { kind: "questions", questions: Object.freeze(cleaned) };
+}
+function consultWriterMemoryDecision(sample, footprintBytes = CONSULT_WRITER_LIMITS.footprintBytes) {
+  if (!sample || !Number.isFinite(sample.totalBytes) || sample.totalBytes <= 0 || !Number.isFinite(sample.freePercent)) {
+    return { ok: false, reason: "memory_unknown" };
+  }
+  if (sample.pressure === "unknown")
+    return { ok: false, reason: "memory_unknown" };
+  if (sample.pressure === "critical")
+    return { ok: false, reason: "swap_pressure" };
+  const freeAfterPercent = sample.freePercent - footprintBytes / sample.totalBytes * 100;
+  if (freeAfterPercent < CONSULT_WRITER_LIMITS.minFreePercentAfter)
+    return { ok: false, reason: "memory_low" };
+  return { ok: true, freeAfterPercent };
+}
+function defaultConsultMemoryProbe(deps = {}) {
+  const exec = deps.exec ?? ((file, args) => execFileSync3(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
+  const platform2 = deps.platform ?? osPlatform4();
+  return () => {
+    try {
+      const totalBytes = totalmem2();
+      if (platform2 !== "darwin") {
+        return { totalBytes, freePercent: freemem() / totalBytes * 100, pressure: "unknown" };
+      }
+      const free = /free percentage:\s*(\d+(?:\.\d+)?)%/i.exec(exec("/usr/bin/memory_pressure", []))?.[1];
+      const level = Number(exec("/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"]).trim());
+      const pressure = level === 1 ? "normal" : level === 2 ? "warn" : level === 4 ? "critical" : "unknown";
+      return { totalBytes, freePercent: free === undefined ? Number.NaN : Number(free), pressure };
+    } catch {
+      return;
+    }
+  };
+}
+function createConsultWriterServer(launch, options = {}) {
+  const handle = (options.createHandle ?? createLlamaServerHandle)({
+    serverPath: launch.serverPath,
+    modelPath: launch.modelPath,
+    gpu: launch.gpu,
+    contextTokens: CONSULT_WRITER_LIMITS.contextTokens,
+    threads: builtInReasoningThreads(),
+    idleShutdownSeconds: options.warm ? CONSULT_WRITER_LIMITS.warmIdleShutdownSeconds : CONSULT_WRITER_LIMITS.idleShutdownSeconds,
+    startupTimeoutMs: CONSULT_WRITER_LIMITS.startupTimeoutMs
+  }, {
+    ...options.spawnImpl ? { spawnImpl: options.spawnImpl } : {},
+    ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
+    ...options.env ? { env: options.env } : {},
+    immediateKill: true,
+    stopGraceMs: 0
+  });
+  return {
+    ensure: (signal) => handle.ensureRunning(signal),
+    kill: () => handle.stop(),
+    touch: () => handle.touch(),
+    get pid() {
+      return handle.pid;
+    }
+  };
+}
+async function runConsultWriter(input, options) {
+  const now = options.now ?? Date.now;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const startedAt = now();
+  if (!options.server)
+    return { kind: "skipped", reason: "no_runtime" };
+  const server = options.server;
+  const memory = consultWriterMemoryDecision(safeProbe(options.memory));
+  if (!memory.ok)
+    return { kind: "skipped", reason: memory.reason };
+  const messages = buildConsultWriterPrompt(input);
+  const deadline = AbortSignal.timeout(options.deadlineMs ?? CONSULT_WRITER_LIMITS.deadlineMs);
+  const stop = AbortSignal.any([options.kill, deadline]);
+  const killedReason = () => options.kill.aborted ? "fresh_answer" : "deadline";
+  let killing;
+  const killNow = () => {
+    killing ??= server.kill().catch(() => {
+      return;
+    });
+    return killing;
+  };
+  const onStop = () => void killNow();
+  if (stop.aborted)
+    return { kind: "killed", reason: killedReason() };
+  stop.addEventListener("abort", onStop, { once: true });
+  let keep = false;
+  try {
+    let endpoint2;
+    try {
+      endpoint2 = await server.ensure(stop);
+    } catch {
+      if (stop.aborted)
+        return { kind: "killed", reason: killedReason() };
+      return { kind: "failed", reason: "start_failed" };
+    }
+    if (stop.aborted)
+      return { kind: "killed", reason: killedReason() };
+    const promptTokens = await countWriterTokens(fetchImpl, endpoint2, messages, stop);
+    if (stop.aborted)
+      return { kind: "killed", reason: killedReason() };
+    if (promptTokens === undefined) {
+      keep = true;
+      return { kind: "skipped", reason: "prompt_tokens_unavailable" };
+    }
+    if (promptTokens > CONSULT_WRITER_LIMITS.promptTokens) {
+      keep = true;
+      return { kind: "skipped", reason: "prompt_too_long" };
+    }
+    let text3;
+    try {
+      text3 = await writerCompletion(fetchImpl, endpoint2, messages, stop);
+    } catch {
+      if (stop.aborted)
+        return { kind: "killed", reason: killedReason() };
+      keep = true;
+      return { kind: "failed", reason: "request_failed" };
+    }
+    if (stop.aborted)
+      return { kind: "killed", reason: killedReason() };
+    keep = true;
+    const reply2 = parseConsultWriterReply(text3);
+    const ms = now() - startedAt;
+    if (reply2.kind === "invalid")
+      return { kind: "failed", reason: reply2.reason };
+    if (reply2.kind === "declined")
+      return { kind: "declined", promptTokens, ms };
+    return { kind: "questions", questions: reply2.questions, promptTokens, ms };
+  } finally {
+    stop.removeEventListener("abort", onStop);
+    if (options.keepWarm && keep && !stop.aborted)
+      server.touch();
+    else
+      await killNow();
+  }
+}
+function safeProbe(probe) {
+  try {
+    return probe();
+  } catch {
+    return;
+  }
+}
+async function post(fetchImpl, endpoint2, path, body, signal) {
+  return fetchModelEndpoint(fetchImpl, `${endpoint2.baseUrl}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${endpoint2.token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal
+  });
+}
+async function countWriterTokens(fetchImpl, endpoint2, messages, signal) {
+  try {
+    const templated = await post(fetchImpl, endpoint2, "/apply-template", { messages }, signal);
+    if (!templated.ok)
+      return;
+    const { prompt } = await templated.json();
+    if (typeof prompt !== "string")
+      return;
+    const tokenized = await post(fetchImpl, endpoint2, "/tokenize", { content: prompt, add_special: true }, signal);
+    if (!tokenized.ok)
+      return;
+    const { tokens } = await tokenized.json();
+    return Array.isArray(tokens) ? tokens.length : undefined;
+  } catch {
+    return;
+  }
+}
+async function writerCompletion(fetchImpl, endpoint2, messages, signal) {
+  const response = await post(fetchImpl, endpoint2, "/v1/chat/completions", {
+    messages,
+    temperature: 0,
+    max_tokens: CONSULT_WRITER_LIMITS.maxOutputTokens,
+    response_format: { type: "json_schema", json_schema: { name: "consult", schema: CONSULT_WRITER_RESPONSE_SCHEMA } }
+  }, signal);
+  if (!response.ok)
+    throw new Error(`writer HTTP ${response.status}`);
+  const payload = await response.json();
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content !== "string")
+    throw new Error("writer returned no text");
+  return content;
+}
+var CONSULT_WRITER_LIMITS, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_RESPONSE_SCHEMA;
+var init_consult_writer = __esm(() => {
+  init_model_transport();
+  init_server4();
+  CONSULT_WRITER_LIMITS = Object.freeze({
+    questionChars: 1000,
+    answerChars: 2700,
+    gaps: 4,
+    gapChars: 300,
+    promptTokens: 2048,
+    maxOutputTokens: 160,
+    maxQuestions: 3,
+    maxQuestionWords: 25,
+    minQuestionWords: 3,
+    maxQuestionChars: 200,
+    deadlineMs: 60000,
+    footprintBytes: 600 * 1024 * 1024,
+    minFreePercentAfter: 20,
+    contextTokens: 4096,
+    startupTimeoutMs: 60000,
+    idleShutdownSeconds: 120,
+    warmIdleShutdownSeconds: 600
+  });
+  CONSULT_WRITER_SYSTEM = [
+    "You are the local analyst. You have just answered a user's question from their private documents. That answer is final.",
+    "You may now propose a consult: up to three short questions for an outside expert model that knows nothing about this user, asking for general background knowledge that would help with a point the answer could not find.",
+    "What you write is sent as written, unreviewed, to an outside provider, and it costs money. If the answer is already good enough, or no general knowledge would help, propose nothing.",
+    "",
+    "Hard rules:",
+    "- Never relay private content: no names of people, companies, products or projects, no places, employers, dates, amounts, addresses, account or reference numbers, titles, file names, health, legal or relationship details, and nothing quoted from the documents or the answer.",
+    "- Never forward the user's words. Do not paraphrase their sentences; write every question yourself in plain generic language, asking for the information you need, not echoing the conversation.",
+    '- Never name a place, person, organisation, product or event that the answer only implies, even when it is not written anywhere: a destination suggested by an itinerary, a country suggested by a city, a currency or a language, an employer suggested by a job title, a product suggested by its features. Ask about the class of thing instead ("entry rules most countries apply to visitors", not a country).',
+    "- Name a country only when the answer genuinely depends on it, and never a city or region. Prefer the class of place or the mechanism.",
+    "- Use bands and orders of magnitude, never exact figures, years or dates.",
+    "- Ask for rules, thresholds, units, reference values and the traps between them, never for a verdict on this user's situation; the user applies the answer locally.",
+    "- Each question must make sense coming from any stranger. If it carries any fact about the user beyond the topic itself, remove the fact or drop the question.",
+    "",
+    "Form:",
+    "- Each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary letters and spaces only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings, spelled-out letters or encoded strings.",
+    "- Use ordinary dictionary words of the user's language, units, and standard abbreviations. Do not reuse wording between questions.",
+    "- At most three questions, on one subject, and at most 600 bytes and 80 words in all.",
+    "",
+    'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.'
+  ].join(`
+`);
+  CONSULT_WRITER_RESPONSE_SCHEMA = Object.freeze({
+    type: "object",
+    properties: {
+      questions: {
+        anyOf: [
+          { type: "null" },
+          {
+            type: "array",
+            minItems: 1,
+            maxItems: CONSULT_WRITER_LIMITS.maxQuestions,
+            items: { type: "string", maxLength: CONSULT_WRITER_LIMITS.maxQuestionChars }
+          }
+        ]
+      }
+    },
+    required: ["questions"],
+    additionalProperties: false
+  });
+});
+
+// src/workers/chatgpt/consult-orchestrator.ts
+var exports_consult_orchestrator = {};
+__export(exports_consult_orchestrator, {
+  resolveZkapiConsultTransport: () => resolveZkapiConsultTransport,
+  createConsultOrchestrator: () => createConsultOrchestrator,
+  CONSULT_WRITER_DEADLINE_MS: () => CONSULT_WRITER_DEADLINE_MS,
+  CONSULT_RECENT_ACTIVITY_MS: () => CONSULT_RECENT_ACTIVITY_MS,
+  CONSULT_DISPATCH_WINDOW_MS: () => CONSULT_DISPATCH_WINDOW_MS,
+  CONSULT_DELIVERY_MARGIN_MS: () => CONSULT_DELIVERY_MARGIN_MS,
+  CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS: () => CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS
+});
+function createConsultOrchestrator(options) {
+  const now = options.now ?? Date.now;
+  const log = options.log ?? ((line) => console.log(line));
+  const completionTimeoutMs = () => {
+    try {
+      const value = options.completionTimeoutMs?.();
+      return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
+    } catch {
+      return CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
+    }
+  };
+  const writerDeadlineMs = options.writerDeadlineMs ?? CONSULT_WRITER_DEADLINE_MS;
+  const recent = [];
+  const inFlight = new Map;
+  let fresh2 = new AbortController;
+  const record4 = (jobId, outcome, startedAt, code) => {
+    try {
+      log(`[consult] outcome=${outcome}${code ? ` code=${code}` : ""} ms=${Math.max(0, now() - startedAt)}`);
+    } catch {}
+  };
+  const fail = (jobId) => {
+    options.jobs.dropConsultSnapshot(jobId);
+    const seam = options.jobs.outsideSeam(jobId);
+    if (!seam)
+      return;
+    options.jobs.markOutside(jobId, seam.rev, "failed");
+  };
+  const windowOpen = (trigger2, at, extraMs = 0) => at <= trigger2.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS && at + extraMs + completionTimeoutMs() + CONSULT_DELIVERY_MARGIN_MS <= trigger2.followUntil;
+  const recentlyActive = (lastCollectedAt, at) => lastCollectedAt !== undefined && at - lastCollectedAt <= CONSULT_RECENT_ACTIVITY_MS;
+  const trigger = (jobId) => {
+    const seam = options.jobs.outsideSeam(jobId);
+    if (!seam)
+      return;
+    if (!seam.policy.outsideHelp || seam.panelCapability !== 2)
+      return;
+    if (seam.state !== "answer" || seam.outside !== "idle")
+      return;
+    if (seam.firstDeliveredAt === undefined || seam.followUntil === undefined)
+      return;
+    const at = now();
+    if (!recentlyActive(seam.lastCollectedAt, at))
+      return;
+    const snapshot = options.jobs.consultSnapshot(jobId);
+    if (!snapshot)
+      return;
+    if (snapshot.verdict.noAnswer)
+      return;
+    if (snapshot.verdict.sufficient !== false && snapshot.gaps.length === 0)
+      return;
+    const candidate = { rev: seam.rev, policy: seam.policy, firstDeliveredAt: seam.firstDeliveredAt, followUntil: seam.followUntil };
+    if (!windowOpen(candidate, at, writerDeadlineMs))
+      return;
+    return candidate;
+  };
+  const safe = (read, fallback) => {
+    try {
+      return read ? read() : fallback;
+    } catch {
+      return !fallback;
+    }
+  };
+  const run = async (jobId, scheduled) => {
+    const startedAt = now();
+    if (!safe(options.transportAvailable, true)) {
+      fail(jobId);
+      record4(jobId, "transport_unavailable", startedAt, "no_route");
+      return;
+    }
+    if (safe(options.answerActivityBusy, false)) {
+      fail(jobId);
+      record4(jobId, "superseded", startedAt, "answer_busy");
+      return;
+    }
+    const kill = fresh2.signal;
+    const first = options.jobs.consultSnapshot(jobId);
+    if (!first) {
+      fail(jobId);
+      record4(jobId, "error", startedAt, "snapshot_gone");
+      return;
+    }
+    const items = first.items;
+    if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
+      fail(jobId);
+      record4(jobId, "ineligible", startedAt, "e1");
+      return;
+    }
+    if (kill.aborted) {
+      fail(jobId);
+      record4(jobId, "superseded", startedAt, "fresh_answer");
+      return;
+    }
+    const held = options.jobs.consultSnapshot(jobId);
+    if (held !== first) {
+      fail(jobId);
+      record4(jobId, "error", startedAt, "snapshot_gone");
+      return;
+    }
+    if (safe(options.answerActivityBusy, false)) {
+      fail(jobId);
+      record4(jobId, "superseded", startedAt, "answer_busy");
+      return;
+    }
+    const bounded = boundConsultWriterInput({ question: held.question, answer: held.answer, gaps: held.gaps });
+    const sessionAbort = new AbortController;
+    const openDeadlineMs = Math.max(1000, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
+    const opening = options.openSession({ signal: sessionAbort.signal, deadlineMs: openDeadlineMs });
+    opening.catch(() => {
+      return;
+    });
+    const closeSession = async () => {
+      sessionAbort.abort();
+      const opened2 = await opening.catch(() => {
+        return;
+      });
+      if (opened2?.ok)
+        opened2.session.cancel();
+    };
+    let written;
+    try {
+      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs });
+    } catch {
+      written = { kind: "failed", reason: "request_failed" };
+    }
+    if (written.kind !== "questions") {
+      await closeSession();
+      fail(jobId);
+      record4(jobId, written.kind === "skipped" ? "writer_skipped" : written.kind === "killed" ? "writer_killed" : written.kind === "declined" ? "writer_declined" : "writer_failed", startedAt, "reason" in written ? written.reason : undefined);
+      return;
+    }
+    const settingsAtGate = options.settings();
+    const policyNow = recheckConsultJobPolicy(scheduled.policy, settingsAtGate);
+    if (!policyNow.ok) {
+      await closeSession();
+      fail(jobId);
+      record4(jobId, "authorization_refused", startedAt, policyNow.reason);
+      return;
+    }
+    const current = options.jobs.consultSnapshot(jobId);
+    if (current !== first) {
+      await closeSession();
+      fail(jobId);
+      record4(jobId, "error", startedAt, "snapshot_gone");
+      return;
+    }
+    const verdict = evaluateConsultRequest(written.questions, consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question, bounded.answer, ...bounded.gaps] }), {}, { recentApprovedQuestions: [...recent] }, consultGateOptionsFromSettings(settingsAtGate.settings));
+    if (verdict.decision !== "pass") {
+      await closeSession();
+      fail(jobId);
+      record4(jobId, "gate_refused", startedAt, String(verdict.reasons.length));
+      return;
+    }
+    const opened = await opening.catch(() => {
+      return;
+    });
+    if (!opened || !opened.ok) {
+      fail(jobId);
+      record4(jobId, "transport_unavailable", startedAt, opened?.ok === false ? opened.error.code : "open_threw");
+      return;
+    }
+    const session = opened.session;
+    const questions = written.questions;
+    const questionText = questions.join(`
+`);
+    const sendDeadlineMs = Math.max(1, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
+    let authorized = false;
+    const authorize = async (signal) => {
+      if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean))
+        return false;
+      if (signal.aborted)
+        return false;
+      if (!recheckConsultJobPolicy(scheduled.policy, options.settings()).ok)
+        return false;
+      const seam2 = options.jobs.outsideSeam(jobId);
+      if (!seam2 || seam2.state !== "answer" || seam2.outside !== "pending" || seam2.panelCapability !== 2)
+        return false;
+      const at = now();
+      if (!recentlyActive(seam2.lastCollectedAt, at))
+        return false;
+      if (!windowOpen(scheduled, at))
+        return false;
+      if (!options.jobs.takeConsultLatch(jobId))
+        return false;
+      authorized = true;
+      for (const question of questions) {
+        recent.push(question);
+        while (recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS)
+          recent.shift();
+      }
+      return true;
+    };
+    options.jobs.dropConsultSnapshot(jobId);
+    const dispatched = session.send(questionText, { authorize, deadlineMs: sendDeadlineMs });
+    dispatched.catch(() => {
+      return;
+    });
+    const reply2 = await dispatched.catch(() => {
+      return;
+    });
+    if (!authorized) {
+      fail(jobId);
+      record4(jobId, "authorization_refused", startedAt, reply2 && reply2.kind === "failed" ? reply2.error.code : undefined);
+      return;
+    }
+    session.finished.then((result) => {
+      try {
+        log(`[consult] finished=${result.ok ? "ok" : result.error.code} ms=${Math.max(0, now() - startedAt)}`);
+      } catch {}
+    }, () => {
+      return;
+    });
+    if (!reply2 || reply2.kind !== "reply") {
+      fail(jobId);
+      record4(jobId, "reply_failed", startedAt, reply2?.kind === "failed" ? reply2.error.code : "no_reply");
+      return;
+    }
+    if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
+      fail(jobId);
+      record4(jobId, "ineligible", startedAt, "reply");
+      return;
+    }
+    const seam = options.jobs.outsideSeam(jobId);
+    const appended = seam ? options.jobs.appendOutsideBlock(jobId, seam.rev, { text: reply2.text, question: questionText, route: reply2.routeLabel }) : undefined;
+    if (!appended?.ok) {
+      fail(jobId);
+      record4(jobId, "append_refused", startedAt, appended ? appended.reason : "job_gone");
+      return;
+    }
+    record4(jobId, "appended", startedAt, `reply_ms=${reply2.elapsedMs}`);
+  };
+  return {
+    onFirstDelivered(jobId) {
+      if (inFlight.has(jobId))
+        return;
+      const scheduled = trigger(jobId);
+      if (!scheduled)
+        return;
+      const marked = options.jobs.markOutside(jobId, scheduled.rev, "pending");
+      if (!marked.ok)
+        return;
+      const task = run(jobId, scheduled).catch(() => {
+        try {
+          fail(jobId);
+        } catch {}
+        record4(jobId, "error", now(), "threw");
+      }).finally(() => {
+        inFlight.delete(jobId);
+      });
+      inFlight.set(jobId, task);
+    },
+    onFreshAnswer() {
+      const current = fresh2;
+      fresh2 = new AbortController;
+      current.abort();
+    },
+    get inFlight() {
+      return inFlight.size;
+    },
+    async idle() {
+      while (inFlight.size > 0)
+        await Promise.allSettled([...inFlight.values()]);
+    },
+    get recentQuestions() {
+      return [...recent];
+    }
+  };
+}
+function resolveZkapiConsultTransport(profiles, resolveSecret, extra = {}) {
+  const routes = Object.values(profiles).filter((profile) => profile.provider === "zkapi" && profile.zkapi && profile.baseUrl);
+  if (routes.length !== 1)
+    return;
+  const route = routes[0];
+  let apiKey;
+  try {
+    apiKey = resolveSecret(route.secretRef);
+  } catch {
+    apiKey = undefined;
+  }
+  return {
+    baseUrl: route.baseUrl,
+    model: route.model ?? "",
+    ...apiKey ? { apiKey } : {},
+    settings: route.zkapi,
+    ...extra.env ? { env: extra.env } : {},
+    ...extra.statePath ? { statePath: extra.statePath } : {}
+  };
+}
+var CONSULT_DISPATCH_WINDOW_MS, CONSULT_RECENT_ACTIVITY_MS = 75000, CONSULT_DELIVERY_MARGIN_MS, CONSULT_WRITER_DEADLINE_MS = 60000, CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS;
+var init_consult_orchestrator = __esm(() => {
+  init_consult_gate();
+  init_consult_settings();
+  init_consult_writer();
+  init_private_answer_contract();
+  CONSULT_DISPATCH_WINDOW_MS = 5 * 60000;
+  CONSULT_DELIVERY_MARGIN_MS = 2 * 60000;
+  CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS = 6 * 60000;
 });
 
 // src/workers/remote-openapi.ts
@@ -119579,7 +123112,7 @@ function privacyRevision(profile) {
 }
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
-  const post = async (path, body) => {
+  const post2 = async (path, body) => {
     const response = await options.workerFetch(new Request(`${WORKER_ORIGIN}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -119601,7 +123134,7 @@ function createChatGptSetupBackend(options) {
   };
   return {
     async startOAuth(source) {
-      const result = await post("/dashboard/connect/oauth/start", { source, handback: "relay" });
+      const result = await post2("/dashboard/connect/oauth/start", { source, handback: "relay" });
       if (typeof result.authorization_url !== "string" || typeof result.expires_at !== "string")
         throw new SetupBackendError("internal");
       return { authorizationUrl: result.authorization_url, expiresAt: result.expires_at };
@@ -119614,7 +123147,7 @@ function createChatGptSetupBackend(options) {
       return { url: `${urls.origin}${HANDOFF_PATH_PREFIX}${link.id}`, expiresAt: link.expiresAt };
     },
     async browseFolders(input) {
-      const result = await post("/dashboard/dispositions", {
+      const result = await post2("/dashboard/dispositions", {
         action: "browse_folder_scope",
         source_id: input.sourceId,
         ...input.parentKey ? { parent_key: input.parentKey } : {},
@@ -119626,7 +123159,7 @@ function createChatGptSetupBackend(options) {
       return browse;
     },
     async approveFolders(input) {
-      const result = await post("/dashboard/dispositions", {
+      const result = await post2("/dashboard/dispositions", {
         action: "approve_source_scope_and_start",
         source_id: input.sourceId,
         account_generation: input.accountGeneration,
@@ -119642,7 +123175,7 @@ function createChatGptSetupBackend(options) {
       return Array.isArray(selections) ? selections : [];
     },
     async browseMail(draft) {
-      const result = await post("/dashboard/dispositions", {
+      const result = await post2("/dashboard/dispositions", {
         action: "browse_mail_scope",
         source_id: "gmail.email",
         draft: draft ?? savedMailDraft() ?? mailScopeDraftView(undefined)
@@ -119660,7 +123193,7 @@ function createChatGptSetupBackend(options) {
       };
     },
     async approveMail(input) {
-      const result = await post("/dashboard/dispositions", {
+      const result = await post2("/dashboard/dispositions", {
         action: "approve_mail_scope_and_start",
         source_id: "gmail.email",
         account_generation: input.accountGeneration,
@@ -119675,9 +123208,9 @@ function createChatGptSetupBackend(options) {
     },
     async disconnect(sourceId) {
       const oauth = DISCONNECT_OAUTH_SOURCES[sourceId];
-      const cancelled = oauth ? (await post("/dashboard/connect/oauth/cancel", { source: oauth })).cancelled === true : false;
+      const cancelled = oauth ? (await post2("/dashboard/connect/oauth/cancel", { source: oauth })).cancelled === true : false;
       try {
-        await post("/dashboard/disconnect", { source_id: sourceId, acknowledge: true });
+        await post2("/dashboard/disconnect", { source_id: sourceId, acknowledge: true });
       } catch (error2) {
         if (cancelled && error2 instanceof SetupBackendError && error2.code === "source_not_connected")
           return;
@@ -119768,7 +123301,7 @@ function createDashboardPrivacyAdapter(options) {
     }
     return cached2.count;
   };
-  const failure = (error2) => ({
+  const failure2 = (error2) => ({
     ok: false,
     code: error2 instanceof ChatGptSurfaceError ? error2.code : "unavailable",
     message: errorMessage3(error2)
@@ -119780,14 +123313,14 @@ function createDashboardPrivacyAdapter(options) {
         const settings = visible();
         return { ok: true, summary: { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length } };
       } catch (error2) {
-        return failure(error2);
+        return failure2(error2);
       }
     },
     async read() {
       try {
         return { ok: true, status: "current", settings: visible() };
       } catch (error2) {
-        return failure(error2);
+        return failure2(error2);
       }
     },
     async save(update) {
@@ -119819,7 +123352,7 @@ function createDashboardPrivacyAdapter(options) {
         const { confirmation: _issued, ...shown } = settings;
         return { ok: true, status, settings: shown };
       } catch (error2) {
-        return failure(error2);
+        return failure2(error2);
       }
     }
   };
@@ -120902,12 +124435,12 @@ async function main() {
   const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
   const modelCredentialState = (id, profile) => {
     if (!profile.secretRef)
-      return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? "missing" : "ready";
+      return bootSecretResolver.status().some((failure2) => failure2.affected_profiles?.includes(id)) ? "missing" : "ready";
     const storedEnv = { ...process.env, ...readWorkerSetupEnv() ?? {} };
     const current = safeModelCredential(profile, storedEnv);
     if (!current)
       return "missing";
-    if (current !== bootModelCredentials.get(id) || bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)))
+    if (current !== bootModelCredentials.get(id) || bootSecretResolver.status().some((failure2) => failure2.affected_profiles?.includes(id)))
       return "applying";
     return "ready";
   };
@@ -122490,11 +126023,14 @@ async function main() {
       return Object.hasOwn(sourceOpenTargets, provider) ? sourceOpenTargets[provider](locator) : undefined;
     }
   });
+  let consultOrchestrator;
   const privateAnswers = new PrivateAnswerJobs2({
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
     consultPolicy: () => bindConsultJobPolicy2(readConsultSettings2()),
+    onFirstDelivered: (jobId) => consultOrchestrator?.onFirstDelivered(jobId),
+    onAnswerActivity: () => consultOrchestrator?.onFreshAnswer(),
     activity: answerActivity,
     ...process.platform === "darwin" ? {
       openFile: (path) => new Promise((resolve10, reject) => {
@@ -122509,6 +126045,47 @@ async function main() {
   });
   const privateAnswerSweep = setInterval(() => privateAnswers.sweep(), 30000);
   privateAnswerSweep.unref?.();
+  {
+    const { createConsultOrchestrator: createConsultOrchestrator2, resolveZkapiConsultTransport: resolveZkapiConsultTransport2 } = await Promise.resolve().then(() => (init_consult_orchestrator(), exports_consult_orchestrator));
+    const { createConsultWriterServer: createConsultWriterServer2, defaultConsultMemoryProbe: defaultConsultMemoryProbe2, runConsultWriter: runConsultWriter2 } = await Promise.resolve().then(() => (init_consult_writer(), exports_consult_writer));
+    const { openZkapiConsultSession: openZkapiConsultSession2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
+    let writerServer;
+    const writerServerFor = () => {
+      if (writerServer)
+        return writerServer;
+      const runtime = workerBuiltInModel?.model.installedRuntime?.();
+      if (!runtime)
+        return;
+      writerServer = createConsultWriterServer2(runtime, { env: process.env });
+      return writerServer;
+    };
+    const memory = defaultConsultMemoryProbe2();
+    const transport = () => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: process.env }), { env: process.env });
+    consultOrchestrator = createConsultOrchestrator2({
+      jobs: privateAnswers,
+      eligible: privateEvidenceEligible,
+      settings: () => readConsultSettings2(),
+      writer: (input, control) => runConsultWriter2(input, {
+        server: writerServerFor(),
+        memory,
+        kill: control.kill,
+        deadlineMs: control.deadlineMs
+      }),
+      openSession: async (control) => {
+        const route = transport();
+        if (!route) {
+          return {
+            ok: false,
+            error: { code: "transport_failed", message: "No zkAPI consult route is configured.", outcome: "not_sent", networkIdentity: "not_verified" }
+          };
+        }
+        return openZkapiConsultSession2(route, control);
+      },
+      transportAvailable: () => transport()?.apiKey !== undefined,
+      answerActivityBusy: () => answerActivity.busy,
+      completionTimeoutMs: () => transport()?.settings.timeoutMs ?? 360000
+    });
+  }
   const remoteAgentOptions = {
     connections: remoteConnections,
     publicUrls: remotePublicUrls,

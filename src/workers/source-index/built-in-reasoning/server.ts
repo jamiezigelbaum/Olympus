@@ -163,12 +163,19 @@ export function createLlamaServerHandle(
     stopGraceMs?: number;
     /** After SIGKILL, how long stop() waits for the exit before it rejects (default 5 s). */
     killWaitMs?: number;
+    /**
+     * Stop with SIGKILL at once, never SIGTERM first. The consult writer's
+     * server is stopped this way (design frontier-consult-lane.md §A.7, B2):
+     * a process that is killed cannot keep the GPU busy finishing a batch.
+     */
+    immediateKill?: boolean;
   } = {},
 ): LlamaServerHandle {
   const spawnImpl = options.spawnImpl ?? spawn;
   const fetchImpl = options.fetchImpl ?? fetch;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const killWaitMs = options.killWaitMs ?? DEFAULT_KILL_WAIT_MS;
+  const immediateKill = options.immediateKill === true;
   // Every process is tracked by its ChildProcess object and exit promise,
   // never by a bare pid, so a signal can never reach a recycled pid.
   //
@@ -222,7 +229,7 @@ export function createLlamaServerHandle(
   const terminate = (server: ServerProcess): Promise<void> => {
     if (server.exited) return Promise.resolve();
     server.terminating ??= (async () => {
-      if (!server.killed) {
+      if (!server.killed && !immediateKill) {
         server.signal('SIGTERM');
         if (await server.waitExit(stopGraceMs)) return;
       }

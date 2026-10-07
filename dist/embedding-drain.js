@@ -24008,6 +24008,11 @@ var init_source_ingestion_ledger = __esm(() => {
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
 });
 
+// src/workers/source-index/built-in-reasoning/server.ts
+var init_server = __esm(() => {
+  init_model_transport();
+});
+
 // src/core/delphi.ts
 var init_delphi = __esm(() => {
   init_operation_error();
@@ -26346,10 +26351,8 @@ var DOWNLOAD_STALL_MS2 = 2 * 60000;
 var VERIFY_TIMEOUT_MS = 15 * 60000;
 var EXTRACT_TIMEOUT_MS = 5 * 60000;
 
-// src/workers/source-index/built-in-reasoning/server.ts
-init_model_transport();
-
 // src/core/analyst-built-in.ts
+init_server();
 var GAP_GENERIC_WORDS = new Set([
   "the",
   "and",

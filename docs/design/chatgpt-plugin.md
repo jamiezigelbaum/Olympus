@@ -732,8 +732,10 @@ The panel protocol's compatibility record, AD-2 of the design
 `docs/design/frontier-consult-lane.md` §A.11 (revision 8, on its proposal
 branch until the lane ships; owner-accepted 2026-10-07). The authoritative text is the header of
 `src/workers/chatgpt/private-answer-contract.ts`; this is the narrative.
-**No consult is written or sent yet** (that is stage C4b); this stage lands
-the protocol the consult will ride on, and the limits it needs.
+This stage landed the protocol the consult rides on, and the limits it
+needs; stage C4b (below, "Consult scheduling") added the writer, the gate
+call and the dispatch that use it. No user-facing path enables outside help
+yet (the Mac dashboard card is C5, the public CLI command C8).
 
 - **One payload contract, every install** (`private-answer-payload.ts`,
   design §A.5.1). The jobs boundary now enforces, before first delivery:
@@ -824,6 +826,83 @@ the protocol the consult will ride on, and the limits it needs.
   clocks (`firstDeliveredAt`, `followUntil`, `lastCollectedAt`) are
   published only with a `ready` actually returned: a seal that fails
   leaves no window and no writable state.
+
+### Consult scheduling (added 2026-10-07, stage C4b)
+
+Design `docs/design/frontier-consult-lane.md` §A.2, §A.3, §A.7 (candidate
+B2), §A.8 and §A.5.6. The code is `src/core/consult-writer.ts` (the writer
+and its own server) and `src/workers/chatgpt/consult-orchestrator.ts` (the
+trigger, gate, transport session and panel seams), wired in the worker beside
+the jobs engine. Inert unless a valid, enabled `~/.olympus/consult.json`
+exists (every job then binds outside help off and the model is not even asked
+for the snapshot metadata); no product path writes that file until C5.
+
+- **Verdict metadata.** `answerPrivately` (analyst-built-in.ts) returns,
+  beside the answer, the model's own `sufficient` verdict, a no-answer flag
+  and the fitted pack its main call received; the panel model passes it
+  through as `PrivateAnswerModelResult.consult`. None of it enters the
+  plaintext.
+- **Snapshot handoff.** At the claim's seal, a follow-up job keeps a
+  deep-frozen consult snapshot: that pack, the question, the answer and gaps
+  exactly as retained, the verdict and the identities of the items read. A
+  reused precompute brings its search-time pack. Its retention clock starts
+  at first delivery and ends after five minutes, at the dispatch decision,
+  at withdrawal or when the job ends.
+- **Trigger** (`onFirstDelivered`): policy on, capability 2, state `answer`,
+  block idle, verdict insufficient or gaps (never "these items do not
+  answer"), a collection within 75 s, and a dispatch window with delivery
+  room for the writer, the configured completion timeout and a two-minute
+  margin. `markOutside('pending')` is the schedule mark. Before any writer
+  work: a route must exist (zkAPI profile and inference key) and no private
+  answer may be in flight; the fresh-answer generation is captured before
+  the E1 eligibility check, and an answer that starts during it supersedes
+  the consult.
+- **Writer** (B2): its own `llama-server` on the answer model's files,
+  `--parallel 1`, batch and ubatch 64, a distinct random port, started on
+  demand and SIGKILLed after the call, on a fresh private answer
+  (`onAnswerActivity`) or at its 60 s deadline. The answer server is never
+  touched; the SIGKILL handler is installed the moment the process starts,
+  so a cancellation during the tokenizer calls kills it too. Memory rule
+  before every start (owner decision, C4b review round 1): at least 20% free
+  after the 0.6 GB footprint and kernel pressure not `critical`. `warn` is
+  allowed because the owner's 24 GB Mac idles at `warn` with other
+  processes' swap in use and that is where M0's B2 pairs were measured;
+  `critical` means the machine is already compressing and swapping hard.
+  Residual: at `warn` the writer can add paging while it runs (M0 saw one
+  +7.7 s prefill pair in four while the machine swapped). Prompt: the rules
+  plus ONE bounded input (question ≤ 1,000, answer ≤ 2,700, ≤ 4 gaps × 300),
+  which is also the gate's `writerVisibleTexts`; at most 2,048 tokens by the
+  server's tokenizer, and when the server cannot count, the consult is
+  skipped (no estimate stands in); reply schema `{"questions": null | [1–3]}`.
+  The rule against naming what the answer only implies (M0 round 2:
+  "Portugal" from a Lisbon itinerary) is in the prompt; mechanically, the
+  gate refuses a country name under the default options (countries pack
+  off, `unknown_word`).
+- **Gate, session, dispatch.** The session opens (lease, Tor, daemon, policy
+  warm) while the writer runs. The gate compares the questions against the
+  snapshot pack plus the question, answer and gaps; a refusal is silent.
+  `send` runs final authorization immediately before the reservation: the
+  E2 eligibility check is awaited first, then, synchronously after it, the
+  settings revision (`recheckConsultJobPolicy`), state, panel activity,
+  window and delivery room, and the send-once latch (`takeConsultLatch`);
+  the questions enter the repeat history at that instant (dispatched or
+  possibly dispatched). The reply is appended at completion, before
+  settlement (`appendOutsideBlock`, fitted, with the question and route
+  label); `finished` runs on. `busy` or any failure skips; nothing is queued.
+  Every end that is not an appended block is `markOutside('failed')`: the
+  block reads idle and the panel shows nothing more. The orchestrator
+  re-reads the snapshot at every use (a withdrawal or the retention clock
+  ends the consult) and holds only item identities past the dispatch
+  decision.
+- **M0 harness against the real scheduler.** `scripts/measure-consult-writer-isolation.ts`
+  (M0 round 2, now on `main`) has a `--real-writer` mode: the WRITER arm is
+  the shipped `runConsultWriter` on a `createConsultWriterServer` process,
+  over the real prompt, token bound and memory rule, killed on arrival by the
+  orchestrator's fresh-answer signal. Phases are clock offsets (the real
+  writer is not streamed); the `hung` and `loading` phases are skipped and
+  recorded. The quiet-machine B2 rerun (load below 3, n ≥ 20 per phase, 30
+  control pairs), judged by the first-token rule, is the merge gate of the
+  C4b pull request and is still owed.
 
 ### Relay
 
