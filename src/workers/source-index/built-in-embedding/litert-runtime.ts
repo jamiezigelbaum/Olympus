@@ -220,7 +220,16 @@ class HelperProcess {
  */
 export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promise<LiteRtEmbedder> {
   let device: 'auto' | 'cpu' = options.device;
-  let helper = await HelperProcess.start(options, device);
+  let helper: HelperProcess;
+  try {
+    helper = await HelperProcess.start(options, device);
+  } catch (error) {
+    // A GPU start that kills the helper outright (a driver fault rather than
+    // a refused engine) leaves the CPU untried; try it once before failing.
+    if (device === 'cpu') throw error;
+    device = 'cpu';
+    helper = await HelperProcess.start(options, device);
+  }
   const releaseAtExit = () => { if (!helper.exited) helper.child.kill('SIGKILL'); };
   process.once('exit', releaseAtExit);
   return {

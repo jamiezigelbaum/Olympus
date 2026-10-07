@@ -19068,7 +19068,15 @@ class HelperProcess {
 }
 async function startLiteRtEmbedder(options) {
   let device = options.device;
-  let helper = await HelperProcess.start(options, device);
+  let helper;
+  try {
+    helper = await HelperProcess.start(options, device);
+  } catch (error) {
+    if (device === "cpu")
+      throw error;
+    device = "cpu";
+    helper = await HelperProcess.start(options, device);
+  }
   const releaseAtExit = () => {
     if (!helper.exited)
       helper.child.kill("SIGKILL");

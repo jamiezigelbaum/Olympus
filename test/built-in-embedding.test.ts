@@ -706,13 +706,14 @@ describe('built-in embedding with a LiteRT model', () => {
 });
 
 /** A helper script that speaks the LiteRT helper's protocol without LiteRT. */
-function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
+function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
   const path = join(temporaryDir(), 'fake-helper.js');
   writeFileSync(path, `
     const settings = JSON.parse(process.argv[2]);
     const behaviour = ${JSON.stringify(behaviour)};
     if (behaviour === 'fatal') { console.log(JSON.stringify({ fatal: 'no model here' })); process.exit(1); }
     const device = settings.device === 'auto' ? 'gpu' : 'cpu';
+    if (behaviour === 'crash-on-gpu-start' && device === 'gpu') process.exit(139);
     console.log('library chatter that is not JSON');
     console.log(JSON.stringify({ ready: true, device }));
     if (behaviour === 'close-stdin') { process.stdin.destroy(); setInterval(() => {}, 1000); return; }
@@ -754,6 +755,13 @@ describe('the LiteRT helper process', () => {
     const vectors = await embedder.embed(['abc']);
     expect(embedder.device).toBe('cpu');
     expect(Array.from(vectors[0]!)).toEqual([3, 2]);
+    await embedder.release();
+  });
+
+  test('a helper that dies starting on the GPU is started again on the CPU', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('crash-on-gpu-start')));
+    expect(embedder.device).toBe('cpu');
+    expect(Array.from((await embedder.embed(['abc']))[0]!)).toEqual([3, 2]);
     await embedder.release();
   });
 
