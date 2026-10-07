@@ -1878,6 +1878,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             : url.pathname === '/dashboard/consult/route' ? await backend.saveRoute(record)
             : url.pathname === '/dashboard/consult/route/add' ? await backend.addRoute(record)
             : url.pathname === '/dashboard/consult/recover' ? await backend.recover(record)
+            : url.pathname === '/dashboard/consult/tools/install' ? await backend.installTools(record)
             : await backend.abandon(record);
           if (!outcome.ok) {
             return json({ ok: false, error: { code: outcome.code, message: outcome.message }, ...(outcome.revision !== undefined ? { revision: outcome.revision } : {}) }, outcome.httpStatus);

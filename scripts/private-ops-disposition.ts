@@ -59,6 +59,7 @@ const ALLOWED_DOCS = new Set([
   'docs/V0_4_RELEASE.md',
   'docs/design/per-item-four-tier-classification.md',
   'docs/design/photo-embeddings.md',
+  'docs/design/private-answers.md',
   'docs/design/private-model-benchmark.md',
   'docs/design/relay.md',
   'docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md',

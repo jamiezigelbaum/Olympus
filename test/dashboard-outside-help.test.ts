@@ -501,6 +501,7 @@ function fakeBackend(calls: string[]): DashboardConsultBackend {
     addRoute: async () => { calls.push('add'); return { ok: true, status_message: 'added', restarting: true }; },
     recover: async () => { calls.push('recover'); return { ok: true, status_message: 'recovered' }; },
     abandon: async () => { calls.push('abandon'); return { ok: false, httpStatus: 409, code: 'no_unresolved_session', message: 'none' }; },
+    installTools: async () => { calls.push('install'); return { ok: true, status_message: 'installing' }; },
   };
 }
 

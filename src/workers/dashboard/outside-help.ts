@@ -16,6 +16,15 @@ import { ZKAPI_RISK_ACKNOWLEDGEMENTS } from '../../core/zkapi-consult-settings.t
 import { escapeHtml, escapeScriptJson } from './components.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from './vocabulary.ts';
 import { fill } from './source-rows.ts';
+import {
+  DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
+  DASHBOARD_OUTSIDE_HELP_TOOLS_COPY,
+  outsideHelpToolsNeedAttention,
+  renderOutsideHelpTools,
+  renderOutsideHelpToolsFix,
+  renderOutsideHelpToolsScript,
+  type DashboardOutsideHelpTools,
+} from './outside-help-tools.ts';
 
 /** One word for Setup's row. */
 export interface DashboardOutsideHelpSummary {
@@ -82,6 +91,8 @@ export interface DashboardOutsideHelpStatus {
   readonly languages: readonly DashboardOutsideHelpLanguage[];
   /** A policy write happened and the worker could not restart itself. */
   readonly restartPending: boolean;
+  /** Tor and zkapi-clientd: where each was found, and the one-click install's progress (outside-help-tools.ts). */
+  readonly tools?: DashboardOutsideHelpTools;
 }
 
 /** The query flag the page answers to; same /dashboard path and auth as every page. */
@@ -96,6 +107,7 @@ export const DASHBOARD_OUTSIDE_HELP_PATHS = {
   addRoute: '/dashboard/consult/route/add',
   recover: '/dashboard/consult/recover',
   abandon: '/dashboard/consult/abandon',
+  installTools: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
 } as const;
 
 export function outsideHelpHref(basePath = '/dashboard'): string {
@@ -208,7 +220,11 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   if (route.state === 'configured' && route.readiness && route.readiness.fences.length > 0) more.push(renderFence(route.readiness, canEdit));
   more.push(renderLanguages(status, canEdit));
   if (route.state === 'configured') more.push(renderLimits(route, blockers, canEdit));
-  more.push(renderSetupSteps(route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, route.state === 'not_configured' || blockers.some((code) => SETUP_BLOCKERS.has(code))));
+  more.push(renderSetupSteps(
+    route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`,
+    route.state === 'not_configured' || blockers.some((code) => SETUP_BLOCKERS.has(code)) || outsideHelpToolsNeedAttention(status.tools),
+    renderOutsideHelpTools(status.tools, { canEdit }),
+  ));
   if (route.state === 'configured') more.push(renderDetails(route));
   if (on) more.push(renderSection({ id: 'disclosure', title: W.disclosureMore, summary: '', open: false, body: `<div data-outside-disclosure-more>${shortList}${fullList}</div>` }));
   parts.push(`<div class="ohmore">${more.join('')}</div>`);
@@ -219,7 +235,8 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
     copy: { saving: W.saving, failed: W.saveFailed, restarting: W.restarting, on: W.state.on, off: W.state.off },
   };
   const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config)}</script>` : '';
-  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}`;
+  const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) });
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
 }
 
 function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: DashboardOutsideHelpSummary, canEdit: boolean): string {
@@ -322,8 +339,21 @@ function renderProblems(status: DashboardOutsideHelpStatus, canEdit: boolean): s
   } else if (route.readinessUnavailable || !route.readiness) {
     items.push(`<li><span>${escapeHtml(W.routeUnknown)}</span></li>`);
   } else {
-    for (const code of route.readiness.blockers) items.push(`<li><span>${escapeHtml(outsideHelpBlockerWords(code))}</span></li>`);
+    for (const code of route.readiness.blockers) {
+      const tool = TOOL_BLOCKERS.get(code);
+      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
+      // Missing and installable: the parts' own To fix line (below) says it, with its button.
+      if (entry?.source === 'missing') continue;
+      // A path set in the route: the button cannot fix it, so it is said plainly.
+      const words = entry?.source === 'configured_missing'
+        ? fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? '' })
+        : outsideHelpBlockerWords(code);
+      items.push(`<li${entry ? ` data-outside-blocker="${escapeHtml(code)}"` : ''}><span>${escapeHtml(words)}</span></li>`);
+    }
   }
+  // Missing programs: one line with the install button (or its progress).
+  const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
+  if (tools) items.unshift(tools);
   if (items.length === 0) return '';
   return `<div class="sect attn">${escapeHtml(W.problemsTitle)}</div><ul class="ohfix" data-outside-blockers>${items.join('')}</ul>`;
 }
@@ -334,7 +364,10 @@ function renderSection(input: { id: string; title: string; summary: string; open
     + `<div class="ohsect-body">${input.body}</div></details>`;
 }
 
-function renderSetupSteps(secretRef: string, needed: boolean): string {
+/** The not-installed blockers the parts' own "To fix" line (outside-help-tools.ts) stands in for. */
+const TOOL_BLOCKERS: ReadonlyMap<string, 'zkapi-clientd' | 'tor'> = new Map([['daemon_not_found', 'zkapi-clientd'], ['tor_not_found', 'tor']]);
+
+function renderSetupSteps(secretRef: string, needed: boolean, tools = ''): string {
   const steps = W.steps.map((step) => fill(step, { secretRef }));
   return renderSection({
     id: 'steps',
@@ -342,7 +375,7 @@ function renderSetupSteps(secretRef: string, needed: boolean): string {
     summary: '',
     open: needed,
     attn: needed,
-    body: `<div data-outside-steps><p class="pnote">${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>`,
+    body: `${tools}<div data-outside-steps><p class="pnote">${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>`,
   });
 }
 

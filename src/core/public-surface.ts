@@ -170,6 +170,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'argus ping',
   'argus list',
   'argus complete',
+  'zkapi install-tools',
   'serve',
 ] as const;
 
@@ -241,6 +242,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/consult/route/add' },
   { method: 'POST', path: '/dashboard/consult/recover' },
   { method: 'POST', path: '/dashboard/consult/abandon' },
+  { method: 'POST', path: '/dashboard/consult/tools/install' },
 ] as const;
 
 export const V0_4_CANONICAL_DOCUMENTS = [
