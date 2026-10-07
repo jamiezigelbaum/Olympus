@@ -281,3 +281,24 @@ No new review round; this records a measurement and the decisions taken on it.
 | Writer prompt | 5 of 6 inputs usable; one leaked an implied place. C4b task and eval case. |
 | Owner decisions | Fork F1/F2, AD-1/AD-2, 640 px cap, M0 tolerance, public privacy sentence, fence recovery as a button: all approved 2026-10-07; moved to "decided" in §10. |
 | Stage table | M0 done; C4a entry satisfied; C4b entry conditions: batch-64 PR merged, quiet-machine B2 rerun, memory-rule tests. |
+
+## I. Owner ruling on undetectability, revision 9 (2026-10-07)
+
+**Ruling:** the "consult undetectable by ChatGPT or the relay" goal is dropped from version one. Content stays sealed (unchanged); ChatGPT and the relay may infer that outside help ran, never what was asked or answered. A second ruling limits each PR to two review rounds, a third only for a money or data-loss blocker.
+
+The findings below were accepted when raised and are now **out of scope by ruling, not unresolved**. Their mechanisms are removed in §A.5 of revision 9.
+
+| Finding | What stays | What is out of scope by ruling |
+|---|---|---|
+| Round 3, finding 1 (panel resizing exposes presence and timing) | Nothing | Locked reported height, 640 px cap, reserved strip, geometry persistence, host-transcript test |
+| Round 3, finding 2 (uniform post-claim response) | Withdrawal as an in-envelope state; sealed, fixed-size envelope as a size bound | Parity of every response, withdrawn-polling parity |
+| Round 3, finding 12 (eviction and restart) | Policy-bound lifetime, oldest-first eviction, discard of replies for gone jobs | Outcome-independent eviction as a hiding rule |
+| Round 3, question 1 (does the envelope make every outcome invisible?) | n/a | Withdrawn; invisibility is not claimed |
+| P1 (M0 endpoint) | Whole | None |
+| P3 (uniform after claim) | Two phases, `cap: 2` handshake, paid dispatch requires `cap: 2` | Equal behavior as a hiding goal |
+| P4 (retained payload, race rules) | Whole: retained payload, terminal withdrawal, post-seal re-check, withdrawal wins | None |
+| P5 (fixed sizes do not hide every outcome) | Outcome-independent lifetime kept only as a simple rule | The phase-2 timing test and response-time floor |
+| P6 (height lock) | Nothing | The geometry rule `H = min(A + R, 640 px)` |
+| P9 (clocks and liveness) | Whole: server-owned `firstDeliveredAt`, `followUntil`, dispatch window, 75 s activity | None |
+
+Unchanged: outside-container rules (separate card, pinned attribution, plain text, no clickable links, truncation), the gate, the payload contract and padder, and the content-sealing bar. The residual is stated in one paragraph in §A.5.5. M1 (ten live consults, 2026-10-07) and the two speed-measure priorities are recorded in §A.8.

@@ -1,9 +1,15 @@
 # Design: frontier consult on the private answer panel, over zkAPI
 
-Status: **proposal, revision 8 (2026-10-07).** Revision 7 froze the M0 rule; M0 has now been measured and **failed on the shared server**. Revision 8 records the result, the scheduling choice it authorizes (a separate writer process, killed on arrival) and the owner decisions taken on 2026-10-07. Dispositions are in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md), sections G and H. Nothing here changes shipped behavior or the release plan.
+Status: **proposal, revision 9 (2026-10-07).** Revision 8 recorded the M0 failure on the shared server and the scheduling choice (separate writer process). Revision 9 records two owner rulings of 2026-10-07 (the "consult undetectable by ChatGPT or the relay" goal is dropped from version one; at most two review rounds per PR) and the M1 live measurement. Dispositions are in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md), sections G, H and I. Nothing here changes shipped behavior or the release plan.
 Risk class: **Critical** (egress of Private-derived text; money).
 
-## Changes since revision 7
+## Changes since revision 8
+
+1. **Owner ruling, 2026-10-07: undetectability is dropped from version one.** Content stays sealed; ChatGPT and the relay may infer that outside help ran (timing, size changes, polling), never what was asked or answered. §A.5 is rewritten: the locked reported height, 640 px cap, reserved strip, geometry persistence, response-time floor, withdrawn-polling parity, outcome-independent eviction rules and host-transcript proofs are removed. The accepted residual is stated in §A.5.5. AD-2, C4a, §A.13 and §10 follow.
+2. **Owner ruling, 2026-10-07: at most two review rounds per PR;** a third only for a money or data-loss blocker (§A.14 conventions).
+3. **M1 is done.** Ten live consults, all ok (§A.8, "Measured speed"): median total 96.8 s, 74 s before the reply, 22 s after it. Three speed measures in priority order, the key-reuse setup requirement and an enable-flow lesson are recorded. Stage table: M1 done, C2 in progress.
+
+## Changes in revision 8 (since revision 7)
 
 1. **M0 is measured and failed on the shared server** (pooled +5.1 s median, +11.3 s p95). The results are in §A.7, from `docs/design/consult-m0-measurement.md` on `claude/consult-m0` (rounds 1 and 2).
 2. **Scheduling choice: candidate B2.** The writer runs on its own `llama-server` process (batch 64), killed, not aborted, when a fresh answer arrives or at the writer's deadline. A memory rule decides whether it may start (§A.7). A, and C (`--parallel 2`), are rejected with reasons.
@@ -89,7 +95,7 @@ Risk class: **Critical** (egress of Private-derived text; money).
 
 - The question is derived from Private material and can still reveal private information (§A.4).
 - The outside provider reads the question. zkAPI hides who paid. On macOS the network route is not verified (§Z.4).
-- Timing can link the consult to the ChatGPT request.
+- ChatGPT and the relay may infer that outside help ran on a question (timing, size changes, polling), never what was asked or answered (§A.5.5).
 
 ### A.2 Flow
 
@@ -216,11 +222,11 @@ A rejection after budgeting would be a bug, and fails closed:
 
 **The transition is first delivery.** The engine records `firstDeliveredAt` when it returns the first `ready` to the claiming key.
 
-**Phase 2, uniform follow-up**, for capability-2 panels on jobs with outside help on:
+**Phase 2, sealed follow-up**, for capability-2 panels on jobs with outside help on:
 
-- **Every** request from the claiming key gets `200 ready` with a freshly sealed 36 KiB envelope, whatever the consult did.
+- Requests from the claiming key get `200 ready` with a freshly sealed 36 KiB envelope.
 - Withdrawal is a state inside the envelope.
-- The only other responses are infrastructure and identity exceptions, which do not depend on consult outcomes: `400` malformed key; `409` another key; `410` after the job's public expiry or eviction (§A.5.4); `503` Mac offline or relay busy; `429` rate limit. The panel's 30-second cadence stays far below the limits, so `429` appears only under abuse.
+- The other responses are the same infrastructure and identity cases as today: `400` malformed key; `409` another key; `410` after the job's expiry or eviction (§A.5.4); `503` Mac offline or relay busy; `429` rate limit. The panel's 30-second cadence stays far below the limits, so `429` appears only under abuse.
 
 **Envelope (plaintext version 1, extended):**
 
@@ -233,7 +239,7 @@ A rejection after budgeting would be a bug, and fails closed:
              text?, cut?, question?, route? } }
 ```
 
-`idle` covers nothing triggered, refused, skipped and failed alike, so the panel cannot tell them apart and neither can anyone watching it. On failure the panel shows nothing new.
+`idle` covers nothing triggered, refused, skipped and failed alike, so the panel shows nothing new on failure. The envelope is a fixed size so the size bound is simple; hiding that a consult ran is not a goal (§A.5.5).
 
 **Capability handshake:**
 
@@ -267,45 +273,15 @@ A rejection after budgeting would be a bug, and fails closed:
   4. Re-read before handing out. If the job was withdrawn meanwhile, seal and return the withdrawn envelope instead. If `rev` advanced, re-seal once with the newer state.
 - **Source-open tokens** are minted once, at the first seal, and are identical in every envelope.
 
-#### A.5.4 Expiry, eviction and timing
+#### A.5.4 Expiry, eviction and restart
 
-- **Public expiry and eviction are independent of consult outcomes.** The job's lifetime comes from its policy at creation: 30 minutes with outside help on, 10 minutes off. Eviction at the 200-job cap stays oldest-first, whatever happened.
-- **A reply for an evicted or expired job is discarded.** There is no outcome-dependent protection. The money is spent and the loss is stated.
+- **Lifetime comes from the job's policy at creation:** 30 minutes with outside help on, 10 minutes off. Eviction at the 200-job cap stays oldest-first.
+- **A reply for an evicted or expired job is discarded.** The money is spent and the loss is stated.
 - **Restart:** an engine restart forgets every job, as today. The fence and the spent money remain.
-- **Timing claim, narrowed:** responses in phase 2 have the same status and the same size. **Equal response timing is not claimed** until the C4a timing test compares latency distributions for idle, pending, appended, paused and withdrawn jobs. If they differ by more than the test's noise floor, the engine adds a fixed response-time floor, and the result is recorded here. Mac source-open requests stay observable, as today.
 
-#### A.5.5 Fixed reported geometry
+#### A.5.5 Accepted residual: what ChatGPT and the relay may infer (owner ruling, 2026-10-07)
 
-**Decision: lock the height the panel reports, not the reporting mechanism.**
-
-**Rule,** for jobs with outside help on:
-
-- `H = min(A + R, 640 px)`.
-- `A` is the height of the first-answer card **alone**, measured at the current width. The outside container is excluded, so `A` never depends on a consult.
-- `R` = 176 px, the outside container, which is always present and always the same height.
-- If `A + R > 640`, the first-answer card scrolls inside `640 − R`.
-
-**Notifications:**
-
-- The existing initialize, resend, load and fallback messages, and the ResizeObserver path, keep firing. They always report `H` from the rule, never a measured total.
-- A late `ui/initialize` therefore still gets `H`.
-- A width change recomputes `A` from the first-answer card at the new width.
-- Hide reports today's fixed hidden height; Show returns to `H`.
-- **After follow-up ends, and on reopen, the same rule applies.** The outside container stays at `R` with its final content.
-- **Residual:** after a withdrawal, a later width change measures the withdrawn card. The host could see that withdrawal, which plaintext `failed` already shows today.
-
-**Host-transcript test (C4a)** covers these outcomes:
-
-- outside block: idle (not triggered, refused, skipped, failed), pending, appended, paused;
-- withdrawal;
-- a delayed handshake;
-- font loading;
-- width change;
-- hide and show;
-- remount within and after the follow-up window;
-- follow-up expiry.
-
-It asserts identical host messages wherever the first answer and width are the same.
+**Ruling:** making a consult undetectable to ChatGPT and the relay is not a goal of version one. **Content stays sealed:** the question, the outside text, the first answer and the source-open tokens are never visible to either. ChatGPT and the relay may infer that outside help ran on a question, from response timing, envelope-size changes, polling behavior, the panel's own height and layout changes, and the later appearance of the outside container; they may infer an outside-help setting that is on (§A.9). They never learn what was asked or answered. The versioned design's earlier mechanisms for hiding presence are removed: the locked reported height and 640 px cap, the reserved strip, geometry persistence, the response-time floor, withdrawn-polling parity, outcome-independent eviction rules and the host-transcript-equality proofs. The fixed 36 KiB envelope stays as a simple size bound, not as a hiding device. The public wording (§2, §A.10) already says the question can reveal private information; it does not claim the consult is hidden.
 
 #### A.5.6 Clocks and liveness
 
@@ -344,7 +320,7 @@ It asserts identical host messages wherever the first answer and width are the s
 - control and bidirectional characters;
 - thousands of newlines.
 
-Each test asserts that the attribution header stays visible, that only text nodes are created, and that geometry is unchanged.
+Each test asserts that the attribution header stays visible and that only text nodes are created.
 
 **Accepted residual risk:** a reply can still mislead a reader who ignores the attribution. No second model pass is added. The eval measures reader attribution (§A.13).
 
@@ -477,7 +453,24 @@ cancel() after dispatched                                → ignored; session-ow
 - After dispatch, a caller cancel neither aborts the fetch nor discards the reply.
 - A second `open` is busy.
 
-**Measurement:** M1 times today's transport. **After C2, the stages C2 changes are re-measured live:** warm-up overlapping the writer, and the reply released before settlement. Further speed work waits for those numbers.
+**Measured speed (M1, 2026-10-07).** Source: `docs/design/consult-m1-measurement.md` on `main`. Ten real consults through today's transport, one at a time, owner-funded, quiet M3 Mac, zkapi-clientd 0.1.6, Tor 0.4.9.13, `openai/gpt-5-mini`, short questions. All ten succeeded, fence clear after each, $6 reserved each.
+
+- **Total:** median 96.8 s, range 70–179 s (the design's earlier reference was 3–4.5 min).
+- **Before the reply: median 74 s** (max 156 s). Tor bootstrap 14 s median (8–104 s; three of ten over 28 s); policy warm 11 s median (p95 66 s, the daemon's own model-list polling); dispatch to first byte 32 s (the outside model's answer over Tor); confinement self-test 3 s.
+- **After the reply: 22 s median** (max 42 s) of settlement and teardown.
+- **Not measured:** writer time, the approval or panel path before a send, a loaded machine, longer questions, and any C2 change.
+
+**Speed measures, in priority order:**
+
+1. **Hand the reply off at completion, before settlement: about −22 s.** Nothing the reader needs depends on settlement or teardown. This is the `reply` / `finished` split above.
+2. **Warm Tor and the daemon while the writer runs: about −30 s.** Self-test, Tor, daemon ready, verification and policy warm (about 28 s median) do not depend on the question. `open` overlaps them with the writer.
+3. **A seeded Tor directory cache** to cut bootstrap variance (8–104 s). Not yet tested; to be measured.
+
+Policy warm time is the daemon's own behavior; it is raised upstream, not worked around. **After C2, the stages C2 changes are re-measured live;** further speed work (C7) waits for those numbers.
+
+**Setup requirement.** Run `zkapi-clientd config --key-reuse-window-seconds 0` before any consult. The daemon's default 60 s key-reuse window is linkable, so Olympus refuses to send (`key_reuse_on`); the first M1 attempt was refused for this reason.
+
+**Enable-flow lesson.** Funding must be one "send" in total, including the fee buffer, because every extra transaction is another visible step. The enable flow warns that gas prices move, so the buffer can fall short.
 
 ### A.9 Settings
 
@@ -518,6 +511,7 @@ Any departure enters the contract-change process: version and fingerprint, compa
   - requests carry `cap`;
   - the jobs boundary limits tighten.
 - **Compatibility:** as in §A.5.2.
+- **Ruling, 2026-10-07:** the protocol does not try to hide that a consult ran; content stays sealed (§A.5.5).
 - **Where it is recorded:** in `private-answer-contract.ts` and `docs/design/chatgpt-plugin.md`, by C4a.
 - **The relay is unchanged:** it forwards bodies unread.
 
@@ -533,8 +527,8 @@ No consult text is stored beyond the job's lifetime. Only content-free operation
 |---|---|---|---|
 | B1 | Planted identifiers in the classes the gate claims: email addresses, URLs, phone and account numbers, exact dates, capitalized names, digit figures, provenance values | 1,000 writer outputs from the real writer on synthetic corpora with planted identifiers and adversarial user questions (500 English, 500 Brazilian Portuguese) | 0 leaks |
 | B2 | Serializer and padder fill tests | Every field at its budget; the multilingual, escape and surrogate cases | 100% exact size |
-| B3 | Host-transcript identity (§A.5.5) | Every listed outcome × 3 widths | 100% |
-| B4 | Hostile-text rendering (§A.6) | 50 crafted replies | 100% (attribution visible, text nodes only, geometry unchanged) |
+| B3 | Withdrawal and re-check races (§A.5.3): post-seal re-check, withdrawal wins, late reply discarded | Each race × 10 | 100% |
+| B4 | Hostile-text rendering (§A.6) | 50 crafted replies | 100% (attribution visible, text nodes only) |
 | B5 | No dispatch for old panels, stale settings, expired windows or a set latch | Each case × 10 | 100% |
 | B6 | C2 cancellation proofs (§A.8) | Each state × 10 | 100% |
 
@@ -553,16 +547,18 @@ The held-out eval (`eval/`) runs wherever shared answer code changes.
 
 ### A.14 Build plan and entry conditions
 
+**Review convention (owner ruling, 2026-10-07): at most two review rounds per PR.** A third round happens only for a money or data-loss blocker; other findings become follow-ups.
+
 **Smallest usable version: M0, M1, C1–C5.** It ships as experimental with the label "route not verified". "Critical (path)" means `config/change-risk.json` classifies it that way. "Critical (declared)" means egress or trust routing, declared critical.
 
 | # | Delivers | Entry conditions | Proof | Risk |
 |---|---|---|---|---|
 | **M0** | Writer-contention measurement (§A.7) | **Done 2026-10-07.** Failed on the shared server; B2 chosen | Results table filled (§A.7) | Standard |
-| **M1** | Stage timers in the transport receipt; ten live consults | Timers merged; **owner-funded daemon (owner-gated)** | Per-stage median and worst case recorded | Critical (declared) |
+| **M1** | Stage timers in the transport receipt; ten live consults | **Done 2026-10-07.** Ten live consults, all ok; median total 96.8 s (§A.8) | Per-stage median and worst case recorded | Critical (declared) |
 | C1 | Gate and packs on `main`; doctor line; 20 pack files listed one by one in `V0_4_PUBLIC_PACKAGE_FILES`; writer rules updated for automatic mode | None | Gate tests; `eval/consult-leak`; public-surface guard; packaged-path fixture; gate timing | Critical (path: `public-surface.ts`) |
-| C2 | Transport session state machine (§A.8) | M1 baseline recorded | B6; then the C2-affected stages re-measured live (owner-gated) | Critical (declared) |
+| C2 | Transport session state machine (§A.8) | **Satisfied:** M1 baseline recorded. **In progress** | B6; then the C2-affected stages re-measured live (owner-gated) | Critical (declared) |
 | C3 | Internal settings mechanism (`consult.json`, compare-and-swap, per-job binding). No public enable command | None | Settings tests; nothing reachable from MCP, setup tools or the relay | Critical (declared) |
-| C4a | Payload contract, serializer, padder, two phases, capability handshake, retained payload, withdrawal and race rules, outcome-independent expiry, geometry, outside container, AD-1 and AD-2 records | **Satisfied:** M0 result recorded and scheduling choice (B2) stated in §A.7 | B2, B3, B4; phase-2 timing test (§A.5.4); first-reveal cost of the 36 KiB envelope compared with today; design receipt; owner visual acceptance | Critical (declared); design-receipt guarded |
+| C4a | Payload contract, serializer, padder, two phases, capability handshake, retained payload, withdrawal and race rules, outside container, AD-1 and AD-2 records | **Satisfied:** M0 result recorded and scheduling choice (B2) stated in §A.7 | B2, B3, B4; first-reveal cost of the 36 KiB envelope compared with today; design receipt; owner visual acceptance | Critical (declared); design-receipt guarded |
 | C4b | Writer scheduling per M0 (own server, kill on arrival, memory rule); writer rule against implied places; snapshot handoff; verdict metadata; token-bounded prompt; E1–E2; clocks and latch | C2 and C4a merged; **batch-64 product pull request merged**; **quiet-machine B2 rerun passing the first-token rule** (§A.7); **memory-rule tests** (writer server refused under 20% free memory or swap pressure) | M0 harness re-run against the real scheduler; B5; precompute-reuse snapshot test; held-out eval; implied-place writer eval case | Critical (declared) |
 | C5 | First usable version: wiring to zkAPI; the Mac dashboard **Outside help** card (disclosure, cost sheet, languages, Recover and Abandon); end-to-end acceptance | C1–C4b merged; B1–B6 green; owner-funded daemon | One real consult end to end; K1–K6 reported; owner review before default-on | Critical (declared); design-receipt guarded |
 | C6 | Strict mode | C5 | Approval binding tests | Critical (declared) |
@@ -723,9 +719,11 @@ Questions are open with Venice. It needs its own proposal, and nothing in track 
 1. **M0 tolerance:** median added delay ≤ 250 ms, 95th percentile ≤ 1 s, zero writer-caused resets (§A.7). The rule stays the acceptance bar for B2.
 2. **Daemon fork** (§Z.4): F1 and F2 proceed. macOS stays "route not verified" until F2 passes; the experimental release does not wait.
 3. **AD-1 and AD-2** (§A.11): accepted, with the bounded interpretation and the panel-protocol compatibility record.
-4. **Capped panel height** (§A.5.5): the 640 px panel cap is accepted (a first answer taller than 464 px scrolls when outside help is on).
+4. **Capped panel height:** accepted on 2026-10-07, now moot: the cap is removed with the undetectability goal (§A.5.5).
 5. **Public privacy sentence** (§2, §A.10): adopted as worded.
 6. **Fence recovery** is a button, never automatic.
+
+**Owner rulings, 2026-10-07 (later):** the undetectability goal is dropped from version one, with content kept sealed (§A.5.5); at most two review rounds per PR, a third only for a money or data-loss blocker (§A.14).
 
 **Decided by the project anchor on 2026-10-07 (owner approved the M0 rule as stated):** the scheduling choice B2 and the batch-64 product prerequisite (§A.7).
 
