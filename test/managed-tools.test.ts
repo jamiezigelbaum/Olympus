@@ -798,7 +798,7 @@ describe('the card section', () => {
   test('on the card: missing parts are one "To fix" line with the button (replacing the two not-found blockers), and step 1 of an open Set up zkAPI', () => {
     const missing = tools({ state: 'idle' }, ['missing', 'olympus']);
     const card = renderOutsideHelpCard({
-      settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false },
+      settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false, level: 'unnamed' },
       route: { state: 'not_configured', policyWritable: true },
       languages: [],
       restartPending: false,
@@ -822,7 +822,7 @@ describe('the card section', () => {
       expiry: { state: 'unknown' }, requestsToday: { count: 0 }, spendToday: { reservedUsd: 0 }, fences: [], routeLabel: 'x',
     };
     const card = renderOutsideHelpCard({
-      settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false },
+      settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false, level: 'unnamed' },
       route: {
         state: 'configured', profileId: 'zkapi-consult', model: 'x', policyWritable: true, secretRef: 'env:X',
         acknowledgements: { version: 0, accepted: [], complete: false }, readiness,
