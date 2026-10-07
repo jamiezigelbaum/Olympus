@@ -107472,7 +107472,7 @@ async function answerPrivately(question, evidence, options = {}) {
   const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
   const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
   const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
-  const consult = (noAnswer) => options.consultMetadata ? { consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer }), pack: deepFreeze(structuredClone(pack)) }) } : {};
+  const consult = (noAnswer) => options.consultMetadata ? { consult: { verdict: { sufficient: verdict.sufficient, noAnswer }, pack } } : {};
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
     return {
       answer: PRIVATE_ANSWER_NOT_FOUND,
@@ -107498,14 +107498,6 @@ async function answerPrivately(question, evidence, options = {}) {
     }),
     modelId
   };
-}
-function deepFreeze(value) {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value))
-    return value;
-  Object.freeze(value);
-  for (const entry of Object.values(value))
-    deepFreeze(entry);
-  return value;
 }
 function withVerdict(model, verdict) {
   return {
@@ -121051,7 +121043,7 @@ class PrivateAnswerJobs {
         ...preparedAnswer(done.result),
         usedKeys: usedKeys(evidence, done.used),
         usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
-        consult: consultSnapshotInput(done.result.consult)
+        consult: done.result.consult
       };
       this.finish(analysis, "done");
     } catch (error2) {
@@ -121197,7 +121189,8 @@ class PrivateAnswerJobs {
             job.sealedItems = result.usedItems;
             if (outcome.kind === "retained") {
               job.rev = 1;
-              job.consult.snapshot = result.consult ? consultSnapshot(question, outcome.answer, result.consult, result.usedItems) : undefined;
+              const input = consultSnapshotInput(result.consult);
+              job.consult.snapshot = input ? consultSnapshot(question, outcome.answer, input, result.usedItems) : undefined;
             }
             settle(outcome);
             return;
@@ -121408,13 +121401,13 @@ function consultSnapshotInput(value) {
     return;
   if (typeof pack.question !== "string" || !Array.isArray(pack.candidates))
     return;
-  return deepFreeze2({
+  return deepFreeze({
     verdict: { sufficient: verdict.sufficient, noAnswer: verdict.noAnswer },
     pack: structuredClone(pack)
   });
 }
 function consultSnapshot(question, retained, input, items) {
-  return deepFreeze2({
+  return deepFreeze({
     question,
     answer: retained.answer,
     gaps: [...retained.unanswered ?? []],
@@ -121423,12 +121416,12 @@ function consultSnapshot(question, retained, input, items) {
     items: items.map((item) => structuredClone(item))
   });
 }
-function deepFreeze2(value) {
+function deepFreeze(value) {
   if (typeof value !== "object" || value === null || Object.isFrozen(value))
     return value;
   Object.freeze(value);
   for (const entry of Object.values(value))
-    deepFreeze2(entry);
+    deepFreeze(entry);
   return value;
 }
 function retainedAnswer(plaintext) {
@@ -122538,6 +122531,11 @@ function createConsultOrchestrator(options) {
       record4(jobId, "error", startedAt, "snapshot_gone");
       return;
     }
+    if (safe(options.answerActivityBusy, false)) {
+      fail(jobId);
+      record4(jobId, "superseded", startedAt, "answer_busy");
+      return;
+    }
     const bounded = boundConsultWriterInput({ question: held.question, answer: held.answer, gaps: held.gaps });
     const sessionAbort = new AbortController;
     const openDeadlineMs = Math.max(1000, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
@@ -122626,6 +122624,7 @@ function createConsultOrchestrator(options) {
       }
       return true;
     };
+    options.jobs.dropConsultSnapshot(jobId);
     const dispatched = session.send(questionText, { authorize, deadlineMs: sendDeadlineMs });
     dispatched.catch(() => {
       return;
@@ -122633,7 +122632,6 @@ function createConsultOrchestrator(options) {
     const reply2 = await dispatched.catch(() => {
       return;
     });
-    options.jobs.dropConsultSnapshot(jobId);
     if (!authorized) {
       fail(jobId);
       record4(jobId, "authorization_refused", startedAt, reply2 && reply2.kind === "failed" ? reply2.error.code : undefined);
@@ -122649,6 +122647,11 @@ function createConsultOrchestrator(options) {
     if (!reply2 || reply2.kind !== "reply") {
       fail(jobId);
       record4(jobId, "reply_failed", startedAt, reply2?.kind === "failed" ? reply2.error.code : "no_reply");
+      return;
+    }
+    if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
+      fail(jobId);
+      record4(jobId, "ineligible", startedAt, "reply");
       return;
     }
     const seam = options.jobs.outsideSeam(jobId);
