@@ -34,6 +34,8 @@ export const PUBLIC_ENTRYPOINTS = [
   'src/cli.ts',
   'src/mcp/server.ts',
   'scripts/source-embedding-drain.ts',
+  // Started by the built-in provider as its own process (dist/litert-helper.js).
+  'src/workers/source-index/built-in-embedding/litert-helper.ts',
 ] as const;
 
 export interface PublicReachability {

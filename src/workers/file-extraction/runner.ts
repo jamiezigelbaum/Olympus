@@ -353,6 +353,11 @@ export interface ExtractionRunResult {
    */
   nextRetryAt?: string;
   reclassification?: ExtractionReclassificationResult;
+  /**
+   * Jobs settled unread for want of a reader, queued again this run because
+   * their lane's reader became ready (each job at most once ever).
+   */
+  rereadRequeued?: number;
   policy: {
     workerPrivateSurface: true;
     rawSourceExposed: false;
@@ -398,6 +403,15 @@ export interface FileExtractionRunner {
   ): JanitorRequeueExtractionJobsResult;
   counts(lane: ExtractionLaneKey): readonly ExtractionStatusCount[];
   corpusIds(): readonly string[];
+  /**
+   * Asks every reader that has work waiting for it in one of `lanes` (queued,
+   * or settled unread) to get ready, which starts a first-use download. The
+   * caller passes the currently approved lanes; a reader with nothing waiting
+   * there is never asked, so nothing downloads for media the owner's chosen
+   * sources do not contain (and rows left in a lane that is no longer
+   * approved never count). Returns the kinds asked.
+   */
+  prepareReadersWithWaitingWork?(lanes: readonly ExtractionLaneKey[]): readonly string[];
 }
 
 // --- the runner ------------------------------------------------------------
@@ -481,8 +495,69 @@ export function createFileExtractionRunner(
     };
   }
 
+  /**
+   * Read again, once, what a lane left unread because it had no reader then.
+   * Generic over lanes: each extractor names its own unread markers
+   * (`Extractor.reread`), and its reader is asked to get ready only when the
+   * lane actually has such jobs, so an empty lane never triggers a download.
+   */
+  function rereadUnread(lane: ExtractionLaneKey): number {
+    let requeued = 0;
+    for (const extractor of registry.list()) {
+      const policy = extractor.reread;
+      if (!policy) continue;
+      const request = {
+        ...lane,
+        extractorKind: extractor.kind,
+        warnings: policy.unreadWarnings,
+        terminalErrorKinds: policy.unreadTerminalErrorKinds,
+        ...(policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}),
+      };
+      try {
+        if (jobs.unreadJobCount(request) === 0) continue;
+        if (policy.prepare() !== 'ready') continue;
+        requeued += jobs.requeueUnread({ ...request, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
+      } catch (error) {
+        // Never a reason to stop the run: the jobs simply wait for the next one.
+        console.error(`Extraction reread check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return requeued;
+  }
+
+  /**
+   * Generic over lanes: a reader is asked only when its lane has work.
+   */
+  function prepareReadersWithWaitingWork(
+    work: { lanes: readonly ExtractionLaneKey[] } | { queuedKinds: ReadonlySet<string> },
+  ): string[] {
+    const asked: string[] = [];
+    for (const extractor of registry.list()) {
+      const policy = extractor.reread;
+      if (!policy) continue;
+      try {
+        const waiting = 'queuedKinds' in work
+          ? work.queuedKinds.has(extractor.kind)
+          : work.lanes.some((lane) => jobs.hasWorkWaitingForReader({
+            ...lane,
+            extractorKind: extractor.kind,
+            warnings: policy.unreadWarnings,
+            terminalErrorKinds: policy.unreadTerminalErrorKinds,
+            ...(policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}),
+          }));
+        if (!waiting) continue;
+        policy.prepare();
+        asked.push(extractor.kind);
+      } catch (error) {
+        console.error(`Extraction reader check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return asked;
+  }
+
   return {
     reclassifyTerminal,
+    prepareReadersWithWaitingWork: (lanes) => prepareReadersWithWaitingWork({ lanes }),
 
     corpusIds(): readonly string[] {
       return [...corporaById.keys()];
@@ -549,6 +624,10 @@ export function createFileExtractionRunner(
           ...(request.force !== undefined ? { force: request.force } : {}),
         });
         jobsQueued += result.jobsQueued;
+        // Newly catalogued items for a lane whose reader is not installed
+        // yet (for example the first audio file in the owner's chosen
+        // sources): start getting it ready now, not when a job is leased.
+        if (result.jobsQueued > 0) prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
         jobsExisting += result.jobsExisting;
         jobsForced += result.jobsForced;
         jobsSkippedTooLarge += result.jobsSkippedTooLarge;
@@ -592,6 +671,7 @@ export function createFileExtractionRunner(
           ...lane,
           ...(request.reclassifyLimit !== undefined ? { limit: request.reclassifyLimit } : {}),
         });
+      const rereadRequeued = rereadUnread(lane);
 
       // The probe runs BEFORE the lease on purpose. A probe failure must cost
       // throughput and nothing else: leasing first would charge an attempt
@@ -697,6 +777,7 @@ export function createFileExtractionRunner(
         consecutiveRetryableFailures,
         ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
         ...(reclassification ? { reclassification } : {}),
+        ...(rereadRequeued > 0 ? { rereadRequeued } : {}),
         policy: {
           workerPrivateSurface: true,
           rawSourceExposed: false,

@@ -3457,10 +3457,16 @@ var init_venice_models = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/manifest.ts
-var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, BUILT_IN_EMBEDDING_MODEL, ONNX_RUNTIME_PACK;
+function builtInEmbeddingModel(modelId) {
+  return BUILT_IN_EMBEDDING_MODELS.find((model) => model.modelId === modelId);
+}
+function builtInEmbeddingModelFiles(model) {
+  return [model.model, ...model.vocabulary ? [model.vocabulary] : []];
+}
+var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a", ARCTIC_M_BASE, ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2_REVISION = "24d962e906c7d332c6428e71c9676855024569e2", EMBEDDINGGEMMA_2_BASE, EMBEDDINGGEMMA_2, BUILT_IN_EMBEDDING_MODEL, BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, BUILT_IN_EMBEDDING_MODELS, ONNX_RUNTIME_PACK, LITERT_WHEELS = "https://files.pythonhosted.org/packages", LITERT_RUNTIME_PACK;
 var init_manifest = __esm(() => {
   ARCTIC_M_BASE = `https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5/resolve/${ARCTIC_M_REVISION}`;
-  BUILT_IN_EMBEDDING_MODEL = {
+  ARCTIC_EMBED_M_V1_5 = {
     modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
     repository: "Snowflake/snowflake-arctic-embed-m-v1.5",
     revision: ARCTIC_M_REVISION,
@@ -3483,6 +3489,28 @@ var init_manifest = __esm(() => {
       sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
     }
   };
+  EMBEDDINGGEMMA_2_BASE = `https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm/resolve/${EMBEDDINGGEMMA_2_REVISION}`;
+  EMBEDDINGGEMMA_2 = {
+    modelId: "embeddinggemma-2-litert-24d962e",
+    repository: "litert-community/embeddinggemma-2-740m-litert-lm",
+    revision: EMBEDDINGGEMMA_2_REVISION,
+    license: "Apache-2.0",
+    runtime: "litert",
+    dimension: 768,
+    maxTokens: 2048,
+    pooling: "model",
+    queryPrefix: "task: search result | query: ",
+    documentPrefix: "title: {title} | text: ",
+    model: {
+      name: "embeddinggemma-2-740m.litertlm",
+      url: `${EMBEDDINGGEMMA_2_BASE}/embeddinggemma-2-740m.litertlm`,
+      bytes: 484622336,
+      sha256: "e7a8a2204b91e0f96e92960e84a09a89212e1633dcb7575a9bf3378b4df77f4c"
+    }
+  };
+  BUILT_IN_EMBEDDING_MODEL = EMBEDDINGGEMMA_2;
+  BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL = ARCTIC_EMBED_M_V1_5;
+  BUILT_IN_EMBEDDING_MODELS = [EMBEDDINGGEMMA_2, ARCTIC_EMBED_M_V1_5];
   ONNX_RUNTIME_PACK = {
     version: "1.30.0",
     runtime: {
@@ -3500,6 +3528,32 @@ var init_manifest = __esm(() => {
       integrity: "sha512-7fdVWjAID1dVhH/G8qK3APARunV4VkBFoCQAP7qp4Wkab0mrorvmc+sqiT+mKXOzDqdjN5j+/Z9nb4gzNPWcyA=="
     },
     platforms: ["darwin-arm64", "linux-x64", "linux-arm64"]
+  };
+  LITERT_RUNTIME_PACK = {
+    version: "0.18.0",
+    platforms: {
+      "darwin-arm64": {
+        name: "litert_lm_api-0.18.0-py3-none-macosx_12_0_arm64.whl",
+        url: `${LITERT_WHEELS}/cc/df/147e5fa60cf8964bdcbc022cbd38502f91ea415bf82bed2c9335fcf9be9d/litert_lm_api-0.18.0-py3-none-macosx_12_0_arm64.whl`,
+        bytes: 21430649,
+        sha256: "9fd0c55835e469a035c1b75cde4797b26292963c2c36d9fcdfceb965ffa08a37",
+        library: "litert_lm/liblitert-lm.dylib"
+      },
+      "linux-x64": {
+        name: "litert_lm_api-0.18.0-py3-none-manylinux_2_27_x86_64.whl",
+        url: `${LITERT_WHEELS}/c9/8f/eb7a5203be1d48440c6b8d6e6382c3f744dd6d338fe400555718b4d695a1/litert_lm_api-0.18.0-py3-none-manylinux_2_27_x86_64.whl`,
+        bytes: 47051760,
+        sha256: "b64e2cf6d7dcb90ff094b74af595cc5d53faa07e0889f967d15df8d3e696b53c",
+        library: "litert_lm/liblitert-lm.so"
+      },
+      "linux-arm64": {
+        name: "litert_lm_api-0.18.0-py3-none-manylinux_2_27_aarch64.whl",
+        url: `${LITERT_WHEELS}/cf/f2/60707ac6860248e5f3601926c7cfe44794db350b60c1f14cb6e7e8874ae4/litert_lm_api-0.18.0-py3-none-manylinux_2_27_aarch64.whl`,
+        bytes: 46425934,
+        sha256: "d066db0c2bcd832b2b9cf8532b5fff385f7cff8562a1b482f8da0b51f810c47c",
+        library: "litert_lm/liblitert-lm.so"
+      }
+    }
   };
 });
 
@@ -4488,7 +4542,7 @@ var init_sovereignty = __esm(() => {
   init_manifest();
   init_zkapi_consult_settings();
   init_source_model_policy();
-  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_MODEL.modelId;
+  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
   SUPPORTED_PROVIDERS = [
     "local-openai-compatible",
     "openclaw-infer",
@@ -6998,6 +7052,12 @@ var init_embedding_identity = __esm(() => {
     canonicalIdentity({
       provider: "built-in",
       modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
+      backend: "local",
+      dimension: 768
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "embeddinggemma-2-litert-24d962e",
       backend: "local",
       dimension: 768
     })
@@ -13519,7 +13579,8 @@ var init_local_index = __esm(() => {
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
-    [BUILT_IN_EMBEDDING_MODEL.modelId, 0.4]
+    [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
+    [EMBEDDINGGEMMA_2.modelId, 0.73]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",
@@ -18249,6 +18310,58 @@ function isSafeRelativePath(path) {
 var BLOCK = 512;
 var init_tar = () => {};
 
+// src/workers/source-index/built-in-embedding/zip.ts
+import { inflateRawSync } from "node:zlib";
+function readZipEntry(archive, name) {
+  const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
+  let end = -1;
+  for (let offset2 = archive.length - 22;offset2 >= Math.max(0, archive.length - 22 - 65535); offset2 -= 1) {
+    if (view.getUint32(offset2, true) === END_OF_CENTRAL_DIRECTORY) {
+      end = offset2;
+      break;
+    }
+  }
+  if (end < 0)
+    throw new Error("Not a ZIP archive: no end of central directory.");
+  const entries = view.getUint16(end + 10, true);
+  let offset = view.getUint32(end + 16, true);
+  const inBounds = (start, length) => start >= 0 && length >= 0 && start + length <= archive.length;
+  const decoder = new TextDecoder;
+  for (let index = 0;index < entries; index += 1) {
+    if (!inBounds(offset, 46) || view.getUint32(offset, true) !== CENTRAL_DIRECTORY_ENTRY)
+      throw new Error("Corrupt ZIP central directory.");
+    const flags = view.getUint16(offset + 8, true);
+    const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const size = view.getUint32(offset + 24, true);
+    const nameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+    const entryName = decoder.decode(archive.subarray(offset + 46, offset + 46 + nameLength));
+    offset += 46 + nameLength + extraLength + commentLength;
+    if (entryName !== name)
+      continue;
+    if (flags & 1)
+      throw new Error(`${name} is encrypted.`);
+    if (!inBounds(localOffset, 30) || view.getUint32(localOffset, true) !== LOCAL_FILE_HEADER)
+      throw new Error("Corrupt ZIP local header.");
+    const dataStart = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
+    if (!inBounds(dataStart, compressedSize))
+      throw new Error(`${name} runs past the end of the archive.`);
+    const compressed = archive.subarray(dataStart, dataStart + compressedSize);
+    const data = method === 0 ? compressed : method === 8 ? new Uint8Array(inflateRawSync(compressed, { maxOutputLength: Math.max(1, size) })) : undefined;
+    if (!data)
+      throw new Error(`${name} uses unsupported ZIP compression method ${method}.`);
+    if (data.length !== size)
+      throw new Error(`${name} unpacked to ${data.length} bytes, expected ${size}.`);
+    return data;
+  }
+  return;
+}
+var END_OF_CENTRAL_DIRECTORY = 101010256, CENTRAL_DIRECTORY_ENTRY = 33639248, LOCAL_FILE_HEADER = 67324752;
+var init_zip = () => {};
+
 // src/workers/source-index/built-in-embedding/assets.ts
 import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
 import {
@@ -18265,8 +18378,8 @@ import {
   writeSync
 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname9, isAbsolute as isAbsolute2, join as join7 } from "node:path";
-function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform2 = currentPlatform()) {
+import { basename, dirname as dirname9, isAbsolute as isAbsolute2, join as join7 } from "node:path";
+function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform2 = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const dataRoot = env.XDG_DATA_HOME?.trim() || join7(env.HOME?.trim() || homedir7(), ".local", "share");
   const root = configured || join7(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
@@ -18275,9 +18388,18 @@ function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MOD
   return {
     root,
     modelDir: join7(root, model.modelId),
-    runtimeDir: join7(root, `onnxruntime-${runtime.version}-${platform2}`),
+    runtimeDir: model.runtime === "litert" ? join7(root, `litert-lm-${liteRtRuntime.version}-${platform2}`) : join7(root, `onnxruntime-${runtime.version}-${platform2}`),
     statusPath: join7(root, "status.json"),
     lockPath: join7(root, "install.lock")
+  };
+}
+function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, platform2 = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
+  const liteRt = model.runtime === "litert" ? liteRtRuntime.platforms[platform2] : undefined;
+  return {
+    modelPath: join7(paths.modelDir, model.model.name),
+    ...model.vocabulary ? { vocabularyPath: join7(paths.modelDir, model.vocabulary.name) } : {},
+    runtimeDir: paths.runtimeDir,
+    ...liteRt ? { libraryPath: join7(paths.runtimeDir, basename(liteRt.library)) } : {}
   };
 }
 function currentPlatform() {
@@ -18304,19 +18426,17 @@ async function installBuiltInEmbedding(options = {}) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
   const platform2 = options.platform ?? currentPlatform();
-  const paths = builtInEmbeddingPaths(options.env, model, runtime, platform2);
+  const paths = builtInEmbeddingPaths(options.env, model, runtime, platform2, options.liteRtRuntime);
   const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
-  const installed = {
-    modelPath: join7(paths.modelDir, model.model.name),
-    vocabularyPath: join7(paths.modelDir, model.vocabulary.name),
-    runtimeDir: paths.runtimeDir
-  };
+  const installed = installedBuiltInEmbedding(paths, model, platform2, options.liteRtRuntime);
+  if (model.runtime === "litert")
+    return installLiteRt(options, model, paths, platform2, reporter, installed);
   try {
     if (!options.skipRuntime && !runtime.platforms.includes(platform2)) {
       throw new BuiltInEmbeddingInstallError("unsupported_platform", `The built-in search model does not run on ${platform2}.`);
     }
     ensureDirectory(paths.root);
-    const modelFiles = [model.model, model.vocabulary];
+    const modelFiles = builtInEmbeddingModelFiles(model);
     const runtimePackages = options.skipRuntime ? [] : [runtime.common, runtime.runtime];
     if (installComplete(paths, modelFiles, runtimePackages)) {
       await verifyModelFiles(paths.modelDir, modelFiles, reporter);
@@ -18353,6 +18473,95 @@ async function installBuiltInEmbedding(options = {}) {
     const failure = error instanceof BuiltInEmbeddingInstallError ? error : new BuiltInEmbeddingInstallError("disk_write_failed", error instanceof Error ? error.message : String(error));
     reporter.fail(failure.reason, failure.message);
     throw failure;
+  }
+}
+async function installLiteRt(options, model, paths, platform2, reporter, installed) {
+  const pack = options.liteRtRuntime ?? LITERT_RUNTIME_PACK;
+  const wheel = pack.platforms[platform2];
+  try {
+    if (!wheel && !options.skipRuntime) {
+      throw new BuiltInEmbeddingInstallError("unsupported_platform", `The built-in search model does not run on ${platform2}.`);
+    }
+    ensureDirectory(paths.root);
+    const modelFiles = builtInEmbeddingModelFiles(model);
+    const wantsRuntime = Boolean(wheel) && !options.skipRuntime;
+    if (wantsRuntime && liteRtInstalled(paths.runtimeDir, wheel) && !await liteRtLibraryIntact(paths.runtimeDir, wheel)) {
+      rmSync2(paths.runtimeDir, { recursive: true, force: true });
+    }
+    const complete = () => modelFiles.every((file) => existsSync8(join7(paths.modelDir, file.name))) && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel));
+    if (!complete()) {
+      await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+        if (complete())
+          return;
+        const fetchImpl = options.fetchImpl ?? fetch;
+        const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS;
+        const pending = modelFiles.filter((file) => !existsSync8(join7(paths.modelDir, file.name)));
+        const runtimePending = wantsRuntime && !liteRtInstalled(paths.runtimeDir, wheel);
+        reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0) + (runtimePending ? wheel.bytes : 0));
+        ensureDirectory(paths.modelDir);
+        for (const file of pending) {
+          await downloadVerified(fetchImpl, file.url, join7(paths.modelDir, file.name), file.bytes, {
+            kind: "sha256",
+            expected: file.sha256
+          }, reporter, "Downloading the built-in search model", stallMs);
+        }
+        if (runtimePending)
+          await installLiteRtRuntime(fetchImpl, paths.runtimeDir, wheel, reporter, stallMs);
+      });
+    }
+    await verifyModelFiles(paths.modelDir, modelFiles, reporter);
+    if (wantsRuntime && !liteRtInstalled(paths.runtimeDir, wheel)) {
+      throw new BuiltInEmbeddingInstallError("runtime_load_failed", "The built-in search runtime did not install completely.");
+    }
+    return installed;
+  } catch (error) {
+    const failure = error instanceof BuiltInEmbeddingInstallError ? error : new BuiltInEmbeddingInstallError("disk_write_failed", error instanceof Error ? error.message : String(error));
+    reporter.fail(failure.reason, failure.message);
+    throw failure;
+  }
+}
+function readLiteRtMarker(runtimeDir) {
+  try {
+    return JSON.parse(readFileSync8(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
+  } catch {
+    return;
+  }
+}
+function liteRtInstalled(runtimeDir, wheel) {
+  const marker = readLiteRtMarker(runtimeDir);
+  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync8(join7(runtimeDir, basename(wheel.library)));
+}
+async function liteRtLibraryIntact(runtimeDir, wheel) {
+  const expected = readLiteRtMarker(runtimeDir)?.librarySha256;
+  return expected !== undefined && await sha256File(join7(runtimeDir, basename(wheel.library))) === expected;
+}
+async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
+  const staging = `${runtimeDir}.staging-${randomUUID4()}`;
+  ensureDirectory(staging);
+  try {
+    const archivePath = join7(staging, wheel.name);
+    await downloadVerified(fetchImpl, wheel.url, archivePath, wheel.bytes, {
+      kind: "sha256",
+      expected: wheel.sha256
+    }, reporter, "Downloading the search runtime", stallMs);
+    reporter.set("verifying", "Unpacking the search runtime");
+    const library = readZipEntry(readFileSync8(archivePath), wheel.library);
+    if (!library)
+      throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
+    writeFileSync3(join7(staging, basename(wheel.library)), library, { mode: 493 });
+    rmSync2(archivePath, { force: true });
+    const marker = {
+      wheel: wheel.name,
+      sha256: wheel.sha256,
+      librarySha256: createHash5("sha256").update(library).digest("hex")
+    };
+    writeFileSync3(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+`);
+    rmSync2(runtimeDir, { recursive: true, force: true });
+    renameSync2(staging, runtimeDir);
+  } catch (error) {
+    rmSync2(staging, { recursive: true, force: true });
+    throw error;
   }
 }
 function reportBuiltInEmbeddingState(options, state, failure) {
@@ -18687,6 +18896,7 @@ var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR", STALE_LOCK_MS
 var init_assets = __esm(() => {
   init_manifest();
   init_tar();
+  init_zip();
   STALE_LOCK_MS = 30 * 60000;
   DOWNLOAD_STALL_MS = 2 * 60000;
   BuiltInEmbeddingInstallError = class BuiltInEmbeddingInstallError extends Error {
@@ -18699,13 +18909,243 @@ var init_assets = __esm(() => {
   };
 });
 
+// src/workers/source-index/built-in-embedding/litert-runtime.ts
+import { spawn } from "node:child_process";
+import { existsSync as existsSync9, statSync as statSync6 } from "node:fs";
+import { homedir as homedir8 } from "node:os";
+import { delimiter, dirname as dirname10, isAbsolute as isAbsolute3, join as join8 } from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+function helperEnvironment() {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined)
+      continue;
+    if (["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"].includes(name) || name.startsWith("VK_")) {
+      env[name] = value;
+    }
+  }
+  env.HOME ??= homedir8();
+  return env;
+}
+
+class HelperProcess {
+  child;
+  device = "cpu";
+  nextId = 1;
+  pending = new Map;
+  stderr = "";
+  requestTimeoutMs;
+  stopTimeoutMs;
+  exited = false;
+  constructor(child, options) {
+    this.child = child;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
+  }
+  failAll(reason) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(reason);
+    }
+    this.pending.clear();
+  }
+  static start(options, device) {
+    const settings = {
+      library: options.library,
+      model: options.model,
+      cacheDir: options.cacheDir,
+      threads: options.threads,
+      device,
+      maxInputTokens: options.maxInputTokens
+    };
+    const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: helperEnvironment()
+    });
+    const helper = new HelperProcess(child, options);
+    child.stdin.on("error", (error) => {
+      helper.exited = true;
+      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
+      child.kill("SIGKILL");
+    });
+    return new Promise((resolve3, reject) => {
+      let started = false;
+      const timer = setTimeout(() => {
+        if (started)
+          return;
+        child.kill("SIGKILL");
+        reject(new Error("The built-in search model took too long to start."));
+      }, options.startTimeoutMs ?? 5 * 60000);
+      child.stderr.on("data", (chunk) => {
+        helper.stderr = (helper.stderr + chunk.toString("utf8")).slice(-4000);
+      });
+      createInterface({ input: child.stdout }).on("line", (line) => {
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (!started) {
+          if (message.ready) {
+            started = true;
+            clearTimeout(timer);
+            helper.device = message.device === "gpu" ? "gpu" : "cpu";
+            resolve3(helper);
+          } else if (message.fatal) {
+            started = true;
+            clearTimeout(timer);
+            reject(Object.assign(new Error(message.fatal), { fatal: true }));
+          }
+          return;
+        }
+        helper.settle(message);
+      });
+      child.on("error", (error) => {
+        if (!started) {
+          started = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      child.on("exit", () => {
+        helper.exited = true;
+      });
+      child.on("close", (code, signal) => {
+        helper.exited = true;
+        const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split(`
+`).at(-1)}` : ""}.`);
+        if (!started) {
+          started = true;
+          clearTimeout(timer);
+          reject(reason);
+        }
+        helper.failAll(reason);
+      });
+    });
+  }
+  embed(texts) {
+    if (this.exited)
+      return Promise.reject(new Error("The built-in search model is not running."));
+    const id = this.nextId++;
+    return new Promise((resolve3, reject) => {
+      const timer = setTimeout(() => {
+        this.child.kill("SIGKILL");
+        this.exited = true;
+        this.failAll(new Error("The built-in search model stopped responding and was restarted."));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve: resolve3, reject, count: texts.length, timer });
+      this.child.stdin.write(`${JSON.stringify({ id, texts })}
+`);
+    });
+  }
+  settle(message) {
+    const pending = message.id === undefined ? undefined : this.pending.get(message.id);
+    if (!pending || message.id === undefined)
+      return;
+    this.pending.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.error || !message.vectors || !message.dimension) {
+      pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
+      if (message.native) {
+        this.exited = true;
+        this.child.kill("SIGKILL");
+      }
+      return;
+    }
+    const bytes = Buffer.from(message.vectors, "base64");
+    const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    const vectors = Array.from({ length: pending.count }, (_, index) => all.subarray(index * message.dimension, (index + 1) * message.dimension));
+    if (vectors.some((vector) => vector.length !== message.dimension)) {
+      pending.reject(new Error("The built-in search model returned the wrong number of values."));
+      return;
+    }
+    pending.resolve(vectors);
+  }
+  async stop() {
+    if (this.exited)
+      return;
+    const exited = new Promise((resolve3) => this.child.once("close", () => resolve3()));
+    this.child.stdin.end();
+    const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
+    await exited;
+    clearTimeout(timer);
+  }
+}
+async function startLiteRtEmbedder(options) {
+  let device = options.device;
+  let helper;
+  try {
+    helper = await HelperProcess.start(options, device);
+  } catch (error) {
+    if (device === "cpu" || error.fatal)
+      throw error;
+    device = "cpu";
+    helper = await HelperProcess.start(options, device);
+  }
+  const releaseAtExit = () => {
+    if (!helper.exited)
+      helper.child.kill("SIGKILL");
+  };
+  process.once("exit", releaseAtExit);
+  return {
+    get device() {
+      return helper.device;
+    },
+    async embed(texts) {
+      if (helper.exited) {
+        if (helper.device === "gpu")
+          device = "cpu";
+        helper = await HelperProcess.start(options, device);
+      }
+      return helper.embed(texts);
+    },
+    async release() {
+      process.removeListener("exit", releaseAtExit);
+      await helper.stop();
+    }
+  };
+}
+function helperPath() {
+  const here = dirname10(fileURLToPath(import.meta.url));
+  for (const name of ["litert-helper.js", "litert-helper.ts"]) {
+    const candidate = join8(here, name);
+    if (existsSync9(candidate))
+      return candidate;
+  }
+  throw new Error("The built-in search model helper is missing from this install.");
+}
+function resolveBun() {
+  const bunName = process.platform === "win32" ? "bun.exe" : "bun";
+  const candidates = [
+    process.versions.bun ? process.execPath : undefined,
+    process.env.BUN_INSTALL ? join8(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join8(directory, bunName)),
+    join8(homedir8(), ".bun", "bin", bunName)
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute3(candidate))
+      continue;
+    try {
+      if (statSync6(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  throw new Error("The built-in search model needs Bun, and none was found.");
+}
+var REQUEST_TIMEOUT_MS;
+var init_litert_runtime = __esm(() => {
+  REQUEST_TIMEOUT_MS = 3 * 60000;
+});
+
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire3 } from "node:module";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire3(join8(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire3(join9(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -18890,6 +19330,7 @@ var init_wordpiece = __esm(() => {
 import { createHash as createHash6 } from "node:crypto";
 import { readFileSync as readFileSync9 } from "node:fs";
 import { availableParallelism } from "node:os";
+import { dirname as dirname11, join as join10 } from "node:path";
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -18899,9 +19340,11 @@ class BuiltInSourceEmbeddingProvider {
   epochId;
   backend;
   threads;
+  device;
   spec;
   env;
   runtimeFactory;
+  liteRtFactory;
   install;
   installerOptions;
   now;
@@ -18918,7 +19361,9 @@ class BuiltInSourceEmbeddingProvider {
     this.modelId = this.spec.modelId;
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
+    this.device = resolveDevice(this.env);
     this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
     this.now = options.now ?? Date.now;
@@ -18935,13 +19380,14 @@ class BuiltInSourceEmbeddingProvider {
       repository: this.spec.repository,
       revision: this.spec.revision,
       weights: this.spec.model.sha256,
-      vocabulary: this.spec.vocabulary.sha256,
+      ...this.spec.vocabulary ? { vocabulary: this.spec.vocabulary.sha256 } : {},
+      ...this.spec.runtime === "litert" ? { runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}` } : {},
       dimension: this.dimension,
       maxTokens: this.spec.maxTokens,
       pooling: this.spec.pooling,
       queryPrefix: this.spec.queryPrefix,
       documentPrefix: this.spec.documentPrefix,
-      windows: MAX_WINDOWS_PER_DOCUMENT,
+      ...this.spec.runtime === "litert" ? { overflow: "chunk-and-average" } : { windows: MAX_WINDOWS_PER_DOCUMENT },
       backend: this.backend
     })).digest("hex");
   }
@@ -18965,7 +19411,7 @@ class BuiltInSourceEmbeddingProvider {
       return [];
     if (options.taskType === "RETRIEVAL_QUERY" && !this.loaded) {
       const status = this.status();
-      if (status.state !== "ready" && status.state !== "loading") {
+      if (this.spec.runtime === "litert" || status.state !== "ready" && status.state !== "loading") {
         this.load().catch(() => {
           return;
         });
@@ -19008,10 +19454,28 @@ class BuiltInSourceEmbeddingProvider {
     }
     try {
       reportBuiltInEmbeddingState(reporterOptions, "loading");
-      const tokenizer = new WordPieceTokenizer(readFileSync9(installed.vocabularyPath, "utf8"));
-      const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+      let model;
+      if (this.spec.runtime === "litert") {
+        if (!installed.libraryPath)
+          throw new Error("the LiteRT-LM runtime is not installed.");
+        const embedder = await this.liteRtFactory({
+          library: installed.libraryPath,
+          model: installed.modelPath,
+          cacheDir: join10(dirname11(installed.modelPath), "cache"),
+          threads: this.threads,
+          device: this.device,
+          maxInputTokens: this.spec.maxTokens
+        });
+        model = { kind: "litert", embedder };
+      } else {
+        if (!installed.vocabularyPath)
+          throw new Error("the model vocabulary is not installed.");
+        const tokenizer = loadTokenizer(installed.vocabularyPath);
+        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        model = { kind: "onnx", session, tokenizer };
+      }
       reportBuiltInEmbeddingState(reporterOptions, "ready");
-      return { session, tokenizer };
+      return model;
     } catch (error) {
       const failure = new BuiltInEmbeddingInstallError("runtime_load_failed", `The built-in search model could not start: ${error instanceof Error ? error.message : String(error)}`);
       reportBuiltInEmbeddingState(reporterOptions, "failed", { reason: failure.reason, message: failure.message });
@@ -19035,19 +19499,18 @@ class BuiltInSourceEmbeddingProvider {
     }
   }
   async embedLoaded(model, inputs, taskType) {
+    if (model.kind === "litert")
+      return this.embedLiteRt(model.embedder, inputs, taskType);
     const windowTokens = this.spec.maxTokens - 2;
     const windows = [];
     inputs.forEach((input, index) => {
-      const prefix = taskType === "RETRIEVAL_QUERY" ? this.spec.queryPrefix : this.spec.documentPrefix;
-      const text = `${prefix}${input.title ? `${input.title}
-` : ""}${input.text}`;
-      const ids = model.tokenizer.tokenize(text);
+      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
       const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window2 = 0;window2 < count; window2 += 1) {
         windows.push({
           input: index,
-          ids: [model.tokenizer.clsId, ...ids.slice(window2 * windowTokens, (window2 + 1) * windowTokens), model.tokenizer.sepId]
+          ids: [model.tokenizer.startId, ...ids.slice(window2 * windowTokens, (window2 + 1) * windowTokens), model.tokenizer.endId]
         });
       }
     });
@@ -19063,6 +19526,26 @@ class BuiltInSourceEmbeddingProvider {
       });
     }
     return sums.map((sum) => normalize2(sum));
+  }
+  async embedLiteRt(embedder, inputs, taskType) {
+    const prompts = inputs.map((input) => promptText(this.spec, input, taskType));
+    const out = [];
+    for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
+      const batch = prompts.slice(offset, offset + LITERT_BATCH);
+      let vectors;
+      try {
+        vectors = await this.withSlot(taskType, () => embedder.embed(batch));
+      } catch (error) {
+        throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; Olympus restarts the model on the next try.");
+      }
+      for (const vector of vectors) {
+        if (vector.length !== this.dimension) {
+          throw new OperationError("source_index_error", `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
+        }
+        out.push(normalize2(vector));
+      }
+    }
+    return out;
   }
   async forward(model, batch) {
     const rows = batch.length;
@@ -19084,10 +19567,11 @@ class BuiltInSourceEmbeddingProvider {
     } catch (error) {
       throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; restarting Olympus reloads the model.");
     }
-    const [outRows, outLength, hidden] = output.dims;
-    if (outRows !== rows || outLength !== length || hidden !== this.dimension) {
-      throw new OperationError("source_index_error", `The built-in search model returned shape [${output.dims.join(", ")}], expected [${rows}, ${length}, ${this.dimension}].`);
+    const expected = [rows, length, this.dimension];
+    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
+      throw new OperationError("source_index_error", `The built-in search model returned shape [${output.dims.join(", ")}], expected [${expected.join(", ")}].`);
     }
+    const hidden = this.dimension;
     return batch.map((window2, row) => {
       const vector = new Float64Array(hidden);
       const base = row * length * hidden;
@@ -19106,6 +19590,26 @@ class BuiltInSourceEmbeddingProvider {
       return Float64Array.from(normalize2(vector));
     });
   }
+}
+function loadTokenizer(path) {
+  const tokenizer = new WordPieceTokenizer(readFileSync9(path, "utf8"));
+  return {
+    tokenize: (text) => tokenizer.tokenize(text),
+    startId: tokenizer.clsId,
+    endId: tokenizer.sepId,
+    padId: tokenizer.padId
+  };
+}
+function promptText(spec, input, taskType) {
+  if (taskType === "RETRIEVAL_QUERY")
+    return `${spec.queryPrefix}${input.title ? `${input.title}
+` : ""}${input.text}`;
+  if (spec.documentPrefix.includes("{title}")) {
+    const title = input.title?.replace(/\s+/g, " ").trim() || "none";
+    return `${spec.documentPrefix.replace("{title}", () => title)}${input.text}`;
+  }
+  return `${spec.documentPrefix}${input.title ? `${input.title}
+` : ""}${input.text}`;
 }
 function builtInEmbeddingOperationError(error) {
   if (error instanceof OperationError)
@@ -19143,6 +19647,13 @@ function normalize2(vector) {
     out[index] = norm > 0 ? vector[index] / norm : 0;
   return out;
 }
+function resolveDevice(env) {
+  const configured = env[BUILT_IN_EMBEDDING_DEVICE_ENV]?.trim().toLowerCase();
+  if (configured && configured !== "cpu" && configured !== "auto") {
+    throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_DEVICE_ENV} must be "auto" or "cpu".`);
+  }
+  return configured === "cpu" ? "cpu" : "auto";
+}
 function resolveThreads(explicit, env) {
   const configured = explicit ?? (env[BUILT_IN_EMBEDDING_THREADS_ENV]?.trim() ? Number(env[BUILT_IN_EMBEDDING_THREADS_ENV]) : undefined);
   if (configured !== undefined) {
@@ -19154,26 +19665,28 @@ function resolveThreads(explicit, env) {
   return Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
 }
 function sharedBuiltInSourceEmbeddingProvider(options) {
-  if (options.modelId !== BUILT_IN_EMBEDDING_MODEL.modelId) {
-    throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use model "${BUILT_IN_EMBEDDING_MODEL.modelId}" for the built-in profile, or update Olympus.`);
+  const model = builtInEmbeddingModel(options.modelId);
+  if (!model) {
+    throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(", ")} for the built-in profile, or update Olympus.`);
   }
   const env = options.env ?? process.env;
   const key = `${builtInEmbeddingPaths(env).root}\x00${options.modelId}`;
   sharedProviders ??= new Map;
   let provider = sharedProviders.get(key);
   if (!provider) {
-    provider = new BuiltInSourceEmbeddingProvider({ env });
+    provider = new BuiltInSourceEmbeddingProvider({ env, model });
     sharedProviders.set(key, provider);
   }
   return provider;
 }
-var BUILT_IN_EMBEDDING_PROVIDER = "built-in", BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS", MAX_WINDOWS_PER_DOCUMENT = 8, MAX_BATCH_TOKENS = 2048, MAX_BATCH_ROWS = 32, RETRY_AFTER_FAILURE_MS, BuiltInEmbeddingNotReadyError, sharedProviders;
+var BUILT_IN_EMBEDDING_PROVIDER = "built-in", BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS", BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE", MAX_WINDOWS_PER_DOCUMENT = 8, MAX_BATCH_TOKENS = 2048, MAX_BATCH_ROWS = 32, LITERT_BATCH = 8, RETRY_AFTER_FAILURE_MS, BuiltInEmbeddingNotReadyError, sharedProviders;
 var init_provider = __esm(() => {
   init_operation_error();
   init_embedding_identity();
   init_embeddings();
   init_assets();
   init_manifest();
+  init_litert_runtime();
   init_runtime();
   init_wordpiece();
   RETRY_AFTER_FAILURE_MS = 2 * 60000;
@@ -19190,20 +19703,20 @@ var init_provider = __esm(() => {
 });
 
 // src/workers/embedding-ledger.ts
-import { homedir as homedir8 } from "node:os";
+import { homedir as homedir9 } from "node:os";
 import { mkdir as mkdir3, open as open3, readFile as readFile3 } from "node:fs/promises";
-import { dirname as dirname10, join as join9 } from "node:path";
+import { dirname as dirname12, join as join11 } from "node:path";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join9(homedir8(), ".local", "share");
-  return join9(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir9(), ".local", "share");
+  return join11(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
 }
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
 `;
-  await mkdir3(dirname10(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname12(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -20149,14 +20662,14 @@ var init_corpus_adapter = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector-store.ts
-import { homedir as homedir9 } from "node:os";
-import { join as join10 } from "node:path";
+import { homedir as homedir10 } from "node:os";
+import { join as join12 } from "node:path";
 function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir9(), ".local", "share");
-  return join10(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir10(), ".local", "share");
+  return join12(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
@@ -20277,7 +20790,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join11 } from "node:path";
+import { join as join13 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -20323,7 +20836,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join11(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join13(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -21003,8 +21516,8 @@ var init_request_budget = __esm(() => {
 
 // src/workers/google-connectors/drive.ts
 import { createHash as createHash10 } from "node:crypto";
-import { homedir as homedir10 } from "node:os";
-import { join as join12 } from "node:path";
+import { homedir as homedir11 } from "node:os";
+import { join as join14 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -21395,8 +21908,8 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir10(), ".local", "share");
-  return join12(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir11(), ".local", "share");
+  return join14(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -21611,14 +22124,14 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/store-sync.ts
-import { homedir as homedir11 } from "node:os";
-import { join as join13 } from "node:path";
+import { homedir as homedir12 } from "node:os";
+import { join as join15 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join13(env.HOME?.trim() || homedir11(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join13(dataHome, "olympus", "whatsapp-live");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join15(env.HOME?.trim() || homedir12(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join15(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join13(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join15(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync = __esm(() => {
@@ -21629,6 +22142,11 @@ var init_store_sync = __esm(() => {
     trustTier: "S4",
     trustDomain: "secure_local"
   });
+});
+
+// src/workers/source-index/built-in-reasoning/server.ts
+var init_server = __esm(() => {
+  init_model_transport();
 });
 
 // src/workers/dashboard/answer-ready-coverage.ts
@@ -21794,8 +22312,8 @@ var init_ingest_filter = __esm(() => {
 
 // src/workers/google-connectors/gmail.ts
 import { createHash as createHash11 } from "node:crypto";
-import { homedir as homedir13 } from "node:os";
-import { join as join15 } from "node:path";
+import { homedir as homedir14 } from "node:os";
+import { join as join17 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -22145,8 +22663,8 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir13(), ".local", "share");
-  return join15(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir14(), ".local", "share");
+  return join17(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -22437,14 +22955,14 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { homedir as homedir14 } from "node:os";
-import { dirname as dirname12, join as join16 } from "node:path";
+import { homedir as homedir15 } from "node:os";
+import { dirname as dirname14, join as join18 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join16(homedir14(), ".local", "share");
-  return join16(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir15(), ".local", "share");
+  return join18(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
 }
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
@@ -22547,14 +23065,14 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { homedir as homedir15 } from "node:os";
-import { join as join17 } from "node:path";
+import { homedir as homedir16 } from "node:os";
+import { join as join19 } from "node:path";
 function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir15(), ".local", "share");
-  return join17(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir16(), ".local", "share");
+  return join19(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
 }
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
@@ -22649,13 +23167,13 @@ var init_x_bookmarks = __esm(() => {
 });
 
 // src/workers/telegram-messages/corpus-adapter.ts
-import { homedir as homedir16 } from "node:os";
-import { join as join18 } from "node:path";
+import { homedir as homedir17 } from "node:os";
+import { join as join20 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join18(env.HOME?.trim() || homedir16(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join20(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join18(env.HOME?.trim() || homedir16(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join20(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
@@ -23841,6 +24359,16 @@ function privacyLogic(config) {
       return { description, fits: false };
     return { description: refineDescription(description, answers), fits: true };
   }
+  function withShownAnswers(description) {
+    const answers = {};
+    for (const question of questions(description)) {
+      const answer = {};
+      for (const option of question.options)
+        answer[option.id] = option.side;
+      answers[question.id] = answer;
+    }
+    return refineDescription(description, answers);
+  }
   function questionsKey(description) {
     return JSON.stringify(questions(description));
   }
@@ -23861,7 +24389,8 @@ function privacyLogic(config) {
     fitsAnswers,
     questions,
     questionsKey,
-    answerTopic
+    answerTopic,
+    withShownAnswers
   };
 }
 var PRIVACY_FOLDER_SOURCE_NAMES;
@@ -24015,11 +24544,6 @@ var init_source_ingestion_ledger = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
-});
-
-// src/workers/source-index/built-in-reasoning/server.ts
-var init_server = __esm(() => {
-  init_model_transport();
 });
 
 // src/core/delphi.ts
@@ -24243,10 +24767,10 @@ var init_credential_degradation = __esm(() => {
 });
 
 // src/core/owner-config-read.ts
-import { readFileSync as readFileSync11, statSync as statSync6 } from "node:fs";
+import { readFileSync as readFileSync11, statSync as statSync7 } from "node:fs";
 function ownerConfigStamp(path) {
   try {
-    return stampOf(statSync6(path));
+    return stampOf(statSync7(path));
   } catch {
     return "missing";
   }
@@ -24254,7 +24778,7 @@ function ownerConfigStamp(path) {
 function readOwnerConfigFile(path) {
   let before;
   try {
-    before = statSync6(path);
+    before = statSync7(path);
   } catch (error) {
     return error.code === "ENOENT" ? { status: "missing" } : { status: "refused", reason: "unreadable", stamp: "unreadable" };
   }
@@ -24270,7 +24794,7 @@ function readOwnerConfigFile(path) {
   }
   let after;
   try {
-    after = statSync6(path);
+    after = statSync7(path);
   } catch {
     return { status: "refused", reason: "torn_read", stamp };
   }
@@ -24289,10 +24813,10 @@ function ownedByThisUser(stat3) {
 var init_owner_config_read = () => {};
 
 // src/workers/classification/tier-rules.ts
-import { homedir as homedir17 } from "node:os";
-import { dirname as dirname14, join as join19 } from "node:path";
+import { homedir as homedir18 } from "node:os";
+import { dirname as dirname16, join as join21 } from "node:path";
 function defaultTierRulesPath() {
-  return join19(homedir17(), ".olympus", "tier-rules.json");
+  return join21(homedir18(), ".olympus", "tier-rules.json");
 }
 function resolveTierRulesPath(options = {}) {
   const env = options.env ?? process.env;
@@ -24428,8 +24952,8 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash18 } from "node:crypto";
-import { existsSync as existsSync12, lstatSync as lstatSync3, mkdirSync as mkdirSync12, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname17, isAbsolute as isAbsolute4 } from "node:path";
+import { existsSync as existsSync13, lstatSync as lstatSync3, mkdirSync as mkdirSync12, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname19, isAbsolute as isAbsolute5 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_package_root();
@@ -24958,6 +25482,132 @@ var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
   "Do not infer private facts beyond the document."
 ].join(" ");
 
+// src/workers/file-extraction/extractors/built-in-transcriber.ts
+init_model_transport();
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+var GIB = 1024 ** 3;
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae";
+var QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523";
+var QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5";
+var QWEN35_2B = {
+  modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+  displayName: "Qwen3.5 2B",
+  sizeClass: "small",
+  baseRepository: "Qwen/Qwen3.5-2B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-2B-GGUF",
+  revision: QWEN35_2B_REVISION,
+  file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+  minimumMemoryBytes: 7 * GIB,
+  contextTokens: 12288
+};
+var QWEN35_4B = {
+  modelId: "qwen3.5-4b-q4_k_m-e87f176",
+  displayName: "Qwen3.5 4B",
+  sizeClass: "standard",
+  baseRepository: "Qwen/Qwen3.5-4B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-4B-GGUF",
+  revision: QWEN35_4B_REVISION,
+  file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+  minimumMemoryBytes: 15 * GIB,
+  contextTokens: 12288
+};
+var QWEN35_9B = {
+  modelId: "qwen3.5-9b-q4_k_m-3885219",
+  displayName: "Qwen3.5 9B",
+  sizeClass: "large",
+  baseRepository: "Qwen/Qwen3.5-9B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-9B-GGUF",
+  revision: QWEN35_9B_REVISION,
+  file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+  minimumMemoryBytes: 15 * GIB,
+  contextTokens: 12288
+};
+var LLAMA_CPP_RELEASE = "b11320";
+var LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+var LLAMA_SERVER_RUNTIME = {
+  release: LLAMA_CPP_RELEASE,
+  license: "MIT",
+  archives: [
+    {
+      platform: "darwin-arm64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+      bytes: 11827796,
+      sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+      gpu: true
+    },
+    {
+      platform: "linux-x64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+      bytes: 17544875,
+      sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+      gpu: false
+    },
+    {
+      platform: "linux-arm64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+      bytes: 13590823,
+      sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+      gpu: false
+    }
+  ]
+};
+var QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2";
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var QWEN3_ASR_06B = {
+  modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+  displayName: "Qwen3-ASR 0.6B",
+  baseRepository: "Qwen/Qwen3-ASR-0.6B",
+  license: "Apache-2.0",
+  repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+  revision: QWEN3_ASR_06B_REVISION,
+  files: [
+    ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+    ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+  ],
+  minimumMemoryBytes: 7 * GIB,
+  contextTokens: 4096
+};
+
+// src/workers/source-index/built-in-reasoning/install.ts
+var STALE_LOCK_MS2 = 60 * 60000;
+var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+var SPACE_BACKOFF_MS = 15 * 60000;
+var DOWNLOAD_STALL_MS2 = 2 * 60000;
+var VERIFY_TIMEOUT_MS = 15 * 60000;
+var EXTRACT_TIMEOUT_MS = 5 * 60000;
+
+// src/workers/file-extraction/extractors/built-in-transcriber.ts
+init_server();
+init_command_runner();
+var DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+var DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
+var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
+var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
+var DEFAULT_VERIFY_WAIT_MS = 5 * 60000;
+
 // src/workers/file-extraction/extractors/transcription.ts
 init_command_runner();
 
@@ -25034,7 +25684,7 @@ init_analyst();
 init_model_transport();
 init_venice_models();
 import {
-  existsSync as existsSync9,
+  existsSync as existsSync10,
   mkdirSync as mkdirSync9,
   readFileSync as readFileSync10,
   renameSync as renameSync3,
@@ -25042,8 +25692,8 @@ import {
   writeFileSync as writeFileSync4
 } from "node:fs";
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { homedir as homedir12 } from "node:os";
-import { dirname as dirname11, isAbsolute as isAbsolute3, join as join14 } from "node:path";
+import { homedir as homedir13 } from "node:os";
+import { dirname as dirname13, isAbsolute as isAbsolute4, join as join16 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -25051,15 +25701,15 @@ var CACHE_SCHEMA_VERSION = 1;
 var MAX_CATALOG_TIMEOUT_MS = 30000;
 var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
-function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir12(), type = "text") {
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir13(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute3(configuredRoot) ? configuredRoot : join14(homeDir, ".cache");
-  return join14(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute4(configuredRoot) ? configuredRoot : join16(homeDir, ".cache");
+  return join16(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
   const type = options.type ?? "text";
-  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir12(), type);
+  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir13(), type);
   const cacheKey = `${cachePath}
 ${type}`;
   const ttlMs = boundedNonNegativeMs(options.ttlMs, DEFAULT_VENICE_MODEL_CATALOG_TTL_MS);
@@ -25224,7 +25874,7 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync9(path))
+  if (!existsSync10(path))
     return;
   let payload;
   try {
@@ -25260,7 +25910,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID5()}.tmp`;
   try {
-    mkdirSync9(dirname11(path), { recursive: true, mode: 448 });
+    mkdirSync9(dirname13(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync4(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -25854,6 +26504,8 @@ init_vocabulary();
 // src/workers/dashboard/outside-help.ts
 init_zkapi_consult_settings();
 init_vocabulary();
+var LIMIT_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid", "note_expired", "daily_cap_reached", "spend_cap_reached"]);
+var SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on"]);
 
 // src/workers/dashboard/pages/setup.ts
 var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears on this page like any " + "built-in.";
@@ -26282,99 +26934,6 @@ init_analyst();
 init_operation_error();
 init_model_transport();
 init_zkapi_consult_settings();
-
-// src/workers/source-index/built-in-reasoning/manifest.ts
-var GIB = 1024 ** 3;
-function unslothQwen(size, revision, bytes, sha256) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae";
-var QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523";
-var QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5";
-var QWEN35_2B = {
-  modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-  displayName: "Qwen3.5 2B",
-  sizeClass: "small",
-  baseRepository: "Qwen/Qwen3.5-2B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-2B-GGUF",
-  revision: QWEN35_2B_REVISION,
-  file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-  minimumMemoryBytes: 7 * GIB,
-  contextTokens: 12288
-};
-var QWEN35_4B = {
-  modelId: "qwen3.5-4b-q4_k_m-e87f176",
-  displayName: "Qwen3.5 4B",
-  sizeClass: "standard",
-  baseRepository: "Qwen/Qwen3.5-4B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-4B-GGUF",
-  revision: QWEN35_4B_REVISION,
-  file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-  minimumMemoryBytes: 15 * GIB,
-  contextTokens: 12288
-};
-var QWEN35_9B = {
-  modelId: "qwen3.5-9b-q4_k_m-3885219",
-  displayName: "Qwen3.5 9B",
-  sizeClass: "large",
-  baseRepository: "Qwen/Qwen3.5-9B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-9B-GGUF",
-  revision: QWEN35_9B_REVISION,
-  file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-  minimumMemoryBytes: 15 * GIB,
-  contextTokens: 12288
-};
-var LLAMA_CPP_RELEASE = "b11320";
-var LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-var LLAMA_SERVER_RUNTIME = {
-  release: LLAMA_CPP_RELEASE,
-  license: "MIT",
-  archives: [
-    {
-      platform: "darwin-arm64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-      bytes: 11827796,
-      sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-      gpu: true
-    },
-    {
-      platform: "linux-x64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-      bytes: 17544875,
-      sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-      gpu: false
-    },
-    {
-      platform: "linux-arm64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-      bytes: 13590823,
-      sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-      gpu: false
-    }
-  ]
-};
-
-// src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2 = 60 * 60000;
-var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-var SPACE_BACKOFF_MS = 15 * 60000;
-var DOWNLOAD_STALL_MS2 = 2 * 60000;
-var VERIFY_TIMEOUT_MS = 15 * 60000;
-var EXTRACT_TIMEOUT_MS = 5 * 60000;
-
-// src/core/analyst-built-in.ts
 init_server();
 var GAP_GENERIC_WORDS = new Set([
   "the",
@@ -26716,6 +27275,11 @@ class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    for (const state of this.states) {
+      try {
+        state.task.atStart?.();
+      } catch {}
+    }
     this.runDueTasks();
   }
   stop() {
@@ -26764,6 +27328,27 @@ class SourceScheduler {
     }
     if (woke)
       this.scheduleContinueWake(at);
+  }
+  wakeTasksOfKind(kind, at = this.now().getTime()) {
+    let woke = 0;
+    for (const state of this.states) {
+      if (state.task.kind !== kind || state.consecutiveFailures > 0)
+        continue;
+      if (taskCadence(state.source, state.task) !== "continuous")
+        continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        woke += 1;
+        continue;
+      }
+      if (state.nextRunAt <= at)
+        continue;
+      state.nextRunAt = at;
+      woke += 1;
+    }
+    if (woke > 0)
+      this.scheduleContinueWake(at);
+    return woke;
   }
   refreshFastWakeTimers() {
     const desired = new Set(this.sources.flatMap((source) => source.tasks.filter((task) => taskCadence(source, task) === "continuous" && taskIntervalMs(source, task) < this.tickMs).map((task) => taskIntervalMs(source, task))));
@@ -26929,7 +27514,10 @@ class SourceScheduler {
       const continuing = result.continueSoon === true && !retryAt;
       const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
-      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const scheduledRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const wokenWhileRunning = state.wakeAfterRun === true && !retryAt;
+      delete state.wakeAfterRun;
+      const nextRunAt = wokenWhileRunning ? Math.min(scheduledRunAt, continueAt) : scheduledRunAt;
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, "checkpoint");
         this.applyPersistedState(state, this.stateStore.recordSuccess({
@@ -26966,11 +27554,12 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
-      if (continuing)
+      if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
       if (result.status === "progress" && !retryAt)
         this.wakeDownstream(state, continueAt);
     } catch (error) {
+      delete state.wakeAfterRun;
       const message = error instanceof Error ? error.message : String(error);
       const errorKind = safeSchedulerErrorKind(error);
       const errorHash = hash(message);
@@ -27592,8 +28181,8 @@ function stripCodeFences(text) {
 init_sqlite_migrations();
 import { Database as Database3 } from "bun:sqlite";
 import { createHash as createHash16 } from "node:crypto";
-import { chmodSync as chmodSync3, existsSync as existsSync10, mkdirSync as mkdirSync10 } from "node:fs";
-import { dirname as dirname13 } from "node:path";
+import { chmodSync as chmodSync3, existsSync as existsSync11, mkdirSync as mkdirSync10 } from "node:fs";
+import { dirname as dirname15 } from "node:path";
 var TIER_SNIFFER_SCHEMA_VERSION = 1;
 function snifferMaterialHash(pass, material) {
   return createHash16("sha256").update(`${pass}
@@ -27617,7 +28206,7 @@ class TierSnifferStore {
     this.readOnly = false;
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      mkdirSync10(dirname13(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync10(dirname15(this.dbPath), { recursive: true, mode: 448 });
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
@@ -27751,7 +28340,7 @@ function subjectParams(subject) {
 }
 function restrictFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync10(path))
+    if (existsSync11(path))
       chmodSync3(path, 384);
   }
 }
@@ -28242,13 +28831,13 @@ init_privacy_profile();
 
 // src/workers/classification-ledger.ts
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname15, join as join20 } from "node:path";
+import { dirname as dirname17, join as join22 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
 var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname15(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname17(path), { recursive: true, mode: 448 });
   const handle = await open4(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -28365,7 +28954,7 @@ init_provider();
 // src/workers/classification/sniffer-resolver.ts
 init_atomic_file();
 import { mkdirSync as mkdirSync11, readFileSync as readFileSync12 } from "node:fs";
-import { dirname as dirname16 } from "node:path";
+import { dirname as dirname18 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
 var DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS = 30;
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
@@ -28407,7 +28996,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync11(dirname16(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync11(dirname18(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -28662,7 +29251,7 @@ function finish(report) {
 }
 
 // src/workers/classification/sniffer-service.ts
-import { existsSync as existsSync11 } from "node:fs";
+import { existsSync as existsSync12 } from "node:fs";
 init_tier_rejudge();
 init_tier_names_only_settle();
 init_tier_rules_sweep();
@@ -28724,7 +29313,7 @@ class TierSnifferService {
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ":memory:" || !existsSync11(path))
+      if (path === ":memory:" || !existsSync12(path))
         continue;
       let store;
       try {
@@ -28895,11 +29484,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync11(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync12(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync11(own))
+      if (existsSync12(own))
         paths.add(own);
     }
     return [...paths];
@@ -29215,7 +29804,7 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
   }
   if (provider === "built-in") {
     return sharedBuiltInSourceEmbeddingProvider({
-      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_MODEL.modelId,
+      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId,
       env
     });
   }
@@ -30036,7 +30625,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync12(config.dbPath))
+    if (!config.dbPath || !existsSync13(config.dbPath))
       return [];
     const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
     try {
@@ -30467,10 +31056,10 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!instanceId || !CANONICAL_UUID.test(instanceId)) {
     throw new Error(`${NATIVE_SERVICE_INSTANCE_ID_ENV} must be a canonical UUID for native startup.`);
   }
-  if (!readinessPath || !isAbsolute4(readinessPath)) {
+  if (!readinessPath || !isAbsolute5(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname17(readinessPath);
+  const directory = dirname19(readinessPath);
   mkdirSync12(directory, { recursive: true, mode: 448 });
   const parent = lstatSync3(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
@@ -30493,7 +31082,7 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync12(dirname17(args.reportPath), { recursive: true });
+      mkdirSync12(dirname19(args.reportPath), { recursive: true });
       writeFileSync5(args.reportPath, `${json}
 `);
     }
@@ -30503,7 +31092,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync12(dirname17(args.reportPath), { recursive: true });
+      mkdirSync12(dirname19(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync5(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

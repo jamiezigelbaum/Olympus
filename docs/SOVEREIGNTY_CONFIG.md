@@ -63,17 +63,24 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 
 ### Built-in embeddings
 
-New installs (setup from 2026-10-01) embed every tier with the **built-in
-model**: Snowflake Arctic Embed M v1.5 (Apache-2.0), int8, 768 dimensions,
-running in-process on ONNX Runtime. It needs no account, no key and no extra
-app, and nothing leaves the computer. On first use Olympus downloads the model
-(110 MB) and the runtime for this platform (114 MB) once into
+New installs embed every tier with the **built-in model**: Google's
+EmbeddingGemma 2 (Apache-2.0), 768 dimensions, in Google's own LiteRT build
+(text, image and audio encoders in one file). It runs on the computer through
+LiteRT-LM, in a small helper process Olympus starts under Bun, needs no
+account, no key and no extra app, and nothing leaves the computer. On first
+use Olympus downloads the model (485 MB) and the LiteRT-LM library for this
+platform (from Google's `litert-lm-api` 0.18.0 wheel: 21 MB on macOS, 47 MB on
+Linux) once into
 `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models/built-in-embedding`
 (override with `OLYMPUS_BUILT_IN_EMBEDDING_DIR`); every file is pinned by size
 and checksum and re-verified before it loads. While it downloads, questions
-fall back to keyword search. It uses at most half the CPU cores, capped at
+fall back to keyword search. It runs on the GPU where one is usable (Metal on
+Apple silicon, Vulkan on Linux) and otherwise on the CPU, with the same
+vectors either way; `OLYMPUS_BUILT_IN_EMBEDDING_DEVICE=cpu` keeps it on the
+CPU. The first start compiles its GPU programs (up to half a minute; later
+starts take seconds). On the CPU it uses at most half the cores, capped at
 four (`OLYMPUS_BUILT_IN_EMBEDDING_THREADS` overrides). Supported: macOS on
-Apple silicon, Linux x64 and arm64.
+Apple silicon, Linux x64 and arm64 (glibc 2.27 or newer).
 
 The profile is:
 
@@ -81,10 +88,18 @@ The profile is:
 "built-in-embedding": {
   "provider": "built-in",
   "trust": "local",
-  "model": "arctic-embed-m-v1.5-int8-e58a8f7",
+  "model": "embeddinggemma-2-litert-24d962e",
   "purpose": "embedding"
 }
 ```
+
+Installs set up before EmbeddingGemma 2 embed with the previous built-in
+model, Snowflake Arctic Embed M v1.5 (`arctic-embed-m-v1.5-int8-e58a8f7`,
+110 MB, on ONNX Runtime). Olympus keeps running it for them; moving such an install to
+EmbeddingGemma 2 is the re-embed described below. The same holds for an
+install configured only by environment: `OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER=built-in`
+with no `OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL` keeps running Arctic, so an
+upgrade never re-embeds on its own; name the EmbeddingGemma 2 model id to move.
 
 Gemini, a local OpenAI-compatible embedding server, and Venice Private
 embeddings stay available as opt-in profiles. Switching an existing corpus to

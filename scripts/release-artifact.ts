@@ -145,19 +145,21 @@ for (const path of V0_4_PUBLIC_PACKAGE_FILES) {
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
     throw new Error(`Public package entry must be a regular non-symlink file: ${path}.`);
   }
-  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js' || path === 'dist/control-ui/index.js') continue;
+  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js' || path === 'dist/litert-helper.js' || path === 'dist/control-ui/index.js') continue;
   mkdirSync(dirname(join(stagingDir, path)), { recursive: true });
   copyFileSync(source, join(stagingDir, path));
 }
 await buildPublicRuntime('src/native-plugin.ts', 'dist/index.js');
 await buildPublicRuntime('src/cli.ts', 'dist/cli.js');
 await buildPublicRuntime('scripts/source-embedding-drain.ts', 'dist/embedding-drain.js');
+await buildPublicRuntime('src/workers/source-index/built-in-embedding/litert-helper.ts', 'dist/litert-helper.js', 'bun');
 await buildPublicRuntime('src/control-ui.ts', 'dist/control-ui/index.js', 'browser');
 run('bun', [
   join(rootDir, 'scripts/strip-generated-trailing-whitespace.ts'),
   join(stagingDir, 'dist/index.js'),
   join(stagingDir, 'dist/cli.js'),
   join(stagingDir, 'dist/embedding-drain.js'),
+  join(stagingDir, 'dist/litert-helper.js'),
   join(stagingDir, 'dist/control-ui/index.js'),
 ]);
 assertStagedEntrypointsAreSynchronouslyLoadable(stagingDir);
@@ -199,7 +201,7 @@ function readJson<T>(relativePath: string): T {
   return JSON.parse(readFileSync(join(rootDir, relativePath), 'utf8')) as T;
 }
 
-async function buildPublicRuntime(entry: string, output: string, target: 'node' | 'browser' = 'node'): Promise<void> {
+async function buildPublicRuntime(entry: string, output: string, target: 'node' | 'browser' | 'bun' = 'node'): Promise<void> {
   const destination = join(stagingDir, output);
   const buildFlavorPath = join(rootDir, 'src/core/build-flavor.ts');
   const googlePilotClientPath = join(rootDir, 'src/core/google-pilot-client.ts');

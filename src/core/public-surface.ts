@@ -297,6 +297,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'dist/index.js',
   'dist/cli.js',
   'dist/embedding-drain.js',
+  'dist/litert-helper.js',
   'dist/control-ui/index.js',
   'scripts/telegram-pair.py',
   'scripts/telegram-telethon-reader.py',

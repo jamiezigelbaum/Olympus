@@ -201,6 +201,14 @@ testers have exercised the normal product journey without custom engineering.
   hosted-relay parts of `design/hosted-agent-compatibility.md`. The OpenClaw
   outcome below stays valid for existing OpenClaw installs.
 
+- **2026-10-07 — Built-in transcription is in 1.0.** Owner decision: audio
+  (Dropbox audio files, voice notes, the sound track of the accepted video
+  containers) is transcribed on the machine with nothing to install, by
+  Qwen3-ASR 0.6B run on the llama.cpp `llama-server` Olympus already pins for
+  built-in reasoning. Audio never leaves the machine; there is no cloud ASR.
+  An owner-configured transcription command still wins. Scope, bounds and
+  proof: [built-in transcription](#built-in-transcription-in-10-owner-2026-10-07).
+
 - **2026-10-02 — Built-in scan reading is in 1.0.** Owner decision: the
   item deferred on 2026-10-01 is pulled into this release. On a Mac, scanned
   PDFs and images are read on-device with the system's own Vision text
@@ -1036,10 +1044,44 @@ in the design note.
 Not in this step: on-device transcription of audio and video. The Speech
 framework needs a speech-recognition privacy permission that a background
 `osascript` cannot ask for without an unexplained system prompt, so it stays
-off; audio keeps the configured transcription command. With none configured,
-audio settles names-only with a `transcription_required` warning (2026-10-07)
-instead of spending its retries and reading as a failed file. A local vision model
-for charts and photos remains a later step.
+off. Audio is read by the built-in transcription model instead (next
+section). A local vision model for charts and photos remains a later step.
+
+### Built-in transcription (in 1.0, owner 2026-10-07)
+
+A fresh Mac used to leave audio names-only unless the owner configured a
+transcription command. Now:
+
+- The transcription lane (`whisper_transcription`; the kind keeps its name)
+  has a built-in engine: Qwen3-ASR 0.6B (Apache-2.0; ggml-org GGUF, Q8_0
+  weights plus Q8_0 audio projector, about 1 GB, pinned by commit and
+  SHA-256) on the pinned llama.cpp b11320 `llama-server`, as a separate
+  loopback-only process that stops after 3 idle minutes. The llama.cpp
+  runtime is shared with the built-in reasoning model and installed once.
+- Engine order: an owner command (`OLYMPUS_TRANSCRIBE_COMMAND`) first, then
+  the built-in engine (on by default on Apple silicon;
+  `OLYMPUS_BUILT_IN_TRANSCRIPTION=on|off`), then none (`transcription_required`).
+- When it downloads (owner 2026-10-07): only when the owner's chosen sources
+  contain audio, checked at engine start and after each sync that catalogued
+  new items; with no audio it never downloads. Built-in model sizes: reasoning
+  about 2.6 GB, embedding about 0.8 GB, transcription about 1 GB only when
+  needed. Once it is ready, extraction runs within seconds, not at the next
+  pass.
+- While the model downloads, or
+  where it cannot run, audio settles names-only with `transcription_required`
+  and spends no retry; once the model is ready, the shared extraction runner
+  reads each such job (and legacy `transcriber_not_configured` terminal jobs)
+  once more.
+- Formats: the system `afconvert` decodes AAC/M4A, MP3, WAV, AIFF, CAF, FLAC,
+  Ogg Opus (voice notes), and the audio of MP4/MOV, to 16 kHz mono; audio is
+  read in chunks of up to 30 s cut at quiet moments.
+- Design, bounds and failure classes:
+  [`design/built-in-transcription.md`](design/built-in-transcription.md).
+
+Proof (2026-10-07, Apple-silicon Mac, scratch directories, synthetic clips):
+the pinned model downloaded and verified through the installer in 29 s; M4A,
+Ogg Opus, CAF Opus, MOV and AIFF clips and a 99 s MP3 (four chunks) were
+transcribed correctly, the longest in 7.6 s. Details in the design note.
 
 ### Deferred: high-value email embeddings
 

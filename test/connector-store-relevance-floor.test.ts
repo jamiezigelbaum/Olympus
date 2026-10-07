@@ -28,7 +28,7 @@ import {
   createConnectorStoreCorpusAdapter,
   defineConnectorCorpus,
 } from '../src/workers/connector-store/index.ts';
-import { BUILT_IN_EMBEDDING_MODEL } from '../src/workers/source-index/built-in-embedding/manifest.ts';
+import { ARCTIC_EMBED_M_V1_5 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import { searchPrivateEvidence, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -160,17 +160,17 @@ describe('the private match floor', () => {
   });
 });
 
-// A stand-in with the built-in model's identity (so its calibrated bar
+// A stand-in with the Arctic built-in model's identity (so its calibrated bar
 // applies). Every document sits on one axis; a query lands at a set cosine
 // to it: "below" at 0.39, "above" at 0.41, anything else at 0.30.
 function builtInLikeProvider(): SourceEmbeddingProvider {
   const at = (cosine: number) => [cosine, Math.sqrt(1 - cosine * cosine)];
   return {
     provider: 'built-in',
-    modelId: BUILT_IN_EMBEDDING_MODEL.modelId,
+    modelId: ARCTIC_EMBED_M_V1_5.modelId,
     dimension: 2,
     configHash: 'relevance-floor-fixture',
-    epochId: `local:built-in:${BUILT_IN_EMBEDDING_MODEL.modelId}:2`,
+    epochId: `local:built-in:${ARCTIC_EMBED_M_V1_5.modelId}:2`,
     backend: 'local',
     async embed(inputs: SourceEmbeddingInput[], options): Promise<number[][]> {
       return inputs.map((input) => {

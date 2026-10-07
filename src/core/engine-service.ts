@@ -46,7 +46,7 @@ export const ENGINE_RUN_COMMAND = '__engine-run';
  * host running, now supervising children from the new files.
  */
 export const ENGINE_BUILD_ENV = 'OLYMPUS_ENGINE_BUILD';
-const BUILD_DIGEST_FILES = ['cli.js', 'index.js', 'embedding-drain.js'] as const;
+const BUILD_DIGEST_FILES = ['cli.js', 'index.js', 'embedding-drain.js', 'litert-helper.js'] as const;
 const ENGINE_THROTTLE_SECONDS = 30;
 const PACKAGE_NAMES = new Set(['olympus', 'olympus-source-checkout']);
 

@@ -120,10 +120,10 @@ const ACKNOWLEDGEMENT_IDS: readonly string[] = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((
 
 const MESSAGES = {
   needsRevision: 'This change needs the settings revision the page was built from. Reload the page and try again.',
-  conflict: 'Outside help was changed somewhere else since this page loaded. Reload the page to see the current setting.',
+  conflict: 'Anonymous answers were changed somewhere else since this page loaded. Reload the page to see the current setting.',
   invalidCurrent: 'The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.',
-  routeMissing: 'Add the zkAPI route before turning outside help on.',
-  acknowledgementsIncomplete: 'Read and tick every statement about cost and risk before turning outside help on.',
+  routeMissing: 'Add zkAPI before turning anonymous answers on.',
+  acknowledgementsIncomplete: 'Read and tick every statement about cost and risk before turning anonymous answers on.',
   languageMissing: 'A chosen language has no vocabulary pack installed on this computer.',
   languagesEmpty: 'Choose at least one language.',
   noHome: 'Olympus cannot find your home folder, so it cannot write the settings file.',
@@ -143,8 +143,8 @@ const MESSAGES = {
   noFence: 'There is no held request to recover.',
   otherWallet: 'The held request belongs to another wallet folder. Recover it there, or abandon it.',
   scope: 'Name which held request to abandon.',
-  turnedOn: 'Outside help is on. When a private answer in ChatGPT is incomplete, Olympus may send one outside question for it.',
-  turnedOff: 'Outside help is off. No outside question is sent.',
+  turnedOn: 'Anonymous answers are on. When a private answer in ChatGPT is missing something, Olympus may ask one anonymous question for it.',
+  turnedOff: 'Anonymous answers are off. No question is sent.',
   routeSavedRestart: 'Saved. Olympus is restarting its worker to apply the change; this page will refresh.',
   routeSavedNoRestart: 'Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.',
   routeAdded: 'The zkAPI route is added. Put the daemon\'s API key in the worker environment file, then finish the steps below.',
@@ -318,7 +318,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
 
     async setEnabled(update) {
       const enabled = update.enabled;
-      if (typeof enabled !== 'boolean') return invalid('Say whether outside help should be on or off.');
+      if (typeof enabled !== 'boolean') return invalid('Say whether anonymous answers should be on or off.');
       const revision = update.revision;
       if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return invalid(MESSAGES.needsRevision, 'needs_revision');
       const replaceInvalid = update.replace_invalid === true;

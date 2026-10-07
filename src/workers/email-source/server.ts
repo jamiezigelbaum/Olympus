@@ -10,7 +10,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { createModelKeyReload } from '../../core/model-key-reload.ts';
+import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
@@ -70,6 +70,7 @@ import {
   workerAuthTokenFromEnv,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
+import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscriptionAtBoot } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
   answerPrivately,
   builtInAnalystEnabled,
@@ -269,7 +270,7 @@ import {
   sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
 import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
-import { BUILT_IN_EMBEDDING_MODEL } from '../source-index/built-in-embedding/manifest.ts';
+import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
   createGoogleDriveConnectorStoreSchedulerSource,
@@ -537,7 +538,7 @@ export function createSourceIndexEmbeddingProviderFromEnv(
   }
   if (provider === 'built-in') {
     return sharedBuiltInSourceEmbeddingProvider({
-      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_MODEL.modelId,
+      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId,
       env,
     });
   }
@@ -1776,6 +1777,18 @@ export function createFileExtractionLocalVlmClientFromEnv(
     : undefined;
 }
 
+/** How this process was launched; set only by startWorkerWithLaunch from the validated entry point. */
+let workerLaunch: WorkerLaunch = {};
+
+/**
+ * The CLI's entry: the launch state runWorkerForeground validated (never an
+ * ambient variable) rides into main() for the restart decision.
+ */
+export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void> {
+  workerLaunch = { ...launch };
+  await main();
+}
+
 export async function main(): Promise<void> {
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
@@ -2674,9 +2687,13 @@ export async function main(): Promise<void> {
       },
     },
     extractors: {
+      // An owner-configured command wins; otherwise audio is read by the
+      // built-in on-device transcriber where it runs (Apple silicon by default).
       ...(process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
         ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } }
-        : {}),
+        : sharedBuiltInTranscriber(process.env)
+          ? { transcription: { builtIn: sharedBuiltInTranscriber(process.env)! } }
+          : {}),
       ...(fileExtractionPdfTextCommand !== undefined || fileExtractionPdfTextTimeoutMs !== undefined
         || fileExtractionMaxBoundedTextChars !== undefined
         ? {
@@ -3827,6 +3844,15 @@ export async function main(): Promise<void> {
         : {}),
     })
     : undefined;
+  // Built-in transcription installs only when the chosen sources contain
+  // audio (each approved extraction lane checks at scheduler start, and each
+  // plan pass after a sync), and once ready wakes every extraction task so
+  // unread audio is read within seconds.
+  wireBuiltInTranscriptionAtBoot({
+    env: process.env,
+    engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
+    ...(sourceScheduler ? { wake: () => { sourceScheduler.wakeTasksOfKind('extract'); } } : {}),
+  });
   // Content-free latency ledger: on by default so the next "why was that answer
   // slow?" is answerable from the host. Only wired when the answer path exists.
   const sourceAnswerLatencyLogPath = sourceAnswer
@@ -4666,8 +4692,11 @@ export async function main(): Promise<void> {
   };
   const chatgptEmbeddingState = () => {
     const builtIn = (['public_safe', 'internal', 'secure_local'] as const)
-      .some((domain) => sovereigntyEngine.resolveEmbeddingProfile(domain)?.profile.provider === 'built-in');
-    return builtIn ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env)) : undefined;
+      .map((domain) => sovereigntyEngine.resolveEmbeddingProfile(domain)?.profile)
+      .find((profile) => profile?.provider === 'built-in');
+    // The configured model's install, which is not the new-install default on an older install.
+    const model = builtIn?.model ? builtInEmbeddingModel(builtIn.model) : undefined;
+    return model ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env, model)) : undefined;
   };
 
   const server = Bun.serve({
@@ -4799,13 +4828,15 @@ export async function main(): Promise<void> {
     installedTierClassification.close();
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
     stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
+    // The built-in transcriber's server, if this process started one.
+    stopBuiltInModelOnShutdown(runningBuiltInTranscriber());
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();
     void server.stop();
   };
   requestModelReload = createModelKeyReload({
-    managed: process.env.OLYMPUS_MANAGED_WORKER === '1',
+    managed: workerRestartsItself(workerLaunch, process.env),
     shutdown: async () => { shutdown('SIGTERM'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
