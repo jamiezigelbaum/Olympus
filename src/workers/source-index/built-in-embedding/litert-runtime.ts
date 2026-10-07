@@ -1,6 +1,7 @@
 // The parent side of the LiteRT-LM helper (litert-helper.ts): starts it under
-// Bun, sends it batches of text and reads back vectors. One request is in
-// flight at a time; the provider already runs one forward pass at a time.
+// Bun, sends it batches of text (and, for a model that reads images, text with
+// a picture) and reads back vectors. One request is in flight at a time; the
+// provider already runs one forward pass at a time.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
@@ -12,10 +13,16 @@ import type { LiteRtHelperSettings } from './litert-helper.ts';
 
 export type LiteRtDevice = 'gpu' | 'cpu';
 
+/**
+ * One input: text alone, or text with a picture (an absolute path to a
+ * prepared JPEG) that the model embeds together into one vector.
+ */
+export type LiteRtEmbedItem = string | { text: string; image?: string };
+
 export interface LiteRtEmbedder {
   /** Where the helper runs the model now. */
   readonly device: LiteRtDevice;
-  embed(texts: readonly string[]): Promise<Float32Array[]>;
+  embed(items: readonly LiteRtEmbedItem[]): Promise<Float32Array[]>;
   release(): Promise<void>;
 }
 
@@ -27,6 +34,11 @@ export interface LiteRtEmbedderOptions {
   /** `cpu` keeps the model off the GPU. */
   device: 'auto' | 'cpu';
   maxInputTokens: number;
+  /**
+   * Image tokens per picture for a model that reads images; absent keeps the
+   * vision encoder off and the helper refuses pictures.
+   */
+  visionTokensPerImage?: number;
   /** Defaults to this process when it is Bun, else Bun found on the machine. */
   bunPath?: string;
   /** Defaults to the helper next to this module (dist or source). */
@@ -100,6 +112,7 @@ class HelperProcess {
       threads: options.threads,
       device,
       maxInputTokens: options.maxInputTokens,
+      ...(options.visionTokensPerImage !== undefined ? { visionTokensPerImage: options.visionTokensPerImage } : {}),
     };
     const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -170,7 +183,7 @@ class HelperProcess {
     });
   }
 
-  embed(texts: readonly string[]): Promise<Float32Array[]> {
+  embed(items: readonly LiteRtEmbedItem[]): Promise<Float32Array[]> {
     if (this.exited) return Promise.reject(new Error('The built-in search model is not running.'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
@@ -180,8 +193,13 @@ class HelperProcess {
         this.exited = true;
         this.failAll(new Error('The built-in search model stopped responding and was restarted.'));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve, reject, count: texts.length, timer });
-      this.child.stdin.write(`${JSON.stringify({ id, texts })}\n`);
+      this.pending.set(id, { resolve, reject, count: items.length, timer });
+      // Text alone keeps the original request shape; a batch with a picture
+      // sends items, each its text and the picture's path.
+      const request = items.every((item) => typeof item === 'string')
+        ? { id, texts: items }
+        : { id, items: items.map((item) => (typeof item === 'string' ? { text: item } : item)) };
+      this.child.stdin.write(`${JSON.stringify(request)}\n`);
     });
   }
 
@@ -243,12 +261,12 @@ export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promi
   process.once('exit', releaseAtExit);
   return {
     get device() { return helper.device; },
-    async embed(texts) {
+    async embed(items) {
       if (helper.exited) {
         if (helper.device === 'gpu') device = 'cpu';
         helper = await HelperProcess.start(options, device);
       }
-      return helper.embed(texts);
+      return helper.embed(items);
     },
     async release() {
       process.removeListener('exit', releaseAtExit);

@@ -57,6 +57,7 @@ import {
 import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
+import { solidPng } from './helpers/solid-png.ts';
 
 const BUILT_IN_EPOCH = 'local:built-in:embeddinggemma-2-litert-24d962e:768';
 const ARCTIC_EPOCH = 'local:built-in:arctic-embed-m-v1.5-int8-e58a8f7:768';
@@ -635,13 +636,15 @@ describe('built-in embedding installer with a LiteRT model', () => {
 });
 
 /** A stand-in LiteRT helper: each prompt becomes `[length, first char code, batch size, 1]`. */
-function stubLiteRt(log: { batches: string[][]; options: LiteRtEmbedderOptions[] }, dimension = 4) {
+function stubLiteRt(log: { batches: string[][]; images: Array<Array<string | undefined>>; options: LiteRtEmbedderOptions[] }, dimension = 4) {
   return async (options: LiteRtEmbedderOptions): Promise<LiteRtEmbedder> => {
     log.options.push(options);
     return {
       device: options.device === 'cpu' ? 'cpu' : 'gpu',
-      async embed(texts) {
-        log.batches.push([...texts]);
+      async embed(items) {
+        const texts = items.map((item) => (typeof item === 'string' ? item : item.text));
+        log.batches.push(texts);
+        log.images.push(items.map((item) => (typeof item === 'string' ? undefined : item.image)));
         return texts.map((text) => Float32Array.from({ length: dimension }, (_, index) => [text.length, text.charCodeAt(0), texts.length, 1][index] ?? 0));
       },
       async release() {},
@@ -649,12 +652,17 @@ function stubLiteRt(log: { batches: string[][]; options: LiteRtEmbedderOptions[]
   };
 }
 
-function liteRtProvider(extraEnv: Record<string, string> = {}, dimension = 4) {
+function withoutVision(model: BuiltInEmbeddingModelSpec): BuiltInEmbeddingModelSpec {
+  const { vision: _vision, ...rest } = model;
+  return rest;
+}
+
+function liteRtProvider(extraEnv: Record<string, string> = {}, dimension = 4, vision = false) {
   const served = servedLiteRt();
-  const log = { batches: [] as string[][], options: [] as LiteRtEmbedderOptions[] };
+  const log = { batches: [] as string[][], images: [] as Array<Array<string | undefined>>, options: [] as LiteRtEmbedderOptions[] };
   const provider = new BuiltInSourceEmbeddingProvider({
     env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir(), ...extraEnv },
-    model: served.model,
+    model: vision ? { ...served.model, vision: { tokensPerImage: 140 } } : withoutVision(served.model),
     liteRt: stubLiteRt(log, dimension),
     installerOptions: { fetchImpl: served.fetchImpl, liteRtRuntime: served.pack },
   });
@@ -699,6 +707,28 @@ describe('built-in embedding with a LiteRT model', () => {
     expect(log.batches).toHaveLength(1);
   });
 
+  test('a document with a picture sends its usual prompt with the picture; a question never does', async () => {
+    const { provider, log } = liteRtProvider({}, 4, true);
+    await provider.prepare();
+    expect(log.options[0]!.visionTokensPerImage).toBe(140);
+    const image = { path: '/media-cache/abc.jpg', sha256: 'a'.repeat(64), mimeType: 'image/jpeg' };
+    await provider.embed([
+      { title: 'kitchen.jpg', text: 'Photo', image },
+      { text: 'a note' },
+    ], { taskType: 'RETRIEVAL_DOCUMENT' });
+    expect(log.batches[0]).toEqual(['title: kitchen.jpg | text: Photo', 'title: none | text: a note']);
+    expect(log.images[0]).toEqual([image.path, undefined]);
+    await provider.embed([{ text: 'the kitchen', image }], { taskType: 'RETRIEVAL_QUERY' });
+    expect(log.images.at(-1)).toEqual([undefined]);
+  });
+
+  test('a model without vision embeds the text alone and starts without the encoder', async () => {
+    const { provider, log } = liteRtProvider();
+    await provider.embed([{ text: 'Photo', image: { path: '/x.jpg', sha256: 'b'.repeat(64), mimeType: 'image/jpeg' } }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    expect(log.options[0]!.visionTokensPerImage).toBeUndefined();
+    expect(log.images[0]).toEqual([undefined]);
+  });
+
   test('refuses a vector of the wrong size', async () => {
     const { provider } = liteRtProvider({}, 8);
     await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' })).rejects.toThrow('returned 8 values, expected 4');
@@ -722,12 +752,16 @@ function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'nativ
     else lines.on('close', () => process.exit(0));
     lines.on('line', (line) => {
       if (behaviour === 'hang') return;
-      const { id, texts } = JSON.parse(line);
+      const request = JSON.parse(line);
+      const id = request.id;
+      const items = request.items ?? request.texts.map((text) => ({ text }));
+      const texts = items.map((item) => item.text);
       if (behaviour === 'crash-first-gpu-batch' && device === 'gpu') process.exit(3);
       if (behaviour === 'native-error-on-gpu' && device === 'gpu') { console.log(JSON.stringify({ id, error: 'LiteRT-LM could not embed this batch.', native: true })); return; }
       if (texts.includes('bad')) { console.log(JSON.stringify({ id, error: 'Every input must be non-empty text.' })); return; }
-      const vectors = new Float32Array(texts.length * 2);
-      texts.forEach((text, index) => vectors.set([text.length, device === 'gpu' ? 1 : 2], index * 2));
+      const vectors = new Float32Array(items.length * 2);
+      // An item with a picture answers with the vision setting it was started with.
+      items.forEach((item, index) => vectors.set([item.text.length, item.image ? settings.visionTokensPerImage : device === 'gpu' ? 1 : 2], index * 2));
       console.log(JSON.stringify({ id, dimension: 2, vectors: Buffer.from(vectors.buffer).toString('base64') }));
     });
   `);
@@ -744,6 +778,14 @@ describe('the LiteRT helper process', () => {
     expect(embedder.device).toBe('gpu');
     const vectors = await embedder.embed(['ab', 'abcd']);
     expect(vectors.map((vector) => Array.from(vector))).toEqual([[2, 1], [4, 1]]);
+    await embedder.release();
+  });
+
+  test('sends text with a picture as items, and text alone as before', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('ok'), { visionTokensPerImage: 140 }));
+    const vectors = await embedder.embed([{ text: 'abc', image: '/media/a.jpg' }, 'de']);
+    expect(vectors.map((vector) => Array.from(vector))).toEqual([[3, 140], [2, 1]]);
+    expect((await embedder.embed(['abcd'])).map((vector) => Array.from(vector))).toEqual([[4, 1]]);
     await embedder.release();
   });
 
@@ -812,6 +854,16 @@ describe('the built-in model registry', () => {
     for (const model of BUILT_IN_EMBEDDING_MODELS) {
       expect(canonicalEmbeddingIdentityForModel(model.modelId)?.dimension).toBe(model.dimension);
     }
+  });
+
+  test('EmbeddingGemma 2 keeps the identity its stored vectors were written under', () => {
+    const provider = new BuiltInSourceEmbeddingProvider({ env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() } });
+    expect(provider.epochId).toBe(BUILT_IN_EPOCH);
+    // Frozen at the value installs were embedded under before the image
+    // encoder was turned on (2026-10-07): text vectors are unchanged by it,
+    // so a change here would re-embed every EmbeddingGemma 2 install for nothing.
+    expect(provider.configHash).toBe('7e20c65a7450e853a7b4d8bbaf47c77541d0e41c41d63fd7a1abbd05c0b6243b');
+    expect(EMBEDDINGGEMMA_2.vision).toEqual({ tokensPerImage: 140 });
   });
 
   test('Arctic keeps the identity its stored vectors were written under', () => {
@@ -888,6 +940,30 @@ describe('built-in embedding with the real model (opt-in)', () => {
     const [long] = await provider.embed([{ text: 'The plumber fixed the kitchen sink and replaced the faucet. '.repeat(400) }], { taskType: 'RETRIEVAL_DOCUMENT' });
     expect(long!.length).toBe(768);
     expect(long!.reduce((sum, value, index) => sum + value * query![index]!, 0)).toBeGreaterThan(scores[0]!);
+  }, 900_000);
+
+  realTest('embeds a picture with its text, and a matching question beats a non-matching one', async () => {
+    const env = {
+      ...process.env,
+      OLYMPUS_BUILT_IN_EMBEDDING_DIR: process.env.OLYMPUS_BUILT_IN_EMBEDDING_DIR || temporaryDir(),
+    };
+    const provider = new BuiltInSourceEmbeddingProvider({ env });
+    await provider.prepare();
+    const path = join(temporaryDir(), 'red.png');
+    writeFileSync(path, solidPng(256, 256, [220, 20, 20]));
+    const [picture] = await provider.embed([{
+      title: 'swatch.png',
+      text: 'Photo',
+      image: { path, sha256: sha256(readFileSync(path)), mimeType: 'image/png' },
+    }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    const [textOnly] = await provider.embed([{ title: 'swatch.png', text: 'Photo' }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    const [match, other] = await provider.embed([{ text: 'a plain red square' }], { taskType: 'RETRIEVAL_QUERY' })
+      .then(async (first) => [...first, ...(await provider.embed([{ text: 'a snowy mountain at night' }], { taskType: 'RETRIEVAL_QUERY' }))]);
+    const cosine = (left: number[], right: number[]) => left.reduce((sum, value, index) => sum + value * right[index]!, 0);
+    expect(picture!.length).toBe(768);
+    // The picture moved the vector: it is not the text alone.
+    expect(cosine(picture!, textOnly!)).toBeLessThan(0.99);
+    expect(cosine(picture!, match!)).toBeGreaterThan(cosine(picture!, other!));
   }, 900_000);
 });
 

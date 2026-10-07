@@ -34,7 +34,7 @@ import {
   LITERT_RUNTIME_PACK,
   type BuiltInEmbeddingModelSpec,
 } from './manifest.ts';
-import { startLiteRtEmbedder, type LiteRtEmbedder, type LiteRtEmbedderOptions } from './litert-runtime.ts';
+import { startLiteRtEmbedder, type LiteRtEmbedder, type LiteRtEmbedderOptions, type LiteRtEmbedItem } from './litert-runtime.ts';
 import { onnxRuntimeFromDirectory, type EmbeddingRuntime, type EmbeddingSession } from './runtime.ts';
 import { WordPieceTokenizer } from './wordpiece.ts';
 
@@ -248,6 +248,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
+          ...(this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}),
         });
         model = { kind: 'litert', embedder };
       } else {
@@ -324,13 +325,22 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     return sums.map((sum) => normalize(sum));
   }
 
-  /** LiteRT tokenizes, windows and pools itself; this only frames the prompts and keeps the pass order. */
+  /**
+   * LiteRT tokenizes, windows and pools itself; this only frames the prompts
+   * and keeps the pass order. A document with a picture, on a model that reads
+   * images, is its usual prompt plus the picture, embedded together.
+   */
   private async embedLiteRt(
     embedder: LiteRtEmbedder,
     inputs: SourceEmbeddingInput[],
     taskType: SourceEmbeddingTaskType,
   ): Promise<number[][]> {
-    const prompts = inputs.map((input) => promptText(this.spec, input, taskType));
+    const prompts: LiteRtEmbedItem[] = inputs.map((input) => {
+      const text = promptText(this.spec, input, taskType);
+      return taskType === 'RETRIEVAL_DOCUMENT' && this.spec.vision && input.image
+        ? { text, image: input.image.path }
+        : text;
+    });
     const out: number[][] = [];
     for (let offset = 0; offset < prompts.length; offset += LITERT_BATCH) {
       const batch = prompts.slice(offset, offset + LITERT_BATCH);
