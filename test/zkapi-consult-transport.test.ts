@@ -22,7 +22,12 @@ import {
   openZkapiConsultSession,
   recoverZkapiSession,
   reserveZkapiRequest,
+  resolveExecutable,
   sendZkapiConsult,
+  standardExecutableDirectories,
+  trustedFallbackExecutable,
+  type ExecutableTrustProbe,
+  zkapiConsultReadiness,
   abandonZkapiFence,
   zkapiFenceScope,
   zkapiOutstandingFences,
@@ -2315,4 +2320,133 @@ describe('doctor: zkapi_consult_transport', () => {
       squatter.stop(true);
     }
   }, SLOW);
+});
+
+describe('zkAPI consult transport: finding the programs', () => {
+  test('after PATH, the standard install folders: ~/.local/bin, then Homebrew and /usr/local/bin on macOS; ~/.local/bin and /usr/local/bin on Linux', () => {
+    expect(standardExecutableDirectories({ HOME: '/Users/me' }, 'darwin')).toEqual(['/Users/me/.local/bin', '/opt/homebrew/bin', '/usr/local/bin']);
+    expect(standardExecutableDirectories({ HOME: '/home/me' }, 'linux')).toEqual(['/home/me/.local/bin', '/usr/local/bin']);
+    // No HOME, or a relative one: no home folder is guessed.
+    expect(standardExecutableDirectories({}, 'darwin')).toEqual(['/opt/homebrew/bin', '/usr/local/bin']);
+    expect(standardExecutableDirectories({ HOME: 'relative' }, 'linux')).toEqual(['/usr/local/bin']);
+  });
+
+  // A described filesystem for the fallback trust check: owner, mode, kind and links.
+  function fakeTrust(entries: Record<string, { uid?: number; mode?: number; kind?: 'dir' | 'file'; link?: string; exec?: boolean }>): ExecutableTrustProbe {
+    const real = (path: string): string => {
+      const parts = path.split('/').filter(Boolean);
+      let current = '/';
+      for (const part of parts) {
+        current = current === '/' ? `/${part}` : `${current}/${part}`;
+        const entry = entries[current];
+        if (!entry) throw new Error(`ENOENT ${current}`);
+        if (entry.link) current = real(entry.link);
+      }
+      return current;
+    };
+    return {
+      realpath: real,
+      stat: (path) => {
+        const entry = path === '/' ? { uid: 0, mode: 0o755, kind: 'dir' as const } : entries[path];
+        if (!entry || entry.link) throw new Error(`ENOENT ${path}`);
+        return { uid: entry.uid ?? 0, mode: entry.mode ?? 0o755, isFile: () => entry.kind === 'file', isDirectory: () => (entry.kind ?? 'dir') === 'dir' };
+      },
+      executable: (path) => entries[path]?.exec !== false,
+      uid: () => 501,
+    };
+  }
+  const HOME_TREE = {
+    '/Users': { uid: 0 },
+    '/Users/me': { uid: 501, mode: 0o750 },
+    '/Users/me/.local': { uid: 501 },
+    '/Users/me/.local/bin': { uid: 501 },
+    '/opt': { uid: 0 },
+    '/opt/homebrew': { uid: 501 },
+    '/opt/homebrew/bin': { uid: 501 },
+    '/opt/homebrew/Cellar': { uid: 501 },
+    '/opt/homebrew/Cellar/tor': { uid: 501 },
+    '/opt/homebrew/Cellar/tor/bin': { uid: 501 },
+    '/opt/homebrew/Cellar/tor/bin/tor': { uid: 501, kind: 'file' as const },
+    '/opt/homebrew/bin/tor': { link: '/opt/homebrew/Cellar/tor/bin/tor' },
+  };
+  const BARE = { HOME: '/Users/me', PATH: '/nonexistent-olympus-path' };
+
+  test('a fallback match runs as its canonical file only when this user or root owns it and every folder above it, none writable by others', () => {
+    const trusted = fakeTrust({ ...HOME_TREE, '/Users/me/.local/bin/zkapi-clientd': { uid: 501, kind: 'file' } });
+    expect(resolveExecutable('zkapi-clientd', undefined, BARE, 'darwin', trusted)).toBe('/Users/me/.local/bin/zkapi-clientd');
+    // A Homebrew symlink resolves to the canonical Cellar file, which is what probe and session both run.
+    expect(resolveExecutable('tor', undefined, BARE, 'darwin', trusted)).toBe('/opt/homebrew/Cellar/tor/bin/tor');
+    // A world-writable folder in the chain: skipped.
+    const worldWritable = fakeTrust({ ...HOME_TREE, '/Users/me/.local/bin': { uid: 501, mode: 0o777 }, '/Users/me/.local/bin/zkapi-clientd': { uid: 501, kind: 'file' } });
+    expect(resolveExecutable('zkapi-clientd', undefined, BARE, 'darwin', worldWritable)).toBeUndefined();
+    const groupWritable = fakeTrust({ ...HOME_TREE, '/Users/me': { uid: 501, mode: 0o770 }, '/Users/me/.local/bin/zkapi-clientd': { uid: 501, kind: 'file' } });
+    expect(resolveExecutable('zkapi-clientd', undefined, BARE, 'darwin', groupWritable)).toBeUndefined();
+    // A file owned by another account: skipped.
+    const foreign = fakeTrust({ ...HOME_TREE, '/Users/me/.local/bin/zkapi-clientd': { uid: 502, kind: 'file' } });
+    expect(resolveExecutable('zkapi-clientd', undefined, BARE, 'darwin', foreign)).toBeUndefined();
+    const foreignFolder = fakeTrust({ ...HOME_TREE, '/opt/homebrew/Cellar/tor': { uid: 502 } });
+    expect(resolveExecutable('tor', undefined, BARE, 'darwin', foreignFolder)).toBeUndefined();
+    // A trusted-looking symlink to a file in a writable folder: skipped.
+    const writableTarget = fakeTrust({
+      ...HOME_TREE,
+      '/tmp': { uid: 0, mode: 0o1777 },
+      '/tmp/drop': { uid: 501, mode: 0o777 },
+      '/tmp/drop/tor': { uid: 501, kind: 'file' },
+      '/opt/homebrew/bin/tor': { link: '/tmp/drop/tor' },
+    });
+    expect(resolveExecutable('tor', undefined, BARE, 'darwin', writableTarget)).toBeUndefined();
+    // Not executable, or a directory: skipped.
+    expect(resolveExecutable('zkapi-clientd', undefined, BARE, 'darwin', fakeTrust({ ...HOME_TREE, '/Users/me/.local/bin/zkapi-clientd': { uid: 501, kind: 'file', exec: false } }))).toBeUndefined();
+    expect(trustedFallbackExecutable('/Users/me/.local/bin', fakeTrust(HOME_TREE))).toBeUndefined();
+    // Linux has no Homebrew folder in the list.
+    expect(resolveExecutable('tor', undefined, { HOME: '/Users/me', PATH: '' }, 'linux', trusted)).toBeUndefined();
+  });
+
+  test('PATH and explicit paths behave as before: no ownership check, PATH wins, an explicit path is the only candidate', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-zkapi-home-'));
+    const pathDir = mkdtempSync(join(tmpdir(), 'olympus-zkapi-path-'));
+    try {
+      writeFileSync(join(pathDir, 'zkapi-clientd'), '#!/bin/sh\n');
+      chmodSync(join(pathDir, 'zkapi-clientd'), 0o755);
+      chmodSync(pathDir, 0o777);
+      // Even a world-writable PATH folder is used as before: PATH is the operator's choice.
+      expect(resolveExecutable('zkapi-clientd', undefined, { HOME: home, PATH: `/usr/bin:${pathDir}` }, 'darwin')).toBe(join(pathDir, 'zkapi-clientd'));
+      expect(resolveExecutable('zkapi-clientd', join(home, 'missing'), { HOME: home, PATH: pathDir }, 'darwin')).toBeUndefined();
+      expect(resolveExecutable('zkapi-clientd', join(pathDir, 'zkapi-clientd'), { HOME: home, PATH: '' }, 'darwin')).toBe(join(pathDir, 'zkapi-clientd'));
+      // The real filesystem: a world-writable ~/.local/bin is never trusted.
+      const local = join(home, '.local', 'bin');
+      mkdirSync(local, { recursive: true });
+      writeFileSync(join(local, 'tor'), '#!/bin/sh\n');
+      chmodSync(join(local, 'tor'), 0o755);
+      chmodSync(local, 0o777);
+      expect(trustedFallbackExecutable(join(local, 'tor'))).toBeUndefined();
+    } finally {
+      chmodSync(pathDir, 0o700);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(pathDir, { recursive: true, force: true });
+    }
+  });
+
+  test('the readiness probe finds zkapi-clientd and tor in ~/.local/bin with the LaunchAgent\'s PATH, so neither reads as not installed', async () => {
+    const local = join(root, '.local', 'bin');
+    mkdirSync(local, { recursive: true });
+    for (const name of ['tor', 'zkapi-clientd']) {
+      writeFileSync(join(local, name), readFileSync(join(binDir, name)));
+      chmodSync(join(local, name), 0o755);
+    }
+    const { daemonExecutable: _d, torExecutable: _t, ...unpinned } = settings();
+    const ready = await zkapiConsultReadiness({ ...transport({ settings: unpinned as ZkapiConsultSettings }), env: { HOME: root, PATH: '/usr/bin:/bin:/usr/sbin:/sbin', ZKAPI_CLIENTD_CONFIG_DIR: configDir } });
+    // Found exactly when the real folders above the temp HOME pass the trust check (a
+    // world-writable /tmp, as on Linux runners, rightly fails it).
+    const trusted = trustedFallbackExecutable(join(local, 'zkapi-clientd'));
+    expect(ready.daemonExecutable).toBe(trusted);
+    expect(ready.torExecutable).toBe(trustedFallbackExecutable(join(local, 'tor')));
+    if (trusted) {
+      expect(trusted).toBe(realpathSync(join(local, 'zkapi-clientd')));
+      expect(ready.blockers).not.toContain('daemon_not_found');
+      expect(ready.blockers).not.toContain('tor_not_found');
+    } else {
+      expect(ready.blockers).toContain('daemon_not_found');
+    }
+  });
 });

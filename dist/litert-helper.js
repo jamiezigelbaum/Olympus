@@ -65,9 +65,7 @@ function requestItems(request, vision) {
       return { text: item.text };
     if (typeof item.image !== "string" || !isAbsolute(item.image))
       throw new Error("An image must be an absolute file path.");
-    if (!vision)
-      throw new Error("This model was started without its image encoder.");
-    return { text: item.text, image: item.image };
+    return { text: item.text, image: item.image, ...vision ? {} : { unsupported: true } };
   });
 }
 function readImage(path) {
@@ -92,7 +90,55 @@ function readImage(path) {
   }
 }
 function embedBatch(lib, engine, options, items) {
-  const images = items.map((item) => item.image ? readImage(item.image) : undefined);
+  const failed = new Set;
+  const images = items.map((item, index) => {
+    if (!item.image)
+      return;
+    if (item.unsupported) {
+      failed.add(index);
+      return;
+    }
+    try {
+      return readImage(item.image);
+    } catch {
+      failed.add(index);
+      return;
+    }
+  });
+  const results = new Map;
+  let dimension = 0;
+  const run = (indexes) => {
+    const out = embedRaw(lib, engine, options, indexes.map((index) => items[index]), indexes.map((index) => images[index]));
+    dimension = out.dimension;
+    indexes.forEach((index, row) => results.set(index, out.vectors.subarray(row * out.dimension, (row + 1) * out.dimension)));
+  };
+  const live = items.map((_, index) => index).filter((index) => !failed.has(index));
+  if (live.length > 0) {
+    try {
+      run(live);
+    } catch (error) {
+      if (!(error instanceof NativeError) || !live.some((index) => images[index]))
+        throw error;
+      const textOnly = live.filter((index) => !images[index]);
+      if (textOnly.length > 0)
+        run(textOnly);
+      for (const index of live.filter((candidate) => images[candidate])) {
+        try {
+          run([index]);
+        } catch (itemError) {
+          if (!(itemError instanceof NativeError))
+            throw itemError;
+          failed.add(index);
+        }
+      }
+    }
+  }
+  const vectors = new Float32Array(dimension * items.length);
+  for (const [index, vector] of results)
+    vectors.set(vector, index * dimension);
+  return { vectors, dimension, failed: [...failed].sort((left, right) => left - right) };
+}
+function embedRaw(lib, engine, options, items, images) {
   const inputs = [];
   try {
     const perItem = items.map((item, index) => {
@@ -200,8 +246,13 @@ function main() {
     try {
       const request = JSON.parse(line);
       id = request.id;
-      const { vectors, dimension } = embedBatch(lib, engine, options, requestItems(request, vision));
-      send({ id, dimension, vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString("base64") });
+      const { vectors, dimension, failed } = embedBatch(lib, engine, options, requestItems(request, vision));
+      send({
+        id,
+        dimension,
+        vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString("base64"),
+        ...failed.length > 0 ? { failed } : {}
+      });
     } catch (error) {
       send({ id, error: error instanceof Error ? error.message : String(error), ...error instanceof NativeError ? { native: true } : {} });
     }

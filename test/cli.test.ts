@@ -45,21 +45,24 @@ describe('CLI tool surface', () => {
     const instanceId = '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f';
     let setupLoads = 0;
     let workerStarts = 0;
+    const launches: unknown[] = [];
 
     await runWorkerForeground({
       managedInstanceId: instanceId,
       env: { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: instanceId },
       applySetupEnv: () => { setupLoads += 1; },
-      startWorker: () => { workerStarts += 1; },
+      startWorker: (launch) => { workerStarts += 1; launches.push(launch); },
     });
     expect({ setupLoads, workerStarts }).toEqual({ setupLoads: 0, workerStarts: 1 });
 
+    // A foreground worker carrying a stale native-service marker is not a supervised launch.
     await runWorkerForeground({
-      env: {},
+      env: { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: instanceId },
       applySetupEnv: () => { setupLoads += 1; },
-      startWorker: () => { workerStarts += 1; },
+      startWorker: (launch) => { workerStarts += 1; launches.push(launch); },
     });
     expect({ setupLoads, workerStarts }).toEqual({ setupLoads: 1, workerStarts: 2 });
+    expect(launches).toEqual([{ nativeServiceSupervised: true }, { nativeServiceSupervised: false }]);
 
     await expect(runWorkerForeground({
       managedInstanceId: instanceId,

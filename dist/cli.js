@@ -8345,14 +8345,591 @@ var init_source_corpus_registry = __esm(() => {
   PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
 });
 
-// src/core/source-ingestion-policy.ts
-import { existsSync as existsSync9, readFileSync as readFileSync12 } from "node:fs";
-import { homedir as homedir12 } from "node:os";
-import { join as join13 } from "node:path";
-function defaultDropboxIngestionPolicyPath() {
-  return join13(homedir12(), ".olympus", "sources", "dropbox.personal.ingestion.json");
+// src/core/remote-public-url.ts
+var exports_remote_public_url = {};
+__export(exports_remote_public_url, {
+  resolveRemotePublicUrls: () => resolveRemotePublicUrls,
+  parseRemotePublicBaseUrl: () => parseRemotePublicBaseUrl,
+  isConfiguredResource: () => isConfiguredResource,
+  currentRemotePublicUrls: () => currentRemotePublicUrls,
+  REMOTE_PUBLIC_BASE_URL_ENV: () => REMOTE_PUBLIC_BASE_URL_ENV,
+  REMOTE_MCP_RESOURCE_PATH: () => REMOTE_MCP_RESOURCE_PATH
+});
+function currentRemotePublicUrls(source) {
+  return typeof source === "function" ? source() : source;
 }
-function defaultDropboxIngestionPolicy() {
+function parseRemotePublicBaseUrl(value, installId) {
+  const raw = value?.trim();
+  if (!raw)
+    return { enabled: false, reason: "not_configured" };
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} is not a URL.` };
+  }
+  if (url.username || url.password) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not carry credentials.` };
+  }
+  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not have a query or fragment.` };
+  }
+  if (url.pathname !== "/" && url.pathname !== "") {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must be an origin such as https://example.com, with no path.` };
+  }
+  const secure = url.protocol === "https:";
+  if (!secure && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname))) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must use https (plain http is allowed only on a loopback host).` };
+  }
+  const origin = url.origin;
+  return {
+    enabled: true,
+    urls: {
+      origin,
+      host: url.host.toLowerCase(),
+      issuer: origin,
+      resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
+      protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
+      secure,
+      ...installId ? { installId } : {}
+    }
+  };
+}
+function resolveRemotePublicUrls(env = process.env) {
+  return parseRemotePublicBaseUrl(env[REMOTE_PUBLIC_BASE_URL_ENV]);
+}
+function isConfiguredResource(value, urls) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || value.includes("#"))
+    return false;
+  const path = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/$/, "") : parsed.pathname;
+  return `${parsed.origin}${path}` === urls.resource;
+}
+var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
+var init_remote_public_url = __esm(() => {
+  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/core/remote-access.ts
+var exports_remote_access = {};
+__export(exports_remote_access, {
+  writeRemoteAccessStatus: () => writeRemoteAccessStatus,
+  writeRelaySecret: () => writeRelaySecret,
+  resolveRemoteAccessUrls: () => resolveRemoteAccessUrls,
+  resolveRemoteAccessMode: () => resolveRemoteAccessMode,
+  remoteAccessStatusView: () => remoteAccessStatusView,
+  remoteAccessDirForCli: () => remoteAccessDirForCli,
+  remoteAccessDir: () => remoteAccessDir,
+  relayProcessRunning: () => relayProcessRunning,
+  readRemoteAccessStatus: () => readRemoteAccessStatus,
+  olympusDataDir: () => olympusDataDir,
+  loopbackWorkerOrigin: () => loopbackWorkerOrigin,
+  isRelayedRequest: () => isRelayedRequest,
+  ensureRemoteAccessDir: () => ensureRemoteAccessDir,
+  emptyRemoteAccessStatus: () => emptyRemoteAccessStatus,
+  demoInstallMarked: () => demoInstallMarked,
+  createRemotePublicUrlSource: () => createRemotePublicUrlSource,
+  createRelayedRequestCheck: () => createRelayedRequestCheck,
+  clearRelaySecret: () => clearRelaySecret,
+  carriesRelayMarker: () => carriesRelayMarker,
+  REMOTE_ACCESS_STATUS_SCHEMA: () => REMOTE_ACCESS_STATUS_SCHEMA,
+  REMOTE_ACCESS_DIR_NAME: () => REMOTE_ACCESS_DIR_NAME,
+  RELAY_SECRET_FILE: () => RELAY_SECRET_FILE,
+  RELAYED_REQUEST_HEADER: () => RELAYED_REQUEST_HEADER,
+  DEMO_INSTALL_MARKER_TEXT: () => DEMO_INSTALL_MARKER_TEXT,
+  DEMO_INSTALL_MARKER_FILE: () => DEMO_INSTALL_MARKER_FILE,
+  DEFAULT_RELAY_HOST: () => DEFAULT_RELAY_HOST
+});
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
+import {
+  chmodSync as raChmodSync,
+  lstatSync as raLstatSync,
+  mkdirSync as raMkdirSync,
+  readFileSync as raReadFileSync,
+  renameSync as raRenameSync,
+  statSync as raStatSync,
+  unlinkSync as raUnlinkSync,
+  writeFileSync as raWriteFileSync
+} from "node:fs";
+import { homedir as raHomedir } from "node:os";
+import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
+function resolveRemoteAccessMode(remote) {
+  if (!remote?.enabled)
+    return { mode: "off" };
+  const { relayHost, publicBaseUrl } = remote;
+  if (relayHost && publicBaseUrl) {
+    return {
+      mode: "error",
+      error: "remote.relayHost and remote.publicBaseUrl are mutually exclusive: the relay sets the public address itself. " + "Unset one of them (openclaw config unset plugins.entries.olympus.config.remote.publicBaseUrl, or .relayHost)."
+    };
+  }
+  if (publicBaseUrl) {
+    const parsed = parseRemotePublicBaseUrl(publicBaseUrl);
+    if (!parsed.enabled) {
+      return { mode: "error", error: `remote.publicBaseUrl is invalid: ${(parsed.detail ?? "not a URL").replace(REMOTE_PUBLIC_BASE_URL_ENV, "it")}` };
+    }
+    return { mode: "manual", publicBaseUrl: parsed.urls.origin };
+  }
+  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
+  if (!DNS_NAME.test(host)) {
+    return { mode: "error", error: "remote.relayHost must be a DNS name such as mcp.olympusplugin.ai, with no scheme, port or path." };
+  }
+  return { mode: "relay", relayHost: host };
+}
+function olympusDataDir(env = process.env) {
+  const configured = env.XDG_DATA_HOME?.trim();
+  const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), ".local", "share");
+  if (!raIsAbsolute(dataRoot))
+    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
+  return raJoin(dataRoot, "openclaw", "olympus");
+}
+function remoteAccessDir(env = process.env) {
+  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
+}
+function remoteAccessDirForCli(env = process.env) {
+  const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
+  const xdg = env.XDG_DATA_HOME?.trim() || workerEnv?.XDG_DATA_HOME;
+  return remoteAccessDir({ ...env.HOME !== undefined ? { HOME: env.HOME } : {}, ...xdg ? { XDG_DATA_HOME: xdg } : {} });
+}
+function ensureRemoteAccessDir(dir) {
+  raMkdirSync(dir, { recursive: true, mode: 448 });
+  const stat2 = raLstatSync(dir);
+  if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid()) {
+    throw new Error("the remote access state directory must be a directory owned by this user");
+  }
+  raChmodSync(dir, 448);
+  return dir;
+}
+function writePrivateText(path, text) {
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
+  raWriteFileSync(temporary, text, { mode: 384, flag: "wx" });
+  raChmodSync(temporary, 384);
+  raRenameSync(temporary, path);
+}
+function readPrivateFile(path) {
+  try {
+    const stat2 = raLstatSync(path);
+    if (!stat2.isFile() || typeof process.getuid === "function" && stat2.uid !== process.getuid())
+      return;
+    return raReadFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+}
+function cachedFileReader(path, parse, minIntervalMs, now) {
+  let checkedAt = -Infinity;
+  let key;
+  let value;
+  return () => {
+    const at = now();
+    if (at - checkedAt < minIntervalMs)
+      return value;
+    checkedAt = at;
+    let file;
+    try {
+      file = path();
+      const stat2 = raStatSync(file, { bigint: true });
+      const next = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}`;
+      if (next === key)
+        return value;
+      key = next;
+    } catch {
+      key = undefined;
+      value = undefined;
+      return;
+    }
+    const text = readPrivateFile(file);
+    value = text === undefined ? undefined : parse(text);
+    return value;
+  };
+}
+function emptyRemoteAccessStatus(mode, now = new Date) {
+  return {
+    schema: REMOTE_ACCESS_STATUS_SCHEMA,
+    updated_at: now.toISOString(),
+    mode,
+    error: null,
+    relay_host: null,
+    local_url: null,
+    public_base_url: null,
+    instance_id: null,
+    pid: null,
+    install_id: null,
+    relay: null,
+    last_connected_at: null
+  };
+}
+function writeRemoteAccessStatus(dir, status) {
+  ensureRemoteAccessDir(dir);
+  writePrivateText(raJoin(dir, STATUS_FILE), `${JSON.stringify(status, null, 2)}
+`);
+}
+function parseStatus(text) {
+  try {
+    const value = JSON.parse(text);
+    return value && value.schema === REMOTE_ACCESS_STATUS_SCHEMA ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function readRemoteAccessStatus(dir) {
+  const text = readPrivateFile(raJoin(dir, STATUS_FILE));
+  return text === undefined ? undefined : parseStatus(text);
+}
+function createRemotePublicUrlSource(env = process.env, options = {}) {
+  if (env[REMOTE_PUBLIC_BASE_URL_ENV]?.trim()) {
+    const parsed = parseRemotePublicBaseUrl(env[REMOTE_PUBLIC_BASE_URL_ENV]);
+    const urls = parsed.enabled ? parsed.urls : undefined;
+    return { origin: "env", current: () => urls };
+  }
+  const dir = remoteAccessDir(env);
+  const read = cachedFileReader(() => raJoin(dir, STATUS_FILE), (text) => {
+    const status = parseStatus(text);
+    if (!status || status.error || status.mode === "off" || !status.public_base_url)
+      return;
+    if (status.mode === "relay" && !(status.install_id && INSTALL_ID.test(status.install_id)))
+      return;
+    const parsed = parseRemotePublicBaseUrl(status.public_base_url, status.mode === "relay" ? status.install_id : undefined);
+    return parsed.enabled ? parsed.urls : undefined;
+  }, options.minIntervalMs ?? 1000, options.now ?? Date.now);
+  return { origin: "status", current: read };
+}
+function demoInstallMarked(dir) {
+  const text = readPrivateFile(raJoin(dir, DEMO_INSTALL_MARKER_FILE));
+  return text !== undefined && text.split(`
+`, 1)[0].trim() === DEMO_INSTALL_MARKER_TEXT;
+}
+function carriesRelayMarker(request) {
+  return request.headers.has(RELAYED_REQUEST_HEADER);
+}
+function writeRelaySecret(dir, secret) {
+  if (!RELAY_SECRET_PATTERN.test(secret))
+    throw new Error("relay secret must be 32 random bytes, base64url");
+  ensureRemoteAccessDir(dir);
+  writePrivateText(raJoin(dir, RELAY_SECRET_FILE), `${secret}
+`);
+}
+function clearRelaySecret(dir, secret) {
+  const path = raJoin(dir, RELAY_SECRET_FILE);
+  if (readPrivateFile(path)?.trim() !== secret)
+    return;
+  try {
+    raUnlinkSync(path);
+  } catch {}
+}
+function createRelayedRequestCheck(options = {}) {
+  const read = cachedFileReader(() => raJoin(options.dir ? options.dir() : remoteAccessDir(process.env), RELAY_SECRET_FILE), (text) => {
+    const secret = text.trim();
+    return RELAY_SECRET_PATTERN.test(secret) ? Buffer.from(secret, "utf8") : undefined;
+  }, 0, options.now ?? Date.now);
+  return (request) => {
+    const value = request.headers.get(RELAYED_REQUEST_HEADER);
+    if (!value)
+      return false;
+    const secret = read();
+    if (!secret)
+      return false;
+    const given = Buffer.from(value, "utf8");
+    return given.length === secret.length && raTimingSafeEqual(given, secret);
+  };
+}
+function isRelayedRequest(request) {
+  if (!request.headers.has(RELAYED_REQUEST_HEADER))
+    return false;
+  defaultRelayedCheck ??= createRelayedRequestCheck();
+  return defaultRelayedCheck(request);
+}
+function resolveRemoteAccessUrls(input) {
+  const local = localWorkerOrigin(input);
+  let publicBase = null;
+  let source = null;
+  const manual = parseRemotePublicBaseUrl(input.layeredEnv[REMOTE_PUBLIC_BASE_URL_ENV]);
+  if (manual.enabled) {
+    publicBase = manual.urls.origin;
+    source = "worker_env";
+  } else if (input.status && !input.status.error && input.status.mode !== "off" && input.status.public_base_url) {
+    const reported = parseRemotePublicBaseUrl(input.status.public_base_url);
+    if (reported.enabled) {
+      publicBase = reported.urls.origin;
+      source = input.status.mode === "relay" ? "relay" : "config";
+    }
+  }
+  const origin = publicBase ?? local;
+  return {
+    public_base_url: publicBase,
+    public_base_url_source: source,
+    mcp_url: `${origin}/mcp`,
+    openapi_url: `${origin}/openapi.json`,
+    oauth_issuer: publicBase,
+    local_url: local
+  };
+}
+function localWorkerOrigin(input) {
+  const explicit = originOf(input.env.OLYMPUS_EMAIL_BASE_URL);
+  if (explicit)
+    return explicit;
+  const reported = originOf(input.status?.local_url ?? undefined);
+  if (reported)
+    return reported;
+  const port = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
+  if (port && /^\d{1,5}$/.test(port)) {
+    const host = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+    const origin = originOf(`http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`);
+    if (origin)
+      return origin;
+  }
+  return originOf(input.configuredWorkerBaseUrl) ?? "http://127.0.0.1:8010";
+}
+function originOf(value) {
+  if (!value?.trim())
+    return;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return;
+  }
+}
+function loopbackWorkerOrigin(value) {
+  const origin = originOf(value);
+  if (!origin)
+    return;
+  const url = new URL(origin);
+  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
+}
+function remoteAccessStatusView(input) {
+  const { status, urls } = input;
+  const isAlive = input.isAlive ?? processIsAlive;
+  const mode = status ? status.mode : "off";
+  let relayState = status?.relay?.state ?? null;
+  if (status?.mode === "relay" && status.pid !== null && relayState !== "stopped" && !isAlive(status.pid)) {
+    relayState = "not_running";
+  }
+  const view = {
+    kind: "remote_access_status",
+    schema: REMOTE_ACCESS_STATUS_SCHEMA,
+    remote_enabled: urls.public_base_url_source === "worker_env" || status !== undefined && status.mode !== "off" && !status.error,
+    mode,
+    error: status?.error ?? null,
+    public_base_url: urls.public_base_url,
+    public_base_url_source: urls.public_base_url_source,
+    urls: { mcp: urls.mcp_url, openapi: urls.openapi_url, oauth_issuer: urls.oauth_issuer },
+    local_url: urls.local_url,
+    relay: {
+      host: status?.relay_host ?? null,
+      state: relayState,
+      connected: relayState === "online",
+      reason: status?.relay?.reason ?? null,
+      retry_in_ms: status?.relay?.retry_in_ms ?? null,
+      install_id: status?.install_id ?? null,
+      last_connected_at: status?.last_connected_at ?? null
+    },
+    updated_at: status?.updated_at ?? null,
+    next_step: null
+  };
+  view.next_step = nextStep(view, input.hostKind ?? "openclaw");
+  return view;
+}
+function nextStep(view, hostKind) {
+  if (view.error)
+    return view.error;
+  if (view.mode === "off" && !view.public_base_url) {
+    return "Remote access is off, so hosted agents cannot reach this Olympus (local agents are unaffected). " + "To turn it on, use Turn on remote access in the Agents section of the Olympus dashboard, " + (hostKind === "standalone" ? 'or set "remote": {"enabled": true} in ~/.olympus/engine.json and run: olympus engine restart' : "or run: openclaw config set plugins.entries.olympus.config.remote.enabled true");
+  }
+  if (view.mode !== "relay")
+    return null;
+  if (view.relay.state === "not_running") {
+    return hostKind === "standalone" ? "The relay process is not running; run olympus engine restart." : "The relay process is not running; check openclaw gateway status.";
+  }
+  if (view.relay.state === "offline") {
+    return `Olympus relay unavailable${view.relay.reason ? ` (${view.relay.reason})` : ""}. ` + "Olympus keeps retrying on its own; local agents are unaffected.";
+  }
+  if (view.relay.state !== "online")
+    return "Olympus is connecting to the relay.";
+  return null;
+}
+function relayProcessRunning(dir, isAlive = processIsAlive) {
+  const status = readRemoteAccessStatus(dir);
+  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
+}
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAYED_REQUEST_HEADER = "x-olympus-relay", STATUS_FILE = "status.json", DNS_NAME, INSTALL_ID, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai", DEMO_INSTALL_MARKER_FILE = "demo-install", DEMO_INSTALL_MARKER_TEXT = "olympus demo install: synthetic sample data only", RELAY_SECRET_FILE = "relay-secret", RELAY_SECRET_PATTERN, defaultRelayedCheck;
+var init_remote_access = __esm(() => {
+  init_remote_public_url();
+  init_worker_auth();
+  DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+  INSTALL_ID = /^[a-z2-7]{32}$/;
+  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+  RELAY_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+});
+
+// src/core/media-cache.ts
+import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
+import {
+  chmodSync as chmodSync3,
+  existsSync as existsSync9,
+  mkdirSync as mkdirSync8,
+  readdirSync,
+  renameSync as renameSync3,
+  rmSync as rmSync6,
+  rmdirSync,
+  statSync as statSync6,
+  writeFileSync as writeFileSync4
+} from "node:fs";
+import { basename as basename3, dirname as dirname12, isAbsolute as isAbsolute4, join as join13, resolve as resolve4 } from "node:path";
+function stillImagePreparationAvailable(platform2 = process.platform) {
+  return platform2 === "darwin" && existsSync9(SIPS_PATH);
+}
+function mediaCacheDir(env = process.env) {
+  const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
+  if (configured && !isAbsolute4(configured))
+    throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
+  return configured ? join13(configured, "olympus-media") : join13(olympusDataDir(env), "media-cache");
+}
+function isSha256(value) {
+  if (value.length !== 64)
+    return false;
+  for (const character of value) {
+    if (!"0123456789abcdef".includes(character))
+      return false;
+  }
+  return true;
+}
+function isMediaCachePath(path, sha256, dir = mediaCacheDir()) {
+  if (!isAbsolute4(path) || !isSha256(sha256))
+    return false;
+  return resolve4(path) === join13(resolve4(dir), `${sha256}.jpg`);
+}
+function writeMediaCacheFile(dir, bytes, mimeType) {
+  const sha256 = createHash4("sha256").update(bytes).digest("hex");
+  const path = join13(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
+  ensureOwnerOnlyDir(dir);
+  const stagingHolder = `staging:${randomUUID4()}`;
+  addMarker(path, stagingHolder);
+  if (!existsSync9(path)) {
+    const temporary = join13(dir, `.${sha256}.${randomUUID4()}.tmp`);
+    writeFileSync4(temporary, bytes, { mode: 384 });
+    chmodSync3(temporary, 384);
+    renameSync3(temporary, path);
+  }
+  return { path, sha256, mimeType, stagingHolder };
+}
+function retainMediaCacheFile(path, sha256, holder, dir) {
+  if (!isMediaCachePath(path, sha256, dir))
+    return false;
+  try {
+    addMarker(path, holder);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function releaseMediaCacheFile(path, sha256, holder, dir) {
+  if (!isMediaCachePath(path, sha256, dir))
+    return false;
+  try {
+    const refs = refsDir(path);
+    rmSync6(join13(refs, holderName(holder)), { force: true });
+    const remaining = existsSync9(refs) ? readdirSync(refs) : [];
+    if (remaining.length > 0)
+      return false;
+    if (existsSync9(refs))
+      rmdirSync(refs);
+    rmSync6(path, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function sweepMediaCache(dir, options = {}) {
+  const maxAgeMs = options.maxAgeMs ?? MEDIA_CACHE_ORPHAN_AGE_MS;
+  const now = options.now ?? Date.now();
+  const old = (path) => {
+    try {
+      return now - statSync6(path).mtimeMs > maxAgeMs;
+    } catch {
+      return false;
+    }
+  };
+  let removed = 0;
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    const path = join13(dir, name);
+    try {
+      if (name.startsWith(".") && name.endsWith(".tmp")) {
+        if (old(path))
+          rmSync6(path, { force: true });
+        continue;
+      }
+      if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
+        continue;
+      const refs = refsDir(path);
+      if (existsSync9(refs)) {
+        for (const marker of readdirSync(refs)) {
+          if (marker.startsWith("staging-") && old(join13(refs, marker)))
+            rmSync6(join13(refs, marker), { force: true });
+        }
+        if (readdirSync(refs).length > 0)
+          continue;
+        rmdirSync(refs);
+      }
+      if (old(path)) {
+        rmSync6(path, { force: true });
+        removed += 1;
+      }
+    } catch {}
+  }
+  return removed;
+}
+function addMarker(path, holder) {
+  const refs = refsDir(path);
+  ensureOwnerOnlyDir(refs);
+  writeFileSync4(join13(refs, holderName(holder)), "", { mode: 384 });
+}
+function refsDir(path) {
+  return join13(dirname12(path), `${basename3(path)}.refs`);
+}
+function holderName(holder) {
+  const digest = createHash4("sha256").update(holder).digest("hex").slice(0, 32);
+  return holder.startsWith("staging:") ? `staging-${digest}` : digest;
+}
+function ensureOwnerOnlyDir(dir) {
+  mkdirSync8(dir, { recursive: true, mode: 448 });
+  chmodSync3(dir, 448);
+}
+var MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", SIPS_PATH = "/usr/bin/sips", MEDIA_CACHE_ORPHAN_AGE_MS, EXTENSIONS;
+var init_media_cache = __esm(() => {
+  init_remote_access();
+  MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
+  EXTENSIONS = { "image/jpeg": ".jpg" };
+});
+
+// src/core/source-ingestion-policy.ts
+import { existsSync as existsSync10, readFileSync as readFileSync12 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { join as join14 } from "node:path";
+function defaultDropboxIngestionPolicyPath() {
+  return join14(homedir12(), ".olympus", "sources", "dropbox.personal.ingestion.json");
+}
+function defaultDropboxIngestionPolicy(options = {}) {
+  const stillImagesRead = options.stillImagesRead ?? stillImagePreparationAvailable();
   return {
     schemaVersion: SOURCE_INGESTION_POLICY_SCHEMA_VERSION,
     source: "dropbox.personal",
@@ -8365,8 +8942,11 @@ function defaultDropboxIngestionPolicy() {
     rules: [
       {
         match: {
-          mime_type_prefixes: ["video/"],
-          extensions: [...DEFAULT_DEFERRED_MEDIA_EXTENSIONS]
+          mime_type_prefixes: stillImagesRead ? ["video/"] : ["image/", "video/"],
+          extensions: [
+            ...DEFAULT_DEFERRED_VIDEO_EXTENSIONS,
+            ...stillImagesRead ? [] : DEFAULT_STILL_IMAGE_EXTENSIONS
+          ].sort()
         },
         action: "metadata_only",
         reason: "media_default_metadata_only"
@@ -8415,7 +8995,7 @@ function loadDropboxIngestionPolicy(options = {}) {
   }
   const env = options.env ?? process.env;
   const path = options.policyPath?.trim() || env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH?.trim() || env.OLYMPUS_SOURCE_INGESTION_POLICY_PATH?.trim() || defaultDropboxIngestionPolicyPath();
-  if (existsSync9(path)) {
+  if (existsSync10(path)) {
     return validateDropboxPolicy(parseSourceIngestionPolicy(JSON.parse(readFileSync12(path, "utf8")), path), path);
   }
   return defaultDropboxIngestionPolicy();
@@ -8534,10 +9114,11 @@ function normalizePath(path) {
   const trimmed = path.trim();
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
-var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1, DEFAULT_DROPBOX_ROOT = "/", DEFAULT_DEFERRED_MEDIA_EXTENSIONS, DEFAULT_DEFERRED_BOOK_EXTENSIONS, DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS, DROPBOX_LANE_CORPUS_IDS;
+var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1, DEFAULT_DROPBOX_ROOT = "/", DEFAULT_DEFERRED_VIDEO_EXTENSIONS, DEFAULT_STILL_IMAGE_EXTENSIONS, DEFAULT_DEFERRED_BOOK_EXTENSIONS, DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS, DROPBOX_LANE_CORPUS_IDS;
 var init_source_ingestion_policy = __esm(() => {
   init_operation_error();
-  DEFAULT_DEFERRED_MEDIA_EXTENSIONS = [
+  init_media_cache();
+  DEFAULT_DEFERRED_VIDEO_EXTENSIONS = [
     "3gp",
     "avi",
     "m4v",
@@ -8546,6 +9127,18 @@ var init_source_ingestion_policy = __esm(() => {
     "mpeg",
     "mpg",
     "webm"
+  ];
+  DEFAULT_STILL_IMAGE_EXTENSIONS = [
+    "bmp",
+    "gif",
+    "heic",
+    "heif",
+    "jpeg",
+    "jpg",
+    "png",
+    "tif",
+    "tiff",
+    "webp"
   ];
   DEFAULT_DEFERRED_BOOK_EXTENSIONS = [
     "azw",
@@ -8582,9 +9175,9 @@ var init_source_ingestion_policy = __esm(() => {
 });
 
 // src/core/source-ingestion-exclusions.ts
-import { existsSync as existsSync10, readFileSync as readFileSync13 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync13 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 function sourceExclusionOutcomeIsUnevaluable(outcome) {
   switch (outcome) {
     case "excluded_path_unevaluable":
@@ -9020,7 +9613,7 @@ function parseFolderIds(value, label) {
   return folders;
 }
 function defaultSourceIngestionExclusionsPath() {
-  return join14(homedir13(), ".olympus", "sources", "ingestion-exclusions.json");
+  return join15(homedir13(), ".olympus", "sources", "ingestion-exclusions.json");
 }
 function loadSourceIngestionExclusions(options = {}) {
   if (options.inlineExclusions !== undefined) {
@@ -9028,7 +9621,7 @@ function loadSourceIngestionExclusions(options = {}) {
   }
   const env = options.env ?? process.env;
   const path = options.exclusionsPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
-  if (!existsSync10(path))
+  if (!existsSync11(path))
     return { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules: [] };
   return parseSourceIngestionExclusions(JSON.parse(readFileSync13(path, "utf8")), path);
 }
@@ -9147,9 +9740,9 @@ var init_source_ingestion_exclusions = __esm(() => {
 });
 
 // src/core/config.ts
-import { existsSync as existsSync11, readFileSync as readFileSync14 } from "node:fs";
+import { existsSync as existsSync12, readFileSync as readFileSync14 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
-import { isAbsolute as isAbsolutePath, join as join15, resolve as resolve4 } from "node:path";
+import { isAbsolute as isAbsolutePath, join as join16, resolve as resolve5 } from "node:path";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
@@ -9162,8 +9755,8 @@ function loadConfig(env = process.env) {
     return config2;
   }
   const config = defaultConfig();
-  const configPath = env.OLYMPUS_CONFIG ?? join15(env.HOME?.trim() || homedir14(), ".olympus", "config.json");
-  if (existsSync11(configPath)) {
+  const configPath = env.OLYMPUS_CONFIG ?? join16(env.HOME?.trim() || homedir14(), ".olympus", "config.json");
+  if (existsSync12(configPath)) {
     const raw = JSON.parse(readFileSync14(configPath, "utf8"));
     mergeConfig(config, raw);
   }
@@ -9173,11 +9766,11 @@ function loadConfig(env = process.env) {
 }
 function installedEngineConfig(env) {
   const home = env.HOME?.trim() || homedir14();
-  const enginePath = join15(home, ".olympus", "engine.json");
-  const agentPath = join15(home, "Library", "LaunchAgents", "ai.olympusplugin.engine.plist");
-  if (env.OLYMPUS_ENGINE_HOST !== "1" && !existsSync11(agentPath))
+  const enginePath = join16(home, ".olympus", "engine.json");
+  const agentPath = join16(home, "Library", "LaunchAgents", "ai.olympusplugin.engine.plist");
+  if (env.OLYMPUS_ENGINE_HOST !== "1" && !existsSync12(agentPath))
     return;
-  if (!existsSync11(enginePath))
+  if (!existsSync12(enginePath))
     return;
   let parsed;
   try {
@@ -9797,7 +10390,7 @@ function validateConfig(config) {
     }
   }
   const { reportPath: creditReportPath, pauseFile: creditPausePath } = config.worker.creditMonitor;
-  if (creditReportPath && creditPausePath && resolve4(creditReportPath) === resolve4(creditPausePath)) {
+  if (creditReportPath && creditPausePath && resolve5(creditReportPath) === resolve5(creditPausePath)) {
     throw new OperationError("config_error", "worker.creditMonitor reportPath and pauseFile must be different paths.");
   }
   assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
@@ -10222,7 +10815,7 @@ var init_config = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash4, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash5, randomBytes as randomBytes4 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -10273,14 +10866,14 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash4("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash5("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
 function dashboardLaunchPageHeaders() {
   const script = DASHBOARD_LAUNCH_PAGE_HTML.split("<script>")[1].split("</script>")[0];
-  const scriptHash = createHash4("sha256").update(script).digest("base64");
+  const scriptHash = createHash5("sha256").update(script).digest("base64");
   return {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
@@ -10581,7 +11174,7 @@ var init_tokens = __esm(() => {
 });
 
 // src/core/remote-oauth-store.ts
-import { createHash as createHash5, randomBytes as randomBytes6, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHash as createHash6, randomBytes as randomBytes6, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 function isWellFormedOAuthAccessToken(token) {
   return ACCESS_TOKEN_PATTERN.test(token) || credentialInstallId("access", token) !== undefined;
 }
@@ -10603,7 +11196,7 @@ function normalizePairingCode(input) {
   return compact;
 }
 function digest(value) {
-  return createHash5("sha256").update(value, "utf8").digest();
+  return createHash6("sha256").update(value, "utf8").digest();
 }
 function randomPairingSymbols(length) {
   const limit = 256 - 256 % PAIRING_ALPHABET.length;
@@ -10902,17 +11495,17 @@ __export(exports_remote_connections, {
   REMOTE_CONNECTIONS_DB_PATH_ENV: () => REMOTE_CONNECTIONS_DB_PATH_ENV
 });
 import { Database } from "bun:sqlite";
-import { createHash as createHash6, randomBytes as randomBytes7, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
-import { chmodSync as chmodSync3, existsSync as existsSync12, lstatSync as lstatSync6, mkdirSync as mkdirSync8 } from "node:fs";
+import { createHash as createHash7, randomBytes as randomBytes7, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { chmodSync as chmodSync4, existsSync as existsSync13, lstatSync as lstatSync6, mkdirSync as mkdirSync9 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
-import { dirname as dirname12, isAbsolute as isAbsolute4, join as join16 } from "node:path";
+import { dirname as dirname13, isAbsolute as isAbsolute5, join as join17 } from "node:path";
 function remoteConnectionsPreV2BackupPath(dbPath) {
   return `${dbPath}.pre-v2.bak`;
 }
 function resolveRemoteConnectionsDbPath(env = process.env) {
   const explicit = env[REMOTE_CONNECTIONS_DB_PATH_ENV]?.trim();
   if (explicit) {
-    if (!isAbsolute4(explicit)) {
+    if (!isAbsolute5(explicit)) {
       throw new TypeError(`${REMOTE_CONNECTIONS_DB_PATH_ENV} must be an absolute path.`);
     }
     return explicit;
@@ -10934,24 +11527,24 @@ function resolveRemoteConnectionsDbPathForCli(env = process.env) {
 }
 function defaultRemoteConnectionsDbPath(env = process.env) {
   const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || join16(env.HOME?.trim() || homedir15(), ".local", "share");
-  if (!isAbsolute4(dataRoot)) {
+  const dataRoot = configured || join17(env.HOME?.trim() || homedir15(), ".local", "share");
+  if (!isAbsolute5(dataRoot)) {
     throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
   }
-  return join16(dataRoot, "openclaw", "olympus", "remote-connections.sqlite");
+  return join17(dataRoot, "openclaw", "olympus", "remote-connections.sqlite");
 }
 function isWellFormedRemoteConnectionToken(token) {
   return TOKEN_PATTERN.test(token);
 }
 function hashRemoteConnectionToken(token) {
-  return createHash6("sha256").update(token, "utf8").digest();
+  return createHash7("sha256").update(token, "utf8").digest();
 }
 function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
   const now = options.now ?? (() => new Date);
   hardenPrivateDatabasePath(dbPath);
   const db = new Database(dbPath, { create: true });
   try {
-    chmodSync3(dbPath, 384);
+    chmodSync4(dbPath, 384);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
     assertSqliteSchemaCanOpen(db, REMOTE_CONNECTIONS_STORE_ID, REMOTE_CONNECTIONS_SCHEMA_VERSION);
     backupBeforeOAuthMigration(db, dbPath);
@@ -11085,27 +11678,27 @@ function backupBeforeOAuthMigration(db, dbPath) {
   if (readSqliteSchemaVersion(db, REMOTE_CONNECTIONS_STORE_ID) !== 1)
     return;
   const backupPath = remoteConnectionsPreV2BackupPath(dbPath);
-  if (existsSync12(backupPath))
+  if (existsSync13(backupPath))
     return;
   db.query("VACUUM INTO ?").run(backupPath);
-  chmodSync3(backupPath, 384);
+  chmodSync4(backupPath, 384);
 }
 function hardenPrivateDatabasePath(dbPath) {
-  if (!isAbsolute4(dbPath)) {
+  if (!isAbsolute5(dbPath)) {
     throw new TypeError("Remote connections database path must be absolute.");
   }
-  const leafDir = dirname12(dbPath);
+  const leafDir = dirname13(dbPath);
   const forbiddenLeafDirs = new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir15()]);
   if (forbiddenLeafDirs.has(leafDir)) {
     throw new Error("Remote connections database must live inside a dedicated private leaf directory.");
   }
-  mkdirSync8(leafDir, { recursive: true, mode: 448 });
+  mkdirSync9(leafDir, { recursive: true, mode: 448 });
   const dirStat = lstatSync6(leafDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
     throw new Error("Remote connections database leaf must be a real private directory.");
   }
-  chmodSync3(leafDir, 448);
-  if (existsSync12(dbPath)) {
+  chmodSync4(leafDir, 448);
+  if (existsSync13(dbPath)) {
     const dbStat = lstatSync6(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
       throw new Error("Remote connections database must be a regular file, not a symlink.");
@@ -11200,7 +11793,7 @@ class DropboxApiMetadataClient {
     this.fetchImpl = options.fetch ?? fetch;
     this.baseUrl = options.baseUrl?.replace(/\/+$/, "") || "https://api.dropboxapi.com/2";
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_DROPBOX_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve5) => setTimeout(resolve5, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
   }
   async listFolder(request) {
     return this.postMetadataPage("/files/list_folder", {
@@ -11532,7 +12125,7 @@ var init_provider_client = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 function createDropboxSourceConnector(options) {
   const account = requireNonEmpty(options.account, "Dropbox source connector account");
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
@@ -11876,7 +12469,7 @@ function resumedPageOffset(cursor, page) {
   return cursor.pageDigest === metadataPageDigest(page) ? cursor.itemOffset : 0;
 }
 function metadataPageDigest(page) {
-  return createHash7("sha256").update(JSON.stringify({
+  return createHash8("sha256").update(JSON.stringify({
     entries: page.entries,
     cursor: page.cursor?.trim() || null,
     hasMore: Boolean(page.hasMore)
@@ -11891,7 +12484,7 @@ function providerItemIdFromLocalItemId(localItemId, account) {
 }
 function deletedProviderItemId(entry) {
   const ref = entry.pathLower || entry.pathDisplay || entry.name;
-  return `deleted:${createHash7("sha256").update(ref).digest("hex").slice(0, 32)}`;
+  return `deleted:${createHash8("sha256").update(ref).digest("hex").slice(0, 32)}`;
 }
 function listRootPath(rootFolderPath, approvedScopeKey, account) {
   const explicit = rootFolderPath?.trim();
@@ -12089,7 +12682,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -12122,14 +12715,14 @@ function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
   };
 }
 function abortableDelay(ms, signal) {
-  return new Promise((resolve5) => {
+  return new Promise((resolve6) => {
     if (signal.aborted)
-      return resolve5();
+      return resolve6();
     const timer = setTimeout(done, ms);
     function done() {
       clearTimeout(timer);
       signal.removeEventListener("abort", done);
-      resolve5();
+      resolve6();
     }
     signal.addEventListener("abort", done, { once: true });
   });
@@ -12848,7 +13441,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash8("sha256").update(value).digest("hex");
+  return createHash9("sha256").update(value).digest("hex");
 }
 function memoizeQueryEmbeddings(provider) {
   const queries = new Map;
@@ -12871,17 +13464,28 @@ function memoizeQueryEmbeddings(provider) {
       pending.catch(() => queries.delete(key));
       return pending;
     },
-    ...provider.assertBindingCurrent ? { assertBindingCurrent: () => provider.assertBindingCurrent() } : {}
+    ...provider.assertBindingCurrent ? { assertBindingCurrent: () => provider.assertBindingCurrent() } : {},
+    ...provider.imageSupport ? { imageSupport: () => provider.imageSupport() } : {}
   };
   return memoized;
 }
-var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
+var SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
+  SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
+    failedIndexes;
+    reason;
+    constructor(failedIndexes, reason) {
+      super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
+      this.name = "SourceEmbeddingInputsFailedError";
+      this.failedIndexes = failedIndexes;
+      this.reason = reason;
+    }
+  };
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   MEDIA_FETCH_HEADERS = {
     Accept: "image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
@@ -12901,7 +13505,7 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text = input.text?.trim() ?? "";
   if (!text) {
@@ -12962,7 +13566,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash9("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash10("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -14078,8 +14682,8 @@ var init_tier_classifier = __esm(() => {
 
 // src/workers/classification/tier-ledger.ts
 import { Database as Database2 } from "bun:sqlite";
-import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync13, mkdirSync as mkdirSync9, openSync as openSync7 } from "node:fs";
-import { dirname as dirname13 } from "node:path";
+import { chmodSync as chmodSync5, closeSync as closeSync7, existsSync as existsSync14, mkdirSync as mkdirSync10, openSync as openSync7 } from "node:fs";
+import { dirname as dirname14 } from "node:path";
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
 }
@@ -14096,8 +14700,8 @@ class TierLedger {
     this.now = options.now ?? (() => new Date);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
-      mkdirSync9(dirname13(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync13(this.dbPath))
+      mkdirSync10(dirname14(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync14(this.dbPath))
         closeSync7(openSync7(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
     }
@@ -15570,8 +16174,8 @@ function decisionFlags(decision) {
 }
 function restrictLedgerFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync13(path))
-      chmodSync4(path, 384);
+    if (existsSync14(path))
+      chmodSync5(path, 384);
   }
 }
 function assertTier(tier) {
@@ -15845,506 +16449,6 @@ var init_tier_ledger = __esm(() => {
     internal: 1,
     secure_local: 2
   };
-});
-
-// src/core/remote-public-url.ts
-var exports_remote_public_url = {};
-__export(exports_remote_public_url, {
-  resolveRemotePublicUrls: () => resolveRemotePublicUrls,
-  parseRemotePublicBaseUrl: () => parseRemotePublicBaseUrl,
-  isConfiguredResource: () => isConfiguredResource,
-  currentRemotePublicUrls: () => currentRemotePublicUrls,
-  REMOTE_PUBLIC_BASE_URL_ENV: () => REMOTE_PUBLIC_BASE_URL_ENV,
-  REMOTE_MCP_RESOURCE_PATH: () => REMOTE_MCP_RESOURCE_PATH
-});
-function currentRemotePublicUrls(source) {
-  return typeof source === "function" ? source() : source;
-}
-function parseRemotePublicBaseUrl(value, installId) {
-  const raw = value?.trim();
-  if (!raw)
-    return { enabled: false, reason: "not_configured" };
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} is not a URL.` };
-  }
-  if (url.username || url.password) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not carry credentials.` };
-  }
-  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not have a query or fragment.` };
-  }
-  if (url.pathname !== "/" && url.pathname !== "") {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must be an origin such as https://example.com, with no path.` };
-  }
-  const secure = url.protocol === "https:";
-  if (!secure && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname))) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must use https (plain http is allowed only on a loopback host).` };
-  }
-  const origin = url.origin;
-  return {
-    enabled: true,
-    urls: {
-      origin,
-      host: url.host.toLowerCase(),
-      issuer: origin,
-      resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
-      protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
-      secure,
-      ...installId ? { installId } : {}
-    }
-  };
-}
-function resolveRemotePublicUrls(env = process.env) {
-  return parseRemotePublicBaseUrl(env[REMOTE_PUBLIC_BASE_URL_ENV]);
-}
-function isConfiguredResource(value, urls) {
-  let parsed;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return false;
-  }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash || value.includes("#"))
-    return false;
-  const path = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/$/, "") : parsed.pathname;
-  return `${parsed.origin}${path}` === urls.resource;
-}
-var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
-var init_remote_public_url = __esm(() => {
-  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
-});
-
-// src/core/remote-access.ts
-var exports_remote_access = {};
-__export(exports_remote_access, {
-  writeRemoteAccessStatus: () => writeRemoteAccessStatus,
-  writeRelaySecret: () => writeRelaySecret,
-  resolveRemoteAccessUrls: () => resolveRemoteAccessUrls,
-  resolveRemoteAccessMode: () => resolveRemoteAccessMode,
-  remoteAccessStatusView: () => remoteAccessStatusView,
-  remoteAccessDirForCli: () => remoteAccessDirForCli,
-  remoteAccessDir: () => remoteAccessDir,
-  relayProcessRunning: () => relayProcessRunning,
-  readRemoteAccessStatus: () => readRemoteAccessStatus,
-  olympusDataDir: () => olympusDataDir,
-  loopbackWorkerOrigin: () => loopbackWorkerOrigin,
-  isRelayedRequest: () => isRelayedRequest,
-  ensureRemoteAccessDir: () => ensureRemoteAccessDir,
-  emptyRemoteAccessStatus: () => emptyRemoteAccessStatus,
-  demoInstallMarked: () => demoInstallMarked,
-  createRemotePublicUrlSource: () => createRemotePublicUrlSource,
-  createRelayedRequestCheck: () => createRelayedRequestCheck,
-  clearRelaySecret: () => clearRelaySecret,
-  carriesRelayMarker: () => carriesRelayMarker,
-  REMOTE_ACCESS_STATUS_SCHEMA: () => REMOTE_ACCESS_STATUS_SCHEMA,
-  REMOTE_ACCESS_DIR_NAME: () => REMOTE_ACCESS_DIR_NAME,
-  RELAY_SECRET_FILE: () => RELAY_SECRET_FILE,
-  RELAYED_REQUEST_HEADER: () => RELAYED_REQUEST_HEADER,
-  DEMO_INSTALL_MARKER_TEXT: () => DEMO_INSTALL_MARKER_TEXT,
-  DEMO_INSTALL_MARKER_FILE: () => DEMO_INSTALL_MARKER_FILE,
-  DEFAULT_RELAY_HOST: () => DEFAULT_RELAY_HOST
-});
-import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
-import {
-  chmodSync as raChmodSync,
-  lstatSync as raLstatSync,
-  mkdirSync as raMkdirSync,
-  readFileSync as raReadFileSync,
-  renameSync as raRenameSync,
-  statSync as raStatSync,
-  unlinkSync as raUnlinkSync,
-  writeFileSync as raWriteFileSync
-} from "node:fs";
-import { homedir as raHomedir } from "node:os";
-import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
-function resolveRemoteAccessMode(remote) {
-  if (!remote?.enabled)
-    return { mode: "off" };
-  const { relayHost, publicBaseUrl } = remote;
-  if (relayHost && publicBaseUrl) {
-    return {
-      mode: "error",
-      error: "remote.relayHost and remote.publicBaseUrl are mutually exclusive: the relay sets the public address itself. " + "Unset one of them (openclaw config unset plugins.entries.olympus.config.remote.publicBaseUrl, or .relayHost)."
-    };
-  }
-  if (publicBaseUrl) {
-    const parsed = parseRemotePublicBaseUrl(publicBaseUrl);
-    if (!parsed.enabled) {
-      return { mode: "error", error: `remote.publicBaseUrl is invalid: ${(parsed.detail ?? "not a URL").replace(REMOTE_PUBLIC_BASE_URL_ENV, "it")}` };
-    }
-    return { mode: "manual", publicBaseUrl: parsed.urls.origin };
-  }
-  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
-  if (!DNS_NAME.test(host)) {
-    return { mode: "error", error: "remote.relayHost must be a DNS name such as mcp.olympusplugin.ai, with no scheme, port or path." };
-  }
-  return { mode: "relay", relayHost: host };
-}
-function olympusDataDir(env = process.env) {
-  const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), ".local", "share");
-  if (!raIsAbsolute(dataRoot))
-    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
-  return raJoin(dataRoot, "openclaw", "olympus");
-}
-function remoteAccessDir(env = process.env) {
-  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
-}
-function remoteAccessDirForCli(env = process.env) {
-  const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
-  const xdg = env.XDG_DATA_HOME?.trim() || workerEnv?.XDG_DATA_HOME;
-  return remoteAccessDir({ ...env.HOME !== undefined ? { HOME: env.HOME } : {}, ...xdg ? { XDG_DATA_HOME: xdg } : {} });
-}
-function ensureRemoteAccessDir(dir) {
-  raMkdirSync(dir, { recursive: true, mode: 448 });
-  const stat2 = raLstatSync(dir);
-  if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid()) {
-    throw new Error("the remote access state directory must be a directory owned by this user");
-  }
-  raChmodSync(dir, 448);
-  return dir;
-}
-function writePrivateText(path, text) {
-  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
-  raWriteFileSync(temporary, text, { mode: 384, flag: "wx" });
-  raChmodSync(temporary, 384);
-  raRenameSync(temporary, path);
-}
-function readPrivateFile(path) {
-  try {
-    const stat2 = raLstatSync(path);
-    if (!stat2.isFile() || typeof process.getuid === "function" && stat2.uid !== process.getuid())
-      return;
-    return raReadFileSync(path, "utf8");
-  } catch {
-    return;
-  }
-}
-function cachedFileReader(path, parse, minIntervalMs, now) {
-  let checkedAt = -Infinity;
-  let key;
-  let value;
-  return () => {
-    const at = now();
-    if (at - checkedAt < minIntervalMs)
-      return value;
-    checkedAt = at;
-    let file;
-    try {
-      file = path();
-      const stat2 = raStatSync(file, { bigint: true });
-      const next = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}`;
-      if (next === key)
-        return value;
-      key = next;
-    } catch {
-      key = undefined;
-      value = undefined;
-      return;
-    }
-    const text = readPrivateFile(file);
-    value = text === undefined ? undefined : parse(text);
-    return value;
-  };
-}
-function emptyRemoteAccessStatus(mode, now = new Date) {
-  return {
-    schema: REMOTE_ACCESS_STATUS_SCHEMA,
-    updated_at: now.toISOString(),
-    mode,
-    error: null,
-    relay_host: null,
-    local_url: null,
-    public_base_url: null,
-    instance_id: null,
-    pid: null,
-    install_id: null,
-    relay: null,
-    last_connected_at: null
-  };
-}
-function writeRemoteAccessStatus(dir, status) {
-  ensureRemoteAccessDir(dir);
-  writePrivateText(raJoin(dir, STATUS_FILE), `${JSON.stringify(status, null, 2)}
-`);
-}
-function parseStatus(text) {
-  try {
-    const value = JSON.parse(text);
-    return value && value.schema === REMOTE_ACCESS_STATUS_SCHEMA ? value : undefined;
-  } catch {
-    return;
-  }
-}
-function readRemoteAccessStatus(dir) {
-  const text = readPrivateFile(raJoin(dir, STATUS_FILE));
-  return text === undefined ? undefined : parseStatus(text);
-}
-function createRemotePublicUrlSource(env = process.env, options = {}) {
-  if (env[REMOTE_PUBLIC_BASE_URL_ENV]?.trim()) {
-    const parsed = parseRemotePublicBaseUrl(env[REMOTE_PUBLIC_BASE_URL_ENV]);
-    const urls = parsed.enabled ? parsed.urls : undefined;
-    return { origin: "env", current: () => urls };
-  }
-  const dir = remoteAccessDir(env);
-  const read = cachedFileReader(() => raJoin(dir, STATUS_FILE), (text) => {
-    const status = parseStatus(text);
-    if (!status || status.error || status.mode === "off" || !status.public_base_url)
-      return;
-    if (status.mode === "relay" && !(status.install_id && INSTALL_ID.test(status.install_id)))
-      return;
-    const parsed = parseRemotePublicBaseUrl(status.public_base_url, status.mode === "relay" ? status.install_id : undefined);
-    return parsed.enabled ? parsed.urls : undefined;
-  }, options.minIntervalMs ?? 1000, options.now ?? Date.now);
-  return { origin: "status", current: read };
-}
-function demoInstallMarked(dir) {
-  const text = readPrivateFile(raJoin(dir, DEMO_INSTALL_MARKER_FILE));
-  return text !== undefined && text.split(`
-`, 1)[0].trim() === DEMO_INSTALL_MARKER_TEXT;
-}
-function carriesRelayMarker(request) {
-  return request.headers.has(RELAYED_REQUEST_HEADER);
-}
-function writeRelaySecret(dir, secret) {
-  if (!RELAY_SECRET_PATTERN.test(secret))
-    throw new Error("relay secret must be 32 random bytes, base64url");
-  ensureRemoteAccessDir(dir);
-  writePrivateText(raJoin(dir, RELAY_SECRET_FILE), `${secret}
-`);
-}
-function clearRelaySecret(dir, secret) {
-  const path = raJoin(dir, RELAY_SECRET_FILE);
-  if (readPrivateFile(path)?.trim() !== secret)
-    return;
-  try {
-    raUnlinkSync(path);
-  } catch {}
-}
-function createRelayedRequestCheck(options = {}) {
-  const read = cachedFileReader(() => raJoin(options.dir ? options.dir() : remoteAccessDir(process.env), RELAY_SECRET_FILE), (text) => {
-    const secret = text.trim();
-    return RELAY_SECRET_PATTERN.test(secret) ? Buffer.from(secret, "utf8") : undefined;
-  }, 0, options.now ?? Date.now);
-  return (request) => {
-    const value = request.headers.get(RELAYED_REQUEST_HEADER);
-    if (!value)
-      return false;
-    const secret = read();
-    if (!secret)
-      return false;
-    const given = Buffer.from(value, "utf8");
-    return given.length === secret.length && raTimingSafeEqual(given, secret);
-  };
-}
-function isRelayedRequest(request) {
-  if (!request.headers.has(RELAYED_REQUEST_HEADER))
-    return false;
-  defaultRelayedCheck ??= createRelayedRequestCheck();
-  return defaultRelayedCheck(request);
-}
-function resolveRemoteAccessUrls(input) {
-  const local = localWorkerOrigin(input);
-  let publicBase = null;
-  let source = null;
-  const manual = parseRemotePublicBaseUrl(input.layeredEnv[REMOTE_PUBLIC_BASE_URL_ENV]);
-  if (manual.enabled) {
-    publicBase = manual.urls.origin;
-    source = "worker_env";
-  } else if (input.status && !input.status.error && input.status.mode !== "off" && input.status.public_base_url) {
-    const reported = parseRemotePublicBaseUrl(input.status.public_base_url);
-    if (reported.enabled) {
-      publicBase = reported.urls.origin;
-      source = input.status.mode === "relay" ? "relay" : "config";
-    }
-  }
-  const origin = publicBase ?? local;
-  return {
-    public_base_url: publicBase,
-    public_base_url_source: source,
-    mcp_url: `${origin}/mcp`,
-    openapi_url: `${origin}/openapi.json`,
-    oauth_issuer: publicBase,
-    local_url: local
-  };
-}
-function localWorkerOrigin(input) {
-  const explicit = originOf(input.env.OLYMPUS_EMAIL_BASE_URL);
-  if (explicit)
-    return explicit;
-  const reported = originOf(input.status?.local_url ?? undefined);
-  if (reported)
-    return reported;
-  const port = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
-  if (port && /^\d{1,5}$/.test(port)) {
-    const host = input.layeredEnv.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
-    const origin = originOf(`http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`);
-    if (origin)
-      return origin;
-  }
-  return originOf(input.configuredWorkerBaseUrl) ?? "http://127.0.0.1:8010";
-}
-function originOf(value) {
-  if (!value?.trim())
-    return;
-  try {
-    const url = new URL(value.trim());
-    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
-  } catch {
-    return;
-  }
-}
-function loopbackWorkerOrigin(value) {
-  const origin = originOf(value);
-  if (!origin)
-    return;
-  const url = new URL(origin);
-  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
-}
-function remoteAccessStatusView(input) {
-  const { status, urls } = input;
-  const isAlive = input.isAlive ?? processIsAlive;
-  const mode = status ? status.mode : "off";
-  let relayState = status?.relay?.state ?? null;
-  if (status?.mode === "relay" && status.pid !== null && relayState !== "stopped" && !isAlive(status.pid)) {
-    relayState = "not_running";
-  }
-  const view = {
-    kind: "remote_access_status",
-    schema: REMOTE_ACCESS_STATUS_SCHEMA,
-    remote_enabled: urls.public_base_url_source === "worker_env" || status !== undefined && status.mode !== "off" && !status.error,
-    mode,
-    error: status?.error ?? null,
-    public_base_url: urls.public_base_url,
-    public_base_url_source: urls.public_base_url_source,
-    urls: { mcp: urls.mcp_url, openapi: urls.openapi_url, oauth_issuer: urls.oauth_issuer },
-    local_url: urls.local_url,
-    relay: {
-      host: status?.relay_host ?? null,
-      state: relayState,
-      connected: relayState === "online",
-      reason: status?.relay?.reason ?? null,
-      retry_in_ms: status?.relay?.retry_in_ms ?? null,
-      install_id: status?.install_id ?? null,
-      last_connected_at: status?.last_connected_at ?? null
-    },
-    updated_at: status?.updated_at ?? null,
-    next_step: null
-  };
-  view.next_step = nextStep(view, input.hostKind ?? "openclaw");
-  return view;
-}
-function nextStep(view, hostKind) {
-  if (view.error)
-    return view.error;
-  if (view.mode === "off" && !view.public_base_url) {
-    return "Remote access is off, so hosted agents cannot reach this Olympus (local agents are unaffected). " + "To turn it on, use Turn on remote access in the Agents section of the Olympus dashboard, " + (hostKind === "standalone" ? 'or set "remote": {"enabled": true} in ~/.olympus/engine.json and run: olympus engine restart' : "or run: openclaw config set plugins.entries.olympus.config.remote.enabled true");
-  }
-  if (view.mode !== "relay")
-    return null;
-  if (view.relay.state === "not_running") {
-    return hostKind === "standalone" ? "The relay process is not running; run olympus engine restart." : "The relay process is not running; check openclaw gateway status.";
-  }
-  if (view.relay.state === "offline") {
-    return `Olympus relay unavailable${view.relay.reason ? ` (${view.relay.reason})` : ""}. ` + "Olympus keeps retrying on its own; local agents are unaffected.";
-  }
-  if (view.relay.state !== "online")
-    return "Olympus is connecting to the relay.";
-  return null;
-}
-function relayProcessRunning(dir, isAlive = processIsAlive) {
-  const status = readRemoteAccessStatus(dir);
-  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
-}
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", RELAYED_REQUEST_HEADER = "x-olympus-relay", STATUS_FILE = "status.json", DNS_NAME, INSTALL_ID, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai", DEMO_INSTALL_MARKER_FILE = "demo-install", DEMO_INSTALL_MARKER_TEXT = "olympus demo install: synthetic sample data only", RELAY_SECRET_FILE = "relay-secret", RELAY_SECRET_PATTERN, defaultRelayedCheck;
-var init_remote_access = __esm(() => {
-  init_remote_public_url();
-  init_worker_auth();
-  DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
-  INSTALL_ID = /^[a-z2-7]{32}$/;
-  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
-  RELAY_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-});
-
-// src/core/media-cache.ts
-import { createHash as createHash10, randomUUID as randomUUID4 } from "node:crypto";
-import {
-  chmodSync as chmodSync5,
-  existsSync as existsSync14,
-  mkdirSync as mkdirSync10,
-  readdirSync,
-  renameSync as renameSync3,
-  rmSync as rmSync6,
-  rmdirSync,
-  writeFileSync as writeFileSync4
-} from "node:fs";
-import { basename as basename3, dirname as dirname14, isAbsolute as isAbsolute5, join as join17 } from "node:path";
-function mediaCacheDir(env = process.env) {
-  const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
-  const dir = configured || join17(olympusDataDir(env), "media-cache");
-  if (!isAbsolute5(dir))
-    throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
-  return dir;
-}
-function writeMediaCacheFile(dir, bytes, mimeType) {
-  const sha256 = createHash10("sha256").update(bytes).digest("hex");
-  const path = join17(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
-  ensureOwnerOnlyDir(dir);
-  if (!existsSync14(path)) {
-    const temporary = join17(dir, `.${sha256}.${randomUUID4()}.tmp`);
-    writeFileSync4(temporary, bytes, { mode: 384 });
-    chmodSync5(temporary, 384);
-    renameSync3(temporary, path);
-  }
-  return { path, sha256, mimeType };
-}
-function retainMediaCacheFile(path, holder) {
-  try {
-    const refs = refsDir(path);
-    ensureOwnerOnlyDir(refs);
-    writeFileSync4(join17(refs, holderName(holder)), "", { mode: 384 });
-  } catch {}
-}
-function releaseMediaCacheFile(path, holder) {
-  try {
-    const refs = refsDir(path);
-    rmSync6(join17(refs, holderName(holder)), { force: true });
-    const remaining = existsSync14(refs) ? readdirSync(refs) : [];
-    if (remaining.length > 0)
-      return false;
-    if (existsSync14(refs))
-      rmdirSync(refs);
-    rmSync6(path, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-function refsDir(path) {
-  return join17(dirname14(path), `${basename3(path)}.refs`);
-}
-function holderName(holder) {
-  return createHash10("sha256").update(holder).digest("hex").slice(0, 32);
-}
-function ensureOwnerOnlyDir(dir) {
-  mkdirSync10(dir, { recursive: true, mode: 448 });
-  chmodSync5(dir, 448);
-}
-var MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", EXTENSIONS;
-var init_media_cache = __esm(() => {
-  init_remote_access();
-  EXTENSIONS = { "image/jpeg": ".jpg" };
 });
 
 // src/workers/classification/installed-tier-classification-registry.ts
@@ -17275,7 +17379,7 @@ var init_manifest = __esm(() => {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync15, lstatSync as lstatSync7, mkdirSync as mkdirSync11, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync15, lstatSync as lstatSync7, mkdirSync as mkdirSync11, statSync as statSync7 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 import { Database as Database3 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
@@ -17411,6 +17515,16 @@ function createConnectorStoreChunkMediaReleases(db) {
     CREATE TABLE IF NOT EXISTS chunk_media_releases (
       media_sha256 TEXT PRIMARY KEY,
       media_path TEXT NOT NULL
+    );
+    -- "Does any chunk still hold this picture" is asked on every release.
+    CREATE INDEX IF NOT EXISTS idx_connector_store_chunks_media
+      ON chunks(media_sha256) WHERE media_sha256 IS NOT NULL;
+    -- Pictures the image encoder could not read: never sent again, so one
+    -- bad photo cannot hold up the rest of a store's embedding.
+    CREATE TABLE IF NOT EXISTS chunk_media_failures (
+      media_sha256 TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      failed_at TEXT NOT NULL
     );
     CREATE TRIGGER IF NOT EXISTS connector_store_chunk_media_release
     AFTER DELETE ON chunks
@@ -17925,7 +18039,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve5) => setTimeout(resolve5, 0));
+  return new Promise((resolve6) => setTimeout(resolve6, 0));
 }
 function normalizeSemanticRelevanceBar(value) {
   if (value === undefined)
@@ -19462,6 +19576,8 @@ function validateConnectorStoreV6Schema(db) {
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
+  assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at"], false, "v13");
+  assertIndexColumns(db, "idx_connector_store_chunks_media", ["media_sha256"], "v13");
   assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
 }
 function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
@@ -19774,7 +19890,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve5) => setTimeout(resolve5, 0));
+  return new Promise((resolve6) => setTimeout(resolve6, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -20081,6 +20197,7 @@ var init_local_index = __esm(() => {
     }
     close() {
       try {
+        this.releaseUnreferencedChunkMedia();
         if (this.tierLedgerOwned === true)
           this.tierLedgerHandle?.close();
         this.boundLedgerHandle?.close();
@@ -20491,12 +20608,11 @@ var init_local_index = __esm(() => {
         FROM chunks WHERE item_pk = ? ORDER BY chunk_index
       `).all(itemPk);
         const namesOnly = options.layers === "metadata";
-        if (!namesOnly && !this.chunkMediaColumnsPresent && copy.chunks.some((chunk) => chunk.mediaSha256)) {
-          throw new Error("Connector store chunks cannot carry media before the v13 schema.");
-        }
+        const keepsMedia = this.trustDomain === "secure_local" && this.chunkMediaColumnsPresent;
+        const strippedMedia = !keepsMedia && copy.chunks.some((chunk) => chunk.mediaSha256);
         const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
           const current = existing[index];
-          return current?.chunk_index === chunk.chunkIndex && current.bounded_text === chunk.boundedText && current.content_hash === chunk.contentHash && current.embedding_input_hash === chunk.embeddingInputHash && (current.media_sha256 ?? undefined) === (chunk.mediaSha256 ?? undefined);
+          return current?.chunk_index === chunk.chunkIndex && current.bounded_text === chunk.boundedText && current.content_hash === chunk.contentHash && current.embedding_input_hash === chunk.embeddingInputHash && (current.media_sha256 ?? undefined) === (keepsMedia ? chunk.mediaSha256 ?? undefined : undefined);
         });
         let chunksWritten = 0;
         if (!unchanged) {
@@ -20512,14 +20628,14 @@ var init_local_index = __esm(() => {
           `);
           for (const chunk of copy.chunks) {
             if (this.chunkMediaColumnsPresent) {
-              insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now, chunk.mediaPath ?? null, chunk.mediaSha256 ?? null);
+              insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now, keepsMedia ? chunk.mediaPath ?? null : null, keepsMedia ? chunk.mediaSha256 ?? null : null);
             } else {
               insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
             }
-            if (chunk.mediaPath)
-              retainMediaCacheFile(chunk.mediaPath, this.mediaHolder);
             chunksWritten += 1;
           }
+          if (strippedMedia)
+            this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
         }
         this.refreshFtsForItem(itemPk);
         const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
@@ -20569,8 +20685,32 @@ var init_local_index = __esm(() => {
           ...vectorsCopied === 0 ? { vectorsNotCopiedReason: hashMismatch ? "input_hash_mismatch" : "no_current_vectors" } : {}
         };
       })();
+      if (this.trustDomain === "secure_local" && options.layers !== "metadata") {
+        for (const chunk of copy.chunks) {
+          if (chunk.mediaPath && chunk.mediaSha256)
+            retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+        }
+      }
       this.releaseUnreferencedChunkMedia();
       return imported;
+    }
+    chunkMediaFailed(mediaSha256) {
+      return Boolean(this.db.query("SELECT 1 AS failed FROM chunk_media_failures WHERE media_sha256 = ?").get(mediaSha256));
+    }
+    storedEmbeddingSeasoning(itemPk) {
+      return this.db.query(`
+      SELECT title, search_text, mime_type, authored_at, updated_at FROM items WHERE item_pk = ?
+    `).get(itemPk) ?? {
+        title: null,
+        search_text: null,
+        mime_type: null,
+        authored_at: null,
+        updated_at: null
+      };
+    }
+    clearChunkMedia(chunkPk, itemPk) {
+      this.db.query("UPDATE chunks SET media_path = NULL, media_sha256 = NULL WHERE chunk_pk = ?").run(chunkPk);
+      this.reseasonItemEmbeddingInputs(itemPk, this.storedEmbeddingSeasoning(itemPk));
     }
     matchOrMintEmbeddingWriteAuthority(provider) {
       const existing = this.db.query(`
@@ -20702,6 +20842,13 @@ var init_local_index = __esm(() => {
       return migrationFingerprint(row.content_hash, hashes);
     }
     stripCopyContent(identity) {
+      try {
+        return this.stripCopyContentHeld(identity);
+      } finally {
+        this.releaseUnreferencedChunkMedia();
+      }
+    }
+    stripCopyContentHeld(identity) {
       return this.db.transaction(() => {
         const row = this.db.query(`
         SELECT item_pk FROM items
@@ -21185,6 +21332,7 @@ var init_local_index = __esm(() => {
       const accountScope = normalizeOptionalAccountScope(options.accountScope);
       const selectedFilters = connectorStoreFilterSql(options.filters);
       let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
+      const imagesWithoutPicture = this.chunkMediaColumnsPresent && this.trustDomain === "secure_local" && stillImagePreparationAvailable();
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
       const query = this.db.query(`
       SELECT
@@ -21198,7 +21346,11 @@ var init_local_index = __esm(() => {
         AND LOWER(i.mime_type) <> 'inode/directory'
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
-        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk))
+        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+          ${imagesWithoutPicture ? `OR (
+            LOWER(i.mime_type) LIKE 'image/%'
+            AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk AND c.media_sha256 IS NOT NULL)
+          )` : ""})
         ${selectedFilters.sql}
       ORDER BY i.item_pk
       LIMIT ?
@@ -21611,6 +21763,15 @@ var init_local_index = __esm(() => {
           skippedProviderItemIds: skippedProviderItemIds.sort()
         };
       })();
+      for (const record of options.items) {
+        if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
+          retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
+        } else if (record.media && this.chunkMediaColumnsPresent) {
+          const present = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(record.media.sha256);
+          if (present)
+            retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
+        }
+      }
       this.releaseUnreferencedChunkMedia();
       return summary;
     }
@@ -21622,12 +21783,19 @@ var init_local_index = __esm(() => {
         for (const entry of queued) {
           const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
           if (!referenced)
-            releaseMediaCacheFile(entry.media_path, this.mediaHolder);
+            releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
           this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
         }
       } catch {}
     }
     relinquishItems(options) {
+      try {
+        return this.relinquishItemsHeld(options);
+      } finally {
+        this.releaseUnreferencedChunkMedia();
+      }
+    }
+    relinquishItemsHeld(options) {
       const syncConnectorId = requireNonEmpty2(options.syncConnectorId, "Relinquish sync connector id");
       const ownerConnectorId = requireNonEmpty2(options.ownerConnectorId, "Relinquish owner connector id");
       return this.db.transaction(() => {
@@ -21722,8 +21890,8 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store trust reconciliation requires two distinct stores.");
       }
       if (this.dbPath !== ":memory:" && options.stricter.dbPath !== ":memory:") {
-        const looserFile = statSync6(this.dbPath);
-        const stricterFile = statSync6(options.stricter.dbPath);
+        const looserFile = statSync7(this.dbPath);
+        const stricterFile = statSync7(options.stricter.dbPath);
         if (looserFile.dev === stricterFile.dev && looserFile.ino === stricterFile.ino) {
           throw new Error("Connector store trust reconciliation refuses one database as both stores.");
         }
@@ -21825,6 +21993,13 @@ var init_local_index = __esm(() => {
       return true;
     }
     purgeExcludedItems(options) {
+      try {
+        return this.purgeExcludedItemsHeld(options);
+      } finally {
+        this.releaseUnreferencedChunkMedia();
+      }
+    }
+    purgeExcludedItemsHeld(options) {
       if (!this.exclusions.active) {
         return emptyPurgeSummary(this.corpusId, options.dryRun, this.exclusions);
       }
@@ -21880,6 +22055,13 @@ var init_local_index = __esm(() => {
       })();
     }
     stripMetadataOnlyRepresentations(options) {
+      try {
+        return this.stripMetadataOnlyRepresentationsHeld(options);
+      } finally {
+        this.releaseUnreferencedChunkMedia();
+      }
+    }
+    stripMetadataOnlyRepresentationsHeld(options) {
       if (!this.exclusions.active) {
         return emptyMetadataOnlyStripSummary(this.corpusId, options.dryRun, this.exclusions);
       }
@@ -22363,6 +22545,13 @@ var init_local_index = __esm(() => {
     `).run();
     }
     async syncFromConnector(connector, options) {
+      try {
+        return await this.syncFromConnectorHeld(connector, options);
+      } finally {
+        this.releaseUnreferencedChunkMedia();
+      }
+    }
+    async syncFromConnectorHeld(connector, options) {
       if (connector.family !== this.family) {
         throw new Error(`Connector store ${this.corpusId} is declared for family "${this.family}" ` + `but connector "${connector.id}" reports family "${connector.family}".`);
       }
@@ -23003,6 +23192,9 @@ var init_local_index = __esm(() => {
       if (media && !this.chunkMediaColumnsPresent) {
         throw new Error("Connector store chunks cannot carry media before the v13 schema.");
       }
+      if (media && this.trustDomain !== "secure_local") {
+        throw new Error("Connector store chunks carry picture media only in a Private store.");
+      }
       const desired = chunks.map((chunk, index) => {
         const chunkMedia = index === 0 ? media : undefined;
         return {
@@ -23057,8 +23249,6 @@ var init_local_index = __esm(() => {
         }
         this.refreshFtsForItem(itemPk);
       })();
-      if (media)
-        retainMediaCacheFile(media.path, this.mediaHolder);
       return { chunksIndexed: chunks.length, ftsContentChanged: true };
     }
     reseasonItemEmbeddingInputs(itemPk, seasoning) {
@@ -23416,6 +23606,7 @@ var init_local_index = __esm(() => {
       }
       let embedded = priorCounts?.chunksEmbedded ?? 0;
       let staleSkipped = 0;
+      let readsImages;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
@@ -23427,18 +23618,52 @@ var init_local_index = __esm(() => {
           if (batch.length === 0)
             continue;
         }
-        const mediaMissing = batch.filter((row) => row.media_path && !existsSync15(row.media_path));
-        if (mediaMissing.length > 0) {
-          staleSkipped += mediaMissing.length;
-          batch = batch.filter((row) => !mediaMissing.includes(row));
-          if (batch.length === 0)
-            continue;
+        if (provider.imageSupport && batch.some((row) => row.media_sha256)) {
+          readsImages ??= await provider.imageSupport();
+          const skip = new Set;
+          for (const row of batch) {
+            if (!row.media_sha256)
+              continue;
+            if (!readsImages || this.chunkMediaFailed(row.media_sha256)) {
+              skip.add(row);
+            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync15(row.media_path)) {
+              this.clearChunkMedia(row.chunk_pk, row.item_pk);
+              skip.add(row);
+            }
+          }
+          if (skip.size > 0) {
+            staleSkipped += skip.size;
+            batch = batch.filter((row) => !skip.has(row));
+            if (batch.length === 0)
+              continue;
+          }
         }
-        const vectors = await provider.embed(batch.map((row) => ({
+        const inputsFor = (rows2) => rows2.map((row) => ({
           ...row.title ? { title: row.title } : {},
           text: buildConnectorStoreEmbeddingText(row),
           ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
-        })), { taskType: "RETRIEVAL_DOCUMENT" });
+        }));
+        let vectors;
+        try {
+          vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+        } catch (error) {
+          if (!(error instanceof SourceEmbeddingInputsFailedError))
+            throw error;
+          const failedRows = new Set(error.failedIndexes.map((index) => batch[index]).filter((row) => row !== undefined));
+          const failedAt = nowIso2();
+          for (const row of failedRows) {
+            if (row.media_sha256) {
+              this.db.query(`
+              INSERT OR REPLACE INTO chunk_media_failures (media_sha256, reason, failed_at) VALUES (?, ?, ?)
+            `).run(row.media_sha256, error.reason, failedAt);
+            }
+          }
+          staleSkipped += failedRows.size;
+          batch = batch.filter((row) => !failedRows.has(row));
+          if (batch.length === 0)
+            continue;
+          vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+        }
         if (vectors.length !== batch.length) {
           throw new Error("Connector store embedding provider returned the wrong number of vectors.");
         }
@@ -24449,7 +24674,9 @@ var init_local_index = __esm(() => {
     "connector_store_locator_identity_insert",
     "connector_store_locator_identity_update",
     "chunk_media_releases",
-    "connector_store_chunk_media_release"
+    "connector_store_chunk_media_release",
+    "idx_connector_store_chunks_media",
+    "chunk_media_failures"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -24845,7 +25072,7 @@ import {
   readFileSync as readFileSync15,
   renameSync as renameSync4,
   rmSync as rmSync7,
-  statSync as statSync7,
+  statSync as statSync8,
   writeFileSync as writeFileSync5,
   writeSync as writeSync2
 } from "node:fs";
@@ -25058,7 +25285,7 @@ async function verifyModelFiles(dir, files, reporter) {
     verifiedThisProcess ??= new Set;
     if (verifiedThisProcess.has(key))
       continue;
-    const size = statSync7(path).size;
+    const size = statSync8(path).size;
     const digest2 = size === file.bytes ? await sha256File(path) : undefined;
     if (digest2 !== file.sha256) {
       rmSync7(path, { force: true });
@@ -25217,7 +25444,7 @@ function integrityAlgorithm(integrity) {
   return algorithm;
 }
 function sha256File(path, timeoutMs = 10 * 60000) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const hash = createHash12("sha256");
     let settled = false;
     const stream = createReadStream(path);
@@ -25230,7 +25457,7 @@ function sha256File(path, timeoutMs = 10 * 60000) {
         stream.destroy();
         reject(error);
       } else {
-        resolve5(hash.digest("hex"));
+        resolve6(hash.digest("hex"));
       }
     };
     const timer = setTimeout(() => finish(new BuiltInEmbeddingInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -25245,7 +25472,7 @@ async function withInstallLock(lockPath, waitMs, run) {
     if (Date.now() > deadline) {
       throw new BuiltInEmbeddingInstallError("download_failed", "Another Olympus process is still installing the built-in search model.");
     }
-    await new Promise((resolve5) => setTimeout(resolve5, LOCK_POLL_MS));
+    await new Promise((resolve6) => setTimeout(resolve6, LOCK_POLL_MS));
   }
   try {
     await run();
@@ -25283,7 +25510,7 @@ function lockIsStale(lockPath) {
     return false;
   } catch {
     try {
-      return Date.now() - statSync7(lockPath).mtimeMs > STALE_LOCK_MS;
+      return Date.now() - statSync8(lockPath).mtimeMs > STALE_LOCK_MS;
     } catch {
       return true;
     }
@@ -25383,7 +25610,7 @@ var init_assets = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn2 } from "node:child_process";
-import { existsSync as existsSync17, statSync as statSync8 } from "node:fs";
+import { existsSync as existsSync17, statSync as statSync9 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname17, isAbsolute as isAbsolute7, join as join19 } from "node:path";
 import { createInterface } from "node:readline";
@@ -25404,6 +25631,7 @@ function helperEnvironment() {
 class HelperProcess {
   child;
   device = "cpu";
+  vision = false;
   nextId = 1;
   pending = new Map;
   stderr = "";
@@ -25442,7 +25670,7 @@ class HelperProcess {
       helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
       child.kill("SIGKILL");
     });
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       let started = false;
       const timer = setTimeout(() => {
         if (started)
@@ -25465,7 +25693,8 @@ class HelperProcess {
             started = true;
             clearTimeout(timer);
             helper.device = message.device === "gpu" ? "gpu" : "cpu";
-            resolve5(helper);
+            helper.vision = message.vision === true;
+            resolve6(helper);
           } else if (message.fatal) {
             started = true;
             clearTimeout(timer);
@@ -25502,13 +25731,13 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const timer = setTimeout(() => {
         this.child.kill("SIGKILL");
         this.exited = true;
         this.failAll(new Error("The built-in search model stopped responding and was restarted."));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolve5, reject, count: items.length, timer });
+      this.pending.set(id, { resolve: resolve6, reject, count: items.length, timer });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
       this.child.stdin.write(`${JSON.stringify(request)}
 `);
@@ -25520,6 +25749,11 @@ class HelperProcess {
       return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
+    const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
+    if (!message.error && failed.size === pending.count) {
+      pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
+      return;
+    }
     if (message.error || !message.vectors || !message.dimension) {
       pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
       if (message.native) {
@@ -25530,8 +25764,8 @@ class HelperProcess {
     }
     const bytes = Buffer.from(message.vectors, "base64");
     const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-    const vectors = Array.from({ length: pending.count }, (_, index) => all.subarray(index * message.dimension, (index + 1) * message.dimension));
-    if (vectors.some((vector) => vector.length !== message.dimension)) {
+    const vectors = Array.from({ length: pending.count }, (_, index) => failed.has(index) ? new Float32Array(0) : all.subarray(index * message.dimension, (index + 1) * message.dimension));
+    if (vectors.some((vector, index) => !failed.has(index) && vector.length !== message.dimension)) {
       pending.reject(new Error("The built-in search model returned the wrong number of values."));
       return;
     }
@@ -25540,7 +25774,7 @@ class HelperProcess {
   async stop() {
     if (this.exited)
       return;
-    const exited = new Promise((resolve5) => this.child.once("close", () => resolve5()));
+    const exited = new Promise((resolve6) => this.child.once("close", () => resolve6()));
     this.child.stdin.end();
     const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
     await exited;
@@ -25566,6 +25800,9 @@ async function startLiteRtEmbedder(options) {
   return {
     get device() {
       return helper.device;
+    },
+    get vision() {
+      return helper.vision;
     },
     async embed(items) {
       if (helper.exited) {
@@ -25602,7 +25839,7 @@ function resolveBun() {
     if (!candidate || !isAbsolute7(candidate))
       continue;
     try {
-      if (statSync8(candidate).isFile())
+      if (statSync9(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -25826,6 +26063,7 @@ class BuiltInSourceEmbeddingProvider {
   loaded;
   lastFailure;
   slotBusy = false;
+  imageSupportWarned = false;
   waiting = { query: [], document: [] };
   constructor(options = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
@@ -25874,6 +26112,17 @@ class BuiltInSourceEmbeddingProvider {
   async warm() {
     await this.load();
     await this.embed([{ text: "warm up" }], { taskType: "RETRIEVAL_QUERY" });
+  }
+  async imageSupport() {
+    if (this.spec.runtime !== "litert" || !this.spec.vision)
+      return false;
+    const model = this.loaded ?? await this.load();
+    const supported = model.kind === "litert" && model.embedder.vision;
+    if (!supported && !this.imageSupportWarned) {
+      this.imageSupportWarned = true;
+      console.warn("[built-in embedding] the image encoder could not start on this machine; photos keep keyword search and wait for their picture vectors.");
+    }
+    return supported;
   }
   async retry() {
     if (!this.loading)
@@ -25959,7 +26208,7 @@ class BuiltInSourceEmbeddingProvider {
   }
   async withSlot(taskType, run) {
     if (this.slotBusy) {
-      await new Promise((resolve5) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve5));
+      await new Promise((resolve6) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve6));
     } else {
       this.slotBusy = true;
     }
@@ -26003,27 +26252,48 @@ class BuiltInSourceEmbeddingProvider {
     return sums.map((sum) => normalize2(sum));
   }
   async embedLiteRt(embedder, inputs, taskType) {
-    const prompts = inputs.map((input) => {
+    const refused = new Set;
+    const prompts = inputs.map((input, index) => {
       const text = promptText(this.spec, input, taskType);
-      return taskType === "RETRIEVAL_DOCUMENT" && this.spec.vision && input.image ? { text, image: input.image.path } : text;
+      if (taskType !== "RETRIEVAL_DOCUMENT" || !this.spec.vision || !input.image)
+        return text;
+      if (!isMediaCachePath(input.image.path, input.image.sha256, this.mediaCacheDir()))
+        refused.add(index);
+      return { text, image: input.image.path };
     });
     const out = [];
+    const failed = [...refused];
     for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
-      const batch = prompts.slice(offset, offset + LITERT_BATCH);
+      const batch = prompts.slice(offset, offset + LITERT_BATCH).map((prompt, row) => refused.has(offset + row) && typeof prompt !== "string" ? prompt.text : prompt);
       let vectors;
       try {
         vectors = await this.withSlot(taskType, () => embedder.embed(batch));
       } catch (error) {
         throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; Olympus restarts the model on the next try.");
       }
-      for (const vector of vectors) {
+      for (const [row, vector] of vectors.entries()) {
+        if (vector.length === 0) {
+          failed.push(offset + row);
+          out.push([]);
+          continue;
+        }
         if (vector.length !== this.dimension) {
           throw new OperationError("source_index_error", `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
         }
         out.push(normalize2(vector));
       }
     }
+    if (failed.length > 0) {
+      throw new SourceEmbeddingInputsFailedError([...new Set(failed)].sort((left, right) => left - right), "image_unreadable");
+    }
     return out;
+  }
+  mediaCacheDir() {
+    try {
+      return mediaCacheDir(this.env);
+    } catch {
+      return;
+    }
   }
   async forward(model, batch) {
     const rows = batch.length;
@@ -26174,6 +26444,7 @@ var BUILT_IN_EMBEDDING_PROVIDER = "built-in", BUILT_IN_EMBEDDING_THREADS_ENV = "
 var init_provider = __esm(() => {
   init_operation_error();
   init_embedding_identity();
+  init_media_cache();
   init_embeddings();
   init_assets();
   init_manifest();
@@ -28970,7 +29241,7 @@ var init_dropbox = __esm(() => {
 // src/workers/file-extraction/extractors/command-runner.ts
 import { Buffer as Buffer4 } from "node:buffer";
 import { spawn as spawn3 } from "node:child_process";
-import { accessSync as accessSync2, constants as fsConstants2, statSync as statSync9 } from "node:fs";
+import { accessSync as accessSync2, constants as fsConstants2, statSync as statSync10 } from "node:fs";
 import { delimiter as delimiter3, join as join25 } from "node:path";
 function errnoCode(error) {
   const code = error?.code;
@@ -29029,7 +29300,7 @@ function resolveExtractionCommand(command, options = {}) {
 }
 function executableFile(path) {
   try {
-    if (!statSync9(path).isFile())
+    if (!statSync10(path).isFile())
       return false;
     accessSync2(path, fsConstants2.X_OK);
     return true;
@@ -29040,7 +29311,7 @@ function executableFile(path) {
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = spawn3(command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32"
@@ -29082,7 +29353,7 @@ async function runExtractionCommand(request, internals = {}) {
         stderr: Buffer4.concat(stderr).toString("utf8")
       };
       if (code === 0) {
-        resolve5(result);
+        resolve6(result);
         return;
       }
       reject(new ExtractionCommandError({
@@ -31174,8 +31445,8 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId) {
   }
   let timer;
   const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const deadline = new Promise((resolve5) => {
-    timer = setTimeout(() => resolve5({ kind: "timeout" }), timeoutMs);
+  const deadline = new Promise((resolve6) => {
+    timer = setTimeout(() => resolve6({ kind: "timeout" }), timeoutMs);
   });
   try {
     const settled = await Promise.race([laneSettled, deadline]);
@@ -33762,7 +34033,7 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
           }, () => {
             return;
           }),
-          new Promise((resolve5) => setTimeout(resolve5, cancellationSettleMs))
+          new Promise((resolve6) => setTimeout(resolve6, cancellationSettleMs))
         ]);
       } else {
         await Promise.resolve();
@@ -36038,7 +36309,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve5) => setTimeout(resolve5, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -37097,7 +37368,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve5) => setTimeout(resolve5, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -44332,7 +44603,7 @@ import {
   existsSync as existsSync24,
   mkdirSync as mkdirSync18,
   renameSync as renameSync6,
-  statSync as statSync10,
+  statSync as statSync11,
   unlinkSync as unlinkSync2,
   writeFileSync as writeFileSync6
 } from "node:fs";
@@ -44577,7 +44848,7 @@ function writePrivateReport(pathValue, contents) {
     chmodSync10(temporaryPath, 384);
     renameSync6(temporaryPath, reportPath);
     chmodSync10(reportPath, 384);
-    if ((statSync10(reportPath).mode & 511) !== 384) {
+    if ((statSync11(reportPath).mode & 511) !== 384) {
       throw new Error("X bookmark diagnostic report permissions are not 0600.");
     }
   } finally {
@@ -45003,7 +45274,7 @@ import {
   rmSync as rmSync8,
   writeFileSync as writeFileSync7
 } from "node:fs";
-import { resolve as resolve5 } from "node:path";
+import { resolve as resolve6 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
   const account = requireNonEmpty3(options.account, "X bookmark content-recovery account");
   const userId = requireNonEmpty3(options.userId, "X bookmark content-recovery provider user id");
@@ -45202,7 +45473,7 @@ function contentRecoveryEmbeddingJournalId(restoreItems) {
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
-  return resolve5(`${storePath}.content-recovery-receipt.json`);
+  return resolve6(`${storePath}.content-recovery-receipt.json`);
 }
 async function authenticatedClient(input) {
   const session = requireBearerTokenCredentialSession(await input.broker.issueSession({
@@ -45290,7 +45561,7 @@ function buildReceipt(status, counts, retryAt) {
   return { ...unsigned, receipt_sha256: sha256Json2(unsigned) };
 }
 function writeReceipt(pathValue, receipt) {
-  const path = resolve5(pathValue);
+  const path = resolve6(pathValue);
   const temporary = `${path}.tmp-${randomUUID13()}`;
   try {
     writeFileSync7(temporary, `${JSON.stringify(receipt, null, 2)}
@@ -45571,7 +45842,7 @@ var init_reaction_index = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-import { existsSync as existsSync25, readFileSync as readFileSync23, readdirSync as readdirSync3, statSync as statSync11 } from "node:fs";
+import { existsSync as existsSync25, readFileSync as readFileSync23, readdirSync as readdirSync3, statSync as statSync12 } from "node:fs";
 import { join as join40 } from "node:path";
 function createWhatsAppLiveSourceConnector(options) {
   const spoolDir = requireNonEmpty4(options.spoolDir, "WhatsApp live connector spoolDir");
@@ -45580,7 +45851,7 @@ function createWhatsAppLiveSourceConnector(options) {
     id: CONNECTOR_ID2,
     family: "chat",
     async authenticate() {
-      if (!existsSync25(spoolDir) || !statSync11(spoolDir).isDirectory()) {
+      if (!existsSync25(spoolDir) || !statSync12(spoolDir).isDirectory()) {
         throw new Error(`WhatsApp live spool directory ${spoolDir} does not exist. ` + "Start the olympus-whatsapp-bridge daemon (tools/whatsapp-bridge) first.");
       }
     },
@@ -45822,7 +46093,7 @@ function buildReactionSnapshot(spoolDir) {
 function spoolFingerprint(spoolDir) {
   return listSpoolFiles(spoolDir).map((file) => {
     try {
-      const stats = statSync11(join40(spoolDir, file));
+      const stats = statSync12(join40(spoolDir, file));
       return `${file}:${stats.size}:${stats.mtimeMs}`;
     } catch {
       return `${file}:gone`;
@@ -46300,7 +46571,7 @@ var init_file_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile5, realpath, stat as stat2 } from "node:fs/promises";
-import { basename as basename5, relative as relative4, resolve as resolve6, sep as sep4 } from "node:path";
+import { basename as basename5, relative as relative4, resolve as resolve7, sep as sep4 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -46319,7 +46590,7 @@ class WhatsAppExtractionSource {
     this.approvedScopeKey = requireNonEmpty5(options.approvedScopeKey, "WhatsApp extraction scope key");
     this.candidates = options.candidates;
     this.locators = options.locators;
-    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve6(root));
+    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve7(root));
     if (this.mediaRoots.length === 0) {
       throw new Error("WhatsApp extraction needs at least one local media root.");
     }
@@ -49297,7 +49568,7 @@ var init_engine_children = __esm(() => {
 // src/core/engine-service.ts
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { createHash as createHash35, randomBytes as randomBytes8 } from "node:crypto";
-import { existsSync as existsSync29, lstatSync as lstatSync12, readdirSync as readdirSync5, readFileSync as readFileSync26, renameSync as renameSync9, statSync as statSync13 } from "node:fs";
+import { existsSync as existsSync29, lstatSync as lstatSync12, readdirSync as readdirSync5, readFileSync as readFileSync26, renameSync as renameSync9, statSync as statSync14 } from "node:fs";
 import { homedir as homedir34, platform as osPlatform2 } from "node:os";
 import { basename as basename7, dirname as dirname31, isAbsolute as isAbsolute9, join as join45, resolve as resolvePath } from "node:path";
 function enginePaths(homeDir) {
@@ -49546,7 +49817,7 @@ function installEngine(options = {}) {
 }
 async function waitForEngineHealthy(input, deps = {}) {
   const now = deps.now ?? Date.now;
-  const sleep2 = deps.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+  const sleep2 = deps.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
   const timeoutMs = deps.timeoutMs ?? ENGINE_HEALTH_TIMEOUT_MS;
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -50189,7 +50460,7 @@ function resolveBun2(explicit) {
     if (!candidate || !isAbsolute9(candidate) || !isBunName(candidate))
       continue;
     try {
-      if (statSync13(candidate).isFile())
+      if (statSync14(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -50215,7 +50486,7 @@ function assertOlympusPackage(root, label) {
 }
 function assertFile(path, message) {
   try {
-    if (statSync13(path).isFile())
+    if (statSync14(path).isFile())
       return;
   } catch {}
   throw new OperationError("config_error", message);
@@ -51669,11 +51940,11 @@ var init_vocabulary = __esm(() => {
     openFailed: "Couldn't open it on your Mac",
     unanswered: "Not found in your private items: {list}",
     withdrawn: "This private answer is no longer available from your Mac.",
-    outsideTitle: "Outside background — not from your documents",
+    outsideTitle: "Anonymous answer · zkAPI",
     outsideNote: "General information from an outside model. It did not read your documents and has not been checked.",
     outsidePending: "Looking up general background…",
-    outsidePaused: "Outside help is paused.",
-    outsideAsked: "What Olympus asked",
+    outsidePaused: "Anonymous answers are paused.",
+    outsideAsked: "What Olympus asked:",
     outsideShortened: "Shortened by Olympus."
   };
   DASHBOARD_PICKER_COPY = {
@@ -51869,35 +52140,67 @@ var init_vocabulary = __esm(() => {
     undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
   };
   DASHBOARD_OUTSIDE_HELP_COPY = {
-    crumb: "Outside help",
-    title: "Outside help",
-    experimental: "Experimental · network route not verified on macOS",
-    intro: "Olympus does not upload the evidence pack. With outside help enabled, it may send a short question derived from your private answer; that question can still reveal private information.",
-    state: {
-      off: "Outside help is off.",
-      on: "Outside help is on.",
-      invalid: "Outside help is off: the settings file on this computer is damaged.",
-      route_not_configured: "Outside help is off: no zkAPI route is set up yet.",
-      fence_held: "Consults are paused: an earlier request has not been seen to settle."
+    crumb: "Anonymous answers",
+    title: "Anonymous answers · zkAPI",
+    sectionTitle: "Private answers",
+    row: {
+      off: "Anonymous answers (zkAPI): off",
+      on: "Anonymous answers (zkAPI): on",
+      invalid: "Anonymous answers (zkAPI): off · settings file damaged",
+      route_not_configured: "Anonymous answers (zkAPI): off · not set up",
+      fence_held: "Anonymous answers (zkAPI): paused · unfinished payment"
     },
-    restartPending: "A change is saved but not applied: ask your agent to restart the managed Olympus worker.",
+    experimental: "Experimental: on macOS, Olympus can't yet confirm the connection is anonymous (network route not verified).",
+    intro: "When the answer from your Mac is missing something, Olympus can ask a top AI model a short question through zkAPI. Payment is anonymous, and with Tor on the provider can't see where the question came from. Olympus blocks names and other identifying words before sending, but the provider reads the question.",
+    privacy: "Your files and private answer stay on this Mac. The outside model sees only the short question, and that question could still hint at private things.",
+    state: {
+      off: "Anonymous answers are off.",
+      on: "Anonymous answers are on.",
+      invalid: "Anonymous answers are off: the settings file on this computer is damaged.",
+      route_not_configured: "Anonymous answers are off: zkAPI is not set up yet.",
+      fence_held: "Paused: an earlier question has not finished paying yet."
+    },
+    restartPending: "Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.",
+    routeReady: "Ready to ask.",
+    routeReadyNoTor: "Ready to ask.",
+    addressVisible: "Your network address will be visible to the provider.",
+    routeNotReady: "Not ready: {reason}",
+    routeMore: "(+{n} more below)",
+    routeUnknown: "Olympus could not check zkAPI right now.",
+    routeMissingShort: "Not ready: zkAPI is not set up yet.",
+    usageNone: "No questions today",
+    usageOne: "1 question today",
+    usageMany: "{n} questions today",
+    usageCounted: "(counted as up to ${usd} against your limits)",
+    usageExpiry: "balance expires about {date} ({days} days left)",
+    usageExpired: "balance past its estimated expiry",
+    usageExpiryUnknown: "balance expiry unknown",
+    costLines: [
+      "Each question usually costs a few cents or less.",
+      "While it runs, up to $6 is held from your balance; the unused part comes back.",
+      "Olympus counts each question as the full $6 when checking your limits."
+    ],
+    problemsTitle: "To fix",
     disclosureTitle: "Before you turn this on",
+    disclosureShort: [
+      "It asks automatically: when a private answer in ChatGPT is missing something, Olympus may send one short question. There is no approval step.",
+      "Each question usually costs a few cents or less; up to $6 is held while it runs, and the unused part comes back.",
+      "The outside model reads the question; zkAPI hides who paid."
+    ],
+    disclosureMore: "Everything to know first",
     disclosure: [
-      "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. Each can cost up to $6 from your zkAPI balance; Olympus counts the full $6.",
+      "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. A short question usually costs a few cents or less. While it runs, up to $6 of your zkAPI balance is held and the unused part comes back when it settles; Olympus counts the full $6 against your limits.",
       "A question is sent only if the panel was recently active, but closing the panel does not guarantee nothing is sent in that window.",
       "There is no daily limit unless you set one. Your deposit is the hard limit.",
       "Depositing and withdrawing are each an expensive on-chain transaction (about $7 at review), paid separately. An unwithdrawn balance becomes claimable by the operator after about 30 days. There is no top-up: each deposit is a new note with its own fee and clock.",
       "The outside provider reads the question; zkAPI hides who paid. The route is experimental and its network path is not verified on macOS.",
       "There is no approval step: consults are automatic while this is on. Turn it off here at any time."
     ],
-    routeTitle: "zkAPI route",
-    routeMissing: "No zkAPI route is set up. Add it here, then follow the steps below in Terminal.",
+    routeMissing: "zkAPI is not set up. Add it, then follow Set up zkAPI below.",
     policyNotFile: "Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.",
-    addRoute: "Add the zkAPI route",
+    addRoute: "Add zkAPI to Olympus",
     addRouteConfirm: "This adds a consult-only zkAPI route to your privacy policy and restarts the Olympus worker. No money moves. Continue?",
-    ready: "The route is ready to send.",
-    blocked: "The route is not ready yet:",
-    readinessUnavailable: "Olympus could not check the route right now.",
+    detailsTitle: "Details",
     facts: {
       daemon: "zkapi-clientd {version} found",
       versionUnknown: "(version unknown)",
@@ -51907,34 +52210,35 @@ var init_vocabulary = __esm(() => {
       torMissing: "Tor not installed",
       key: "API key configured",
       keyMissing: "API key not configured",
-      today: "{n} requests today (${usd} reserved)",
-      todayOne: "1 request today (${usd} reserved)",
+      today: "{n} requests today (${usd} counted at $6 each)",
+      todayOne: "1 request today (${usd} counted at $6 each)",
       expiry: "balance estimated to expire {date} ({days} days left)",
       expired: "balance past its estimated expiry",
       expiryUnknown: "balance expiry unknown until you enter the funding date"
     },
     routeLabel: "Route: {label}.",
+    lastSession: "Last consult: {at}, {result}.",
     blockers: {
-      daemon_not_found: "The zkapi-clientd program is not installed.",
-      daemon_version_unsupported: "This zkapi-clientd version is not one Olympus has reviewed (0.1.5 or 0.1.6).",
-      tor_not_found: "Tor is not installed.",
-      daemon_api_key_missing: "The daemon's API key is not configured in Olympus. Put it where the route's key reference points, then restart the worker.",
-      acknowledgements_incomplete: "The cost and risk statements below are not all acknowledged.",
-      funding_date_missing: "Enter the funding date below so Olympus can estimate when the balance expires.",
-      funding_date_invalid: "The funding date you entered is in the future.",
-      note_expired: "By the funding date you gave, the balance is past its estimated 30-day expiry.",
-      unresolved_session: "An earlier request has not been seen to settle. Use Recover below.",
-      unresolved_session_other_wallet: "A held request belongs to another wallet folder. Recover it there, or abandon it below.",
-      stranded_processes: "Programs from an earlier session could not be confirmed stopped.",
-      daemon_already_running: "Something is already serving on the zkAPI port. Stop your own zkapi-clientd serve; Olympus runs its own for each consult.",
-      tor_port_busy: "Something already listens on the Tor port. Olympus needs it free to start a fresh Tor client.",
-      daily_cap_reached: "Today's request limit you set is reached.",
-      spend_cap_reached: "Another request would exceed today's spending limit you set.",
-      state_unavailable: "The consult ledger on this computer could not be read.",
-      key_reuse_on: "The daemon's key-reuse window is on; run zkapi-clientd config --key-reuse-window-seconds 0."
+      daemon_not_found: "The zkAPI app is not installed on this Mac. See Set up zkAPI.",
+      daemon_version_unsupported: "This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6: see Set up zkAPI.",
+      tor_not_found: "The program that hides your network address is not installed. See Set up zkAPI.",
+      daemon_api_key_missing: "Olympus does not have your zkAPI access key yet. See Set up zkAPI.",
+      acknowledgements_incomplete: "The cost and risk statements are not all accepted. Tick them under Cost and risk.",
+      funding_date_missing: "Enter the day you paid in under Balance and limits, so Olympus can tell when the balance expires.",
+      funding_date_invalid: "The day you paid in is in the future. Fix it under Balance and limits.",
+      note_expired: "Your balance is past its estimated 30-day expiry.",
+      unresolved_session: "An earlier question has not finished paying. Use Recover under Unfinished payment.",
+      unresolved_session_other_wallet: "An unfinished payment belongs to another zkAPI wallet. Finish it there, or abandon it under Unfinished payment.",
+      stranded_processes: "Programs from an earlier question may still be running.",
+      daemon_already_running: "Another copy of the zkAPI app is already running. Close it; Olympus starts its own for each question.",
+      tor_port_busy: "Another program is using the connection Olympus needs to hide your network address.",
+      daily_cap_reached: "Today's question limit is reached. Raise or remove it under Balance and limits.",
+      spend_cap_reached: "Another question would pass today's spending limit. Raise or remove it under Balance and limits.",
+      state_unavailable: "Olympus could not read its record of questions on this Mac.",
+      key_reuse_on: "The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off: see Set up zkAPI."
     },
-    blockerOther: "The route is not ready ({code}).",
-    stepsTitle: "How to set up the zkAPI route",
+    blockerOther: "Not ready yet ({code}).",
+    stepsTitle: "Set up zkAPI",
     stepsIntro: "In Terminal, in this order. This is the order that worked live.",
     steps: [
       "Install zkapi-clientd (version 0.1.5 or 0.1.6) and Tor.",
@@ -51946,26 +52250,37 @@ var init_vocabulary = __esm(() => {
       "Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
     ],
     costTitle: "Cost and risk",
-    costIntro: "Read and tick every statement once. They are recorded with the route; the wording version moves when a statement changes, and you are asked again.",
-    acknowledged: "All statements acknowledged.",
-    notAcknowledged: "Not yet acknowledged.",
+    costIntro: "Tick each statement once. They are recorded with the route; if the wording changes, you are asked again.",
+    acknowledged: "You accepted the {n} cost and risk statements.",
+    acknowledgedReview: "Review",
+    notAcknowledged: "Not yet accepted.",
+    limitsTitle: "Balance and limits",
+    limitsNone: "No daily limit",
+    limitsRequests: "{n} questions a day",
+    limitsUsd: "${usd} a day",
+    fundedOn: "paid in on {date}",
+    notFunded: "payment date not set",
+    limitsToday: "Questions today: {n}, counted as up to ${usd} against your limits.",
     fundingDate: "Funding date: the day your deposit was confirmed (YYYY-MM-DD)",
-    capRequests: "Daily request limit (optional)",
-    capUsd: "Daily spending limit in dollars, counted at $6 per consult (optional)",
-    saveRestarts: "Saving restarts the Olympus worker to apply it.",
+    capRequests: "Daily question limit (optional)",
+    capUsd: "Daily spending limit in dollars, counted at $6 per question (optional)",
+    noLimitIntro: "There is no default limit: your deposit is the hard limit.",
+    removeLimits: "No daily limit",
+    removeLimitsHint: "Clears both limits.",
+    saveRestarts: "Saving restarts Olympus to apply it.",
     saveRoute: "Save",
-    fenceTitle: "Held request",
-    fenceIntro: "An earlier request has not been seen to settle. Until it does, no consult is sent.",
+    fenceTitle: "Unfinished payment",
+    fenceIntro: "An earlier question has not been confirmed as paid. Until it is, no question is sent.",
     fenceThis: "Held since {at} (this wallet)",
     fenceOther: "Held since {at} (another wallet folder)",
     recover: "Recover",
-    recoverHint: "Sends one fixed request with no content and reserves up to $6.",
+    recoverHint: "Sends one empty request to finish it; up to $6 is held while it runs.",
     recoverConfirm: "Recovery sends one fixed request with no content through the same route and reserves up to $6. Continue?",
     abandon: "Abandon",
-    abandonHint: "Stops the block without settling; the unsettled request may later link two sessions.",
+    abandonHint: "Stops waiting without finishing it; the unfinished payment may later link two sessions.",
     abandonConfirm: "Abandoning means the unsettled request may later settle under another session's network identity, linking the two. It stops blocking consults and stays in the ledger as a record. Continue?",
     languagesTitle: "Languages",
-    languagesIntro: "The outside question may use these languages. Only languages with a vocabulary pack installed on this computer can be chosen.",
+    languagesIntro: "The outside question may use these languages. Only languages with a word pack installed on this computer can be chosen.",
     packMissing: "pack not installed",
     domainsOn: "Besides everyday words in these languages, a question may use: {list}.",
     domainsOff: "Not admitted: {list}.",
@@ -51978,22 +52293,21 @@ var init_vocabulary = __esm(() => {
       medicines: "medicine names",
       medicineBrands: "medicine brand names"
     },
-    automatic: "While on, consults run automatically when a private answer in ChatGPT is incomplete. Only this computer can change this setting.",
-    turnOn: "Turn on outside help",
-    turnOff: "Turn off outside help",
-    replaceFile: "Replace the damaged settings file (outside help stays off)",
-    enableBlockedRoute: "Add the zkAPI route first.",
-    enableBlockedAcks: "Tick and save every cost and risk statement first.",
+    turnOn: "Turn on anonymous answers",
+    turnOff: "Turn off anonymous answers",
+    replaceFile: "Replace the damaged settings file (anonymous answers stay off)",
+    enableBlockedRoute: "Add zkAPI first.",
+    enableBlockedAcks: "Accept the cost and risk statements first.",
     edit: "Edit",
     setUp: "Set up",
     saving: "Saving…",
     saveFailed: "Olympus could not save this. Try again.",
-    restarting: "Restarting the worker…",
-    locked: "Unlock dashboard controls in Setup to see and change outside help.",
-    unlockIntro: "Changing outside help needs a session opened from this computer itself, not one an agent or the launch link could open. One click, in this browser, on this Mac.",
-    unlock: "Unlock outside help on this Mac",
-    native: "Outside help is set up on this computer's own dashboard only, never from an agent or ChatGPT.",
-    unavailable: "Outside help is not available from this worker."
+    restarting: "Restarting Olympus to apply it…",
+    locked: "Unlock dashboard controls in Setup to see and change anonymous answers.",
+    unlockIntro: "Changing anonymous answers needs a session opened on this Mac itself, not one an agent or the launch link opened. One click, in this browser.",
+    unlock: "Unlock anonymous answers on this Mac",
+    native: "Anonymous answers are set up on this computer's own dashboard only, never from an agent or ChatGPT.",
+    unavailable: "Anonymous answers are not available from this worker."
   };
 });
 
@@ -56157,6 +56471,8 @@ __export(exports_consult_transport_zkapi, {
   zkapiFenceScope: () => zkapiFenceScope,
   zkapiConsultReadiness: () => zkapiConsultReadiness,
   validZkapiConsultQuestion: () => validZkapiConsultQuestion,
+  trustedFallbackExecutable: () => trustedFallbackExecutable,
+  standardExecutableDirectories: () => standardExecutableDirectories,
   sendZkapiConsult: () => sendZkapiConsult,
   resolveExecutable: () => resolveExecutable,
   reserveZkapiRequest: () => reserveZkapiRequest,
@@ -56173,14 +56489,15 @@ __export(exports_consult_transport_zkapi, {
   ZKAPI_SUPPORTED_DAEMON_VERSIONS: () => ZKAPI_SUPPORTED_DAEMON_VERSIONS,
   ZKAPI_STAGE_LABELS: () => ZKAPI_STAGE_LABELS,
   ZKAPI_SESSION_READY_TIMEOUT_MS: () => ZKAPI_SESSION_READY_TIMEOUT_MS,
-  ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD
+  ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD,
+  DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn4, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash38, randomUUID as randomUUID16 } from "node:crypto";
-import { accessSync as accessSync3, chmodSync as chmodSync14, constants as constants3, existsSync as existsSync34, mkdirSync as mkdirSync26, mkdtempSync, readdirSync as readdirSync6, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync10, statSync as statSync14, writeFileSync as writeFileSync8 } from "node:fs";
+import { accessSync as accessSync3, chmodSync as chmodSync14, constants as constants3, existsSync as existsSync34, mkdirSync as mkdirSync26, mkdtempSync, readdirSync as readdirSync6, readFileSync as readFileSync28, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync10, statSync as statSync15, writeFileSync as writeFileSync8 } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir as homedir38, tmpdir as tmpdir3 } from "node:os";
-import { delimiter as delimiter4, dirname as dirname36, join as join49, resolve as resolvePath2 } from "node:path";
+import { delimiter as delimiter4, dirname as dirname36, isAbsolute as isAbsolute10, join as join49, resolve as resolvePath2 } from "node:path";
 function zkapiStageRows(timings) {
   if (!timings)
     return [];
@@ -56651,19 +56968,69 @@ function childEnvironment(env) {
   }
   return out;
 }
-function resolveExecutable(name, explicit, env) {
-  const candidates = explicit ? [explicit] : (env.PATH ?? "").split(delimiter4).filter(Boolean).map((dir) => join49(dir, name));
+function standardExecutableDirectories(env, platform2 = process.platform) {
+  const home = env.HOME?.trim();
+  const local = home && isAbsolute10(home) ? [join49(home, ".local", "bin")] : [];
+  if (platform2 === "darwin")
+    return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
+  if (platform2 === "linux")
+    return [...local, "/usr/local/bin"];
+  return local;
+}
+function trustedChain(path, probe, uid) {
+  for (let current = path;; current = dirname36(current)) {
+    const stats = probe.stat(current);
+    if (current !== path && !stats.isDirectory())
+      return false;
+    if (stats.uid !== uid && stats.uid !== 0)
+      return false;
+    if ((stats.mode & 18) !== 0)
+      return false;
+    if (dirname36(current) === current)
+      return true;
+  }
+}
+function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) {
+  const uid = probe.uid();
+  if (uid === undefined)
+    return;
+  try {
+    const real = probe.realpath(candidate);
+    const target = probe.stat(real);
+    if (!target.isFile() || !probe.executable(real))
+      return;
+    if (!trustedChain(real, probe, uid))
+      return;
+    if (!trustedChain(probe.realpath(dirname36(candidate)), probe, uid))
+      return;
+    return real;
+  } catch {
+    return;
+  }
+}
+function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
+  const pathDirectories = (env.PATH ?? "").split(delimiter4).filter(Boolean);
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join49(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync3(candidate, constants3.X_OK);
-      if (statSync14(candidate).isFile())
+      if (statSync15(candidate).isFile())
         return candidate;
     } catch {}
+  }
+  if (explicit)
+    return;
+  for (const dir of standardExecutableDirectories(env, platform2)) {
+    if (pathDirectories.includes(dir))
+      continue;
+    const found = trustedFallbackExecutable(join49(dir, name), trust);
+    if (found)
+      return found;
   }
   return;
 }
 function sleep2(ms) {
-  return new Promise((resolve8) => setTimeout(resolve8, ms));
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
 }
 async function waitFor(condition, timeoutMs, options = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -56678,11 +57045,11 @@ async function waitFor(condition, timeoutMs, options = {}) {
   }
 }
 function portAnswers(port) {
-  return new Promise((resolve8) => {
+  return new Promise((resolve9) => {
     const socket = createConnection({ host: "127.0.0.1", port });
     const done = (value) => {
       socket.destroy();
-      resolve8(value);
+      resolve9(value);
     };
     socket.setTimeout(1000, () => done(false));
     socket.once("connect", () => done(true));
@@ -56952,16 +57319,16 @@ async function zkapiConsultReadiness(options) {
 }
 function deferred() {
   let settled = false;
-  let resolve8;
+  let resolve9;
   const promise = new Promise((done) => {
-    resolve8 = (value) => {
+    resolve9 = (value) => {
       if (settled)
         return;
       settled = true;
       done(value);
     };
   });
-  return { promise, resolve: resolve8, settled: () => settled };
+  return { promise, resolve: resolve9, settled: () => settled };
 }
 async function openZkapiConsultSession(options, control = {}) {
   return openSession(options, control, false);
@@ -57372,11 +57739,11 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
       timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
       bridge.state = "ready";
       bridge.ready.resolve();
-      const aborted = new Promise((resolve8) => {
+      const aborted = new Promise((resolve9) => {
         if (sessionSignal.aborted)
-          resolve8(undefined);
+          resolve9(undefined);
         else
-          sessionSignal.addEventListener("abort", () => resolve8(undefined), { once: true });
+          sessionSignal.addEventListener("abort", () => resolve9(undefined), { once: true });
       });
       const readyTimer = setTimeout(() => cancelBeforeDispatch("deadline"), bridge.readyTimeoutMs);
       const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
@@ -57819,7 +58186,7 @@ const resolver = () => new Promise((resolve) => {
   const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
   process.stdout.write(JSON.stringify(result));
 })();
-`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES;
+`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, DEFAULT_EXECUTABLE_TRUST, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES;
 var init_consult_transport_zkapi = __esm(() => {
   init_atomic_file();
   init_file_lease();
@@ -57984,12 +58351,25 @@ process.stdin.on('data', (chunk) => { received += chunk; if (!child && !cleaning
 process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
+  DEFAULT_EXECUTABLE_TRUST = {
+    realpath: (path) => realpathSync2(path),
+    stat: (path) => statSync15(path),
+    executable: (path) => {
+      try {
+        accessSync3(path, constants3.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    uid: () => typeof process.getuid === "function" ? process.getuid() : undefined
+  };
   SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomplete"]);
 });
 
 // src/core/consult-gate.ts
 import { createHash as createHash39 } from "node:crypto";
-import { existsSync as existsSync35, readFileSync as readFileSync29, statSync as statSync15 } from "node:fs";
+import { existsSync as existsSync35, readFileSync as readFileSync29, statSync as statSync16 } from "node:fs";
 import { homedir as homedir39 } from "node:os";
 import { basename as basename8, dirname as dirname37, join as join50 } from "node:path";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
@@ -58456,7 +58836,7 @@ function verifiedPackFile(path, sha2563) {
   try {
     if (!existsSync35(path))
       return "missing";
-    if (statSync15(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
+    if (statSync16(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync29(path);
     return createHash39("sha256").update(gz).digest("hex") === sha2563 ? gz : "hash_mismatch";
@@ -58551,7 +58931,7 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join50(userDir, "manifest.json");
-    if (!existsSync35(path) || statSync15(path).size > 1024 * 1024)
+    if (!existsSync35(path) || statSync16(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync29(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -63810,10 +64190,10 @@ var init_sniffer_lane = __esm(() => {
 });
 
 // src/core/owner-config-read.ts
-import { readFileSync as readFileSync35, statSync as statSync17 } from "node:fs";
+import { readFileSync as readFileSync35, statSync as statSync18 } from "node:fs";
 function ownerConfigStamp(path) {
   try {
-    return stampOf(statSync17(path));
+    return stampOf(statSync18(path));
   } catch {
     return "missing";
   }
@@ -63821,7 +64201,7 @@ function ownerConfigStamp(path) {
 function readOwnerConfigFile(path) {
   let before;
   try {
-    before = statSync17(path);
+    before = statSync18(path);
   } catch (error) {
     return error.code === "ENOENT" ? { status: "missing" } : { status: "refused", reason: "unreadable", stamp: "unreadable" };
   }
@@ -63837,7 +64217,7 @@ function readOwnerConfigFile(path) {
   }
   let after;
   try {
-    after = statSync17(path);
+    after = statSync18(path);
   } catch {
     return { status: "refused", reason: "torn_read", stamp };
   }
@@ -65015,7 +65395,7 @@ async function yieldToAnswers(options) {
   }
 }
 function sleep3(ms) {
-  return new Promise((resolve8) => setTimeout(resolve8, ms));
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
 }
 function adoptedByThisPlan(record, proposal) {
   const expected = proposal.expectedGeneration ?? 0;
@@ -66871,20 +67251,20 @@ function isCleanExit(child) {
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
     return;
-  await new Promise((resolve8) => {
+  await new Promise((resolve9) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
     child.once("exit", done);
     function done() {
       clearTimeout(timeout);
       child.removeListener("exit", done);
-      resolve8();
+      resolve9();
     }
   });
 }
 function delay(ms) {
-  return new Promise((resolve8) => {
-    const timeout = setTimeout(resolve8, ms);
+  return new Promise((resolve9) => {
+    const timeout = setTimeout(resolve9, ms);
     timeout.unref?.();
   });
 }
@@ -67157,8 +67537,8 @@ var init_embedding_runtime = __esm(() => {
 
 // src/core/native-embedding-drain-service.ts
 import { randomUUID as randomUUID19 } from "node:crypto";
-import { readFileSync as readFileSync38, statSync as statSync18 } from "node:fs";
-import { delimiter as delimiter5, dirname as dirname47, isAbsolute as isAbsolute12, join as join62 } from "node:path";
+import { readFileSync as readFileSync38, statSync as statSync19 } from "node:fs";
+import { delimiter as delimiter5, dirname as dirname47, isAbsolute as isAbsolute13, join as join62 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
@@ -67203,7 +67583,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   const runtimePath = resolveBunRuntimePath(drain.runtimePath, env);
   const executablePath = assertUsableFile(fileURLToPath8(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
   const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
-  if (!isAbsolute12(reportPath)) {
+  if (!isAbsolute13(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join62(dirname47(reportPath), READINESS_FILE);
@@ -67253,30 +67633,30 @@ function resolveBunRuntimePath(configured, env) {
     ...(env.PATH ?? "").split(delimiter5).filter(Boolean).map((dir) => join62(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute12(candidate))
+    if (!candidate || !isAbsolute13(candidate))
       continue;
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
     try {
-      if (statSync18(candidate).isFile())
+      if (statSync19(candidate).isFile())
         return candidate;
     } catch {}
   }
   throw new NativeProcessConfigurationError("Olympus source embedding drain could not resolve an absolute Bun runtime path.");
 }
 function assertUsableFile(path, label) {
-  if (!isAbsolute12(path)) {
+  if (!isAbsolute13(path)) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
-    if (statSync18(path).isFile())
+    if (statSync19(path).isFile())
       return path;
   } catch {}
   throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
 }
 async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
   try {
-    const stat3 = statSync18(readinessPath);
+    const stat3 = statSync19(readinessPath);
     if (!stat3.isFile() || stat3.size > 16 * 1024)
       return false;
     const receipt = JSON.parse(readFileSync38(readinessPath, "utf8"));
@@ -67377,8 +67757,8 @@ var init_native_embedding_drain_service = __esm(() => {
 
 // src/core/native-worker-service.ts
 import { randomUUID as randomUUID20 } from "node:crypto";
-import { statSync as statSync19 } from "node:fs";
-import { basename as basename10, delimiter as delimiter6, isAbsolute as isAbsolute13, join as join63 } from "node:path";
+import { statSync as statSync20 } from "node:fs";
+import { basename as basename10, delimiter as delimiter6, isAbsolute as isAbsolute14, join as join63 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 function createNativeWorkerService(options) {
   let readyChild;
@@ -67555,10 +67935,10 @@ function resolveBunRuntimePath2(configured, env) {
     ...(env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join63(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!isAbsolute13(candidate) || !isBunExecutableName2(candidate))
+    if (!isAbsolute14(candidate) || !isBunExecutableName2(candidate))
       continue;
     try {
-      if (statSync19(candidate).isFile())
+      if (statSync20(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -67569,10 +67949,10 @@ function resolveWorkerExecutablePath(configured, moduleUrl) {
   return assertExecutableFile(candidate, "worker executable");
 }
 function assertExecutableFile(path, label) {
-  if (!isAbsolute13(path))
+  if (!isAbsolute14(path))
     throw new Error(`Olympus ${label} path must be absolute.`);
   try {
-    if (statSync19(path).isFile())
+    if (statSync20(path).isFile())
       return path;
   } catch {}
   throw new Error(`Olympus ${label} is unavailable.`);
@@ -67981,7 +68361,7 @@ async function startEngineHost(options) {
       status.state = "stopping";
       writeStatus();
       log("engine: stopping.");
-      const deadline = new Promise((resolve8) => setTimeout(resolve8, STOP_DEADLINE_MS).unref?.());
+      const deadline = new Promise((resolve9) => setTimeout(resolve9, STOP_DEADLINE_MS).unref?.());
       await Promise.race([
         Promise.allSettled([...services].reverse().map((service) => service.stop())),
         deadline
@@ -74882,7 +75262,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve8) => setTimeout(resolve8, pollInterval));
+        await new Promise((resolve9) => setTimeout(resolve9, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -74894,7 +75274,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -74972,7 +75352,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve8(parseResult.data);
+            resolve9(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -75163,12 +75543,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve8, interval);
+      const timeoutId = setTimeout(resolve9, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -78153,7 +78533,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve8.call(this, root, ref);
+    let _sch = resolve9.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a3 = root.localRefs) === null || _a3 === undefined ? undefined : _a3[ref];
       const { schemaId } = this.opts;
@@ -78180,7 +78560,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve8(root, ref) {
+  function resolve9(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -78710,7 +79090,7 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve8(baseURI, relativeURI, options) {
+  function resolve9(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse6(baseURI, schemelessOptions), parse6(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
@@ -78938,7 +79318,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize: normalize3,
-    resolve: resolve8,
+    resolve: resolve9,
     resolveComponent,
     equal,
     serialize,
@@ -82321,12 +82701,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve8) => {
+    return new Promise((resolve9) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve8();
+        resolve9();
       } else {
-        this._stdout.once("drain", resolve8);
+        this._stdout.once("drain", resolve9);
       }
     });
   }
@@ -82397,8 +82777,8 @@ class SourceAnswerJobRegistry {
     }
     const outcome = pending.then((value) => ({ ok: true, value }), (error2) => ({ ok: false, error: error2 }));
     let timer;
-    const handoff = new Promise((resolve8) => {
-      timer = setTimeout(() => resolve8("handoff"), this.limits.handoffMs);
+    const handoff = new Promise((resolve9) => {
+      timer = setTimeout(() => resolve9("handoff"), this.limits.handoffMs);
     });
     const first = await Promise.race([outcome, handoff]);
     clearTimeout(timer);
@@ -82414,8 +82794,8 @@ class SourceAnswerJobRegistry {
       id: newJobId(),
       owner: scope.owner,
       startedAt,
-      done: new Promise((resolve8) => {
-        wake = resolve8;
+      done: new Promise((resolve9) => {
+        wake = resolve9;
       }),
       finish: (result) => {
         if (job.outcome)
@@ -82446,12 +82826,12 @@ class SourceAnswerJobRegistry {
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer;
       let onAbort;
-      const stop = new Promise((resolve8) => {
-        timer = setTimeout(resolve8, this.limits.resultWaitMs);
+      const stop = new Promise((resolve9) => {
+        timer = setTimeout(resolve9, this.limits.resultWaitMs);
         if (signal) {
-          onAbort = () => resolve8();
+          onAbort = () => resolve9();
           if (signal.aborted)
-            resolve8();
+            resolve9();
           else
             signal.addEventListener("abort", onAbort, { once: true });
         }
@@ -82779,7 +83159,7 @@ async function solveRegistrationPow(bits, nonce, installId, relayHost, signal) {
   for (let counter = 0;; counter += 1) {
     if (counter % 4096 === 0) {
       if (counter > 0)
-        await new Promise((resolve8) => setTimeout(resolve8, 0));
+        await new Promise((resolve9) => setTimeout(resolve9, 0));
       if (signal?.aborted)
         throw new PowCancelledError;
     }
@@ -83395,7 +83775,7 @@ class RelayClient {
   }
   async drained() {
     while (this.socket && this.socket.readyState === WebSocket.OPEN && this.socket.bufferedAmount > SEND_HIGH_WATER_BYTES) {
-      await new Promise((resolve8) => setTimeout(resolve8, 10));
+      await new Promise((resolve9) => setTimeout(resolve9, 10));
     }
   }
 }
@@ -83498,9 +83878,9 @@ async function startRelayRuntime(options) {
 }
 async function runRelayRuntimeProcess(instanceId, overrides = {}) {
   const runtime = await startRelayRuntime({ ...overrides, env: process.env, instanceId });
-  await new Promise((resolve8) => {
+  await new Promise((resolve9) => {
     const shutdown = () => {
-      runtime.stop().finally(resolve8);
+      runtime.stop().finally(resolve9);
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
@@ -83880,6 +84260,9 @@ var init_model_setup = __esm(() => {
 });
 
 // src/core/model-key-reload.ts
+function workerRestartsItself(launch, env) {
+  return launch.nativeServiceSupervised === true || env.OLYMPUS_MANAGED_WORKER === "1";
+}
 function createModelKeyReload(options) {
   let requested = false;
   return () => {
@@ -83949,7 +84332,7 @@ var init_dashboard_session_secret = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile7, realpath as realpath2, stat as stat3 } from "node:fs/promises";
-import { relative as relative6, resolve as resolve8, sep as sep6 } from "node:path";
+import { relative as relative6, resolve as resolve9, sep as sep6 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -84088,7 +84471,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve8(rootRealPath, relativePath);
+    const candidatePath = resolve9(rootRealPath, relativePath);
     const relativeToRoot = relative6(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep6}`)) {
       return;
@@ -84947,6 +85330,21 @@ class LocalFileExtractionJobStore {
       }
     })();
     return { matchedJobs: matched.length, jobsRequeued: requeued };
+  }
+  hasWorkWaitingForReader(request) {
+    const lane = requireLaneKey(request);
+    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
+    const pending = this.db.query(`
+      SELECT 1 AS hit FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status IN ('queued', 'leased', 'failed_retryable')
+        AND extractor_kind = ?
+      LIMIT 1
+    `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind);
+    if (pending)
+      return true;
+    const { sql, params } = this.unreadJobsQuery(request);
+    return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
   }
   unreadJobsQuery(request) {
     const lane = requireLaneKey(request);
@@ -86275,7 +86673,7 @@ var init_document_formats = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { join as join68 } from "node:path";
+import { dirname as dirname50, join as join68 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -86293,6 +86691,12 @@ function createTextExtractor(options = {}) {
     kind,
     version: version2,
     needsBytes: true,
+    ...imagePreparation ? {
+      versionFor(mimeType) {
+        const normalized = normalizeMimeType2(mimeType);
+        return normalized && IMAGE_MIME_TYPES.has(normalized) ? `${version2}${IMAGE_MEDIA_VERSION_SUFFIX}` : version2;
+      }
+    } : {},
     egress: "local",
     accepts(mimeType) {
       return textLaneAccepts(mimeType);
@@ -86334,8 +86738,17 @@ function createTextExtractor(options = {}) {
           if (prepared.kind === "settled")
             return prepared.output;
           if (prepared.kind === "media") {
-            const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
-            return preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+            let output;
+            try {
+              const ocr = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
+              output = preparedImageOutput(prepared.media, ocr, maxBoundedTextChars);
+            } catch (error2) {
+              releaseStaged(prepared.media);
+              throw error2;
+            }
+            if (output.status !== "indexed")
+              releaseStaged(prepared.media);
+            return output;
           }
         }
         const ocrOutput = await imageOcr?.({ bytes, mimeType, sizeBytes: context.sizeBytes });
@@ -86383,6 +86796,10 @@ function createTextExtractor(options = {}) {
       };
     }
   };
+}
+function releaseStaged(media) {
+  if (media.stagingHolder)
+    releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname50(media.path));
 }
 function preparedImageOutput(media, ocr, maxBoundedTextChars) {
   if (ocr && (ocr.status === "failed_retryable" || ocr.status === "failed_terminal"))
@@ -86817,24 +87234,25 @@ function extractDelimitedText(input) {
     ...bounded.warnings.length > 0 ? { warnings: appendBoundedTextWarnings(undefined, bounded) } : {}
   };
 }
-var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo";
+var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = "+image-media-2026-10-07";
 var init_text = __esm(() => {
   init_bounded_text();
   init_command_runner();
   init_document_formats();
+  init_media_cache();
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync45 } from "node:fs";
-import { dirname as dirname50, join as join69 } from "node:path";
+import { dirname as dirname51, join as join69 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync45) {
-  let directory = dirname50(fileURLToPath10(moduleUrl));
+  let directory = dirname51(fileURLToPath10(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
     const candidate = join69(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
-    const parent = dirname50(directory);
+    const parent = dirname51(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -87602,6 +88020,8 @@ function createImagePreparation(options) {
     if (Math.max(input.sizeBytes, input.bytes.byteLength) > maxInputBytes) {
       return { kind: "settled", output: { status: "skipped_too_large" } };
     }
+    if (input.bytes.byteLength < MIN_INPUT_BYTES)
+      return { kind: "too_small" };
     const tempDir = await mkdtemp4(join71(tmpdir7(), TEMP_DIR_PREFIX4));
     try {
       const inputPath = join71(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
@@ -87645,9 +88065,15 @@ function createImagePreparation(options) {
       if (!isJpeg(prepared)) {
         return { kind: "settled", output: { status: "failed_terminal", errorKind: IMAGE_PREPARE_ERROR_FAILED } };
       }
+      const size = jpegPixelSize(prepared);
+      if (size && Math.min(size.width, size.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE)
+        return { kind: "too_small" };
       try {
         const stored = writeMediaCacheFile(options.cacheDir, prepared, "image/jpeg");
-        return { kind: "media", media: { path: stored.path, sha256: stored.sha256, mimeType: "image/jpeg" } };
+        return {
+          kind: "media",
+          media: { path: stored.path, sha256: stored.sha256, mimeType: "image/jpeg", stagingHolder: stored.stagingHolder }
+        };
       } catch {
         return { kind: "settled", output: { status: "failed_retryable", errorKind: IMAGE_PREPARE_ERROR_CACHE_WRITE } };
       }
@@ -87656,10 +88082,34 @@ function createImagePreparation(options) {
     }
   };
 }
+function jpegPixelSize(bytes) {
+  let offset = 2;
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 255)
+      return;
+    const marker = bytes[offset + 1];
+    if (marker === 216 || marker === 1 || marker >= 208 && marker <= 215) {
+      offset += 2;
+      continue;
+    }
+    const length = bytes[offset + 2] << 8 | bytes[offset + 3];
+    const startOfFrame = marker >= 192 && marker <= 207 && marker !== 196 && marker !== 200 && marker !== 204;
+    if (startOfFrame) {
+      return {
+        height: bytes[offset + 5] << 8 | bytes[offset + 6],
+        width: bytes[offset + 7] << 8 | bytes[offset + 8]
+      };
+    }
+    if (length < 2)
+      return;
+    offset += 2 + length;
+  }
+  return;
+}
 function isJpeg(bytes) {
   return bytes.length > 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
 }
-var SIPS_PATH = "/usr/bin/sips", DEFAULT_IMAGE_PREPARE_TIMEOUT_MS = 60000, DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES, IMAGE_PREPARE_MAX_PIXEL_EDGE = 1024, MAX_PREPARED_BYTES, TEMP_DIR_PREFIX4 = "olympus-image-prepare-", IMAGE_PREPARE_ERROR_FAILED = "image_prepare_failed", IMAGE_PREPARE_ERROR_TIMEOUT = "image_prepare_timeout", IMAGE_PREPARE_ERROR_CACHE_WRITE = "media_cache_write_failed";
+var DEFAULT_IMAGE_PREPARE_TIMEOUT_MS = 60000, DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES, IMAGE_PREPARE_MAX_PIXEL_EDGE = 1024, MAX_PREPARED_BYTES, TEMP_DIR_PREFIX4 = "olympus-image-prepare-", IMAGE_PREPARE_MIN_PIXEL_EDGE = 64, MIN_INPUT_BYTES = 1024, IMAGE_PREPARE_ERROR_FAILED = "image_prepare_failed", IMAGE_PREPARE_ERROR_TIMEOUT = "image_prepare_timeout", IMAGE_PREPARE_ERROR_CACHE_WRITE = "media_cache_write_failed";
 var init_image_prepare = __esm(() => {
   init_media_cache();
   init_command_runner();
@@ -87808,13 +88258,13 @@ import {
   readdirSync as readdirSync8,
   renameSync as renameSync13,
   rmSync as rmSync13,
-  statSync as statSync20,
+  statSync as statSync21,
   statfsSync,
   writeFileSync as writeFileSync14,
   writeSync as writeSync3
 } from "node:fs";
 import { homedir as homedir50 } from "node:os";
-import { dirname as dirname51, isAbsolute as isAbsolute14, join as join72 } from "node:path";
+import { dirname as dirname52, isAbsolute as isAbsolute15, join as join72 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = builtInReasoningRoot(env);
   return {
@@ -87828,7 +88278,7 @@ function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_
 }
 function builtInReasoningRoot(env) {
   const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join72(olympusModelsDir(env), "built-in-reasoning");
-  if (!isAbsolute14(root))
+  if (!isAbsolute15(root))
     throw new TypeError("The built-in reasoning directory must be an absolute path.");
   return root;
 }
@@ -87989,7 +88439,7 @@ function volumeFreeBytes(path) {
 }
 function fileSize(path) {
   try {
-    return statSync20(path).size;
+    return statSync21(path).size;
   } catch {
     return 0;
   }
@@ -88046,7 +88496,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
   verifiedThisProcess2 ??= new Set;
   if (verifiedThisProcess2.has(key))
     return;
-  const size = statSync20(path).size;
+  const size = statSync21(path).size;
   const label = `Checking the ${noun}`;
   reporter.verifying(label, 0, file.bytes);
   const digest2 = size === file.bytes ? await sha256File3(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes)) : undefined;
@@ -88078,7 +88528,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       extract(archivePath, staging);
     } catch (error2) {
       if (isNoSpaceError(error2)) {
-        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname51(runtimeDir)) ?? 0, "the disk filled up while unpacking");
+        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname52(runtimeDir)) ?? 0, "the disk filled up while unpacking");
       }
       throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error2 instanceof Error ? error2.message : String(error2)}).`);
     }
@@ -88118,7 +88568,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   if (entries.includes(name)) {
     const relative7 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync20(join72(root, relative7)).isFile())
+      if (statSync21(join72(root, relative7)).isFile())
         return relative7;
     } catch {}
   }
@@ -88127,7 +88577,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   for (const entry of entries) {
     const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync20(join72(root, child)).isDirectory())
+      if (!statSync21(join72(root, child)).isDirectory())
         continue;
     } catch {
       continue;
@@ -88143,7 +88593,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   const hash = createHash49("sha256");
   let received = 0;
   if (existsSync46(partial2)) {
-    const size = statSync20(partial2).size;
+    const size = statSync21(partial2).size;
     if (size > 0 && size < expectedBytes) {
       await hashInto(partial2, hash, VERIFY_TIMEOUT_MS);
       received = size;
@@ -88203,7 +88653,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     });
     if (isNoSpaceError(error2)) {
       rmSync13(partial2, { force: true });
-      throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname51(target)) ?? 0, "the disk is full");
+      throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname52(target)) ?? 0, "the disk is full");
     }
     throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write ${partial2}: ${String(error2)}`);
   }
@@ -88241,7 +88691,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
             closeSync13(fd);
           } catch {}
           rmSync13(partial2, { force: true });
-          throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname51(target)) ?? 0, "the disk filled up during the download");
+          throw spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname52(target)) ?? 0, "the disk filled up during the download");
         }
         throw new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error2)}`);
       }
@@ -88265,7 +88715,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   renameSync13(partial2, target);
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve9, reject) => {
+  return new Promise((resolve10, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream2(path);
@@ -88278,7 +88728,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error2);
       } else {
-        resolve9();
+        resolve10();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -88303,7 +88753,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve9) => setTimeout(resolve9, LOCK_POLL_MS2));
+    await new Promise((resolve10) => setTimeout(resolve10, LOCK_POLL_MS2));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -88359,7 +88809,7 @@ function lockIsStale2(lockPath) {
     return typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS2;
   } catch {
     try {
-      return Date.now() - statSync20(lockPath).mtimeMs > STALE_LOCK_MS2;
+      return Date.now() - statSync21(lockPath).mtimeMs > STALE_LOCK_MS2;
     } catch {
       return true;
     }
@@ -88437,7 +88887,7 @@ class ProgressReporter2 {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync38(dirname51(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync38(dirname52(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync14(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
@@ -88696,7 +89146,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve9) => setTimeout(resolve9, HEALTH_POLL_MS));
+      await new Promise((resolve10) => setTimeout(resolve10, HEALTH_POLL_MS));
     }
     if (current !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -88807,11 +89257,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve9) => {
+      return new Promise((resolve10) => {
         const settle = (value) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve9(value);
+          resolve10(value);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -88854,12 +89304,12 @@ function abortable(promise2, signal) {
     return promise2;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve9, reject) => {
+  return new Promise((resolve10, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise2.then((value) => {
       signal.removeEventListener("abort", onAbort);
-      resolve9(value);
+      resolve10(value);
     }, (error2) => {
       signal.removeEventListener("abort", onAbort);
       reject(error2);
@@ -88896,14 +89346,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve9, reject) => {
+  return new Promise((resolve10, reject) => {
     const server = createServer2();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve9(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve10(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -88937,10 +89387,10 @@ var init_server4 = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { isAbsolute as isAbsolute15, join as join74 } from "node:path";
+import { isAbsolute as isAbsolute16, join as join74 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join74(olympusModelsDir(env), "built-in-transcription");
-  if (!isAbsolute15(root))
+  if (!isAbsolute16(root))
     throw new TypeError("The built-in transcription directory must be an absolute path.");
   return {
     root,
@@ -89188,6 +89638,7 @@ function createBuiltInTranscriber(options = {}) {
   let installing;
   let failedAt;
   let consecutiveFailures = 0;
+  const readyListeners = [];
   let server;
   const prepare = () => {
     if (unavailable)
@@ -89203,6 +89654,11 @@ function createBuiltInTranscriber(options = {}) {
       installed = result;
       failedAt = undefined;
       consecutiveFailures = 0;
+      for (const listener of readyListeners) {
+        try {
+          listener();
+        } catch {}
+      }
     }, (error2) => {
       if (error2 instanceof BuiltInReasoningInstallError && (error2.reason === "unsupported_platform" || error2.reason === "insufficient_memory")) {
         unavailable = error2.message;
@@ -89247,6 +89703,9 @@ function createBuiltInTranscriber(options = {}) {
   };
   return {
     prepare,
+    onReady(listener) {
+      readyListeners.push(listener);
+    },
     async stop() {
       await server?.stop();
     },
@@ -89257,7 +89716,7 @@ function createBuiltInTranscriber(options = {}) {
       if (state === "pending" && installing && filesOnDisk()) {
         const pending = installing;
         const waitMs = Math.max(0, Math.min(verifyWaitMs, deadline - now()));
-        await Promise.race([pending, new Promise((resolve9) => setTimeout(resolve9, waitMs).unref?.())]);
+        await Promise.race([pending, new Promise((resolve10) => setTimeout(resolve10, waitMs).unref?.())]);
         state = prepare();
       }
       if (state === "unavailable")
@@ -89366,6 +89825,13 @@ async function transcribeChunk(fetchImpl, endpoint2, wav, timeoutMs) {
 }
 function runningBuiltInTranscriber() {
   return sharedTranscriber;
+}
+function wireBuiltInTranscriptionAtBoot(input) {
+  if (input.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || input.env.NODE_ENV === "test" || !input.engine)
+    return;
+  if (input.wake)
+    input.engine.onReady?.(input.wake);
+  return input.engine;
 }
 function transcriptionDeadlineFromLease(leaseExpiresAt) {
   const at = leaseExpiresAt ? Date.parse(leaseExpiresAt) : Number.NaN;
@@ -89817,7 +90283,7 @@ function createVlmPdfExtractor(options = {}) {
             lastError = error2;
           }
           if (attempt < pageRetries && pageRetryDelayMs > 0) {
-            await new Promise((resolve9) => setTimeout(resolve9, pageRetryDelayMs));
+            await new Promise((resolve10) => setTimeout(resolve10, pageRetryDelayMs));
           }
         }
         if (!pageText) {
@@ -90051,7 +90517,7 @@ function createDefaultExtractorRegistry(config2 = {}) {
       ...config2.text?.maxBoundedTextChars !== undefined ? { maxBoundedTextChars: config2.text.maxBoundedTextChars } : {},
       pdfOcr: createPdfOcr(ocrShared),
       imageOcr: createImageOcr(ocrShared),
-      ...config2.media?.cacheDir && (config2.media.platform ?? process.platform) === "darwin" ? {
+      ...config2.media?.cacheDir && (config2.media.platform !== undefined ? config2.media.platform === "darwin" : stillImagePreparationAvailable()) ? {
         imagePreparation: createImagePreparation({
           cacheDir: config2.media.cacheDir,
           ...config2.media.timeoutMs !== undefined ? { timeoutMs: config2.media.timeoutMs } : {},
@@ -90152,6 +90618,7 @@ var init_registry = __esm(() => {
   init_remote_vlm();
   init_text();
   init_image_prepare();
+  init_media_cache();
   init_transcription();
   init_vlm();
   DEFAULT_EXTRACTOR_SELECTION_ORDER = [
@@ -90218,6 +90685,14 @@ function createConnectorStoreExtractionSink(options) {
           chunksIndexed: 0,
           chunksAwaitingEmbedding: 0,
           skippedReason: plan.skippedReason
+        };
+      }
+      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== "secure_local") {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY
         };
       }
       const sensitivity = options.classify(plan.item);
@@ -90338,14 +90813,16 @@ function planExtractionSinkWrite(store, request) {
     ...request.media ? { media: { path: request.media.path, sha256: request.media.sha256 } } : {}
   };
 }
-var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = "extraction_claim_superseded", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets";
+var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = "extraction_claim_superseded", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets", EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
 var init_store_sink = __esm(() => {
+  init_tier_classifier();
   init_source_ingestion_exclusions();
   init_connector_store();
 });
 
 // src/workers/file-extraction/runner.ts
 import { createHash as createHash51 } from "node:crypto";
+import { dirname as dirname53 } from "node:path";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -90457,8 +90934,33 @@ function createFileExtractionRunner(options) {
     }
     return requeued;
   }
+  function prepareReadersWithWaitingWork(work) {
+    const asked = [];
+    for (const extractor of registry2.list()) {
+      const policy = extractor.reread;
+      if (!policy)
+        continue;
+      try {
+        const waiting = "queuedKinds" in work ? work.queuedKinds.has(extractor.kind) : work.lanes.some((lane) => jobs.hasWorkWaitingForReader({
+          ...lane,
+          extractorKind: extractor.kind,
+          warnings: policy.unreadWarnings,
+          terminalErrorKinds: policy.unreadTerminalErrorKinds,
+          ...policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}
+        }));
+        if (!waiting)
+          continue;
+        policy.prepare();
+        asked.push(extractor.kind);
+      } catch (error2) {
+        console.error(`Extraction reader check failed for ${extractor.kind}: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      }
+    }
+    return asked;
+  }
   return {
     reclassifyTerminal,
+    prepareReadersWithWaitingWork: (lanes) => prepareReadersWithWaitingWork({ lanes }),
     corpusIds() {
       return [...corporaById.keys()];
     },
@@ -90488,28 +90990,31 @@ function createFileExtractionRunner(options) {
           jobsUnroutable += 1;
           continue;
         }
-        const bucket = byKind.get(extractor.kind);
+        const version2 = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
+        const key = `${extractor.kind}\x00${version2}`;
+        const bucket = byKind.get(key);
         if (bucket)
-          bucket.push(ref);
+          bucket.refs.push(ref);
         else
-          byKind.set(extractor.kind, [ref]);
+          byKind.set(key, { kind: extractor.kind, version: version2, refs: [ref] });
       }
       let jobsQueued = 0;
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
-      for (const [extractorKind, refs] of byKind) {
-        const extractor = registry2.get(extractorKind);
+      for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
         const result = jobs.enqueue({
           refs,
           extractorKind,
-          extractorVersion: extractor.version,
+          extractorVersion,
           ...request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {},
           ...request.priority !== undefined ? { priority: request.priority } : {},
           ...request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {},
           ...request.force !== undefined ? { force: request.force } : {}
         });
         jobsQueued += result.jobsQueued;
+        if (result.jobsQueued > 0)
+          prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
         jobsExisting += result.jobsExisting;
         jobsForced += result.jobsForced;
         jobsSkippedTooLarge += result.jobsSkippedTooLarge;
@@ -90523,10 +91028,10 @@ function createFileExtractionRunner(options) {
         jobsForced,
         jobsSkippedTooLarge,
         jobsUnroutable,
-        extractorKinds: [...byKind.keys()],
+        extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {},
         done: page.done,
-        policy: extractionPlanPolicy(corpus, request.extractorKind !== undefined ? [registry2.get(request.extractorKind)].filter((extractor) => extractor !== undefined) : [...byKind.keys()].map((kind) => registry2.get(kind)))
+        policy: extractionPlanPolicy(corpus, request.extractorKind !== undefined ? [registry2.get(request.extractorKind)].filter((extractor) => extractor !== undefined) : [...new Set([...byKind.values()].map((bucket) => bucket.kind))].map((kind) => registry2.get(kind)))
       };
     },
     async run(request) {
@@ -90637,6 +91142,16 @@ function createFileExtractionRunner(options) {
   };
 }
 async function settleOneJob(input) {
+  const staged = {};
+  try {
+    return await settleOneJobHeld(input, staged);
+  } finally {
+    const media = staged.media;
+    if (media?.stagingHolder)
+      releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname53(media.path));
+  }
+}
+async function settleOneJobHeld(input, staged) {
   const { job, extractor, corpus } = input;
   if (!extractor) {
     return { status: "failed_terminal", errorKind: EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR };
@@ -90711,6 +91226,8 @@ async function settleOneJob(input) {
   }
   try {
     output = await extractor.extract(extractorInput);
+    if (output.status === "indexed" && output.media)
+      staged.media = output.media;
   } catch (error2) {
     if (isModelEndpointRedirectError(error2))
       return retryable(EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT, error2);
@@ -91061,6 +91578,7 @@ async function drainPdfExtraction(input) {
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
+  init_media_cache();
   init_operation_error();
   init_model_transport();
   init_types();
@@ -91076,7 +91594,8 @@ var init_runner = __esm(() => {
     [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",
     [EXTRACTION_SINK_SKIPPED_SECRETS]: "blocked_policy",
     [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
-    [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only"
+    [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only",
+    [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: "metadata_only"
   });
   PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 });
@@ -91540,6 +92059,8 @@ function createFileExtractionRuntime(options) {
     ...options.extractors ?? {},
     media: { cacheDir: mediaCacheDir(env), ...options.extractors?.media ?? {} }
   };
+  if (extractorConfig.media?.cacheDir)
+    sweepMediaCache(extractorConfig.media.cacheDir);
   const registry2 = createDefaultExtractorRegistry(extractorConfig);
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
   const runner = createFileExtractionRunner({
@@ -91981,10 +92502,10 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID23 } from "node:crypto";
 import { homedir as homedir51 } from "node:os";
-import { dirname as dirname52, isAbsolute as isAbsolute16, join as join77 } from "node:path";
+import { dirname as dirname54, isAbsolute as isAbsolute17, join as join77 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir51(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute16(configuredRoot) ? configuredRoot : join77(homeDir, ".cache");
+  const cacheRoot = configuredRoot && isAbsolute17(configuredRoot) ? configuredRoot : join77(homeDir, ".cache");
   return join77(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
@@ -92191,7 +92712,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID23()}.tmp`;
   try {
-    mkdirSync39(dirname52(path), { recursive: true, mode: 448 });
+    mkdirSync39(dirname54(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync16(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -92909,7 +93430,7 @@ import {
   unlink as unlink2
 } from "node:fs/promises";
 import { homedir as homedir52 } from "node:os";
-import { dirname as dirname53, join as join78 } from "node:path";
+import { dirname as dirname55, join as join78 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped2 = audit.skipped_corpora.map((skip) => ({
@@ -93023,7 +93544,7 @@ async function appendSourceAnswerLatencyLine(path, record3, options = {}) {
   const line = `${JSON.stringify(record3)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir5(dirname53(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname55(path), { recursive: true, mode: 448 });
   await makeExistingLedgerPrivate(path);
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line), maxBytes);
@@ -93746,7 +94267,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve9, reject) => {
+  return new Promise((resolve10, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -93769,7 +94290,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve9(response);
+      resolve10(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -94313,14 +94834,51 @@ details.models .modelsbody { margin-top: 12px; }
 .pprompt p { margin: 0; color: var(--t1); }
 `, DASHBOARD_OUTSIDE_HELP_CSS = `
 .outside .ohlabel { color: var(--t3); font-size: var(--fs-caption); margin: -2px 0 10px; }
-.outside .ohstate { font-weight: 600; color: var(--t1); margin: 0 0 12px; }
-.outside .ohready { color: var(--good, var(--t1)); font-weight: 600; margin: 0 0 8px; }
+/* The status block: the switch, the route in one line, today's usage. */
+.outside .ohpanel { margin: 0 0 8px; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
+.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; margin: 0 0 4px; }
+.outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
+.outside .dot.on { background: var(--good); }
+.outside .dot.off { background: transparent; border: 2px solid var(--off); }
+.outside .dot.attn { background: var(--warn-fill); }
+.outside .ohline { margin: 0 0 0 20px; color: var(--t2); }
+.outside .ohline.good { color: var(--good); font-weight: 600; }
+.outside .ohline.attn, .outside .ohline .attn { color: var(--warn); font-weight: 600; }
+.outside .ohline .attn { font-weight: 500; }
+.outside .ohpanel .ohsmall { margin: 4px 0 0 20px; }
+.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
 .outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+/* Problems: one tinted list, a line each, the fix in the line. */
+.outside .ohfix { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
+.outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
+.outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.outside .ohfix .ohform { margin: 0; }
+.outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
+.outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
 .outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
-.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; }
+.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; overflow-wrap: anywhere; }
 .outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
-.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); }
+.outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
+/* Secondary sections: one line each (title and a short summary), open only when they need attention. */
+.outside details.ohsect { border-top: 1px solid var(--line); }
+.outside .ohmore { margin: 28px 0 0; }
+.outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
+.outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
+.outside details.ohsect > summary::-webkit-details-marker { display: none; }
+.outside details.ohsect > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
+.outside details.ohsect[open] > summary::before { content: '\\25BE'; }
+.outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.outside .ohsect-title.attn { color: var(--warn); }
+.outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
+.outside .ohsect-sum:empty { display: none; }
+.outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
+.outside .ohsect-body { padding: 0 0 16px 18px; }
+.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0 16px; margin: 0 0 8px; }
 .outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
+.outside .ohform.ohinline { margin: 0 0 12px; }
+.outside .ohform .keyfield { width: 100%; max-width: 220px; }
 .outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
 .outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
 .outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
@@ -94329,6 +94887,15 @@ details.models .modelsbody { margin-top: 12px; }
 .outside .ohfence .ohform { grid-template-columns: auto 1fr; align-items: center; }
 .outside .ohfence .ohform .actmsg { grid-column: 1 / -1; }
 .outside .actmsg[data-state="error"] { color: var(--bad); }
+.outside .ohunlock { margin: 0 0 12px; padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohunlock .pnote { margin: 0; color: var(--t1); }
+@media (max-width: 700px) {
+  .outside .ohpanel { padding: 14px; }
+  .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
+  .outside .ohline, .outside .ohpanel .ohsmall { margin-left: 0; }
+  .outside .btn { white-space: normal; text-align: left; }
+  .outside .ohsect-body { padding-left: 0; }
+}
 `;
 
 // src/control-ui/browser-controller.ts
@@ -102450,80 +103017,158 @@ function summaryOf(status) {
 function outsideHelpBlockerWords(code) {
   return DASHBOARD_OUTSIDE_HELP_COPY.blockers[code] ?? fill(DASHBOARD_OUTSIDE_HELP_COPY.blockerOther, { code });
 }
+function shortDate(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  const month = match ? MONTHS2[Number(match[2]) - 1] : undefined;
+  return match && month ? `${Number(match[3])} ${month}` : iso;
+}
 function renderOutsideHelpCard(status, input) {
   const summary = summaryOf(status);
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
-  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const blockers = route.state === "configured" && route.readiness ? route.readiness.blockers : [];
   const parts = [];
   parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
   parts.push(`<p class="ohlabel">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`);
   parts.push(`<p class="pintro">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>`);
-  parts.push(`<p class="ohstate" data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</p>`);
+  parts.push(`<p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>`);
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
   if (canUnlock) {
-    parts.push(`<form class="ohform" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
-  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div><ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`);
-  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeTitle)}</div>`);
-  if (route.state === "not_configured") {
-    parts.push(`<p class="pnote" data-outside-route="not_configured">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing)}</p>`);
-    if (route.policyWritable) {
-      parts.push(`<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}">` + `<button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-    } else {
-      parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile)}</p>`);
-    }
-  } else {
-    parts.push(renderReadiness(route));
+  parts.push(renderStatusBlock(status, summary, canEdit));
+  parts.push(renderProblems(status, canEdit));
+  const shortList = `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
+  const fullList = `<ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
+  const on = status.settings.state === "on";
+  if (!on) {
+    parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div>${shortList}` + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</summary>${fullList}</details>`);
   }
-  parts.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`));
-  if (route.state === "configured") {
+  if (route.state === "configured")
     parts.push(renderAcknowledgements(route, canEdit));
-  }
-  if (route.state === "configured" && route.readiness && route.readiness.fences.length > 0) {
-    parts.push(renderFence(route.readiness, canEdit));
-  }
-  parts.push(renderEnable(status, summary, canEdit));
-  const config2 = { csrfToken: input.csrfToken ?? "", paths: DASHBOARD_OUTSIDE_HELP_PATHS, copy: { saving: DASHBOARD_OUTSIDE_HELP_COPY.saving, failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed, restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting } };
+  const more = [];
+  if (route.state === "configured" && route.readiness && route.readiness.fences.length > 0)
+    more.push(renderFence(route.readiness, canEdit));
+  more.push(renderLanguages(status, canEdit));
+  if (route.state === "configured")
+    more.push(renderLimits(route, blockers, canEdit));
+  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, route.state === "not_configured" || blockers.some((code) => SETUP_BLOCKERS.has(code))));
+  if (route.state === "configured")
+    more.push(renderDetails(route));
+  if (on)
+    more.push(renderSection({ id: "disclosure", title: DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore, summary: "", open: false, body: `<div data-outside-disclosure-more>${shortList}${fullList}</div>` }));
+  parts.push(`<div class="ohmore">${more.join("")}</div>`);
+  const config2 = {
+    csrfToken: input.csrfToken ?? "",
+    paths: DASHBOARD_OUTSIDE_HELP_PATHS,
+    copy: { saving: DASHBOARD_OUTSIDE_HELP_COPY.saving, failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed, restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting, on: DASHBOARD_OUTSIDE_HELP_COPY.state.on, off: DASHBOARD_OUTSIDE_HELP_COPY.state.off }
+  };
   const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config2)}</script>` : "";
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
 }
-function renderReadiness(route) {
-  if (route.readinessUnavailable || !route.readiness) {
-    return `<p class="pnote ohwarn" data-outside-route="unknown">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.readinessUnavailable)}</p>`;
-  }
-  const ready = route.readiness;
-  const facts = [
-    ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
-    ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
-    ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
-    fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
-    ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown
-  ];
-  const blockers = ready.blockers.map((code) => `<li>${escapeHtml2(outsideHelpBlockerWords(code))}</li>`).join("");
-  const head = ready.ready ? `<p class="ohready" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.ready)}</p>` : `<p class="pnote ohwarn" data-outside-route="blocked">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.blocked)}</p><ul class="ohlist" data-outside-blockers>${blockers}</ul>`;
-  return `${head}<ul class="ohfacts">${facts.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>` + `<p class="pnote ohsmall">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }))}</p>`;
+function renderStatusBlock(status, summary, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const route = status.route;
+  const on = status.settings.state === "on";
+  const invalid2 = status.settings.state === "invalid";
+  const blockedReason = invalid2 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
+  const button = invalid2 ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const tone = summary.state === "on" ? "on" : summary.state === "off" ? "off" : "attn";
+  const head = `<div class="ohhead"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + `<div class="pbuttons">${button}</div></div>`;
+  const lines = [renderRouteLine(route)];
+  if (route.state === "configured" && route.readiness)
+    lines.push(`<p class="ohline" data-outside-usage>${escapeHtml2(usageLine(route.readiness))}</p>`);
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">` + head + lines.join("") + `<p class="ohsmall" data-outside-cost>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLines.join(" "))}</p>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
-function renderSetupSteps(secretRef) {
+function renderRouteLine(route) {
+  if (route.state === "not_configured")
+    return `<p class="ohline attn" data-outside-route="not_configured">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeMissingShort)}</p>`;
+  if (route.readinessUnavailable || !route.readiness)
+    return `<p class="ohline attn" data-outside-route="unknown">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown)}</p>`;
+  const ready = route.readiness;
+  if (ready.ready) {
+    return ready.torMode === "off" ? `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReadyNoTor)} <span class="attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</span></p>` : `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReady)}</p>`;
+  }
+  const first = ready.blockers[0];
+  const reason = first ? outsideHelpBlockerWords(first) : DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown;
+  const more = ready.blockers.length > 1 ? ` ${fill(DASHBOARD_OUTSIDE_HELP_COPY.routeMore, { n: String(ready.blockers.length - 1) })}` : "";
+  return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeNotReady, { reason }))}${escapeHtml2(more)}</p>` + (ready.torMode === "off" ? `<p class="ohline attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "");
+}
+function usageLine(ready) {
+  const count2 = ready.requestsToday.count;
+  const pieces = [count2 === 0 ? DASHBOARD_OUTSIDE_HELP_COPY.usageNone : count2 === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.usageOne : fill(DASHBOARD_OUTSIDE_HELP_COPY.usageMany, { n: String(count2) })];
+  const head = count2 > 0 ? `${pieces[0]} ${fill(DASHBOARD_OUTSIDE_HELP_COPY.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}` : pieces[0];
+  pieces.splice(0, 1, head);
+  pieces.push(ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.usageExpired : DASHBOARD_OUTSIDE_HELP_COPY.usageExpiryUnknown);
+  return pieces.join(" · ");
+}
+function renderProblems(status, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const route = status.route;
+  const items = [];
+  if (route.state === "not_configured") {
+    const action = route.policyWritable ? `<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}">` + `<button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
+    items.push(`<li data-outside-route-missing><span>${escapeHtml2(route.policyWritable ? DASHBOARD_OUTSIDE_HELP_COPY.routeMissing : DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile)}</span>${action}</li>`);
+  } else if (route.readinessUnavailable || !route.readiness) {
+    items.push(`<li><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown)}</span></li>`);
+  } else {
+    for (const code of route.readiness.blockers)
+      items.push(`<li><span>${escapeHtml2(outsideHelpBlockerWords(code))}</span></li>`);
+  }
+  if (items.length === 0)
+    return "";
+  return `<div class="sect attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}</div><ul class="ohfix" data-outside-blockers>${items.join("")}</ul>`;
+}
+function renderSection(input) {
+  return `<details class="ohsect" data-outside-section="${escapeHtml2(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title${input.attn ? " attn" : ""}">${escapeHtml2(input.title)}</span><span class="ohsect-sum">${escapeHtml2(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
+}
+function renderSetupSteps(secretRef, needed) {
   const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => fill(step, { secretRef }));
-  return `<details class="howto" data-outside-steps><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle)}</summary>` + `<p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></details>`;
+  return renderSection({
+    id: "steps",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
+    summary: "",
+    open: needed,
+    attn: needed,
+    body: `<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
+  });
 }
 function renderAcknowledgements(route, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  const accepted = new Set(route.acknowledgements.complete ? route.acknowledgements.accepted : []);
+  const complete = route.acknowledgements.complete;
+  const accepted = new Set(complete ? route.acknowledgements.accepted : []);
   const boxes = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<label class="ohack"><input type="checkbox" name="acknowledged" value="${escapeHtml2(entry.id)}"` + `${accepted.has(entry.id) ? " checked" : ""}${disabled}><span>${escapeHtml2(entry.statement)}</span></label>`).join("");
-  const state = route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.acknowledged : DASHBOARD_OUTSIDE_HELP_COPY.notAcknowledged;
-  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>` + `<p class="pnote" data-outside-acknowledged="${route.acknowledgements.complete ? "yes" : "no"}">${escapeHtml2(state)}</p>` + `<form class="ohform" data-outside-form="route">${boxes}` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</p>` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></div></form>`;
+  const form = `<form class="ohform" data-outside-form="route">${boxes}` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const head = `<div class="sect${complete ? "" : " attn"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div>`;
+  if (complete) {
+    return head + `<p class="pnote" data-outside-acknowledged="yes">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.acknowledged, { n: String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length) }))}</p>` + `<details class="howto" data-outside-ack-review><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.acknowledgedReview)}</summary>${form}</details>`;
+  }
+  return head + `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>` + `<p class="pnote" data-outside-acknowledged="no">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.notAcknowledged)}</p>` + form;
+}
+function renderLimits(route, blockers, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const capped = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
+  const limit = capped ? [
+    ...route.dailyRequestCap !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsRequests, { n: String(route.dailyRequestCap) })] : [],
+    ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
+  ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
+  const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
+  const needed = blockers.some((code) => LIMIT_BLOCKERS.has(code));
+  const noLimit = capped ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>`;
+  const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
+  const body = today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, open: needed, attn: needed, body });
 }
 function renderFence(ready, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const mine = ready.fences.some((fence) => fence.thisWallet);
   const rows = ready.fences.map((fence) => `<li>${escapeHtml2(fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: fence.at.slice(0, 16).replace("T", " ") }))}</li>`).join("");
-  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceTitle)}</div><p class="pnote ohwarn" data-outside-fence>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceIntro)}</p><ul class="ohlist">${rows}</ul>` + `<div class="ohfence">` + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary"${mine ? "" : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}</span><span class="actmsg" data-action-message role="status"></span></form>` + ready.fences.map((fence) => `<form class="ohform" data-outside-form="abandon" data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join("") + `</div>`;
+  const body = `<p class="pnote ohwarn" data-outside-fence>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceIntro)}</p><ul class="ohlist">${rows}</ul>` + `<div class="ohfence">` + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary"${mine ? "" : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}</span><span class="actmsg" data-action-message role="status"></span></form>` + ready.fences.map((fence) => `<form class="ohform" data-outside-form="abandon" data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join("") + `</div>`;
+  return renderSection({ id: "fence", title: DASHBOARD_OUTSIDE_HELP_COPY.fenceTitle, summary: "", open: true, attn: true, body });
 }
-function renderEnable(status, summary, canEdit) {
+function renderLanguages(status, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const chosen = new Set(status.settings.languages);
   const languages = status.languages.map((entry) => {
@@ -102531,16 +103176,39 @@ function renderEnable(status, summary, canEdit) {
     const off = !entry.installed;
     return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled}>` + `<span>${escapeHtml2(name)}${off ? ` <span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
   }).join("");
-  const on = status.settings.state === "on";
-  const route = status.route;
-  const blockedReason = status.settings.state === "invalid" ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const invalid2 = status.settings.state === "invalid";
-  const button = invalid2 ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
-  const domainsOn = Object.entries(status.settings.domains).filter(([, on2]) => on2).map(([key]) => domainNames[key] ?? key);
-  const domainsOff = Object.entries(status.settings.domains).filter(([, on2]) => !on2).map(([key]) => domainNames[key] ?? key);
-  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on2]) => on2).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
-  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p>${domains}` + `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">${languages}` + `<div class="pfooter"><p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.automatic)}</p><div class="pbuttons">${button}</div>` + `<span class="actmsg" data-action-message role="status"></span></div></form>` + (summary.state === "fence_held" ? "" : "");
+  const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => domainNames[key] ?? key);
+  const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key]) => domainNames[key] ?? key);
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
+  const named = status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => LANGUAGE_NAMES[entry.language]);
+  return renderSection({
+    id: "languages",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle,
+    summary: named.join(", "),
+    open: false,
+    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
+  });
+}
+function renderDetails(route) {
+  if (route.readinessUnavailable || !route.readiness)
+    return "";
+  const ready = route.readiness;
+  const facts = [
+    ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
+    ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
+    ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
+    fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
+    ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown,
+    fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }),
+    ...ready.lastSession ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.lastSession, { at: ready.lastSession.at.slice(0, 16).replace("T", " "), result: ready.lastSession.result })] : []
+  ];
+  return renderSection({
+    id: "details",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.detailsTitle,
+    summary: "",
+    open: false,
+    body: `<ul class="ohfacts" data-outside-facts>${facts.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>`
+  });
 }
 function outsideHelpClientScript(config2) {
   return `(function () {
@@ -102559,26 +103227,49 @@ function outsideHelpClientScript(config2) {
     var n = Number(trimmed);
     return isFinite(n) ? n : NaN;
   }
+  function checked(name) {
+    return Array.prototype.map.call(root.querySelectorAll('input[name="' + name + '"]:checked'), function (input) { return input.value; });
+  }
+  function field(name) {
+    var input = root.querySelector('[name="' + name + '"]');
+    return input ? input.value : '';
+  }
+  // Each post carries the whole card's state for its route, wherever on the
+  // card the fields sit: the switch reads the language boxes, and every route
+  // save reads the acknowledgements, the funding date and both limits.
   function bodyFor(form, kind, submitter) {
-    var data = new FormData(form);
     if (kind === 'enable') {
       var invalid = form.getAttribute('data-outside-invalid') === 'yes';
       var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
-      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: data.getAll('languages') };
+      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: checked('languages') };
       if (invalid) body.replace_invalid = true;
       return body;
     }
     if (kind === 'route') {
+      if (form.hasAttribute('data-outside-nolimit')) {
+        return { acknowledged: checked('acknowledged'), daily_request_cap: null, daily_spend_cap_usd: null };
+      }
       return {
-        acknowledged: data.getAll('acknowledged'),
-        funding_date: String(data.get('funding_date') || ''),
-        daily_request_cap: numberOrNull(data.get('daily_request_cap')),
-        daily_spend_cap_usd: numberOrNull(data.get('daily_spend_cap_usd')),
+        acknowledged: checked('acknowledged'),
+        funding_date: String(field('funding_date') || ''),
+        daily_request_cap: numberOrNull(field('daily_request_cap')),
+        daily_spend_cap_usd: numberOrNull(field('daily_spend_cap_usd')),
       };
     }
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
+  }
+  // After a restart the worker is briefly away: wait for it to answer, then reload.
+  function reloadWhenBack(delay) {
+    var tries = 0;
+    function poll() {
+      tries += 1;
+      fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+        if (response.ok || tries > 40) window.location.reload(); else setTimeout(poll, 1500);
+      }, function () { if (tries > 40) window.location.reload(); else setTimeout(poll, 1500); });
+    }
+    setTimeout(poll, delay);
   }
   var paths = { unlock: config.paths.unlock, enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
   root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
@@ -102593,12 +103284,13 @@ function outsideHelpClientScript(config2) {
       try {
         // The local unlock presents no credential at all: the boundary wants a
         // loopback browser and nothing else. Every other form carries the CSRF token.
+        var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var response = await fetch(paths[kind], kind === 'unlock'
           ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
           : {
             method: 'POST', credentials: 'same-origin', cache: 'no-store',
             headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
-            body: JSON.stringify(bodyFor(form, kind, event.submitter)),
+            body: JSON.stringify(body),
           });
         var result = {};
         try { result = await response.json(); } catch (error) { result = {}; }
@@ -102608,11 +103300,18 @@ function outsideHelpClientScript(config2) {
           return;
         }
         message(form, result.status_message || '', false);
+        if (kind === 'enable' && body && !body.replace_invalid) {
+          // Say the new state at once, before the reload that redraws the card.
+          var line = root.querySelector('[data-outside-state-text]');
+          if (line) line.textContent = body.enabled ? config.copy.on : config.copy.off;
+          if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
+          if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
+        }
         if (result.restarting) {
           message(form, (result.status_message || '') + ' ' + config.copy.restarting, false);
-          setTimeout(function () { window.location.reload(); }, 6000);
+          reloadWhenBack(4000);
         } else {
-          setTimeout(function () { window.location.reload(); }, 1200);
+          setTimeout(function () { window.location.reload(); }, 900);
         }
       } catch (error) {
         message(form, config.copy.failed, true);
@@ -102627,9 +103326,9 @@ function renderOutsideHelpSection(summary, basePath) {
     return "";
   const href = outsideHelpHref(basePath);
   const label = summary.state === "route_not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.setUp : DASHBOARD_OUTSIDE_HELP_COPY.edit;
-  return `<div class="sect" id="outside-help">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</div>` + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml2(outsideHelpStateLine(summary))}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a></div></div></div>`;
+  return `<div class="sect" id="outside-help">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.sectionTitle)}</div>` + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a></div></div></div>`;
 }
-var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES;
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS2, LIMIT_BLOCKERS, SETUP_BLOCKERS;
 var init_outside_help = __esm(() => {
   init_zkapi_consult_settings();
   init_components();
@@ -102653,6 +103352,9 @@ var init_outside_help = __esm(() => {
     de: "German",
     it: "Italian"
   };
+  MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  LIMIT_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid", "note_expired", "daily_cap_reached", "spend_cap_reached"]);
+  SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on"]);
 });
 
 // src/workers/dashboard/pages/setup.ts
@@ -104107,7 +104809,7 @@ function whenText(recordedAt, now) {
 }
 function utcStamp(at) {
   const day = at.getUTCDate();
-  const month = MONTHS2[at.getUTCMonth()] ?? "";
+  const month = MONTHS3[at.getUTCMonth()] ?? "";
   const hours = String(at.getUTCHours()).padStart(2, "0");
   const minutes = String(at.getUTCMinutes()).padStart(2, "0");
   return `${day} ${month} ${at.getUTCFullYear()}, ${hours}:${minutes} UTC`;
@@ -104115,7 +104817,7 @@ function utcStamp(at) {
 function plural3(count2, one, many) {
   return count2 === 1 ? one : many;
 }
-var DEFAULT_BASE_PATH6 = "/dashboard", BACKGROUND_QUERY_PARAM3 = "background", MONTHS2, EMBEDDING_LEDGER_CSS = `.ledgerback { margin-bottom: 10px; font-size: 12px; }
+var DEFAULT_BASE_PATH6 = "/dashboard", BACKGROUND_QUERY_PARAM3 = "background", MONTHS3, EMBEDDING_LEDGER_CSS = `.ledgerback { margin-bottom: 10px; font-size: 12px; }
 .ledgerback a { color: var(--t3); text-decoration: none; }
 .ledgerback a:hover { color: var(--t1); }
 .ledgerwarn { background: var(--panel); border: 1px solid var(--warn); border-radius: 9px; padding: 10px 14px; margin-bottom: 10px; color: var(--warn); font-size: 12px; line-height: 1.5; }
@@ -104137,7 +104839,7 @@ var init_embedding_ledger2 = __esm(() => {
   init_nav();
   init_components();
   init_vocabulary();
-  MONTHS2 = [
+  MONTHS3 = [
     "Jan",
     "Feb",
     "Mar",
@@ -104793,7 +105495,7 @@ var init_source_disposition_tree = __esm(() => {
 
 // src/workers/source-dispositions.ts
 import { chmodSync as chmodSync23, copyFileSync, existsSync as existsSync49, lstatSync as lstatSync19, mkdirSync as mkdirSync40, readFileSync as readFileSync46 } from "node:fs";
-import { dirname as dirname54 } from "node:path";
+import { dirname as dirname56 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
   const scopeSourceIds = new Set((options.folderScopes ?? []).map((source) => source.disposition_source_id));
@@ -104908,7 +105610,7 @@ function writeSourceIngestionExclusionsFile(options) {
     copyFileSync(path, backupPath);
     chmodSync23(backupPath, 384);
   } else {
-    mkdirSync40(dirname54(path), { recursive: true });
+    mkdirSync40(dirname56(path), { recursive: true });
   }
   writePrivateFileAtomicSync(path, text);
   return {
@@ -105574,12 +106276,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve9) => {
+        new Promise((resolve10) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve9({
+              resolve10({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -105604,9 +106306,9 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash55, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { readFileSync as readFileSync47, statSync as statSync21 } from "node:fs";
+import { readFileSync as readFileSync47, statSync as statSync22 } from "node:fs";
 import { homedir as homedir54 } from "node:os";
-import { join as join80, resolve as resolve9 } from "node:path";
+import { join as join80, resolve as resolve10 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -107252,8 +107954,8 @@ function createEmailSourceWorker(options = {}) {
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve10) => {
-      release = resolve10;
+    dashboardGrantMutationTail = new Promise((resolve11) => {
+      release = resolve11;
     });
     await previous;
     try {
@@ -107566,7 +108268,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
-  return new Promise((resolve10) => setTimeout(resolve10, ms));
+  return new Promise((resolve11) => setTimeout(resolve11, ms));
 }
 async function parseSourceIndexAnswerRequest(request) {
   const record3 = await parseObjectBody(request);
@@ -108552,10 +109254,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve9(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve10(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize3 = (paths) => [...new Set(paths.map((path) => resolve9(path)))].sort();
+  const normalize3 = (paths) => [...new Set(paths.map((path) => resolve10(path)))].sort();
   const a = normalize3(left);
   const b = normalize3(right);
   return a.length === b.length && a.every((value, index) => value === b[index]);
@@ -108739,7 +109441,7 @@ function assertDashboardSourceMayRead(source, sourceDashboard, disconnected) {
 }
 function dashboardRegistryStamp(registryPath) {
   try {
-    const stat6 = statSync21(registryPath);
+    const stat6 = statSync22(registryPath);
     return `${stat6.mtimeMs}:${stat6.size}`;
   } catch {
     return "absent";
@@ -110452,7 +111154,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve10) => setTimeout(resolve10, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -110495,6 +111197,11 @@ class SourceScheduler {
     }, this.tickMs);
     this.timer.unref?.();
     this.refreshFastWakeTimers();
+    for (const state of this.states) {
+      try {
+        state.task.atStart?.();
+      } catch {}
+    }
     this.runDueTasks();
   }
   stop() {
@@ -110543,6 +111250,27 @@ class SourceScheduler {
     }
     if (woke)
       this.scheduleContinueWake(at);
+  }
+  wakeTasksOfKind(kind, at = this.now().getTime()) {
+    let woke = 0;
+    for (const state of this.states) {
+      if (state.task.kind !== kind || state.consecutiveFailures > 0)
+        continue;
+      if (taskCadence(state.source, state.task) !== "continuous")
+        continue;
+      if (state.running) {
+        state.wakeAfterRun = true;
+        woke += 1;
+        continue;
+      }
+      if (state.nextRunAt <= at)
+        continue;
+      state.nextRunAt = at;
+      woke += 1;
+    }
+    if (woke > 0)
+      this.scheduleContinueWake(at);
+    return woke;
   }
   refreshFastWakeTimers() {
     const desired = new Set(this.sources.flatMap((source) => source.tasks.filter((task) => taskCadence(source, task) === "continuous" && taskIntervalMs(source, task) < this.tickMs).map((task) => taskIntervalMs(source, task))));
@@ -110708,7 +111436,10 @@ class SourceScheduler {
       const continuing = result.continueSoon === true && !retryAt;
       const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
-      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const scheduledRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
+      const wokenWhileRunning = state.wakeAfterRun === true && !retryAt;
+      delete state.wakeAfterRun;
+      const nextRunAt = wokenWhileRunning ? Math.min(scheduledRunAt, continueAt) : scheduledRunAt;
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, "checkpoint");
         this.applyPersistedState(state, this.stateStore.recordSuccess({
@@ -110745,11 +111476,12 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
-      if (continuing)
+      if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
       if (result.status === "progress" && !retryAt)
         this.wakeDownstream(state, continueAt);
     } catch (error2) {
+      delete state.wakeAfterRun;
       const message = error2 instanceof Error ? error2.message : String(error2);
       const errorKind = safeSchedulerErrorKind(error2);
       const errorHash = hash(message);
@@ -111095,6 +111827,9 @@ function fileExtractionSchedulerTask(input) {
     id: input.id,
     kind: "extract",
     writer: true,
+    atStart: () => {
+      input.runner.prepareReadersWithWaitingWork?.([input.lane]);
+    },
     run: async (context) => {
       let cursor = context?.checkpoint ?? undefined;
       const startCursor = cursor;
@@ -112260,7 +112995,8 @@ function scopeBoundEmbeddingProvider(provider, authority, ref) {
     },
     assertBindingCurrent() {
       authority.assertRefCurrent(ref);
-    }
+    },
+    ...provider.imageSupport ? { imageSupport: () => provider.imageSupport() } : {}
   };
 }
 function gmailConnectorScopeFromApproval(approval) {
@@ -112295,12 +113031,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname55, join as join81 } from "node:path";
+import { dirname as dirname57, join as join81 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join81(dirname55(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join81(dirname57(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -112761,7 +113497,7 @@ var init_answer_activity = __esm(() => {
 import { createHash as createHash57 } from "node:crypto";
 import { mkdirSync as mkdirSync41 } from "node:fs";
 import { homedir as homedir55 } from "node:os";
-import { dirname as dirname56, join as join82 } from "node:path";
+import { dirname as dirname58, join as join82 } from "node:path";
 function defaultPrivacyProfilePath() {
   return join82(homedir55(), ".olympus", "privacy.json");
 }
@@ -112919,7 +113655,7 @@ function writePrivacyProfile(update, options = {}) {
   if (!unchanged)
     writeOwnerTierRules([...kept, ...owned], rulesOptions);
   const path = resolvePrivacyProfilePath(options);
-  mkdirSync41(dirname56(path), { recursive: true, mode: 448 });
+  mkdirSync41(dirname58(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}
 `);
   return next;
@@ -112953,7 +113689,7 @@ var init_privacy_profile = __esm(() => {
 
 // src/workers/classification/sniffer-resolver.ts
 import { mkdirSync as mkdirSync42, readFileSync as readFileSync48 } from "node:fs";
-import { dirname as dirname57 } from "node:path";
+import { dirname as dirname59 } from "node:path";
 function defaultSnifferMaxCallsPerPass(kind) {
   return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
 }
@@ -112990,7 +113726,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync42(dirname57(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync42(dirname59(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -114147,9 +114883,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve10) => {
+        return new Promise((resolve11) => {
           this._streamMapping.set(streamId2, {
-            resolveJson: resolve10,
+            resolveJson: resolve11,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
             }
@@ -114380,12 +115116,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve11, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve10, reject, timer };
+      pending[id] = { resolve: resolve11, reject, timer };
     });
   }
   function notify(method, params) {
@@ -118199,7 +118935,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve10) => {
+    return new Promise((resolve11) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -118210,7 +118946,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return;
         }
         settled = true;
-        resolve10(db);
+        resolve11(db);
       };
       try {
         const factory = window.indexedDB;
@@ -118237,7 +118973,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve10) => {
+    return new Promise((resolve11) => {
       let settled = false;
       const finish2 = (value) => {
         if (settled)
@@ -118246,7 +118982,7 @@ function chatgptPrivateAnswerProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve10(value);
+        resolve11(value);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -118444,10 +119180,10 @@ function chatgptPrivateAnswerProgram(config2) {
     };
   }
   function wait(ms) {
-    return new Promise((resolve10) => setTimeout(resolve10, ms));
+    return new Promise((resolve11) => setTimeout(resolve11, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve11, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -118457,7 +119193,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }, Math.max(0, ms));
       work.then((value) => {
         clearTimeout(timer);
-        resolve10(value);
+        resolve11(value);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -120855,10 +121591,10 @@ function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
-  const timeout = new Promise((resolve10) => {
+  const timeout = new Promise((resolve11) => {
     timer = setTimeout(() => {
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve10(false);
+      resolve11(false);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -120899,8 +121635,8 @@ async function defaultPrivateMatchProbe(question, ctx) {
   if (corpora.length === 0)
     return none;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
-  const timeout = new Promise((resolve10) => {
-    const timer = setTimeout(() => resolve10(none), PROBE_TIMEOUT_MS2);
+  const timeout = new Promise((resolve11) => {
+    const timer = setTimeout(() => resolve11(none), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -121162,8 +121898,8 @@ async function readBoundedRequestText(request, maxBytes = REMOTE_REQUEST_MAX_BOD
   const chunks2 = [];
   let total = 0;
   let timer;
-  const deadline = options.deadlineMs === undefined ? undefined : new Promise((resolve10) => {
-    timer = setTimeout(() => resolve10("timeout"), options.deadlineMs);
+  const deadline = options.deadlineMs === undefined ? undefined : new Promise((resolve11) => {
+    timer = setTimeout(() => resolve11("timeout"), options.deadlineMs);
   });
   try {
     for (;; ) {
@@ -121620,7 +122356,7 @@ function createRemoteOAuthHandler(options) {
   const registrations = tokenBucket(options.registrationBurst ?? 10, 3600000, now);
   const pending = new Map;
   const codes = new Map;
-  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve10) => setTimeout(resolve10, ms))));
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
@@ -122800,8 +123536,8 @@ class PrivateAnswerJobs {
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
         let timer;
-        await Promise.race([settled, new Promise((resolve10) => {
-          timer = setTimeout(resolve10, holdMs);
+        await Promise.race([settled, new Promise((resolve11) => {
+          timer = setTimeout(resolve11, holdMs);
           timer.unref?.();
         })]);
         clearTimeout(timer);
@@ -123134,8 +123870,8 @@ class PrivateAnswerJobs {
     let settle = () => {
       return;
     };
-    const settled = new Promise((resolve10) => {
-      settle = resolve10;
+    const settled = new Promise((resolve11) => {
+      settle = resolve11;
     });
     const analysis = {
       key,
@@ -123334,10 +124070,10 @@ class PrivateAnswerJobs {
     work.catch(() => {
       return;
     });
-    const stopped = new Promise((resolve10) => {
+    const stopped = new Promise((resolve11) => {
       if (abort.signal.aborted)
-        resolve10();
-      abort.signal.addEventListener("abort", () => resolve10(), { once: true });
+        resolve11();
+      abort.signal.addEventListener("abort", () => resolve11(), { once: true });
     });
     try {
       const done = await Promise.race([work, stopped]);
@@ -123365,8 +124101,8 @@ class PrivateAnswerJobs {
     let claimSettled = () => {
       return;
     };
-    const done = new Promise((resolve10) => {
-      claimSettled = resolve10;
+    const done = new Promise((resolve11) => {
+      claimSettled = resolve11;
     });
     const abort = new AbortController;
     job.claimAbort = abort;
@@ -123405,10 +124141,10 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
-    const stopped = new Promise((resolve10) => {
+    const stopped = new Promise((resolve11) => {
       if (abort.signal.aborted)
-        resolve10();
-      abort.signal.addEventListener("abort", () => resolve10(), { once: true });
+        resolve11();
+      abort.signal.addEventListener("abort", () => resolve11(), { once: true });
     });
     const record3 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
@@ -123563,8 +124299,8 @@ class PrivateAnswerJobs {
       return;
     }
     let timer;
-    const timeout = new Promise((resolve10) => {
-      timer = setTimeout(resolve10, this.resetTimeoutMs);
+    const timeout = new Promise((resolve11) => {
+      timer = setTimeout(resolve11, this.resetTimeoutMs);
       timer.unref?.();
     });
     const settled = Promise.race([reset.then(() => {
@@ -124248,7 +124984,7 @@ __export(exports_open_target, {
   createDropboxOpenTargets: () => createDropboxOpenTargets,
   OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
 });
-import { existsSync as existsSync52, lstatSync as lstatSync21, readFileSync as readFileSync49, readdirSync as readdirSync9, realpathSync as realpathSync3, statSync as statSync22 } from "node:fs";
+import { existsSync as existsSync52, lstatSync as lstatSync21, readFileSync as readFileSync49, readdirSync as readdirSync9, realpathSync as realpathSync3, statSync as statSync23 } from "node:fs";
 import { homedir as homedir56 } from "node:os";
 import { extname as extname2, join as join83, sep as sep7 } from "node:path";
 function dropboxPreviewUrl(displayPath) {
@@ -124296,7 +125032,7 @@ function localDropboxRoots(options = {}) {
   for (const candidate of candidates) {
     try {
       const real = realpathSync3.native(candidate);
-      if (statSync22(real).isDirectory() && !roots.includes(real))
+      if (statSync23(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
   }
@@ -124349,7 +125085,7 @@ function localFileUnder(root, segments) {
     const real = realpathSync3.native(path);
     if (!real.startsWith(root.endsWith(sep7) ? root : `${root}${sep7}`))
       return;
-    return statSync22(real).isFile() ? real : undefined;
+    return statSync23(real).isFile() ? real : undefined;
   } catch {
     return;
   }
@@ -125678,11 +126414,11 @@ var init_dashboard_privacy = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync24, lstatSync as lstatSync22, mkdirSync as mkdirSync43, statSync as statSync23 } from "node:fs";
-import { dirname as dirname58, isAbsolute as isAbsolute17 } from "node:path";
+import { chmodSync as chmodSync24, lstatSync as lstatSync22, mkdirSync as mkdirSync43, statSync as statSync24 } from "node:fs";
+import { dirname as dirname60, isAbsolute as isAbsolute18 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   const path = location.path ?? consultSettingsPath(location.env ?? process.env);
-  if (path === undefined || !isAbsolute17(path))
+  if (path === undefined || !isAbsolute18(path))
     return { ok: false, reason: "no_home" };
   const nextRevision = input.expectedRevision + 1;
   const candidate = parseConsultSettings({
@@ -125695,7 +126431,7 @@ function writeConsultSettings(input, location = {}) {
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
-  const custody = ensureSettingsDirectory(dirname58(path));
+  const custody = ensureSettingsDirectory(dirname60(path));
   if (custody !== "ok")
     return { ok: false, reason: custody };
   let published = false;
@@ -125752,7 +126488,7 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync23(dirname58(directory));
+      statSync24(dirname60(directory));
     } catch {
       return "home_missing";
     }
@@ -125937,7 +126673,7 @@ function createDashboardConsultAdapter(options) {
     async setEnabled(update) {
       const enabled = update.enabled;
       if (typeof enabled !== "boolean")
-        return invalid3("Say whether outside help should be on or off.");
+        return invalid3("Say whether anonymous answers should be on or off.");
       const revision = update.revision;
       if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
         return invalid3(MESSAGES2.needsRevision, "needs_revision");
@@ -126140,10 +126876,10 @@ var init_dashboard_consult = __esm(() => {
   ACKNOWLEDGEMENT_IDS = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);
   MESSAGES2 = {
     needsRevision: "This change needs the settings revision the page was built from. Reload the page and try again.",
-    conflict: "Outside help was changed somewhere else since this page loaded. Reload the page to see the current setting.",
+    conflict: "Anonymous answers were changed somewhere else since this page loaded. Reload the page to see the current setting.",
     invalidCurrent: "The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.",
-    routeMissing: "Add the zkAPI route before turning outside help on.",
-    acknowledgementsIncomplete: "Read and tick every statement about cost and risk before turning outside help on.",
+    routeMissing: "Add zkAPI before turning anonymous answers on.",
+    acknowledgementsIncomplete: "Read and tick every statement about cost and risk before turning anonymous answers on.",
     languageMissing: "A chosen language has no vocabulary pack installed on this computer.",
     languagesEmpty: "Choose at least one language.",
     noHome: "Olympus cannot find your home folder, so it cannot write the settings file.",
@@ -126163,8 +126899,8 @@ var init_dashboard_consult = __esm(() => {
     noFence: "There is no held request to recover.",
     otherWallet: "The held request belongs to another wallet folder. Recover it there, or abandon it.",
     scope: "Name which held request to abandon.",
-    turnedOn: "Outside help is on. When a private answer in ChatGPT is incomplete, Olympus may send one outside question for it.",
-    turnedOff: "Outside help is off. No outside question is sent.",
+    turnedOn: "Anonymous answers are on. When a private answer in ChatGPT is missing something, Olympus may ask one anonymous question for it.",
+    turnedOff: "Anonymous answers are off. No question is sent.",
     routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
     routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
     routeAdded: "The zkAPI route is added. Put the daemon's API key in the worker environment file, then finish the steps below.",
@@ -126181,6 +126917,7 @@ __export(exports_server2, {
   validateSecureVeniceAnalystProfileAtConstruction: () => validateSecureVeniceAnalystProfileAtConstruction,
   trustedAnalystAssistTimeoutMs: () => trustedAnalystAssistTimeoutMs,
   stopBuiltInModelOnShutdown: () => stopBuiltInModelOnShutdown,
+  startWorkerWithLaunch: () => startWorkerWithLaunch,
   startApprovedSourceRun: () => startApprovedSourceRun,
   sovereigntyAnalystRoutePlan: () => sovereigntyAnalystRoutePlan,
   sourceIndexTelegramAccountFromEnv: () => sourceIndexTelegramAccountFromEnv,
@@ -126224,7 +126961,7 @@ __export(exports_server2, {
 });
 import { execFile } from "node:child_process";
 import { existsSync as existsSync53 } from "node:fs";
-import { dirname as dirname59, isAbsolute as isAbsolute18, join as join84 } from "node:path";
+import { dirname as dirname61, isAbsolute as isAbsolute19, join as join84 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -127114,6 +127851,10 @@ function createFileExtractionLocalVlmClientFromEnv(env) {
       timeoutMs: parseOptionalTimeoutSecondsOrNone(env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS")
     } : {}
   }) : undefined;
+}
+async function startWorkerWithLaunch(launch) {
+  workerLaunch = { ...launch };
+  await main();
 }
 async function main() {
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? "8010");
@@ -128394,6 +129135,13 @@ async function main() {
       }
     } : {}
   }) : undefined;
+  wireBuiltInTranscriptionAtBoot({
+    env: process.env,
+    engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
+    ...sourceScheduler ? { wake: () => {
+      sourceScheduler.wakeTasksOfKind("extract");
+    } } : {}
+  });
   const sourceAnswerLatencyLogPath = sourceAnswer ? resolveSourceAnswerLatencyLogPath(process.env) : undefined;
   const sourceAnswerLatencyLog = sourceAnswerLatencyLogPath ? createFileSourceAnswerLatencyLog(sourceAnswerLatencyLogPath) : undefined;
   const mailScopeSummaryCache = new Map;
@@ -128857,13 +129605,13 @@ async function main() {
     onAnswerActivity: () => consultOrchestrator?.onFreshAnswer(),
     activity: answerActivity,
     ...process.platform === "darwin" ? {
-      openFile: (path) => new Promise((resolve10, reject) => {
+      openFile: (path) => new Promise((resolve11, reject) => {
         const args = localOpenArguments2(path, localDropboxRoots2());
         if (!args) {
           reject(new Error("open refused"));
           return;
         }
-        execFile("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve10());
+        execFile("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve11());
       })
     } : {}
   });
@@ -128884,7 +129632,7 @@ async function main() {
       return writerServer;
     };
     const memory = defaultConsultMemoryProbe2();
-    const transport = () => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: process.env }), { env: process.env });
+    const transport = () => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env });
     consultOrchestrator = createConsultOrchestrator2({
       jobs: privateAnswers,
       eligible: privateEvidenceEligible,
@@ -128980,7 +129728,7 @@ async function main() {
     if (!secretRef)
       return;
     try {
-      return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...readWorkerSetupEnv() ?? {} } })?.trim() || undefined;
+      return resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() })?.trim() || undefined;
     } catch {
       return;
     }
@@ -129102,7 +129850,7 @@ async function main() {
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join84(dirname59(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join84(dirname61(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -129141,7 +129889,7 @@ async function main() {
     server.stop();
   };
   requestModelReload = createModelKeyReload({
-    managed: process.env.OLYMPUS_MANAGED_WORKER === "1",
+    managed: workerRestartsItself(workerLaunch, process.env),
     shutdown: async () => {
       shutdown("SIGTERM");
       await Promise.all(Object.values(captures).map((capture) => capture.stop()));
@@ -129598,7 +130346,7 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!dbPath || !corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
-  if (!isAbsolute18(dbPath)) {
+  if (!isAbsolute19(dbPath)) {
     throw new Error("Connector store dbPath must be absolute.");
   }
   if (!isDeclarableSourceFamily(family)) {
@@ -129646,7 +130394,7 @@ function mergeConnectorStores(stores) {
   }
   return [...byCorpusId.values()];
 }
-var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES;
+var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
 var init_server5 = __esm(async () => {
   init_package_root();
   init_messaging_capture();
@@ -129770,6 +130518,7 @@ var init_server5 = __esm(async () => {
     [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
     [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }]
   ]);
+  workerLaunch = {};
   if (false) {}
 });
 
@@ -130081,7 +130830,7 @@ import { randomBytes as randomBytes19 } from "node:crypto";
 import { readFileSync as readFileSync50, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve10 } from "node:path";
+import { resolve as resolve11 } from "node:path";
 
 // src/data-lifecycle.ts
 init_atomic_file();
@@ -130101,6 +130850,7 @@ init_sovereignty();
 init_pairing_session_paths();
 init_public_source_capabilities();
 init_worker_service();
+init_media_cache();
 import { createHash as createHash33, randomUUID as randomUUID14 } from "node:crypto";
 import {
   closeSync as closeSync9,
@@ -130114,10 +130864,10 @@ import {
   readFileSync as readFileSync24,
   renameSync as renameSync8,
   rmSync as rmSync9,
-  statSync as statSync12
+  statSync as statSync13
 } from "node:fs";
 import { homedir as homedir32 } from "node:os";
-import { basename as basename6, dirname as dirname28, join as join42, relative as relative5, resolve as resolve7, sep as sep5 } from "node:path";
+import { basename as basename6, dirname as dirname28, join as join42, relative as relative5, resolve as resolve8, sep as sep5 } from "node:path";
 import { Database as Database7 } from "bun:sqlite";
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
 var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
@@ -130334,7 +131084,7 @@ function exportOlympusData(options) {
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
 }
 function verifyOlympusDataExport(options) {
-  const destination = resolve7(requirePath(options.destination, "--input"));
+  const destination = resolve8(requirePath(options.destination, "--input"));
   const manifestPath = join42(destination, "manifest.json");
   const parsed = JSON.parse(readFileSync24(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
@@ -130343,7 +131093,7 @@ function verifyOlympusDataExport(options) {
   const verified = [];
   for (const value of parsed.artifacts) {
     const artifact = parseExportArtifact(value);
-    const path = resolve7(destination, artifact.relativePath);
+    const path = resolve8(destination, artifact.relativePath);
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
@@ -130372,6 +131122,9 @@ function deleteOlympusData(options) {
   for (const target of uniqueDeleteTargets) {
     if (existsSync26(target.path))
       assertDeleteTargetSafe(target);
+  }
+  if (selectedSource) {
+    removed.push(...releaseSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [], options, options.dryRun === true));
   }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync26(target.path)) {
@@ -130473,6 +131226,7 @@ function allDeleteTargets(context) {
   return [
     ...selectSources(undefined).flatMap((source) => sourceDeleteTargets(source, context)),
     ...remoteConnectionsDeleteTargets(context),
+    ...mediaCacheDeleteTargets(context),
     ...knownOlympusDataRoots(context).map((path) => ({
       path,
       kind: "known_root",
@@ -130483,6 +131237,56 @@ function allDeleteTargets(context) {
     ...globExisting(join42(home, "Library", "LaunchAgents"), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/).map(serviceUnitTarget),
     ...globExisting(join42(home, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
   ];
+}
+function mediaCacheDeleteTargets(context) {
+  try {
+    return [{ path: mediaCacheDir(envForContext(context)), kind: "known_root", allowRecursive: true }];
+  } catch {
+    return [];
+  }
+}
+function releaseSourceMedia(storePaths, context, dryRun) {
+  let dir;
+  try {
+    dir = mediaCacheDir(envForContext(context));
+  } catch {
+    return [];
+  }
+  const released = [];
+  for (const storePath of storePaths) {
+    if (storePath === ":memory:" || !existsSync26(storePath))
+      continue;
+    let rows = [];
+    let db;
+    try {
+      db = new Database7(storePath, { readonly: true });
+      db.exec("PRAGMA busy_timeout = 10000;");
+    } catch {
+      continue;
+    }
+    try {
+      const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
+      if (columns.includes("media_sha256")) {
+        rows = db.query(`
+          SELECT DISTINCT media_path, media_sha256 FROM chunks
+          WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+        `).all();
+      }
+    } catch {} finally {
+      closeSqliteStore(db);
+    }
+    for (const row of rows) {
+      if (!isMediaCachePath(row.media_path, row.media_sha256, dir))
+        continue;
+      if (dryRun) {
+        if (existsSync26(row.media_path))
+          released.push(row.media_path);
+      } else if (releaseMediaCacheFile(row.media_path, row.media_sha256, storePath, dir)) {
+        released.push(row.media_path);
+      }
+    }
+  }
+  return released;
 }
 function sourceDeleteTargets(source, context) {
   const legacyIndexPath = source.sqlitePath?.(context);
@@ -130634,11 +131438,11 @@ function inspectSqliteSnapshot(snapshotPath, sqlitePath, expectedStoreId) {
   }
 }
 function fileArtifact(exportRoot, path, sourceId, role) {
-  const stats = statSync12(path);
+  const stats = statSync13(path);
   return {
     sourceId,
     role,
-    relativePath: relative5(resolve7(exportRoot), resolve7(path)),
+    relativePath: relative5(resolve8(exportRoot), resolve8(path)),
     bytes: stats.size,
     sha256: sha256File2(path)
   };
@@ -130691,7 +131495,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current = dirname28(resolve7(destination));
+  let current = dirname28(resolve8(destination));
   for (;; ) {
     if (existsSync26(current))
       return current;
@@ -130703,7 +131507,7 @@ function exportDurabilityBoundary(destination) {
 }
 function makeDurableDirectory(path, boundary) {
   mkdirSync19(path, { recursive: true });
-  let current = resolve7(path);
+  let current = resolve8(path);
   for (;; ) {
     syncDirectorySync2(current);
     if (current === boundary)
@@ -130766,7 +131570,7 @@ function globExisting(root, pattern) {
     return [];
   return readdirSync4(root).map((entry) => join42(root, entry)).filter((path) => {
     const name = basename6(path);
-    return pattern.test(name) && statSync12(path).isFile();
+    return pattern.test(name) && statSync13(path).isFile();
   });
 }
 function serviceUnitTarget(path) {
@@ -130831,8 +131635,8 @@ function isInsideKnownOlympusRoot(path, context) {
   return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));
 }
 function isSameOrInsidePath(path, root) {
-  const absolutePath = resolve7(path);
-  const absoluteRoot = resolve7(root);
+  const absolutePath = resolve8(path);
+  const absoluteRoot = resolve8(root);
   return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep5}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
@@ -130896,7 +131700,7 @@ import { createHash as createHash41 } from "node:crypto";
 import { spawnSync as spawnSync8 } from "node:child_process";
 import { existsSync as existsSync39, lstatSync as lstatSync15, mkdirSync as mkdirSync28, readFileSync as readFileSync34 } from "node:fs";
 import { homedir as homedir41, platform as osPlatform3 } from "node:os";
-import { dirname as dirname40, isAbsolute as isAbsolute11, join as join56 } from "node:path";
+import { dirname as dirname40, isAbsolute as isAbsolute12, join as join56 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
@@ -130915,11 +131719,11 @@ import {
   readdirSync as readdirSync7,
   renameSync as renameSync10,
   rmSync as rmSync11,
-  statSync as statSync16,
+  statSync as statSync17,
   writeFileSync as writeFileSync10
 } from "node:fs";
 import { tmpdir as tmpdir4 } from "node:os";
-import { basename as basename9, isAbsolute as isAbsolute10, join as join54 } from "node:path";
+import { basename as basename9, isAbsolute as isAbsolute11, join as join54 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
 var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
@@ -131004,7 +131808,7 @@ function assertVersionParentSafety(homeDir, workingDirectory) {
 }
 function validateArtifactPath(path) {
   const trimmed2 = path.trim();
-  if (!trimmed2 || !isAbsolute10(trimmed2) || /[\0\r\n]/.test(trimmed2)) {
+  if (!trimmed2 || !isAbsolute11(trimmed2) || /[\0\r\n]/.test(trimmed2)) {
     throw new OperationError("invalid_params", "olympus worker upgrade requires an absolute --artifact path.");
   }
   let stats;
@@ -131157,7 +131961,7 @@ function makeVersionTreeReadOnly(root) {
     }
   }
   chmodSync15(root, 448);
-  const rootStats = statSync16(root);
+  const rootStats = statSync17(root);
   if (!rootStats.isDirectory() || (rootStats.mode & 511) !== 448) {
     throw new OperationError("config_error", "Managed upgrade version root changed during staging.");
   }
@@ -131802,7 +132606,7 @@ function restoreManagedFile(homeDir, path, backupPath, previousPresent, expected
   writePrivateFileAtomicSync(path, text);
 }
 function isRecordedManagedPath(value) {
-  return typeof value === "string" && value.trim() !== "" && isAbsolute11(value) && !/[\0\r\n]/.test(value);
+  return typeof value === "string" && value.trim() !== "" && isAbsolute12(value) && !/[\0\r\n]/.test(value);
 }
 function transactionPaths(homeDir) {
   const dir = join56(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -131889,7 +132693,7 @@ function validateWorkerReadinessPort(value) {
 }
 function defaultWorkerReadinessProbe(url, bunBin) {
   const executable = bunBin ?? (typeof Bun !== "undefined" ? Bun.which("bun") : null) ?? process.execPath;
-  if (!executable || !isAbsolute11(executable))
+  if (!executable || !isAbsolute12(executable))
     return false;
   const script = [
     "const url = process.argv.at(-1);",
@@ -131977,7 +132781,7 @@ function normalizeLifecyclePlatform(value) {
 }
 function validateHomeDir(value) {
   const trimmed2 = value.trim();
-  if (!trimmed2 || !isAbsolute11(trimmed2) || /[\0\r\n]/.test(trimmed2)) {
+  if (!trimmed2 || !isAbsolute12(trimmed2) || /[\0\r\n]/.test(trimmed2)) {
     throw new OperationError("invalid_params", "Olympus lifecycle requires an absolute home directory.");
   }
   return trimmed2;
@@ -133022,7 +133826,7 @@ async function followEngineLogs(homeDir, lines) {
   const child = spawn5("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
   const reader = createInterface2({ input: child.stdout });
   reader.on("line", (line) => console.log(redactLogLine(line)));
-  await new Promise((resolve8) => child.once("exit", () => resolve8()));
+  await new Promise((resolve9) => child.once("exit", () => resolve9()));
 }
 function parseInstallArgs(args) {
   const options = {};
@@ -133865,7 +134669,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count: count2,
-    out_dir: resolve10(out),
+    out_dir: resolve11(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -133915,7 +134719,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync50(resolve10(input2), "utf8");
+    raw = readFileSync50(resolve11(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -134179,7 +134983,7 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve10(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve11(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };
@@ -134385,8 +135189,8 @@ async function runWorkerForeground(options = {}) {
       throw new OperationError("config_error", "Native worker service invocation identity does not match its finalized environment.");
     }
   }
-  const startWorker = options.startWorker ?? (await init_server5().then(() => exports_server2)).main;
-  await startWorker();
+  const startWorker = options.startWorker ?? (await init_server5().then(() => exports_server2)).startWorkerWithLaunch;
+  await startWorker({ nativeServiceSupervised: managedInstanceId !== undefined });
 }
 async function readWorkerHttpState() {
   const config2 = loadConfig();

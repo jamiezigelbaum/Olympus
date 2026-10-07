@@ -1271,6 +1271,31 @@ export class LocalFileExtractionJobStore {
     return { matchedJobs: matched.length, jobsRequeued: requeued };
   }
 
+  /**
+   * Whether this lane has work waiting for `extractorKind`'s reader: a job
+   * queued, leased or due a retry, or one it settled unread (as in
+   * `unreadJobCount`). The queue holds what the lane chose to read, routed
+   * by media type and file extension at plan time, so for an approved lane
+   * this answers "do the owner's chosen sources contain such items". Always
+   * lane-scoped (there is no cross-lane mode): rows left behind by a lane
+   * that is no longer approved never count. Uses the lane index and stops at
+   * the first hit.
+   */
+  hasWorkWaitingForReader(request: UnreadExtractionJobsRequest): boolean {
+    const lane = requireLaneKey(request);
+    const extractorKind = requireToken(request.extractorKind, 'extractorKind');
+    const pending = this.db.query(`
+      SELECT 1 AS hit FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status IN ('queued', 'leased', 'failed_retryable')
+        AND extractor_kind = ?
+      LIMIT 1
+    `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind) as { hit: number } | null;
+    if (pending) return true;
+    const { sql, params } = this.unreadJobsQuery(request);
+    return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
+  }
+
   private unreadJobsQuery(request: UnreadExtractionJobsRequest): { sql: string; params: string[] } {
     const lane = requireLaneKey(request);
     const extractorKind = requireToken(request.extractorKind, 'extractorKind');

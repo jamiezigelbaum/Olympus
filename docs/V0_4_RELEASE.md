@@ -1071,7 +1071,13 @@ transcription command. Now:
 - Engine order: an owner command (`OLYMPUS_TRANSCRIBE_COMMAND`) first, then
   the built-in engine (on by default on Apple silicon;
   `OLYMPUS_BUILT_IN_TRANSCRIPTION=on|off`), then none (`transcription_required`).
-- The model downloads the first time audio needs it. While it downloads, or
+- When it downloads (owner 2026-10-07): only when the owner's chosen sources
+  contain audio, checked at engine start and after each sync that catalogued
+  new items; with no audio it never downloads. Built-in model sizes: reasoning
+  about 2.6 GB, embedding about 0.8 GB, transcription about 1 GB only when
+  needed. Once it is ready, extraction runs within seconds, not at the next
+  pass.
+- While the model downloads, or
   where it cannot run, audio settles names-only with `transcription_required`
   and spends no retry; once the model is ready, the shared extraction runner
   reads each such job (and legacy `transcriber_not_configured` terminal jobs)

@@ -533,6 +533,11 @@ export interface BuiltInTranscriptionEngine {
   }>;
   prepare(): 'ready' | 'pending' | 'unavailable';
   stop(): Promise<void>;
+  /**
+   * Calls `listener` each time an install finishes and the engine becomes
+   * ready, so the wiring layer can wake the work that waited for it.
+   */
+  onReady?(listener: () => void): void;
 }
 
 // --- Seam 3: the sink ------------------------------------------------------
