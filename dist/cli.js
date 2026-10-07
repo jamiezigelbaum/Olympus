@@ -128953,7 +128953,7 @@ async function main() {
       return writerServer;
     };
     const memory = defaultConsultMemoryProbe2();
-    const transport = () => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: process.env }), { env: process.env });
+    const transport = () => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env });
     consultOrchestrator = createConsultOrchestrator2({
       jobs: privateAnswers,
       eligible: privateEvidenceEligible,
@@ -129049,7 +129049,7 @@ async function main() {
     if (!secretRef)
       return;
     try {
-      return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...readWorkerSetupEnv() ?? {} } })?.trim() || undefined;
+      return resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() })?.trim() || undefined;
     } catch {
       return;
     }
