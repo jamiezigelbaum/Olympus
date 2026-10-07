@@ -12,7 +12,7 @@ import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
-import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
+import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -4496,11 +4496,11 @@ export async function main(): Promise<void> {
     // The zkAPI route: the one `zkapi` sovereignty profile, if any. Without
     // one the transport is unavailable and no consult is sent. The key is
     // read per call from the same environment the outside-help card checks
-    // (process env plus worker.env), so the card never says a key is present
+    // (worker.env under a non-empty process value), so the card never says a key is present
     // that the send cannot use.
     const transport = () => resolveZkapiConsultTransport(
       sovereigntyEngine.config.modelProfiles,
-      (secretRef) => resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...(readWorkerSetupEnv() ?? {}) } }),
+      (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
       { env: process.env },
     );
     consultOrchestrator = createConsultOrchestrator({
@@ -4616,7 +4616,7 @@ export async function main(): Promise<void> {
   const consultRouteKey = (secretRef: string | undefined): string | undefined => {
     if (!secretRef) return undefined;
     try {
-      return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...(readWorkerSetupEnv() ?? {}) } })?.trim() || undefined;
+      return resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() })?.trim() || undefined;
     } catch {
       return undefined;
     }
