@@ -41,6 +41,11 @@ export const TRANSCRIPTION_EXTRACTOR_KIND = 'whisper_transcription';
 export const TRANSCRIPTION_EXTRACTOR_VERSION = '2026-06-12';
 export const DEFAULT_TRANSCRIBE_TIMEOUT_MS = 1_800_000;
 export const MAX_TRANSCRIPT_CHARS = 200_000;
+/**
+ * Artifact warning on audio left unread because no transcriber is configured;
+ * the counterpart of the text lane's `ocr_required`.
+ */
+export const TRANSCRIPTION_REQUIRED_WARNING = 'transcription_required';
 
 const TEMP_DIR_PREFIX = 'olympus-transcribe-';
 
@@ -294,9 +299,7 @@ export function createTranscriptionExtractor(
       return transcriptionLaneAccepts(mimeType, name);
     },
     async extract(input: ExtractorInput): Promise<ExtractorOutput> {
-      if (!transcriber) {
-        return { status: 'failed_retryable', errorKind: 'transcriber_not_configured' };
-      }
+      if (!transcriber) return transcriptionRequiredOutput(input, maxTranscriptChars);
       const bytes = input.bytes;
       if (!bytes && !input.localPath) return missingBytesFailure();
       const mimeType = normalizeMimeType(input.mimeType ?? input.ref.mimeType);
@@ -368,6 +371,44 @@ export function createTranscriptionExtractor(
         }
       }
     },
+  };
+}
+
+/**
+ * Audio on a host with no transcription set up. This is the owner's choice of
+ * setup, not a failure of the file: on-device transcription is not built in
+ * (it needs a speech-recognition permission a background process cannot ask
+ * for), so the item stays findable by name and says plainly that reading it
+ * needs a transcription command. It used to fail "retryably" until the retry
+ * budget ran out and then read as a broken file.
+ */
+function transcriptionRequiredOutput(input: ExtractorInput, maxBoundedTextChars: number): ExtractorOutput {
+  const mimeType = normalizeMimeType(input.mimeType ?? input.ref.mimeType);
+  const sizeBytes = input.sizeBytes ?? input.bytes?.byteLength;
+  const descriptor = boundText([
+    'Audio file',
+    mimeType ? `MIME type: ${mimeType}` : undefined,
+    sizeBytes !== undefined && Number.isFinite(sizeBytes) ? `Size bytes: ${sizeBytes}` : undefined,
+    'No transcript has been made: transcription is not set up on this computer.',
+  ].filter((value): value is string => Boolean(value)).join('\n'), maxBoundedTextChars);
+  const derivation = buildDerivation({
+    artifact: 'media_descriptor',
+    structural: { kind: 'media', label: 'audio without transcript' },
+    bounded: descriptor,
+    confidence: 0.3,
+    warnings: [TRANSCRIPTION_REQUIRED_WARNING],
+  });
+  return {
+    status: 'metadata_only',
+    derivations: [{
+      ...derivation,
+      structuralRef: {
+        ...derivation.structuralRef,
+        ...(mimeType !== undefined ? { mimeType } : {}),
+        ...(sizeBytes !== undefined && Number.isFinite(sizeBytes) ? { sizeBytes } : {}),
+      },
+    }],
+    warnings: [TRANSCRIPTION_REQUIRED_WARNING],
   };
 }
 

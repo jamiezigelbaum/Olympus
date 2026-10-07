@@ -347,6 +347,11 @@ export interface ExtractionRunResult {
   // Bounded categorical reason for a pre-lease health refusal.
   preflightErrorKind?: string;
   consecutiveRetryableFailures: number;
+  /**
+   * The lane's earliest backed-off retry still in the future, so a scheduled
+   * caller can come back when it is due instead of at its idle interval.
+   */
+  nextRetryAt?: string;
   reclassification?: ExtractionReclassificationResult;
   policy: {
     workerPrivateSurface: true;
@@ -673,6 +678,7 @@ export function createFileExtractionRunner(
           leaseToken: abandoned[0]!.leaseToken,
         });
       }
+      const nextRetryAt = jobs.nextRetryAt(lane, now());
 
       return {
         kind: 'file_extraction_run',
@@ -689,6 +695,7 @@ export function createFileExtractionRunner(
         paused,
         ...(paused ? { pauseReason: EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } : {}),
         consecutiveRetryableFailures,
+        ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
         ...(reclassification ? { reclassification } : {}),
         policy: {
           workerPrivateSurface: true,

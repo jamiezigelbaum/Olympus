@@ -392,6 +392,25 @@ describe('extraction job store: record, retry and lost leases', () => {
     expect(delayMs).toBeLessThanOrEqual(DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS * 1_000 + 1_000);
   });
 
+  test('nextRetryAt names the lane\'s earliest backoff still ahead, and nothing once it is due', () => {
+    const { store, dbPath } = newStore();
+    expect(store.nextRetryAt(LANE)).toBeUndefined();
+    const first = enqueueOne(store, 'item-a');
+    const second = enqueueOne(store, 'item-b');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId: first, status: 'failed_retryable', errorKind: 'extractor_timeout' });
+    store.record({ jobId: second, status: 'failed_retryable', errorKind: 'extractor_timeout' });
+    const soon = isoSecondsFromNow(60);
+    backdate(dbPath, first, { next_retry_at: isoSecondsFromNow(600) });
+    backdate(dbPath, second, { next_retry_at: soon });
+    expect(store.nextRetryAt(LANE)).toBe(soon);
+
+    // A retry already due is the next run's ordinary work, not a wake time.
+    backdate(dbPath, second, { next_retry_at: isoSecondsFromNow(-1) });
+    expect(store.nextRetryAt(LANE)).not.toBe(soon);
+    expect(Date.parse(store.nextRetryAt(LANE)!)).toBeGreaterThan(Date.now());
+  });
+
   test('backoff scales with the attempt count', () => {
     // The one-hour ceiling is unreachable in practice and that is faithful to
     // the queue this ports: escalation to terminal fires at three attempts,

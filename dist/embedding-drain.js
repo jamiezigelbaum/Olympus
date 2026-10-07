@@ -26904,7 +26904,9 @@ class SourceScheduler {
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const continueAt = Date.parse(completedAt) + this.continueAfterMs;
       const continuing = result.continueSoon === true && !retryAt;
-      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : continuing ? Math.min(continueAt, nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt))) : nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
+      const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
+      const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
+      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, "checkpoint");
         this.applyPersistedState(state, this.stateStore.recordSuccess({
@@ -27311,6 +27313,14 @@ function parseSchedulerTimestamp(value) {
     return;
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+function normalizeWakeAt(wakeAt, completedAt) {
+  if (wakeAt === undefined)
+    return;
+  const wakeTimestamp = Date.parse(wakeAt);
+  if (!Number.isFinite(wakeTimestamp))
+    return;
+  return Math.max(Date.parse(completedAt), wakeTimestamp);
 }
 function normalizeRetryAt(retryAt, completedAt) {
   if (!retryAt)

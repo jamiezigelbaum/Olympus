@@ -1243,6 +1243,31 @@ export class LocalFileExtractionJobStore {
   }
 
   /**
+   * When the lane's earliest backed-off retry comes due, if it has one still
+   * in the future. A due retry is leased by the next run like any queued job;
+   * this answers when that next run should be, so a short backoff is not
+   * stretched to the lane's idle interval.
+   */
+  nextRetryAt(lane: ExtractionLaneKey, now: Date = new Date()): string | undefined {
+    const key = requireLaneKey(lane);
+    const row = this.db.query(`
+      SELECT MIN(next_retry_at) AS next_retry_at
+      FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status = 'failed_retryable'
+        AND next_retry_at IS NOT NULL
+        AND next_retry_at > ?
+    `).get(
+      key.corpusId,
+      key.provider,
+      key.accountScope,
+      key.approvedScopeKey,
+      now.toISOString(),
+    ) as { next_retry_at: string | null } | null;
+    return row?.next_retry_at ?? undefined;
+  }
+
+  /**
    * Readiness across an explicit set of current lanes, retaining the corpus
    * roll-up's per-item supersession and timestamp semantics.
    */
