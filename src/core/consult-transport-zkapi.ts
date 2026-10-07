@@ -1707,7 +1707,8 @@ interface DispatchRequest {
   question: string;
   signal: AbortSignal | undefined;
   authorize: ZkapiSendControl['authorize'];
-  deadlineMs: number | undefined;
+  /** Absolute monotonic instant (`performance.now()` scale) captured synchronously inside `send`. */
+  deadlineAt: number | undefined;
 }
 
 type CancelReason = 'cancel' | 'deadline';
@@ -1883,11 +1884,14 @@ async function openSession(
         return { kind: 'failed', error: failure('session_spent', 'not_sent', initialIdentity).error };
       }
       bridge.state = 'authorizing';
+      // Captured here, synchronously, so event-loop delay before the machine
+      // resumes counts against the deadline.
+      const deadlineAt = sendControl.deadlineMs !== undefined ? performance.now() + sendControl.deadlineMs : undefined;
       bridge.dispatch.resolve({
         question,
         signal: sendControl.signal,
         authorize: sendControl.authorize,
-        deadlineMs: sendControl.deadlineMs,
+        deadlineAt,
       });
       return bridge.reply.promise;
     },
@@ -2225,11 +2229,13 @@ async function runSession(
     sendSignal = dispatch.signal;
     sendSignal?.addEventListener('abort', onCallerAbort, { once: true });
     if (sendSignal?.aborted) cancelBeforeDispatch('cancel');
-    // The deadline is absolute and monotonic: checked after authorization and
-    // again immediately before the fetch, whatever the timer did.
-    const deadlineAt = dispatch.deadlineMs !== undefined ? performance.now() + dispatch.deadlineMs : undefined;
+    // The deadline is absolute and monotonic, captured inside `send`: checked
+    // after authorization and again immediately before the fetch is invoked,
+    // whatever the timer did.
+    const deadlineAt = dispatch.deadlineAt;
     const pastDeadline = (): boolean => deadlineAt !== undefined && performance.now() >= deadlineAt;
-    if (dispatch.deadlineMs !== undefined) sendDeadline = setTimeout(() => cancelBeforeDispatch('deadline'), dispatch.deadlineMs);
+    if (pastDeadline()) return (result = fail('timeout'));
+    if (deadlineAt !== undefined) sendDeadline = setTimeout(() => cancelBeforeDispatch('deadline'), Math.max(0, deadlineAt - performance.now()));
     problem = await guard();
     if (problem) return (result = fail(problem));
     let authorized = true;
@@ -2274,11 +2280,24 @@ async function runSession(
     if (!reservation.reserved) return (result = fail(reservation.reason));
     receipt.reservedUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD / 1_000_000;
     receipt.fence = 'held';
-    if (pastDeadline()) {
-      // The reservation itself consumed the remaining time. The fetch is
-      // provably not invoked yet, so this is the one rollback: reservation,
+    const requestsBefore = new Set(facts.requests.keys());
+    sent.dispatched = true;
+    bridge.state = 'dispatched';
+    // From here the caller's signals only end its wait for the reply, and
+    // every failure of the fetch, however it fails, is an unknown dispatch:
+    // the fence clears only on settlement evidence. The one exception is the
+    // deadline check sendCompletion makes immediately before invoking fetch.
+    detachCaller = () => bridge.reply.resolve({ kind: 'failed', error: failure('aborted', 'unknown', identity(), { receipt: pendingSnapshot() }).error });
+    const completion = await sendCompletion(prepared, options, sessionSignal, stage, pastDeadline);
+
+    if (!completion.ok && completion.error.outcome === 'not_sent') {
+      // The deadline passed between the reservation and the fetch (the
+      // reservation or the stage clock consumed the remaining time). The fetch
+      // is provably not invoked, so this is the one rollback: reservation,
       // count and fence return to what they were, recorded as a lifecycle
       // receipt. If the ledger cannot be written the reservation stands.
+      sent.dispatched = false;
+      detachCaller = undefined;
       try {
         releaseZkapiReservation(statePath, scope, fences[scope], now());
         delete receipt.reservedUsd;
@@ -2286,16 +2305,8 @@ async function runSession(
       } catch {
         // stays reserved and held
       }
-      return (result = fail('timeout'));
+      return (result = fail(completion.error.code));
     }
-    const requestsBefore = new Set(facts.requests.keys());
-    sent.dispatched = true;
-    bridge.state = 'dispatched';
-    // From here the caller's signals only end its wait for the reply, and
-    // every failure of the fetch, however it fails, is an unknown dispatch:
-    // the fence clears only on settlement evidence.
-    detachCaller = () => bridge.reply.resolve({ kind: 'failed', error: failure('aborted', 'unknown', identity(), { receipt: pendingSnapshot() }).error });
-    const completion = await sendCompletion(prepared, options, sessionSignal, stage);
 
     // --- Replied: hand the completion over before settlement.
     if (completion.ok) timings = withTiming(timings, 'replyHandedOverAtMs', durationMs(startedAt, lastSampleAt));
@@ -2550,6 +2561,8 @@ async function sendCompletion(
   options: ZkapiConsultTransportOptions,
   signal: AbortSignal | undefined,
   stage: (key: keyof ZkapiStageTimings | undefined) => void,
+  /** Checked immediately before fetch is invoked; true refuses with `timeout`, outcome `not_sent`. */
+  pastDeadline: () => boolean = () => false,
 ): Promise<CompletionResult> {
   const settings = options.settings;
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -2568,6 +2581,8 @@ async function sendCompletion(
   try {
     let response: Response;
     stage('dispatchToFirstByteMs');
+    // The last instant at which nothing has been sent.
+    if (pastDeadline()) return bad('timeout', 'not_sent');
     try {
       // Once fetchImpl is invoked, any exception, synchronous or not, is an
       // unknown dispatch: an injected fetch may have sent before throwing.

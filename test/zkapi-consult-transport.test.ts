@@ -1684,6 +1684,45 @@ describe('zkAPI consult transport: one-shot session', () => {
     await expectProcessesGone();
   }, 90_000);
 
+  test('the deadline is captured inside send and checked at the last instant before fetch is invoked', async () => {
+    const busyWait = (ms: number): void => {
+      const until = performance.now() + ms;
+      while (performance.now() < until) { /* hold the event loop */ }
+    };
+    // Event-loop delay between the send call and the machine resuming counts:
+    // the deadline was captured synchronously inside send.
+    const blocked = await openReady();
+    const pending = blocked.send(QUESTION, { deadlineMs: 100 });
+    busyWait(300);
+    expect(await pending).toMatchObject({ kind: 'failed', error: { code: 'timeout', outcome: 'not_sent' } });
+    expect(await blocked.finished).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'not_sent' } });
+    expectNothingReserved();
+    // The stage clock sample taken just before the fetch overruns the deadline:
+    // the fetch is not invoked, and the reservation rolls back.
+    let armed = false;
+    const slowClock = transport({
+      clock: () => {
+        if (armed) {
+          armed = false;
+          busyWait(400);
+        }
+        return performance.now();
+      },
+    });
+    const opened = await openZkapiConsultSession(slowClock);
+    if (!opened.ok) throw new Error(opened.error.code);
+    const result = await opened.session.send(QUESTION, { deadlineMs: 200, authorize: () => { armed = true; return true; } });
+    expect(result).toMatchObject({ kind: 'failed', error: { code: 'timeout', outcome: 'not_sent', receipt: { fence: 'clear' } } });
+    expect(await opened.session.finished).toMatchObject({ ok: false, error: { code: 'timeout', outcome: 'not_sent', receipt: { fence: 'clear' } } });
+    expect(ledger().lastSession).toMatchObject({ result: 'timeout', fence: 'clear' });
+    expect(ledger().lastSession.reservedUsd).toBeUndefined();
+    // The dispatch stage was opened but no fetch followed it.
+    expect(ledger().lastSession.stageMs).toHaveProperty('dispatchToFirstByteMs');
+    expectNothingReserved();
+    expect(completions()).toEqual([]);
+    await expectProcessesGone();
+  }, 90_000);
+
   test('a ready session nobody sends on ends itself after the ready timeout, nothing reserved', async () => {
     const opened = await openZkapiConsultSession(transport(), { readyTimeoutMs: 400 });
     if (!opened.ok) throw new Error(opened.error.code);
