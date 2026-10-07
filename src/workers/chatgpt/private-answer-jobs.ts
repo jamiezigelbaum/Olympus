@@ -1294,7 +1294,12 @@ export class PrivateAnswerJobs {
           modelCall: (call) => {
             analysis.stats.calls.push(call);
           },
-        }, { detail: analysis.detail });
+        }, {
+          detail: analysis.detail,
+          // The consult snapshot is built only for a job that bound outside
+          // help on; an install without it does no extra cloning.
+          ...([...analysis.jobs].some((job) => job.policy.outsideHelp) ? { consult: true } : {}),
+        });
         return { result, used };
       } catch (error) {
         if (error instanceof NoPrivateEvidenceError) throw new AnalysisStop('no_evidence');

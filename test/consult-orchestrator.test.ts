@@ -10,7 +10,7 @@
 import { describe, expect, test } from 'bun:test';
 import { privateEvidencePack } from '../src/core/analyst-built-in.ts';
 import { consultWriterContextFromPack, evaluateConsultRequest } from '../src/core/consult-gate.ts';
-import { DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, type ConsultJobPolicy, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
+import { DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, consultGateOptionsFromSettings, type ConsultJobPolicy, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultReply, ZkapiConsultSession, ZkapiOpenControl, ZkapiOpenSessionResult, ZkapiSendControl } from '../src/core/consult-transport-zkapi.ts';
 import type { ConsultWriterInput, ConsultWriterOutcome } from '../src/core/consult-writer.ts';
 import {
@@ -40,16 +40,19 @@ const OFF: ConsultJobPolicy = bindConsultJobPolicy({ state: 'absent', settings: 
 
 type Verdict = { sufficient: boolean | undefined; noAnswer: boolean };
 
-function model(verdict: Verdict | 'none' = { sufficient: false, noAnswer: false }, calls = { n: 0 }): PrivateAnswerModel {
+/** The fake model: its pack is built from the evidence it is handed, and the snapshot metadata only when asked for (`consult`). */
+function model(verdict: Verdict | 'none' = { sufficient: false, noAnswer: false }, calls = { n: 0, asked: [] as boolean[] }): PrivateAnswerModel {
   return {
     status: () => ({ state: 'ready' }),
-    answerPrivately: async (): Promise<PrivateAnswerModelResult> => {
+    answerPrivately: async (question, evidence, _signal, _observe, options): Promise<PrivateAnswerModelResult> => {
       calls.n += 1;
+      calls.asked.push(options?.consult === true);
+      const pack = privateEvidencePack(question, evidence.map((item, index) => ({ id: `item-${index + 1}`, text: (item.chunks as string[])[0] ?? '' })));
       return {
         answer: ANSWER,
         citations: [{ title: 'Lease', source: 'Dropbox' }],
         unanswered: [...GAPS],
-        ...(verdict === 'none' ? {} : { consult: { verdict, pack: PACK } }),
+        ...(verdict === 'none' || !options?.consult ? {} : { consult: { verdict, pack } }),
       };
     },
   };
@@ -67,11 +70,13 @@ interface Harness {
   orchestrator: ConsultOrchestrator;
   clock: { now: number };
   settings: { read: ConsultSettingsRead };
-  eligible: { refuse: boolean };
+  eligible: { refuse: boolean; hold?: (() => Promise<void>) | undefined };
+  route: { available: boolean };
+  activity: { busy: boolean };
   writer: { calls: ConsultWriterInput[]; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
   transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy'; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; reply: 'reply' | 'failed' };
   logs: string[];
-  calls: { n: number };
+  calls: { n: number; asked: boolean[] };
 }
 
 function harness(options: {
@@ -83,9 +88,11 @@ function harness(options: {
 } = {}): Harness {
   const clock = { now: 1_000_000 };
   const settings = { read: SETTINGS_ON };
-  const eligible = { refuse: false };
+  const eligible: Harness['eligible'] = { refuse: false };
+  const route = { available: true };
+  const activity = { busy: false };
   const logs: string[] = [];
-  const calls = { n: 0 };
+  const calls = { n: 0, asked: [] as boolean[] };
   const writer: Harness['writer'] = {
     calls: [],
     kills: [],
@@ -118,7 +125,12 @@ function harness(options: {
   });
   orchestrator = createConsultOrchestrator({
     jobs,
-    eligible: async (items) => items.map(() => !eligible.refuse),
+    eligible: async (items) => {
+      if (eligible.hold) await eligible.hold();
+      return items.map(() => !eligible.refuse);
+    },
+    transportAvailable: () => route.available,
+    answerActivityBusy: () => activity.busy,
     settings: () => settings.read,
     now: () => clock.now,
     log: (line) => logs.push(line),
@@ -178,7 +190,7 @@ function harness(options: {
       return { ok: true, session: fake.session };
     },
   });
-  return { jobs, orchestrator, clock, settings, eligible, writer, transport, logs, calls };
+  return { jobs, orchestrator, clock, settings, eligible, route, activity, writer, transport, logs, calls };
 }
 
 async function settled(jobs: PrivateAnswerJobs, ms = 10_000): Promise<void> {
@@ -223,6 +235,30 @@ describe('the gate fixtures behave as the tests assume', () => {
     const context = consultWriterContextFromPack(PACK, { writerVisibleTexts: [QUESTION, ANSWER, ...GAPS] });
     expect(evaluateConsultRequest([CLEAN_QUESTION], context, {}, {}, { languages: ['en'] })).toEqual({ decision: 'pass', reasons: [] });
     expect(evaluateConsultRequest([COPIED_QUESTION], context, {}, {}, { languages: ['en'] }).decision).toBe('refuse');
+  });
+
+  test('the implied-place case (M0 round 2): "Portugal", never written in a Lisbon answer, is refused by the gate with the default options; unit words pass', () => {
+    const lisbon = privateEvidencePack('What should I prepare for the Lisbon trip?', [
+      { id: 'itinerary', text: 'Three days in Lisbon: the flight lands in the morning and the hotel is near the river.' },
+    ]);
+    const context = consultWriterContextFromPack(lisbon, {
+      writerVisibleTexts: ['What should I prepare for the Lisbon trip?', 'Your itinerary covers three days in Lisbon with a morning flight and a hotel near the river.', 'Entry and passport rules for the trip are not stated.'],
+    });
+    const defaults = consultGateOptionsFromSettings(DEFAULT_CONSULT_SETTINGS);
+    expect(defaults.domains).toMatchObject({ countries: false });
+    const portugal = evaluateConsultRequest(['What entry rules apply to visitors arriving in Portugal?'], context, {}, {}, defaults);
+    expect(portugal.decision).toBe('refuse');
+    expect(portugal.reasons).toContain('unknown_word');
+    expect(evaluateConsultRequest(['What passport validity do most countries require from visitors?'], context, {}, {}, defaults)).toEqual({ decision: 'pass', reasons: [] });
+    // Pinned finding (C4b review round 1): the default vocabulary (en-esdb +
+    // cldr-units + rx-ingredients) does not admit the temperature scale
+    // names, so these generic unit questions are refused as unknown words
+    // today, capitalised or not. A vocabulary change (stage C1 territory)
+    // would flip this test, which is the point of pinning it.
+    for (const question of ['How are Celsius and Fahrenheit readings converted in practice?', 'How are celsius and fahrenheit readings converted in practice?']) {
+      expect({ question, verdict: evaluateConsultRequest([question], context, {}, {}, defaults) }).toEqual({ question, verdict: { decision: 'refuse', reasons: ['unknown_word'] } });
+    }
+    expect(evaluateConsultRequest(['How are temperature scales usually converted in practice?'], context, {}, {}, defaults)).toEqual({ decision: 'pass', reasons: [] });
   });
 });
 
@@ -407,7 +443,8 @@ describe('writer outcomes and the gate', () => {
       { kind: 'skipped', reason: 'prompt_too_long' },
       { kind: 'declined', promptTokens: 100, ms: 5 },
       { kind: 'killed', reason: 'deadline' },
-      { kind: 'failed', reason: 'named_entity' },
+      { kind: 'skipped', reason: 'prompt_tokens_unavailable' },
+      { kind: 'failed', reason: 'form' },
     ] as const satisfies readonly ConsultWriterOutcome[]) {
       const h = harness({ writerOutcome: outcome });
       const { jobId, panel } = await consult(h);
@@ -458,7 +495,8 @@ describe('transport and dispatch', () => {
     expect(h.transport.sessions[0]!.authorizeResults).toEqual([true]);
     expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
     expect(h.logs.some((line) => line.includes('outcome=reply_failed code=daemon_error'))).toBe(true);
-    expect(h.orchestrator.recentQuestions).toEqual([]);
+    // Dispatched: the question stays in the repeat history whatever came back.
+    expect(h.orchestrator.recentQuestions).toEqual([CLEAN_QUESTION]);
   });
 
   test('the latch: one consult per job; a second trigger is a no-op and the latch cannot be taken twice', async () => {
@@ -558,6 +596,122 @@ describe('B5: no dispatch for old panels, stale settings, expired windows or a s
       await h.orchestrator.idle();
       expect(h.transport.sessions[0]!.authorizeResults).toEqual([false]);
     }
+  });
+});
+
+describe('round-1 review cases', () => {
+  test('the writer sees one bounded input (question cut at 1,000 characters), and the model is asked for the snapshot only on a job that bound outside help on', async () => {
+    const h = harness();
+    const longQuestion = `${QUESTION} ${'x'.repeat(2_000)}`;
+    const jobId = begin(h, longQuestion);
+    const panel = await generatePanelKeyPair();
+    await deliver(h, jobId, panel);
+    await h.orchestrator.idle();
+    expect(h.writer.calls[0]!.question.length).toBe(1_000);
+    expect(h.calls.asked).toEqual([true]);
+    const off = harness({ policy: OFF });
+    await consult(off);
+    expect(off.calls.asked).toEqual([false]);
+  });
+
+  test('no route (profile or key missing) or a private answer in flight: no writer work at all', async () => {
+    const noRoute = harness();
+    noRoute.route.available = false;
+    const { jobId, panel } = await consult(noRoute);
+    expect(noRoute.writer.calls.length).toBe(0);
+    expect(noRoute.transport.opens.length).toBe(0);
+    expect((await envelope(jobId, panel, await noRoute.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+    expect(noRoute.logs.some((line) => line.includes('outcome=transport_unavailable code=no_route'))).toBe(true);
+    const busy = harness();
+    busy.activity.busy = true;
+    await consult(busy);
+    expect(busy.writer.calls.length).toBe(0);
+    expect(busy.logs.some((line) => line.includes('outcome=superseded code=answer_busy'))).toBe(true);
+  });
+
+  test('a fresh answer during E1 supersedes the consult before the writer starts', async () => {
+    const h = harness();
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    const first = await h.jobs.claim(jobId, panel.publicKey, 2);
+    expect(first.status).toBe(202);
+    await settled(h.jobs);
+    // Hold only the orchestrator's E1 call: the guard is read synchronously
+    // when the trigger runs, so the hold is set around that call alone.
+    let releaseE1!: () => void;
+    const e1 = new Promise<void>((resolve) => {
+      releaseE1 = resolve;
+    });
+    (h.jobs as unknown as { options: { onFirstDelivered: (id: string) => void } }).options.onFirstDelivered = (id) => {
+      h.eligible.hold = () => e1;
+      h.orchestrator.onFirstDelivered(id);
+      h.eligible.hold = undefined;
+    };
+    await h.jobs.claim(jobId, panel.publicKey, 2);
+    // A fresh answer arrives while E1 is awaited.
+    h.orchestrator.onFreshAnswer();
+    releaseE1();
+    await h.orchestrator.idle();
+    expect(h.writer.calls.length).toBe(0);
+    expect(h.logs.some((line) => line.includes('outcome=superseded code=fresh_answer'))).toBe(true);
+  });
+
+  test('deferred E2: outside help turned off while eligibility is awaited inside final authorization refuses; no latch, no send', async () => {
+    for (let round = 0; round < 10; round += 1) {
+      const h = harness();
+      let holdE2 = false;
+      h.eligible.hold = async () => {
+        if (!holdE2) return;
+        holdE2 = false;
+        // The flip lands during the await.
+        h.settings.read = { state: 'valid', settings: { ...SETTINGS_ON.settings, enabled: false } };
+      };
+      h.transport.beforeAuthorize = async () => {
+        holdE2 = true;
+      };
+      const { jobId } = await consult(h);
+      expect(h.transport.sessions[0]!.authorizeResults).toEqual([false]);
+      expect(h.jobs.takeConsultLatch(jobId)).toBe(false);
+      expect(h.orchestrator.recentQuestions).toEqual([]);
+    }
+  });
+
+  test('a changed claim-time evidence set discards the precompute: the snapshot is the recomputed baseline\'s pack', async () => {
+    const h = harness();
+    h.writer.holdAll();
+    const changed = [{ title: 'Lease v2', trust_domain: 'secure_local', chunks: ['SENTINEL_CHANGED: the renewed lease ends in June and the deposit is held in a scheme.'], sourceItem: { provider: 'p', localItemId: 'lease-v2' } }];
+    const jobId = h.jobs.begin({ question: QUESTION, count: 1, evidence: [{ ...EVIDENCE[0]!, sourceItem: { provider: 'p', localItemId: 'lease-v1' } }], refresh: async () => changed, caller: 'c' }).jobId!;
+    const panel = await generatePanelKeyPair();
+    await deliver(h, jobId, panel);
+    expect(h.calls.n).toBe(2);
+    const snapshot = h.jobs.consultSnapshot(jobId)!;
+    expect(snapshot.pack.candidates.map((candidate) => candidate.chunks[0])).toEqual([changed[0]!.chunks[0]]);
+    expect(JSON.stringify(snapshot.pack)).not.toContain('landlord holds the deposit');
+    h.writer.releaseAll();
+    await h.orchestrator.idle();
+  });
+
+  test('the snapshot expiring while the writer runs ends the consult before the gate: nothing is sent', async () => {
+    const h = harness();
+    h.writer.holdAll();
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    await deliver(h, jobId, panel);
+    expect(h.writer.calls.length).toBe(1);
+    h.clock.now += PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS;
+    h.writer.releaseAll();
+    await h.orchestrator.idle();
+    expect(h.transport.sessions[0]!.sends).toEqual([]);
+    expect(h.transport.sessions[0]!.cancelled).toBe(1);
+    expect(h.logs.some((line) => line.includes('outcome=error code=snapshot_gone'))).toBe(true);
+  });
+
+  test('a dispatched question whose completion fails is still in the repeat history', async () => {
+    const h = harness();
+    h.transport.reply = 'failed';
+    await consult(h);
+    expect(h.transport.sessions[0]!.authorizeResults).toEqual([true]);
+    expect(h.orchestrator.recentQuestions).toEqual([CLEAN_QUESTION]);
   });
 });
 

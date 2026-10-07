@@ -321,6 +321,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
           audit: limits.audit,
           evidenceFormat: 'compact',
+          ...(request?.consult ? { consultMetadata: true } : {}),
           ...(observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {}),
           ...(signal ? { signal } : {}),
         });

@@ -275,7 +275,8 @@ export interface PrivateAnswerModel {
     evidence: readonly PrivateEvidenceItem[],
     signal?: AbortSignal,
     observe?: PrivateAnswerObserver,
-    options?: { detail?: PrivateAnswerDetail },
+    /** `consult`: return the consult snapshot metadata (asked only for a job that bound outside help on). */
+    options?: { detail?: PrivateAnswerDetail; consult?: boolean },
   ): Promise<PrivateAnswerModelResult>;
   /**
    * Kill or reset the model runtime (its child process or session). Called

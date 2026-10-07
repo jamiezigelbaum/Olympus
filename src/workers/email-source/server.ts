@@ -4395,8 +4395,9 @@ export async function main(): Promise<void> {
   // follow-up job's first delivery it may write one outside question on the
   // writer's own model server, pass it through the outbound gate and send it
   // through the configured zkAPI route. Bound late: the jobs engine calls
-  // its hooks. No user-facing path enables outside help yet (C5), so every
-  // job binds it off and nothing here is triggered until one lands.
+  // its hooks. Inert unless a valid, enabled ~/.olympus/consult.json exists
+  // (every job then binds outside help off); no product path writes that
+  // file until C5.
   let consultOrchestrator: import('../chatgpt/consult-orchestrator.ts').ConsultOrchestrator | undefined;
   const privateAnswers = new PrivateAnswerJobs({
     model: () => privateAnswerModel,
@@ -4475,6 +4476,10 @@ export async function main(): Promise<void> {
         }
         return openZkapiConsultSession(route, control);
       },
+      // A route (profile and inference key) must exist before any writer
+      // work, and no private answer may be in flight when the writer starts.
+      transportAvailable: () => transport()?.apiKey !== undefined,
+      answerActivityBusy: () => answerActivity.busy,
       completionTimeoutMs: () => transport()?.settings.timeoutMs ?? 6 * 60_000,
     });
   }

@@ -9,16 +9,23 @@
  *       recently active, dispatch window open with delivery room, snapshot
  *       held, consult not over                              any no → nothing
  *     markOutside pending                                   (the schedule mark)
- *     E1: every item the answer read still eligible         no → failed, snapshot dropped
+ *     route available (profile and key) and no answer activity now
+ *                                                           no → failed
+ *     E1: every item the answer read still eligible; the fresh-answer
+ *       generation captured before E1 still current         no → failed, snapshot dropped
  *     ┌ open the transport session (warm: lease, Tor, daemon, policy)   ┐ in parallel
  *     └ writer on its own server (memory rule, token bound, deadline)   ┘
- *     gate over the snapshot pack + question, answer, gaps  refuse → failed, silently
+ *       over ONE bounded input (question, answer, gaps), also the gate's
+ *       writerVisibleTexts
+ *     gate over the snapshot pack + that bounded input      refuse → failed, silently
  *     session ready? busy or any failure → failed (never queued)
- *     send(question, authorize): settings revision, panel activity,
- *       window and delivery room, state, E2 eligibility, the send-once latch
+ *     send(question, authorize): E2 eligibility awaited FIRST, then
+ *       synchronously: settings revision, state, panel activity, window and
+ *       delivery room, the send-once latch; the questions enter the repeat
+ *       history at that instant (dispatched or possibly dispatched)
  *     reply → appendOutsideBlock (fitted; question and route label)
  *     finished runs on in the background; the snapshot is dropped at the
- *       dispatch decision.
+ *       dispatch decision (only item identities are held past it).
  *
  * A fresh private answer starting anywhere (jobs.onAnswerActivity) kills a
  * writer in flight (SIGKILL of the writer's own process; the answer server
@@ -36,9 +43,9 @@
  * the session (consult-transport-zkapi.ts). A `busy` or fenced transport
  * skips the consult; nothing is queued.
  *
- * No user-facing path enables outside help here (the Mac dashboard card is
- * C5; the public CLI command is C8). Until one exists every job binds
- * outside help off and this orchestrator is never triggered.
+ * Inert unless a valid, enabled `~/.olympus/consult.json` exists: every job
+ * then binds outside help off and nothing here runs. No product path writes
+ * that file until C5 (the Mac dashboard card); the public CLI command is C8.
  */
 import {
   consultWriterContextFromPack,
@@ -57,7 +64,7 @@ import type {
   ZkapiOpenControl,
   ZkapiOpenSessionResult,
 } from '../../core/consult-transport-zkapi.ts';
-import type { ConsultWriterInput, ConsultWriterOutcome } from '../../core/consult-writer.ts';
+import { boundConsultWriterInput, type ConsultWriterInput, type ConsultWriterOutcome } from '../../core/consult-writer.ts';
 import { checkPrivateEvidence, type PrivateEvidenceGuard } from './private-answer-contract.ts';
 import type { PrivateAnswerJobs } from './private-answer-jobs.ts';
 
@@ -83,6 +90,7 @@ export type ConsultOrchestratorOutcome =
   | 'gate_refused'
   | 'ineligible'
   | 'transport_unavailable'
+  | 'superseded'
   | 'authorization_refused'
   | 'reply_failed'
   | 'append_refused'
@@ -99,6 +107,10 @@ export interface ConsultOrchestratorOptions {
   readonly writer: (input: ConsultWriterInput, control: { kill: AbortSignal; deadlineMs: number }) => Promise<ConsultWriterOutcome>;
   /** Opens the transport session (openZkapiConsultSession bound to the configured route); a failure means no consult. */
   readonly openSession: (control: ZkapiOpenControl) => Promise<ZkapiOpenSessionResult>;
+  /** Whether a route exists now (profile and inference key present); checked before any writer work. Default: assumed available. */
+  readonly transportAvailable?: () => boolean;
+  /** Whether a private answer is in flight now (the worker's answer activity); the writer never starts beside one. Default: not busy. */
+  readonly answerActivityBusy?: () => boolean;
   /** The settings now (readConsultSettings), re-read at the gate and inside final authorization. */
   readonly settings: () => ConsultSettingsRead;
   /** The live eligibility guard over the items the answer read (E1 before the writer, E2 inside authorization). */
@@ -194,27 +206,65 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     return candidate;
   };
 
+  const safe = (read: (() => boolean) | undefined, fallback: boolean): boolean => {
+    try {
+      return read ? read() : fallback;
+    } catch {
+      return !fallback;
+    }
+  };
+
   const run = async (jobId: string, scheduled: Trigger): Promise<void> => {
     const startedAt = now();
-    const snapshot = options.jobs.consultSnapshot(jobId);
-    if (!snapshot) {
+    // Nothing starts without a route to send on, or beside a private answer in flight.
+    if (!safe(options.transportAvailable, true)) {
+      fail(jobId);
+      record(jobId, 'transport_unavailable', startedAt, 'no_route');
+      return;
+    }
+    if (safe(options.answerActivityBusy, false)) {
+      fail(jobId);
+      record(jobId, 'superseded', startedAt, 'answer_busy');
+      return;
+    }
+    // The fresh-answer generation is captured before E1: any answer that
+    // starts while E1 is awaited supersedes this consult.
+    const kill = fresh.signal;
+    const first = options.jobs.consultSnapshot(jobId);
+    if (!first) {
       fail(jobId);
       record(jobId, 'error', startedAt, 'snapshot_gone');
       return;
     }
+    // Item identities (no text) are all that is held past the dispatch decision.
+    const items = first.items;
     // E1: every item the answer read must still be eligible before the writer sees anything.
-    if (!(await checkPrivateEvidence(options.eligible, snapshot.items)).every(Boolean)) {
+    if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
       fail(jobId);
       record(jobId, 'ineligible', startedAt, 'e1');
       return;
     }
+    if (kill.aborted) {
+      fail(jobId);
+      record(jobId, 'superseded', startedAt, 'fresh_answer');
+      return;
+    }
+    // The snapshot is re-read at every use: a withdrawal or the retention
+    // clock ending the job's snapshot ends this consult too.
+    const held = options.jobs.consultSnapshot(jobId);
+    if (held !== first) {
+      fail(jobId);
+      record(jobId, 'error', startedAt, 'snapshot_gone');
+      return;
+    }
+    // One bounded input (§A.3): what the writer sees is exactly what the gate compares against.
+    const bounded = boundConsultWriterInput({ question: held.question, answer: held.answer, gaps: held.gaps });
     // The writer and the transport warm-up overlap (§A.8, speed measure 2).
     // The session's own open deadline is the dispatch window's remainder.
     const sessionAbort = new AbortController();
     const openDeadlineMs = Math.max(1_000, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
     const opening = options.openSession({ signal: sessionAbort.signal, deadlineMs: openDeadlineMs });
     opening.catch(() => undefined);
-    const kill = fresh.signal;
     const closeSession = async () => {
       sessionAbort.abort();
       const opened = await opening.catch(() => undefined);
@@ -222,10 +272,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     };
     let written: ConsultWriterOutcome;
     try {
-      written = await options.writer(
-        { question: snapshot.question, answer: snapshot.answer, gaps: snapshot.gaps },
-        { kill, deadlineMs: writerDeadlineMs },
-      );
+      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs });
     } catch {
       written = { kind: 'failed', reason: 'request_failed' };
     }
@@ -251,9 +298,16 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       record(jobId, 'authorization_refused', startedAt, policyNow.reason);
       return;
     }
+    const current = options.jobs.consultSnapshot(jobId);
+    if (current !== first) {
+      await closeSession();
+      fail(jobId);
+      record(jobId, 'error', startedAt, 'snapshot_gone');
+      return;
+    }
     const verdict = evaluateConsultRequest(
       written.questions,
-      consultWriterContextFromPack(snapshot.pack, { writerVisibleTexts: [snapshot.question, snapshot.answer, ...snapshot.gaps] }),
+      consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question, bounded.answer, ...bounded.gaps] }),
       {},
       { recentApprovedQuestions: [...recent] },
       consultGateOptionsFromSettings(settingsAtGate.settings),
@@ -271,22 +325,30 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       return;
     }
     const session = opened.session;
-    const questionText = written.questions.join('\n');
+    const questions = written.questions;
+    const questionText = questions.join('\n');
     const sendDeadlineMs = Math.max(1, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
     let authorized = false;
-    const authorize = async (): Promise<boolean> => {
-      const at = now();
-      // Final authorization (§A.8 step 2): the settings revision, panel
-      // activity, the window and delivery room, the job's state, eligibility
-      // (E2), then the latch, synchronously last.
+    const authorize = async (signal: AbortSignal): Promise<boolean> => {
+      // Final authorization (§A.8 step 2). The one await, E2 eligibility,
+      // runs first; everything that can go stale during it is read
+      // synchronously after it, and the latch is taken last in the same
+      // turn, so nothing changes between these reads and the reservation.
+      if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) return false;
+      if (signal.aborted) return false;
       if (!recheckConsultJobPolicy(scheduled.policy, options.settings()).ok) return false;
       const seam = options.jobs.outsideSeam(jobId);
       if (!seam || seam.state !== 'answer' || seam.outside !== 'pending' || seam.panelCapability !== 2) return false;
+      const at = now();
       if (!recentlyActive(seam.lastCollectedAt, at)) return false;
       if (!windowOpen(scheduled, at)) return false;
-      if (!(await checkPrivateEvidence(options.eligible, snapshot.items)).every(Boolean)) return false;
       if (!options.jobs.takeConsultLatch(jobId)) return false;
       authorized = true;
+      // Dispatched, or possibly dispatched, from here: the repeat check sees these questions whatever happens next.
+      for (const question of questions) {
+        recent.push(question);
+        while (recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS) recent.shift();
+      }
       return true;
     };
     // The snapshot's work is done once the dispatch decision is made.
@@ -322,10 +384,6 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       fail(jobId);
       record(jobId, 'append_refused', startedAt, appended ? appended.reason : 'job_gone');
       return;
-    }
-    for (const question of written.questions) {
-      recent.push(question);
-      while (recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS) recent.shift();
     }
     record(jobId, 'appended', startedAt, `reply_ms=${reply.elapsedMs}`);
   };

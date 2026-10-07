@@ -497,6 +497,13 @@ export interface AnswerPrivatelyOptions {
   /** Called after each model call with its stage and timing (counts only, never content). */
   onModelCall?: (call: PrivateModelCallTiming) => void;
   signal?: AbortSignal;
+  /**
+   * Return the consult metadata (`PrivateAnswer.consult`: the verdict and a
+   * frozen copy of the fitted pack). Off by default, so an install without
+   * outside help does no extra cloning; the jobs engine asks for it only for
+   * a job that bound outside help on.
+   */
+  consultMetadata?: boolean;
 }
 
 /** One model call of answerPrivately: what it cost, never what it said. */
@@ -559,19 +566,21 @@ export async function answerPrivately(
   // plainly that these items did not answer the question. An answer that
   // reproduces the evidence blocks' formatting (field labels, provenance
   // JSON) is a failed answer, not an answer, and is reported the same way.
-  const frozenPack = deepFreeze(structuredClone(pack));
+  const consult = (noAnswer: boolean): Pick<PrivateAnswer, 'consult'> => (options.consultMetadata
+    ? { consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer }), pack: deepFreeze(structuredClone(pack)) }) }
+    : {});
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
     return {
       answer: PRIVATE_ANSWER_NOT_FOUND,
       citations: [],
       unanswered: cleanUnanswered(unanswered, '', { maxChars: gapChars, complete: false }),
       modelId,
-      consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer: true }), pack: frozenPack }),
+      ...consult(true),
     };
   }
   return {
     answer: result.answer,
-    consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer: false }), pack: frozenPack }),
+    ...consult(false),
     unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
