@@ -10,26 +10,33 @@
 // abort) the moment a fresh private answer arrives or at its own deadline.
 // The answer server is never aborted, signalled or reset by anything here.
 //
-// Memory rule (§A.7): the writer server starts only if the machine's free
-// memory stays at or above 20% after the writer's footprint (about 0.6 GB)
-// and there is no swap pressure. Otherwise the consult is skipped; no consult
-// is always acceptable.
+// Memory rule (§A.7, owner decision in review round 1 of C4b): the writer
+// server starts only if the machine's free memory stays at or above 20% after
+// the writer's footprint (about 0.6 GB) and the kernel's memory pressure is
+// not critical. The `warn` level is allowed: the owner's 24 GB Mac idles at
+// `warn` with other processes' swap in use, and M0's B2 pairs were measured
+// there; `critical` means the machine is already compressing and swapping
+// hard, and a second model process would make the fresh answer wait. The
+// residual: at `warn` a writer can add paging while it runs (one +7.7 s
+// prefill pair out of four was seen under swapping in M0). Otherwise the
+// consult is skipped; no consult is always acceptable.
 //
 // What the writer sees: the user's question, the first answer and its gaps,
 // each bounded (§A.3), plus the rules below. Never the documents. The whole
 // prompt is bounded to 2,048 model tokens, counted with the server's own
-// tokenizer (`/apply-template` then `/tokenize`); when that count is not
-// available a conservative estimate (3 bytes per token) decides. Over the
-// bound: no consult.
+// tokenizer (`/apply-template` then `/tokenize`). Over the bound, or when the
+// count is not available: no consult (no estimate stands in for the count).
 //
 // The mechanical subset of the writer rules is enforced after the fact by
-// the outbound gate (consult-gate.ts). This module adds one deterministic
-// post-check of its own, for the rule the gate cannot see: a question that
-// names a place or entity only implied by the answer (M0 round 2: "Portugal"
-// from a Lisbon itinerary). Any capitalised word after the first in a
-// sub-question refuses the whole reply (`named_entity`); all-caps acronyms
-// are allowed. German (whose common nouns are capitalised) is a user-installed
-// pack and is not a target of this check.
+// the outbound gate (consult-gate.ts): with the default options a country
+// name such as "Portugal" (M0 round 2: implied by a Lisbon itinerary, never
+// written in the answer) is an unknown word and is refused there. The rule
+// against naming what the answer only implies lives in the prompt below.
+//
+// Process lifetime: the moment the writer's server process is started, an
+// abort of the stop signal (a fresh answer, the deadline) SIGKILLs it, and
+// the whole started lifetime is wrapped so the process is killed on every
+// exit path, the tokenizer calls included.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { freemem, platform as osPlatform, totalmem } from 'node:os';
@@ -63,8 +70,6 @@ export const CONSULT_WRITER_LIMITS = Object.freeze({
   footprintBytes: 600 * 1024 * 1024,
   /** Free memory that must remain after the footprint (§A.7). */
   minFreePercentAfter: 20,
-  /** Bytes per token when the server's tokenizer is not available (deliberately low: it over-counts). */
-  estimateBytesPerToken: 3,
   /** Context the writer server serves: the prompt bound plus the reply, with headroom. */
   contextTokens: 4_096,
   /** How long the writer server may take to load. */
@@ -163,39 +168,10 @@ export function buildConsultWriterPrompt(input: ConsultWriterInput): readonly Co
   ]);
 }
 
-const utf8 = new TextEncoder();
-
-/**
- * A deliberately high token estimate for when the server's tokenizer is not
- * available: UTF-8 bytes at 3 per token, plus the chat template's per-message
- * overhead. Prose tokenizes at about 4 bytes per token, so this refuses
- * before the real count would.
- */
-export function estimateConsultWriterTokens(messages: readonly ConsultWriterMessage[]): number {
-  const bytes = messages.reduce((sum, message) => sum + utf8.encode(message.content).byteLength, 0);
-  return Math.ceil(bytes / CONSULT_WRITER_LIMITS.estimateBytesPerToken) + messages.length * 8 + 8;
-}
-
 export type ConsultWriterReply =
   | { readonly kind: 'questions'; readonly questions: readonly string[] }
   | { readonly kind: 'declined' }
-  | { readonly kind: 'invalid'; readonly reason: 'not_json' | 'shape' | 'form' | 'named_entity' };
-
-/**
- * Whether a sub-question names an entity: any capitalised word after the
- * first (a name, a place, a product, whether copied from the answer or only
- * implied by it). All-caps acronyms ("VAT", "ISO") are allowed.
- */
-export function consultQuestionNamesEntity(question: string): boolean {
-  const words = question.trim().split(/\s+/).slice(1);
-  for (const raw of words) {
-    const word = raw.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
-    if (word.length < 2) continue;
-    if (/^\p{Lu}+$/u.test(word)) continue;
-    if (/^\p{Lu}\p{Ll}+$/u.test(word)) return true;
-  }
-  return false;
-}
+  | { readonly kind: 'invalid'; readonly reason: 'not_json' | 'shape' | 'form' };
 
 /** Parses and checks the writer's reply against the form rules; a reply that breaks any rule is invalid as a whole. */
 export function parseConsultWriterReply(text: string): ConsultWriterReply {
@@ -221,7 +197,6 @@ export function parseConsultWriterReply(text: string): ConsultWriterReply {
     if (!question.endsWith('?') || question.indexOf('?') !== question.length - 1) return { kind: 'invalid', reason: 'form' };
     const words = question.split(/\s+/);
     if (words.length > CONSULT_WRITER_LIMITS.maxQuestionWords || words.length < CONSULT_WRITER_LIMITS.minQuestionWords) return { kind: 'invalid', reason: 'form' };
-    if (consultQuestionNamesEntity(question)) return { kind: 'invalid', reason: 'named_entity' };
     cleaned.push(question);
   }
   if (new Set(cleaned.map((question) => question.toLowerCase())).size !== cleaned.length) return { kind: 'invalid', reason: 'form' };
@@ -248,9 +223,10 @@ export type ConsultMemoryDecision =
   | { readonly ok: false; readonly reason: 'memory_unknown' | 'memory_low' | 'swap_pressure' };
 
 /**
- * §A.7: start the writer server only if free memory stays at or above 20%
- * after its footprint and there is no swap pressure (the kernel's pressure
- * level is normal). Anything unknown refuses.
+ * §A.7 with the owner's round-1 decision: start the writer server only if
+ * free memory stays at or above 20% after its footprint and the kernel's
+ * pressure level is not critical (`warn` is allowed; see the header).
+ * Anything unknown refuses.
  */
 export function consultWriterMemoryDecision(
   sample: ConsultMemorySample | undefined,
@@ -260,7 +236,7 @@ export function consultWriterMemoryDecision(
     return { ok: false, reason: 'memory_unknown' };
   }
   if (sample.pressure === 'unknown') return { ok: false, reason: 'memory_unknown' };
-  if (sample.pressure !== 'normal') return { ok: false, reason: 'swap_pressure' };
+  if (sample.pressure === 'critical') return { ok: false, reason: 'swap_pressure' };
   const freeAfterPercent = sample.freePercent - (footprintBytes / sample.totalBytes) * 100;
   if (freeAfterPercent < CONSULT_WRITER_LIMITS.minFreePercentAfter) return { ok: false, reason: 'memory_low' };
   return { ok: true, freeAfterPercent };
@@ -361,9 +337,9 @@ export function createConsultWriterServer(launch: ConsultWriterLaunch, options: 
 export type ConsultWriterOutcome =
   | { readonly kind: 'questions'; readonly questions: readonly string[]; readonly promptTokens: number; readonly ms: number }
   | { readonly kind: 'declined'; readonly promptTokens: number; readonly ms: number }
-  | { readonly kind: 'skipped'; readonly reason: 'memory_unknown' | 'memory_low' | 'swap_pressure' | 'prompt_too_long' | 'no_runtime' }
+  | { readonly kind: 'skipped'; readonly reason: 'memory_unknown' | 'memory_low' | 'swap_pressure' | 'prompt_too_long' | 'prompt_tokens_unavailable' | 'no_runtime' }
   | { readonly kind: 'killed'; readonly reason: 'fresh_answer' | 'deadline' }
-  | { readonly kind: 'failed'; readonly reason: 'start_failed' | 'request_failed' | 'not_json' | 'shape' | 'form' | 'named_entity' };
+  | { readonly kind: 'failed'; readonly reason: 'start_failed' | 'request_failed' | 'not_json' | 'shape' | 'form' };
 
 export interface ConsultWriterRunOptions {
   /** The writer's server; undefined when the model runtime is not installed (skipped, `no_runtime`). */
@@ -380,9 +356,11 @@ export interface ConsultWriterRunOptions {
 
 /**
  * Runs the writer once over bounded inputs. Memory rule, then start (or
- * reuse) the writer server, then the token bound, then one JSON-schema
- * completion. A fresh answer (`kill`) or the deadline SIGKILLs the writer
- * process; the outcome says which. The answer server is never touched.
+ * reuse) the writer server, then the exact token bound, then one JSON-schema
+ * completion. From the moment the server is started, a fresh answer
+ * (`kill`) or the deadline SIGKILLs the writer process at once, whatever
+ * stage it is in, and every exit path kills it (on demand) or releases it
+ * (warm). The answer server is never touched.
  */
 export async function runConsultWriter(input: ConsultWriterInput, options: ConsultWriterRunOptions): Promise<ConsultWriterOutcome> {
   const now = options.now ?? Date.now;
@@ -396,56 +374,58 @@ export async function runConsultWriter(input: ConsultWriterInput, options: Consu
   const deadline = AbortSignal.timeout(options.deadlineMs ?? CONSULT_WRITER_LIMITS.deadlineMs);
   const stop = AbortSignal.any([options.kill, deadline]);
   const killedReason = (): 'fresh_answer' | 'deadline' => (options.kill.aborted ? 'fresh_answer' : 'deadline');
-  const killNow = async (): Promise<void> => {
-    try {
-      await server.kill();
-    } catch {
-      // The launcher reports a process that outlives SIGKILL; nothing more can be done here.
-    }
+  let killing: Promise<void> | undefined;
+  const killNow = (): Promise<void> => {
+    killing ??= server.kill().catch(() => undefined);
+    return killing;
   };
-  let endpoint: LlamaServerEndpoint;
+  // The stop signal kills the process the instant it fires, whatever this
+  // function is awaiting (the start, the tokenizer, the completion).
+  const onStop = () => void killNow();
+  if (stop.aborted) return { kind: 'killed', reason: killedReason() };
+  stop.addEventListener('abort', onStop, { once: true });
+  let keep = false;
   try {
-    endpoint = await server.ensure(stop);
-  } catch {
-    if (stop.aborted) {
-      await killNow();
-      return { kind: 'killed', reason: killedReason() };
+    let endpoint: LlamaServerEndpoint;
+    try {
+      endpoint = await server.ensure(stop);
+    } catch {
+      if (stop.aborted) return { kind: 'killed', reason: killedReason() };
+      return { kind: 'failed', reason: 'start_failed' };
     }
-    return { kind: 'failed', reason: 'start_failed' };
-  }
-  if (stop.aborted) {
-    await killNow();
-    return { kind: 'killed', reason: killedReason() };
-  }
-  const promptTokens = await countWriterTokens(fetchImpl, endpoint, messages, stop) ?? estimateConsultWriterTokens(messages);
-  if (stop.aborted) {
-    await killNow();
-    return { kind: 'killed', reason: killedReason() };
-  }
-  if (promptTokens > CONSULT_WRITER_LIMITS.promptTokens) {
-    if (options.keepWarm) server.touch();
-    else await killNow();
-    return { kind: 'skipped', reason: 'prompt_too_long' };
-  }
-  let text: string;
-  try {
-    text = await writerCompletion(fetchImpl, endpoint, messages, stop);
-  } catch {
-    if (stop.aborted) {
-      await killNow();
-      return { kind: 'killed', reason: killedReason() };
+    if (stop.aborted) return { kind: 'killed', reason: killedReason() };
+    const promptTokens = await countWriterTokens(fetchImpl, endpoint, messages, stop);
+    if (stop.aborted) return { kind: 'killed', reason: killedReason() };
+    if (promptTokens === undefined) {
+      keep = true;
+      return { kind: 'skipped', reason: 'prompt_tokens_unavailable' };
     }
-    if (options.keepWarm) server.touch();
+    if (promptTokens > CONSULT_WRITER_LIMITS.promptTokens) {
+      keep = true;
+      return { kind: 'skipped', reason: 'prompt_too_long' };
+    }
+    let text: string;
+    try {
+      text = await writerCompletion(fetchImpl, endpoint, messages, stop);
+    } catch {
+      if (stop.aborted) return { kind: 'killed', reason: killedReason() };
+      keep = true;
+      return { kind: 'failed', reason: 'request_failed' };
+    }
+    if (stop.aborted) return { kind: 'killed', reason: killedReason() };
+    keep = true;
+    const reply = parseConsultWriterReply(text);
+    const ms = now() - startedAt;
+    if (reply.kind === 'invalid') return { kind: 'failed', reason: reply.reason };
+    if (reply.kind === 'declined') return { kind: 'declined', promptTokens, ms };
+    return { kind: 'questions', questions: reply.questions, promptTokens, ms };
+  } finally {
+    stop.removeEventListener('abort', onStop);
+    // On demand: the process goes after every call. Warm: it stays only after
+    // a call that ended normally; a killed or failed process never does.
+    if (options.keepWarm && keep && !stop.aborted) server.touch();
     else await killNow();
-    return { kind: 'failed', reason: 'request_failed' };
   }
-  if (options.keepWarm) server.touch();
-  else await killNow();
-  const reply = parseConsultWriterReply(text);
-  const ms = now() - startedAt;
-  if (reply.kind === 'invalid') return { kind: 'failed', reason: reply.reason };
-  if (reply.kind === 'declined') return { kind: 'declined', promptTokens, ms };
-  return { kind: 'questions', questions: reply.questions, promptTokens, ms };
 }
 
 function safeProbe(probe: ConsultMemoryProbe): ConsultMemorySample | undefined {
@@ -481,8 +461,7 @@ async function countWriterTokens(
     if (!tokenized.ok) return undefined;
     const { tokens } = await tokenized.json() as { tokens?: unknown };
     return Array.isArray(tokens) ? tokens.length : undefined;
-  } catch (error) {
-    if (signal.aborted) throw error;
+  } catch {
     return undefined;
   }
 }

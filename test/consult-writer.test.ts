@@ -1,10 +1,12 @@
 // The consult writer (src/core/consult-writer.ts; design
 // docs/design/frontier-consult-lane.md §A.3 and §A.7, stage C4b): its
-// prompt and bounds, the reply form, the rule against naming an entity the
-// answer only implies (M0 round 2: "Portugal" from a Lisbon itinerary), the
-// memory rule, and the lifecycle of its own server process: started on
-// demand, SIGKILLed (never SIGTERMed) on a fresh answer or at the deadline,
-// not started under the memory rule, and never asked past the token bound.
+// prompt and bounds (with the rule against naming what the answer only
+// implies; the gate-level proof for "Portugal" is in consult-orchestrator.test.ts),
+// the reply form, the memory rule, and the lifecycle of its own server
+// process: started on demand, SIGKILLed (never SIGTERMed) on a fresh answer
+// or at the deadline at any stage (the tokenizer included), not started under
+// the memory rule, never asked past the token bound, and skipped when the
+// server cannot count tokens.
 // Every process and model call here is a fake; no llama-server runs.
 
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -16,11 +18,9 @@ import {
   CONSULT_WRITER_SYSTEM,
   boundConsultWriterInput,
   buildConsultWriterPrompt,
-  consultQuestionNamesEntity,
   consultWriterMemoryDecision,
   createConsultWriterServer,
   defaultConsultMemoryProbe,
-  estimateConsultWriterTokens,
   parseConsultWriterReply,
   runConsultWriter,
   type ConsultMemorySample,
@@ -71,15 +71,6 @@ describe('writer prompt', () => {
     ]);
   });
 
-  test('the conservative token estimate over-counts prose, and the real prompt at full bounds exceeds it', () => {
-    const small = buildConsultWriterPrompt({ question: 'Why?', answer: 'Because.', gaps: [] });
-    const estimate = estimateConsultWriterTokens(small);
-    const bytes = small.reduce((sum, message) => sum + Buffer.byteLength(message.content), 0);
-    expect(estimate).toBeGreaterThan(bytes / 4);
-    expect(estimate).toBeLessThan(CONSULT_WRITER_LIMITS.promptTokens);
-    const full = buildConsultWriterPrompt({ question: 'q '.repeat(500), answer: 'word '.repeat(540), gaps: ['gap '.repeat(75), 'gap '.repeat(75), 'gap '.repeat(75), 'gap '.repeat(75)] });
-    expect(estimateConsultWriterTokens(full)).toBeGreaterThan(CONSULT_WRITER_LIMITS.promptTokens);
-  });
 });
 
 describe('writer reply', () => {
@@ -102,26 +93,19 @@ describe('writer reply', () => {
     expect(parseConsultWriterReply('{"questions": ["What are typical entry rules?", "what are typical entry rules?"]}')).toEqual({ kind: 'invalid', reason: 'form' });
   });
 
-  test('the implied-place rule: a question naming the country a Lisbon itinerary implies is refused as a whole; the class-level question passes', () => {
-    // M0 round 2, input w6: the answer never says "Portugal"; the writer inferred it.
-    expect(consultQuestionNamesEntity('What entry rules apply to visitors arriving in Portugal?')).toBe(true);
-    expect(consultQuestionNamesEntity('What passport validity do most countries require from visitors?')).toBe(false);
-    // Acronyms are allowed; a sentence-initial capital is not a name.
-    expect(consultQuestionNamesEntity('How is VAT usually refunded to visitors?')).toBe(false);
-    expect(parseConsultWriterReply('{"questions": ["What passport validity do most countries require from visitors?", "What entry rules apply to visitors arriving in Portugal?"]}'))
-      .toEqual({ kind: 'invalid', reason: 'named_entity' });
-    expect(parseConsultWriterReply('{"questions": ["What passport validity do most countries require from visitors?"]}')).toMatchObject({ kind: 'questions' });
+  test('the form check is form only: a proper noun is the gate\'s business, not the parser\'s', () => {
+    expect(parseConsultWriterReply('{"questions": ["What entry rules apply to visitors arriving in Portugal?"]}')).toMatchObject({ kind: 'questions' });
   });
 });
 
 describe('memory rule', () => {
-  test('refuses below 20% free after the footprint, under warn or critical pressure, and when unknown', () => {
+  test('refuses below 20% free after the footprint, at critical pressure and when unknown; warn is allowed (owner decision)', () => {
     expect(consultWriterMemoryDecision(NORMAL)).toMatchObject({ ok: true });
     expect(consultWriterMemoryDecision({ totalBytes: 8 * GB, freePercent: 26, pressure: 'normal' })).toEqual({ ok: false, reason: 'memory_low' });
     // 24 GB: the 0.6 GB footprint is 2.5 points; 22.4% stays above the line, 22.4 does not once rounded down.
     expect(consultWriterMemoryDecision({ totalBytes: 24 * GB, freePercent: 22.6, pressure: 'normal' })).toMatchObject({ ok: true });
     expect(consultWriterMemoryDecision({ totalBytes: 24 * GB, freePercent: 22.4, pressure: 'normal' })).toEqual({ ok: false, reason: 'memory_low' });
-    expect(consultWriterMemoryDecision({ ...NORMAL, pressure: 'warn' })).toEqual({ ok: false, reason: 'swap_pressure' });
+    expect(consultWriterMemoryDecision({ ...NORMAL, pressure: 'warn' })).toMatchObject({ ok: true });
     expect(consultWriterMemoryDecision({ ...NORMAL, pressure: 'critical' })).toEqual({ ok: false, reason: 'swap_pressure' });
     expect(consultWriterMemoryDecision({ ...NORMAL, pressure: 'unknown' })).toEqual({ ok: false, reason: 'memory_unknown' });
     expect(consultWriterMemoryDecision(undefined)).toEqual({ ok: false, reason: 'memory_unknown' });
@@ -172,8 +156,10 @@ class FakeChild extends EventEmitter {
 interface FakeServerOptions {
   /** The writer's reply text; a function may hang (never resolve) until aborted. */
   reply?: string | ((signal: AbortSignal) => Promise<string>);
-  /** Tokens the fake tokenizer reports; undefined makes /tokenize fail (the estimate decides). */
+  /** Tokens the fake tokenizer reports; undefined makes /tokenize fail (the consult is skipped). */
   tokens?: number | undefined;
+  /** /tokenize hangs until its request is aborted. */
+  tokenizeHangs?: boolean;
   exitsOn?: NodeJS.Signals[];
 }
 
@@ -201,6 +187,7 @@ function fakeServer(options: FakeServerOptions = {}) {
     if (url.pathname === '/v1/models') return Response.json({ data: [{ id: alias }] });
     if (url.pathname === '/apply-template') return Response.json({ prompt: 'templated' });
     if (url.pathname === '/tokenize') {
+      if (options.tokenizeHangs) await hang(init?.signal as AbortSignal);
       return options.tokens === undefined ? new Response('no', { status: 500 }) : Response.json({ tokens: new Array(options.tokens).fill(1) });
     }
     if (url.pathname === '/v1/chat/completions') {
@@ -252,12 +239,25 @@ describe('writer server lifecycle', () => {
     expect(fake.spawned[0]!.signals).toEqual(['SIGKILL']);
   });
 
-  test('the memory rule is enforced before any start: low memory or swap pressure skips the consult and spawns nothing', async () => {
+  test('a fresh answer during the tokenizer calls kills the writer process at once; nothing is left on the port', async () => {
+    const fake = fakeServer({ tokens: 100, tokenizeHangs: true });
+    const fresh = new AbortController();
+    const running = runConsultWriter(LISBON, { server: fake.server, memory: () => NORMAL, kill: fresh.signal, fetchImpl: fake.fetchImpl });
+    await waitFor(() => fake.requests.includes('/tokenize'));
+    fresh.abort();
+    expect(await running).toEqual({ kind: 'killed', reason: 'fresh_answer' });
+    expect(fake.spawned[0]!.signals).toEqual(['SIGKILL']);
+    expect(fake.spawned[0]!.signalCode).toBe('SIGKILL');
+    expect(fake.server.pid).toBeUndefined();
+    expect(fake.requests).not.toContain('/v1/chat/completions');
+  });
+
+  test('the memory rule is enforced before any start: low memory or critical pressure skips the consult and spawns nothing', async () => {
     const fake = fakeServer({ tokens: 100 });
     const kill = new AbortController().signal;
     expect(await runConsultWriter(LISBON, { server: fake.server, memory: () => ({ totalBytes: 8 * GB, freePercent: 25, pressure: 'normal' }), kill, fetchImpl: fake.fetchImpl }))
       .toEqual({ kind: 'skipped', reason: 'memory_low' });
-    expect(await runConsultWriter(LISBON, { server: fake.server, memory: () => ({ ...NORMAL, pressure: 'warn' }), kill, fetchImpl: fake.fetchImpl }))
+    expect(await runConsultWriter(LISBON, { server: fake.server, memory: () => ({ ...NORMAL, pressure: 'critical' }), kill, fetchImpl: fake.fetchImpl }))
       .toEqual({ kind: 'skipped', reason: 'swap_pressure' });
     expect(await runConsultWriter(LISBON, { server: fake.server, memory: () => { throw new Error('probe broke'); }, kill, fetchImpl: fake.fetchImpl }))
       .toEqual({ kind: 'skipped', reason: 'memory_unknown' });
@@ -265,7 +265,7 @@ describe('writer server lifecycle', () => {
     expect(fake.requests).toEqual([]);
   });
 
-  test('a prompt over 2,048 tokens by the server\'s tokenizer is never sent; without a tokenizer the conservative estimate decides', async () => {
+  test('a prompt over 2,048 tokens by the server\'s tokenizer is never sent; without a tokenizer the consult is skipped', async () => {
     const over = fakeServer({ tokens: 2_049 });
     expect(await runConsultWriter(LISBON, { server: over.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: over.fetchImpl }))
       .toEqual({ kind: 'skipped', reason: 'prompt_too_long' });
@@ -273,22 +273,19 @@ describe('writer server lifecycle', () => {
     expect(over.spawned[0]!.signals).toEqual(['SIGKILL']);
     const exact = fakeServer({ tokens: 2_048 });
     expect(await runConsultWriter(LISBON, { server: exact.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: exact.fetchImpl })).toMatchObject({ kind: 'questions', promptTokens: 2_048 });
-    // No tokenizer: a short prompt passes on the estimate; a long one does not.
-    const estimated = fakeServer({ tokens: undefined });
-    expect(await runConsultWriter(LISBON, { server: estimated.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: estimated.fetchImpl })).toMatchObject({ kind: 'questions' });
-    const longInput = { question: 'q '.repeat(500), answer: 'word '.repeat(540), gaps: ['gap '.repeat(75), 'gap '.repeat(75), 'gap '.repeat(75), 'gap '.repeat(75)] };
-    const estimatedLong = fakeServer({ tokens: undefined });
-    expect(await runConsultWriter(longInput, { server: estimatedLong.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: estimatedLong.fetchImpl }))
-      .toEqual({ kind: 'skipped', reason: 'prompt_too_long' });
+    // No tokenizer: no estimate stands in; the consult is skipped and the writer is never asked.
+    const uncounted = fakeServer({ tokens: undefined });
+    expect(await runConsultWriter(LISBON, { server: uncounted.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: uncounted.fetchImpl }))
+      .toEqual({ kind: 'skipped', reason: 'prompt_tokens_unavailable' });
+    expect(uncounted.requests).not.toContain('/v1/chat/completions');
+    expect(uncounted.spawned[0]!.signals).toEqual(['SIGKILL']);
   });
 
-  test('an invalid reply, a decline and a named entity are reported as such; no runtime means skipped', async () => {
+  test('an invalid reply and a decline are reported as such; no runtime means skipped', async () => {
     const invalid = fakeServer({ tokens: 100, reply: 'not json at all' });
     expect(await runConsultWriter(LISBON, { server: invalid.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: invalid.fetchImpl })).toEqual({ kind: 'failed', reason: 'not_json' });
     const declined = fakeServer({ tokens: 100, reply: '{"questions": null}' });
     expect(await runConsultWriter(LISBON, { server: declined.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: declined.fetchImpl })).toMatchObject({ kind: 'declined' });
-    const named = fakeServer({ tokens: 100, reply: '{"questions": ["What entry rules apply to visitors arriving in Portugal?"]}' });
-    expect(await runConsultWriter(LISBON, { server: named.server, memory: () => NORMAL, kill: new AbortController().signal, fetchImpl: named.fetchImpl })).toEqual({ kind: 'failed', reason: 'named_entity' });
     expect(await runConsultWriter(LISBON, { server: undefined, memory: () => NORMAL, kill: new AbortController().signal })).toEqual({ kind: 'skipped', reason: 'no_runtime' });
   });
 });
