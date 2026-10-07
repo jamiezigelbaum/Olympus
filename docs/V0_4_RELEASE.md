@@ -117,9 +117,12 @@ waits for a calendar slot.
   stages land behind the internal settings mechanism (no public enable
   path): C1 gate and packs, C2 the transport session, C3 settings, C4a the
   panel collection protocol, C4b the writer scheduling and dispatch
-  orchestration (wired; inert unless a valid enabled `consult.json` exists,
-  which no product path writes until C5; the quiet-machine B2 rerun of §A.7
-  is the C4b merge gate and is still owed).
+  orchestration (wired; inert unless a valid enabled `consult.json` exists),
+  C5 the Mac dashboard Outside help card (the settings writer and the only
+  enable path, control session only; `docs/design/chatgpt-plugin.md`,
+  "Outside help enable flow"). The quiet-machine B2 rerun of §A.7 is the
+  C5 release gate and is still owed; until it passes the card ships as
+  experimental, "route not verified".
 
 ## Outcome (0.4, OpenClaw)
 
