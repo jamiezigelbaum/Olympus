@@ -31041,33 +31041,66 @@ function writeSovereigntyConfigFile(input) {
   publishSovereigntyConfigFile(path, config);
   return path;
 }
-function publishSovereigntyConfigFile(path, config) {
+function publishSovereigntyConfigFile(path, config, onPublished) {
   const directory = dirname17(path);
   mkdirSync12(directory, { recursive: true, mode: 448 });
   chmodSync5(directory, 448);
   __sovereigntyFileTestHooks.beforePublish?.(path);
   writePrivateFileAtomicSync(path, `${JSON.stringify(config, null, 2)}
-`);
+`, {
+    onPublished: () => {
+      onPublished?.();
+      __sovereigntyFileTestHooks.afterPublish?.(path);
+    }
+  });
   chmodSync5(path, 384);
 }
 function updateSovereigntyConfigFile(input) {
-  return withFileLeaseSync(input.path, (lease) => {
-    let current;
+  let published = false;
+  let validated;
+  const afterPublish = () => {
     try {
-      current = validateSovereigntyConfig(JSON.parse(readFileSync17(input.path, "utf8")));
+      const actual = validateSovereigntyConfig(JSON.parse(readFileSync17(input.path, "utf8")));
+      if (validated && JSON.stringify(actual) === JSON.stringify(validated)) {
+        return { ok: true, config: actual, changed: true, publishedDespiteError: true };
+      }
+      return { ok: false, reason: "uncertain", current: actual };
     } catch {
-      return { ok: false, reason: "unreadable" };
+      return { ok: false, reason: "uncertain" };
     }
-    if (input.expect && JSON.stringify(validateSovereigntyConfig(input.expect)) !== JSON.stringify(current)) {
-      return { ok: false, reason: "conflict", current };
-    }
-    const next = input.patch(current);
-    if (next === current)
-      return { ok: true, config: current, changed: false };
-    const validated = validateSovereigntyConfig(next);
-    lease.commit(() => publishSovereigntyConfigFile(input.path, validated));
-    return { ok: true, config: validated, changed: true };
-  }, { acquireTimeoutMs: 5000 });
+  };
+  try {
+    return withFileLeaseSync(input.path, (lease) => {
+      let current;
+      try {
+        current = validateSovereigntyConfig(JSON.parse(readFileSync17(input.path, "utf8")));
+      } catch {
+        return { ok: false, reason: "unreadable" };
+      }
+      if (input.expect && JSON.stringify(validateSovereigntyConfig(input.expect)) !== JSON.stringify(current)) {
+        return { ok: false, reason: "conflict", current };
+      }
+      const next = input.patch(current);
+      if (next === current)
+        return { ok: true, config: current, changed: false };
+      const toPublish = validateSovereigntyConfig(next);
+      validated = toPublish;
+      try {
+        lease.commit(() => publishSovereigntyConfigFile(input.path, toPublish, () => {
+          published = true;
+        }));
+      } catch (error) {
+        if (!published)
+          throw error;
+        return afterPublish();
+      }
+      return { ok: true, config: toPublish, changed: true };
+    }, { acquireTimeoutMs: 5000 });
+  } catch (error) {
+    if (published)
+      return afterPublish();
+    throw error;
+  }
 }
 function loadSovereigntyPreset(name) {
   const sourceLayoutPath = join24(dirname17(fileURLToPath4(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
@@ -31498,7 +31531,7 @@ var init_sovereignty = __esm(() => {
     encrypted_cloud: 2,
     standard_cloud: 1
   };
-  __sovereigntyFileTestHooks = { beforePublish: undefined };
+  __sovereigntyFileTestHooks = { beforePublish: undefined, afterPublish: undefined };
 });
 
 // src/workers/source-index/analyst-pool.ts
@@ -100327,6 +100360,43 @@ var init_control_ui_contract = __esm(() => {
   ];
 });
 
+// src/core/request-peer.ts
+var exports_request_peer = {};
+__export(exports_request_peer, {
+  withRequestPeer: () => withRequestPeer,
+  requestPeerAddress: () => requestPeerAddress,
+  recordRequestPeer: () => recordRequestPeer,
+  isLoopbackAddress: () => isLoopbackAddress
+});
+function recordRequestPeer(request, address) {
+  if (address)
+    peers.set(request, address);
+}
+function requestPeerAddress(request) {
+  return peers.get(request);
+}
+function isLoopbackAddress(address) {
+  if (!address)
+    return false;
+  const value = address.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (value === "::1" || value === "0:0:0:0:0:0:0:1")
+    return true;
+  const v4 = value.startsWith("::ffff:") ? value.slice("::ffff:".length) : value;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
+}
+function withRequestPeer(handler) {
+  return (request, server) => {
+    try {
+      recordRequestPeer(request, server?.requestIP(request)?.address);
+    } catch {}
+    return handler(request);
+  };
+}
+var peers;
+var init_request_peer = __esm(() => {
+  peers = new WeakMap;
+});
+
 // src/workers/http.ts
 import { createHmac as createHmac3, randomBytes as randomBytes14, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
@@ -100348,6 +100418,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
+  const sessionSecret = randomBytes14(32).toString("base64url");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -100381,13 +100452,13 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return dashboardControlForbiddenResponse("origin_mismatch");
       const consumed = launchTickets.consume(await dashboardLaunchTicketFromBody(request), origin);
       if (consumed.status === "ok") {
-        const minted = mintDashboardControlSession(authToken, origin, now());
+        const minted = mintDashboardControlSession(sessionSecret, origin, now());
         return dashboardLaunchRedeemedResponse(minted, now());
       }
       return dashboardLaunchRefusedResponse(consumed.status);
     }
     if (isDashboardControlLockRequest(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), true);
       if (authorization.status === "origin_mismatch" || authorization.status === "csrf_mismatch") {
         return dashboardControlForbiddenResponse(authorization.status);
       }
@@ -100404,12 +100475,14 @@ function withWorkerBearerAuth(fetchHandler, options) {
       const origin = sameRequestOrigin(request);
       if (!origin || !isLoopbackOrigin(origin))
         return dashboardControlForbiddenResponse("origin_mismatch");
-      const minted = mintDashboardControlSession(authToken, origin, now(), "local");
+      if (!isLoopbackAddress(requestPeerAddress(request)))
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      const minted = mintDashboardControlSession(sessionSecret, origin, now(), "local");
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
     if (isDashboardControlSessionRequest(request)) {
       if (!hasValidWorkerBearerToken(request.headers.get("Authorization"), authToken)) {
-        const renewal = authorizeDashboardControlSession(request, authToken, now(), true);
+        const renewal = authorizeDashboardControlSession(request, sessionSecret, now(), true);
         if (renewal.status === "allowed") {
           return dashboardControlSessionResponse(renewal.sessionId, renewal.csrfToken, renewal.expiresAtMs, now());
         }
@@ -100421,14 +100494,14 @@ function withWorkerBearerAuth(fetchHandler, options) {
       const origin = sameRequestOrigin(request);
       if (!origin)
         return dashboardControlForbiddenResponse("origin_mismatch");
-      const minted = mintDashboardControlSession(authToken, origin, now());
+      const minted = mintDashboardControlSession(sessionSecret, origin, now());
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
     if (isOAuthCallbackRequest(request)) {
       return fetchHandler(withAuthenticatedGatewayPublicOrigin(request, presentedAuthorization, authToken, presentedGatewayPublicOrigin, presentedGatewayCallbackPeer));
     }
     if (isDashboardQueryTokenRequest(request, authToken)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false);
       if (authorization.status === "allowed") {
         const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
@@ -100445,7 +100518,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
       return fetchHandler(isGatewayPublicOriginContextRoute(request) ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin) : request);
     }
     if (isDashboardControlReadRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false);
       if (authorization.status === "allowed") {
         const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
         return withRenewedDashboardControlCookie(response, authorization, now());
@@ -100455,7 +100528,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
       }
     }
     if (isDashboardHtmlNavigationRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), false, true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false, true);
       if (authorization.status === "allowed") {
         const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
@@ -100465,7 +100538,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
       }
     }
     if (isDashboardControlRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
+      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), true);
       if (authorization.status === "allowed") {
         if (isAgentMintRoute(request) && !agentMintAllowed(`session:${authorization.sessionId}`)) {
           return agentMintLimitedResponse();
@@ -100719,14 +100792,14 @@ function hmacTag(authToken, context, ...parts) {
     mac2.update("\x00").update(part);
   return mac2.digest("base64url");
 }
-function dashboardControlOriginTag(authToken, origin) {
-  return hmacTag(authToken, DASHBOARD_CONTROL_ORIGIN_CONTEXT, origin).slice(0, 22);
+function dashboardControlOriginTag(sessionSecret, origin) {
+  return hmacTag(sessionSecret, DASHBOARD_CONTROL_ORIGIN_CONTEXT, origin).slice(0, 22);
 }
-function dashboardControlSignature(authToken, parts) {
-  return hmacTag(authToken, DASHBOARD_CONTROL_SIGNATURE_CONTEXT, parts.nonce, String(parts.issuedSeconds), parts.originTag, parts.grade);
+function dashboardControlSignature(sessionSecret, parts) {
+  return hmacTag(sessionSecret, DASHBOARD_CONTROL_SIGNATURE_CONTEXT, parts.nonce, String(parts.issuedSeconds), parts.originTag, parts.grade);
 }
-function dashboardControlCsrfToken(authToken, nonce) {
-  return hmacTag(authToken, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
+function dashboardControlCsrfToken(sessionSecret, nonce) {
+  return hmacTag(sessionSecret, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
 }
 function encodeDashboardControlSession(parts) {
   return [parts.nonce, parts.issuedSeconds, parts.originTag, GRADE_CODES[parts.grade], parts.signature].join(".");
@@ -100751,31 +100824,31 @@ function decodeDashboardControlSession(value) {
 function dashboardControlExpiresAtMs(parts) {
   return (parts.issuedSeconds + DASHBOARD_CONTROL_SESSION_TTL_SECONDS) * 1000;
 }
-function mintDashboardControlSession(authToken, origin, nowMs, grade = "bearer") {
+function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bearer") {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
     nonce: randomBytes14(24).toString("base64url"),
     issuedSeconds: nowSeconds,
-    originTag: dashboardControlOriginTag(authToken, origin),
+    originTag: dashboardControlOriginTag(sessionSecret, origin),
     grade
   };
-  const parts = { ...unsigned, signature: dashboardControlSignature(authToken, unsigned) };
+  const parts = { ...unsigned, signature: dashboardControlSignature(sessionSecret, unsigned) };
   return {
     status: "allowed",
     sessionId: encodeDashboardControlSession(parts),
-    csrfToken: dashboardControlCsrfToken(authToken, parts.nonce),
+    csrfToken: dashboardControlCsrfToken(sessionSecret, parts.nonce),
     expiresAtMs: dashboardControlExpiresAtMs(parts),
     grade
   };
 }
-function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf, allowOriginlessNavigation = false) {
+function authorizeDashboardControlSession(request, sessionSecret, nowMs, requireCsrf, allowOriginlessNavigation = false) {
   const cookie = cookieValue(request.headers.get("Cookie"), DASHBOARD_CONTROL_COOKIE);
   if (!cookie)
     return { status: "missing" };
   const parts = decodeDashboardControlSession(cookie);
   if (!parts)
     return { status: "missing" };
-  const expected = dashboardControlSignature(authToken, parts);
+  const expected = dashboardControlSignature(sessionSecret, parts);
   if (!constantTimeStringEqual(parts.signature, expected))
     return { status: "missing" };
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
@@ -100784,10 +100857,10 @@ function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf
   const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined)
     return { status: "origin_mismatch" };
-  if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(authToken, origin))) {
+  if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(sessionSecret, origin))) {
     return { status: "origin_mismatch" };
   }
-  const csrfToken = dashboardControlCsrfToken(authToken, parts.nonce);
+  const csrfToken = dashboardControlCsrfToken(sessionSecret, parts.nonce);
   if (requireCsrf) {
     const presented = request.headers.get("X-Olympus-CSRF");
     if (!presented || !constantTimeStringEqual(presented, csrfToken))
@@ -101052,6 +101125,7 @@ function optionalEnv(value) {
 }
 var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, GRADE_CODES;
 var init_http = __esm(() => {
+  init_request_peer();
   init_worker_auth();
   init_dashboard_launch();
   DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -119634,43 +119708,6 @@ var init_remote_mcp = __esm(() => {
   init_tokens();
 });
 
-// src/core/request-peer.ts
-var exports_request_peer = {};
-__export(exports_request_peer, {
-  withRequestPeer: () => withRequestPeer,
-  requestPeerAddress: () => requestPeerAddress,
-  recordRequestPeer: () => recordRequestPeer,
-  isLoopbackAddress: () => isLoopbackAddress
-});
-function recordRequestPeer(request, address) {
-  if (address)
-    peers.set(request, address);
-}
-function requestPeerAddress(request) {
-  return peers.get(request);
-}
-function isLoopbackAddress(address) {
-  if (!address)
-    return false;
-  const value = address.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  if (value === "::1" || value === "0:0:0:0:0:0:0:1")
-    return true;
-  const v4 = value.startsWith("::ffff:") ? value.slice("::ffff:".length) : value;
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
-}
-function withRequestPeer(handler) {
-  return (request, server) => {
-    try {
-      recordRequestPeer(request, server?.requestIP(request)?.address);
-    } catch {}
-    return handler(request);
-  };
-}
-var peers;
-var init_request_peer = __esm(() => {
-  peers = new WeakMap;
-});
-
 // src/workers/remote-oauth/pinned-clients.ts
 var exports_pinned_clients = {};
 __export(exports_pinned_clients, {
@@ -123961,6 +123998,14 @@ function writeConsultSettings(input, location = {}) {
   const custody = ensureSettingsDirectory(dirname54(path));
   if (custody !== "ok")
     return { ok: false, reason: custody };
+  let published = false;
+  const afterPublish = () => {
+    const actual = readConsultSettings({ path });
+    if (actual.state === "valid" && actual.settings.revision === nextRevision) {
+      return { ok: true, settings: actual.settings, publishedDespiteError: true };
+    }
+    return { ok: false, reason: "write_uncertain", current: actual };
+  };
   try {
     return withFileLeaseSync(path, (lease) => {
       const current = readConsultSettings({ path });
@@ -123972,7 +124017,6 @@ function writeConsultSettings(input, location = {}) {
         if (currentRevision !== input.expectedRevision)
           return { ok: false, reason: "revision_conflict", current };
       }
-      let published = false;
       try {
         lease.commit(() => {
           writePrivateFileAtomicSync(path, `${JSON.stringify(candidate)}
@@ -123985,11 +124029,7 @@ function writeConsultSettings(input, location = {}) {
       } catch {
         if (!published)
           return { ok: false, reason: "write_failed" };
-        const actual = readConsultSettings({ path });
-        if (actual.state === "valid" && actual.settings.revision === nextRevision) {
-          return { ok: true, settings: actual.settings, publishedDespiteError: true };
-        }
-        return { ok: false, reason: "write_uncertain", current: actual };
+        return afterPublish();
       }
       const written = readConsultSettings({ path });
       if (written.state !== "valid")
@@ -123997,6 +124037,8 @@ function writeConsultSettings(input, location = {}) {
       return { ok: true, settings: written.settings };
     }, { acquireTimeoutMs: CONSULT_SETTINGS_LEASE_TIMEOUT_MS });
   } catch (error2) {
+    if (published)
+      return afterPublish();
     if (error2 instanceof FileLeaseBusyError || error2?.code === "file_lease_busy")
       return { ok: false, reason: "lease_busy" };
     return { ok: false, reason: "write_failed" };
@@ -124161,9 +124203,13 @@ function createDashboardConsultAdapter(options) {
       return { ok: false, httpStatus: 409, code: "policy_not_file", message: MESSAGES2.policyNotFile };
     const update = updateSovereigntyConfigFile({ path: options.sovereignty.path, expect: policy, patch });
     if (!update.ok) {
-      if (update.reason === "conflict" && update.current)
+      if (update.current)
         policy = update.current;
-      return update.reason === "conflict" ? { ok: false, httpStatus: 409, code: "policy_changed", message: MESSAGES2.policyChanged } : { ok: false, httpStatus: 500, code: "policy_unreadable", message: MESSAGES2.policyUnreadable };
+      if (update.reason === "conflict")
+        return { ok: false, httpStatus: 409, code: "policy_changed", message: MESSAGES2.policyChanged };
+      if (update.reason === "uncertain")
+        return { ok: false, httpStatus: 500, code: "policy_uncertain", message: MESSAGES2.policyUncertain };
+      return { ok: false, httpStatus: 500, code: "policy_unreadable", message: MESSAGES2.policyUnreadable };
     }
     policy = update.config;
     return;
@@ -124408,6 +124454,7 @@ var init_dashboard_consult = __esm(() => {
     policyNotFile: "Your privacy policy is not kept in a file on this computer, so Olympus cannot record this here.",
     policyChanged: "Your privacy policy file changed since this page loaded. Nothing was written; reload the page and try again.",
     policyUnreadable: "Your privacy policy file could not be read. Nothing was written.",
+    policyUncertain: "Olympus could not confirm whether your privacy policy file changed. Reload the page to see the current state.",
     routeExists: "A zkAPI route is already configured.",
     tickAll: "Tick every statement to record your acknowledgement.",
     fundingDate: "Enter the funding date as YYYY-MM-DD, the day the deposit was confirmed.",

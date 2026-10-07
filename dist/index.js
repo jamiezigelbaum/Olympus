@@ -15285,6 +15285,9 @@ function humanUtcMinute(value) {
 // src/workers/http.ts
 import { createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 
+// src/core/request-peer.ts
+var peers = new WeakMap;
+
 // src/core/dashboard-launch.ts
 import { createHash, randomBytes as randomBytes2 } from "node:crypto";
 var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";

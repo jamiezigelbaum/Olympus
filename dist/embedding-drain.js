@@ -23928,6 +23928,12 @@ var init_dashboard_view_model = __esm(() => {
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
 });
 
+// src/core/request-peer.ts
+var peers;
+var init_request_peer = __esm(() => {
+  peers = new WeakMap;
+});
+
 // src/workers/google-connectors/gmail-live-control.ts
 var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
 var init_gmail_live_control = __esm(() => {
@@ -25912,6 +25918,7 @@ init_vocabulary();
 init_mail_source_scope();
 
 // src/workers/http.ts
+init_request_peer();
 init_worker_auth();
 
 // src/core/dashboard-launch.ts
