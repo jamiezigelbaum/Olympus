@@ -13,6 +13,7 @@ import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } f
 import { createModelKeyReload } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
+import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -1780,6 +1781,12 @@ export async function main(): Promise<void> {
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
   const authToken = workerAuthTokenFromEnv(process.env);
+  // The dashboard control-session signing secret: its own owner-only file
+  // beside the worker token, created on first start, never the bearer.
+  const dashboardSessionSecret = loadOrCreateDashboardSessionSecret({ env: process.env });
+  if (dashboardSessionSecret.source !== 'file') {
+    console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === 'memory' ? ' (could not be written; sessions end with this worker)' : ''}`);
+  }
   const olympusConfig = loadConfig();
   const sourceCorpusRegistry = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
@@ -4721,7 +4728,7 @@ export async function main(): Promise<void> {
             },
           },
         }),
-        withWorkerBearerAuth(worker.fetch, { authToken }),
+        withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),
       )),
     )))),
   });

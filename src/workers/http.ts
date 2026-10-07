@@ -23,6 +23,14 @@ export interface WorkerBearerAuthOptions {
    * store per wrapper, which is one per worker process.
    */
   launchTickets?: DashboardLaunchTickets;
+  /**
+   * The worker-private secret that signs control sessions
+   * (core/dashboard-session-secret.ts): independent of the bearer, durable
+   * across restarts when the worker loads it from its state file. Absent, an
+   * in-memory random secret is used for this wrapper's lifetime; never the
+   * bearer.
+   */
+  sessionSecret?: string;
 }
 
 /**
@@ -98,11 +106,20 @@ export function withWorkerBearerAuth(
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  // Control sessions are signed with a worker-private secret made at worker
-  // start and held in memory only: never derived from, nor exposed through,
-  // the worker bearer, so a bearer holder cannot forge a cookie (a local
-  // grade least of all). Sessions do not survive a worker restart.
-  const sessionSecret = randomBytes(32).toString('base64url');
+  // Control sessions are signed with a worker-private secret: never derived
+  // from, nor exposed through, the worker bearer, so a bearer holder cannot
+  // forge a cookie (a local grade least of all). The worker passes the one it
+  // keeps in its state file, so sessions survive a restart; without one, a
+  // random secret for this wrapper's lifetime.
+  // The signing key is the secret bound to the bearer: the bearer alone
+  // cannot forge a cookie (it lacks the secret), and rotating the worker
+  // token still revokes every session at once (the key changes with it).
+  const sessionSecret = createHmac('sha256', options.sessionSecret?.trim() || randomBytes(32).toString('base64url'))
+    .update('olympus-dashboard-control-key-v1')
+    .update('\0')
+    // No bearer configured: the wrapper refuses everything but health anyway.
+    .update(authToken ?? '')
+    .digest('base64url');
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request: Request): Promise<Response> => {

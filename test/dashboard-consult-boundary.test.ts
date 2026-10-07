@@ -11,6 +11,10 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { dashboardSessionSecretPath, loadOrCreateDashboardSessionSecret, newDashboardSessionSecret } from '../src/core/dashboard-session-secret.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 import {
   DASHBOARD_CONSULT_CONTROL_PATHS,
@@ -23,13 +27,13 @@ import {
 const TOKEN = 'worker-secret-token';
 const ORIGIN = 'http://127.0.0.1:28190';
 
-function fixture() {
+function fixture(sessionSecret?: string) {
   let clock = Date.parse('2026-10-07T12:00:00.000Z');
   const seen: Request[] = [];
   const fetch = withWorkerBearerAuth(async (request) => {
     seen.push(request);
     return new Response(JSON.stringify({ ok: true, handler: true }), { headers: { 'Content-Type': 'application/json' } });
-  }, { authToken: TOKEN, now: () => clock, launchTickets: new DashboardLaunchTickets({ now: () => clock }) });
+  }, { authToken: TOKEN, now: () => clock, launchTickets: new DashboardLaunchTickets({ now: () => clock }), ...(sessionSecret ? { sessionSecret } : {}) });
   return { fetch, seen, advance: (ms: number) => { clock += ms; } };
 }
 
@@ -126,12 +130,24 @@ describe('consult authority is not reachable from the worker bearer', () => {
     expect(f.seen).toEqual([]);
   });
 
-  test('the signing secret is per worker start: a cookie from another worker instance with the same bearer is no session', async () => {
-    const first = fixture();
+  test('the signing secret is the worker\'s own, not the bearer: same secret file → the session survives a restart; a different secret → no session', async () => {
+    const secret = newDashboardSessionSecret();
+    const first = fixture(secret);
     const { cookie, csrf } = await bearerSession(first);
-    const second = fixture();
-    expect((await second.fetch(post('/dashboard/privacy', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(401);
-    expect(second.seen).toEqual([]);
+    const restarted = fixture(secret);
+    expect((await restarted.fetch(post('/dashboard/privacy', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(200);
+    const other = fixture(newDashboardSessionSecret());
+    expect((await other.fetch(post('/dashboard/privacy', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(401);
+    expect(other.seen).toEqual([]);
+    // The bearer used as the secret is never what a worker runs with: a secret equal
+    // to the bearer would make the forge above work, so the loader never produces it.
+    const local = fixture(secret);
+    const minted = await localSession(local);
+    expect(minted.status).toBe(200);
+    const localCookie = cookieOf(minted);
+    const { csrf_token: localCsrf } = (await minted.json()) as { csrf_token: string };
+    expect((await fixture(secret).fetch(post('/dashboard/consult', { Cookie: localCookie, Origin: ORIGIN, 'X-Olympus-CSRF': localCsrf }))).status).toBe(200);
+    expect((await fixture(newDashboardSessionSecret()).fetch(post('/dashboard/consult', { Cookie: localCookie, Origin: ORIGIN, 'X-Olympus-CSRF': localCsrf }))).status).toBe(401);
   });
 });
 
@@ -196,5 +212,60 @@ describe('the local-only mint', () => {
     // Incoming grade headers are stripped before the handler sees anything.
     await f.fetch(new Request(`${ORIGIN}/dashboard`, { headers: { Authorization: `Bearer ${TOKEN}`, [DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER]: 'local' } }));
     expect(f.seen.at(-1)!.headers.has(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)).toBe(false);
+  });
+});
+
+describe('the control-session secret file', () => {
+  const homes: string[] = [];
+  function home(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-session-secret-'));
+    homes.push(dir);
+    return dir;
+  }
+  test('lives beside the worker token, is created owner-only on first start, is reused after, and is never the bearer', () => {
+    const dir = home();
+    const env = { HOME: dir };
+    expect(dashboardSessionSecretPath({ env })).toBe(join(dir, '.config', 'olympus', 'dashboard-session.secret'));
+    const first = loadOrCreateDashboardSessionSecret({ env });
+    expect(first.source).toBe('created');
+    expect(first.secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(statSync(first.path).mode & 0o777).toBe(0o600);
+    expect(statSync(join(dir, '.config', 'olympus')).mode & 0o777).toBe(0o700);
+    expect(readFileSync(first.path, 'utf8').trim()).toBe(first.secret);
+    const again = loadOrCreateDashboardSessionSecret({ env });
+    expect(again).toEqual({ ...first, source: 'file' });
+    expect(first.secret).not.toBe(TOKEN);
+    for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
+  });
+
+  test('a malformed, group-readable or symlinked file is regenerated in place; an unwritable location falls back to memory, never to the bearer', () => {
+    const dir = home();
+    const env = { HOME: dir };
+    const path = dashboardSessionSecretPath({ env });
+    mkdirSync(join(dir, '.config', 'olympus'), { recursive: true, mode: 0o700 });
+    writeFileSync(path, 'not a secret\n', { mode: 0o600 });
+    const malformed = loadOrCreateDashboardSessionSecret({ env });
+    expect(malformed.source).toBe('regenerated');
+    expect(readFileSync(path, 'utf8').trim()).toBe(malformed.secret);
+    chmodSync(path, 0o640);
+    const exposed = loadOrCreateDashboardSessionSecret({ env });
+    expect(exposed.source).toBe('regenerated');
+    expect(exposed.secret).not.toBe(malformed.secret);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    rmSync(path);
+    writeFileSync(join(dir, 'elsewhere'), `${newDashboardSessionSecret()}\n`, { mode: 0o600 });
+    symlinkSync(join(dir, 'elsewhere'), path);
+    const linked = loadOrCreateDashboardSessionSecret({ env });
+    expect(linked.source).toBe('regenerated');
+    expect(lstatSync(path).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(dir, 'elsewhere'), 'utf8').trim()).not.toBe(linked.secret);
+    // Unwritable: a regular file where the directory should be.
+    const blocked = home();
+    mkdirSync(join(blocked, '.config'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(blocked, '.config', 'olympus'), 'file', { mode: 0o600 });
+    const memory = loadOrCreateDashboardSessionSecret({ env: { HOME: blocked } });
+    expect(memory.source).toBe('memory');
+    expect(memory.secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
   });
 });
