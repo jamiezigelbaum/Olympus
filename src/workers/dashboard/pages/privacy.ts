@@ -161,13 +161,13 @@ function privacyQuestions(description: string, canEdit: boolean): string {
       const choices = (['private', 'share'] as const).map((side) => `<label class="pqchoice"><input type="radio" name="${id}" value="${side}"`
         + ` data-privacy-topic="${escapeHtml(topic.id)}" data-privacy-option="${escapeHtml(option.id)}"`
         + `${option.side === side ? ' checked' : ''}${disabled}><span>${escapeHtml(side === 'private' ? Q.private : Q.share)}</span></label>`).join('');
-      return `<div class="pqopt" role="radiogroup" aria-labelledby="${id}"><span class="pqlabel" id="${id}">${escapeHtml(option.label)}</span>`
+      return `<div class="pqopt" role="radiogroup" aria-labelledby="privacy-q-${topic.id} ${id}"><span class="pqlabel" id="${id}">${escapeHtml(option.label)}</span>`
         + `<span class="pqchoices">${choices}</span></div>`;
     }).join('');
-    return `<div class="pqtopic"><h3 class="pqtitle">${escapeHtml(topic.question)}</h3>${options}</div>`;
+    return `<div class="pqtopic"><h4 class="pqtitle" id="privacy-q-${topic.id}">${escapeHtml(topic.question)}</h4>${options}</div>`;
   }).join('');
   return `<div class="pquestions" data-privacy-questions="${escapeHtml(asked.map((topic) => topic.id).join(','))}">`
-    + `<div class="sect">${escapeHtml(Q.title)}</div><p class="pnote">${escapeHtml(Q.intro)}</p>${topics}</div>`;
+    + `<h3 class="sect">${escapeHtml(Q.title)}</h3><p class="pnote">${escapeHtml(Q.intro)}</p>${topics}</div>`;
 }
 
 function senderPanel(): string {

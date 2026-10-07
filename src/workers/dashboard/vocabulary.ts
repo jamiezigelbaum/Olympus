@@ -1420,6 +1420,8 @@ export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
   intro: 'Your words name some broad areas. Pick what\'s private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.',
   private: 'Private',
   share: 'Fine to share',
+  /** A choice whose sentence would not fit in the description: nothing changes. */
+  tooLong: 'Your description is too long to add this answer. Shorten your own words, then choose again.',
   about: 'About {topic}:',
   privateList: 'private — {list}',
   shareList: 'fine to share — {list}',

@@ -886,18 +886,19 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    * description names change, and when a choice rewrites it. `focus` is the
    * choice to put the caret back on.
    */
-  function renderPrivacyQuestions(form: HTMLFormElement, focus?: { topic: string; option: string; side: string }): void {
+  function renderPrivacyQuestions(form: HTMLFormElement, focus?: { topic: string; option: string; side: string }, message = ''): void {
     const holder = form.querySelector<HTMLElement>('[data-privacy-questions]');
     const field = form.querySelector<HTMLTextAreaElement>('textarea[name="description"]');
     const logic = privacyLogicFor(form);
     if (!holder || !field || !logic) return;
     const words = privacyJson<Record<string, string> | null>(form.dataset.questions, null) || {};
     const asked = logic.questions(field.value);
+    shownPrivacyQuestions.set(holder, logic.questionsKey(field.value));
     holder.setAttribute('data-privacy-questions', asked.map((topic) => topic.id).join(','));
     holder.hidden = asked.length === 0;
     const children: HTMLElement[] = [];
     if (asked.length > 0) {
-      const title = document.createElement('div');
+      const title = document.createElement('h3');
       title.className = 'sect';
       title.textContent = words.title || '';
       const intro = document.createElement('p');
@@ -909,8 +910,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     for (const topic of asked) {
       const group = document.createElement('div');
       group.className = 'pqtopic';
-      const heading = document.createElement('h3');
+      const heading = document.createElement('h4');
       heading.className = 'pqtitle';
+      heading.id = `privacy-q-${topic.id}`;
       heading.textContent = topic.question;
       group.append(heading);
       for (const option of topic.options) {
@@ -918,7 +920,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         const row = document.createElement('div');
         row.className = 'pqopt';
         row.setAttribute('role', 'radiogroup');
-        row.setAttribute('aria-labelledby', id);
+        row.setAttribute('aria-labelledby', `${heading.id} ${id}`);
         const name = document.createElement('span');
         name.className = 'pqlabel';
         name.id = id;
@@ -950,6 +952,14 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
       children.push(group);
     }
+    if (message) {
+      const note = document.createElement('p');
+      note.className = 'pnote pqmessage';
+      note.setAttribute('data-privacy-questions-message', '');
+      note.setAttribute('role', 'alert');
+      note.textContent = message;
+      children.push(note);
+    }
     holder.replaceChildren(...children);
     if (focus) {
       holder.querySelectorAll<HTMLInputElement>('input[data-privacy-topic]').forEach((input) => {
@@ -957,6 +967,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       });
     }
   }
+
+  /** What each questions block shows, as `questionsKey`, once this controller has drawn it. */
+  const shownPrivacyQuestions = new WeakMap<HTMLElement, string>();
 
   /** Typing in the description: the questions follow the areas it names. */
   function onPrivacyInput(event: Event): void {
@@ -966,7 +979,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const holder = form.querySelector<HTMLElement>('[data-privacy-questions]');
     const logic = privacyLogicFor(form);
     if (!holder || !logic) return;
-    if (logic.detectTopics(field.value).join(',') !== (holder.getAttribute('data-privacy-questions') || '')) renderPrivacyQuestions(form);
+    // What the questions show now: the server drew them from the saved description.
+    const shown = shownPrivacyQuestions.get(holder) ?? logic.questionsKey(field.defaultValue);
+    // Redrawn when an area or an answer changes (a sentence edited by hand), or a too-long note clears.
+    if (logic.questionsKey(field.value) !== shown || holder.querySelector('[data-privacy-questions-message]')) renderPrivacyQuestions(form);
   }
 
   /** A choice: that area's sentence in the description is written again, and the draft is changed. */
@@ -980,7 +996,14 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (!field || !logic) return;
     const topic = input.dataset.privacyTopic || '';
     const option = input.dataset.privacyOption || '';
-    field.value = logic.answerTopic(field.value, topic, option, side);
+    const next = logic.answerTopic(field.value, topic, option, side);
+    if (!next.fits) {
+      // Too long to add: nothing changes, the radio is drawn as it was, and the owner is told why.
+      const words = privacyJson<Record<string, string> | null>(form.dataset.questions, null) || {};
+      renderPrivacyQuestions(form, { topic, option, side: side === 'share' ? 'private' : 'share' }, words.tooLong || '');
+      return;
+    }
+    field.value = next.description;
     setPrivacyDirty(form);
     renderPrivacyQuestions(form, { topic, option, side });
   }

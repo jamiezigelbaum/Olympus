@@ -7167,6 +7167,7 @@ var init_vocabulary = __esm(() => {
     intro: "Your words name some broad areas. Pick what's private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.",
     private: "Private",
     share: "Fine to share",
+    tooLong: "Your description is too long to add this answer. Shorten your own words, then choose again.",
     about: "About {topic}:",
     privateList: "private — {list}",
     shareList: "fine to share — {list}",
@@ -20033,11 +20034,17 @@ function privacyLogic(config) {
     return words.about.split("{topic}").join(words.topics[id].name);
   }
   function lineTopic(line) {
+    if (!words)
+      return "";
     const trimmed = line.trim();
+    const parts = [words.privateList.split("{list}")[0], words.shareList.split("{list}")[0]];
     for (const topic of TOPICS) {
       const lead = leadOf(topic.id);
-      if (lead && trimmed.indexOf(lead) === 0)
-        return topic.id;
+      if (!lead)
+        continue;
+      for (const part of parts)
+        if (part && trimmed.indexOf(lead + " " + part) === 0)
+          return topic.id;
     }
     return "";
   }
@@ -20109,38 +20116,33 @@ function privacyLogic(config) {
   function refineDescription(description, answers) {
     const text2 = String(description || "").replace(/\r\n/g, `
 `);
+    const refined = refineUnbounded(text2, answers);
+    return refined.length > DESCRIPTION_MAX ? text2 : refined;
+  }
+  function fitsAnswers(description, answers) {
+    return refineUnbounded(String(description || "").replace(/\r\n/g, `
+`), answers).length <= DESCRIPTION_MAX;
+  }
+  function refineUnbounded(text2, answers) {
     if (!words)
       return text2;
     const lines = text2.split(`
 `);
-    const generated = [];
     for (const topic of TOPICS) {
       const answer = answers[topic.id];
       const line = answer ? sentence(topic.id, answer) : "";
       if (!line)
         continue;
       const at = lines.map(lineTopic).indexOf(topic.id);
-      if (at >= 0) {
+      if (at >= 0)
         lines[at] = line;
-        generated.push(at);
-      } else {
+      else {
         while (lines.length && lines[lines.length - 1].trim() === "")
           lines.pop();
         lines.push(line);
-        generated.push(lines.length - 1);
       }
     }
-    let over = lines.join(`
-`).length - DESCRIPTION_MAX;
-    for (let i = generated.length - 1;over > 0 && i >= 0; i--) {
-      const at = generated[i];
-      const line = lines[at];
-      const room = line.length - over - 1;
-      lines[at] = room > leadOf(lineTopic(line)).length + 1 ? line.slice(0, room).replace(/[\s,;]+$/, "") + "…" : "";
-      over = lines.join(`
-`).length - DESCRIPTION_MAX;
-    }
-    return lines.filter((line, index) => line !== "" || generated.indexOf(index) < 0).join(`
+    return lines.join(`
 `);
   }
   function questions(description) {
@@ -20168,16 +20170,27 @@ function privacyLogic(config) {
     }
     return out;
   }
-  function answerTopic(description, topicId, optionId, side) {
+  function choiceAnswers(description, topicId, optionId, side) {
     const question = questions(description).filter((entry) => entry.id === topicId)[0];
     if (!question || side !== "private" && side !== "share")
-      return description;
+      return null;
     const answer = {};
     for (const option of question.options)
       answer[option.id] = option.id === optionId ? side : option.side;
     const answers = {};
     answers[topicId] = answer;
-    return refineDescription(description, answers);
+    return answers;
+  }
+  function answerTopic(description, topicId, optionId, side) {
+    const answers = choiceAnswers(description, topicId, optionId, side);
+    if (!answers)
+      return { description, fits: true };
+    if (!fitsAnswers(description, answers))
+      return { description, fits: false };
+    return { description: refineDescription(description, answers), fits: true };
+  }
+  function questionsKey(description) {
+    return JSON.stringify(questions(description));
   }
   return {
     validRule,
@@ -20193,7 +20206,9 @@ function privacyLogic(config) {
     detectTopics,
     topicAnswers,
     refineDescription,
+    fitsAnswers,
     questions,
+    questionsKey,
     answerTopic
   };
 }

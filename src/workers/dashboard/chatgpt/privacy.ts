@@ -124,6 +124,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       edited: false, saving: false, saveError: '', discarding: false, picking: false,
       labels: [], labelsLoading: false, labelsError: '',
       sender: '', senderError: '',
+      questionsError: '',
     };
     load();
   }
@@ -559,12 +560,14 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (!asked.length) return null;
     const section = add(el('section', 'fsection questions'), el('h2', '', Q.title), el('p', 'reason', Q.intro));
     for (const topic of asked) {
-      const group = add(el('div', 'qtopic'), el('h3', 'qtitle', topic.question));
+      const heading = el('h3', 'qtitle', topic.question);
+      heading.id = 'privacy-q-' + topic.id;
+      const group = add(el('div', 'qtopic'), heading);
       for (const option of topic.options) {
         const id = 'privacy-q-' + topic.id + '-' + option.id;
         const row = el('div', 'qopt');
         row.setAttribute('role', 'radiogroup');
-        row.setAttribute('aria-labelledby', id);
+        row.setAttribute('aria-labelledby', heading.id + ' ' + id);
         const name = el('span', 'qlabel', option.label);
         name.id = id;
         const choices = el('span', 'qchoices');
@@ -579,9 +582,14 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
           input.setAttribute('data-key', 'privacy:q:' + topic.id + ':' + option.id + ':' + side);
           input.addEventListener('change', () => {
             if (!input.checked || !s) return;
-            s.description = L.answerTopic(s.description, topic.id, option.id, side);
-            changed();
-            s.saveError = '';
+            const next = L.answerTopic(s.description, topic.id, option.id, side);
+            // Too long to add: nothing changes, the radio redraws as it was, and the owner is told why.
+            s.questionsError = next.fits ? '' : Q.tooLong;
+            if (next.fits) {
+              s.description = next.description;
+              changed();
+              s.saveError = '';
+            }
             kit.render('privacy:q:' + topic.id + ':' + option.id + ':' + side);
           });
           add(choices, add(choice, input, el('span', '', side === 'private' ? Q.private : Q.share)));
@@ -589,6 +597,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         add(group, add(row, name, choices));
       }
       add(section, group);
+    }
+    if (s.questionsError) {
+      const message = el('p', 'reason error', s.questionsError);
+      message.setAttribute('role', 'alert');
+      add(section, message);
     }
     return section;
   }
@@ -621,13 +634,16 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     area.disabled = s.saving;
     area.setAttribute('data-key', 'privacy:description');
     area.setAttribute('aria-describedby', 'privacy-description-shared');
-    const asked = L.detectTopics(s.description).join(',');
+    const asked = L.questionsKey(s.description);
     area.addEventListener('input', () => {
       s.description = area.value;
       const open = s.confirmStep;
       changed();
-      // Redrawn (caret kept) when the step closes or the areas asked about change.
-      if (open || L.detectTopics(s.description).join(',') !== asked) kit.render('privacy:description');
+      // Redrawn (caret kept) when the step closes, a too-long note clears, or
+      // what the questions show changes (an area, or an answer edited by hand).
+      const noted = !!s.questionsError;
+      s.questionsError = '';
+      if (open || noted || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
     });
     add(page, add(field, area));
     const shared = el('p', 'reason field-note', W.descriptionShared);

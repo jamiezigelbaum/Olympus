@@ -667,7 +667,9 @@ describe('follow-up questions', () => {
     expect(section.textContent).toContain(Q.intro);
     expect(section.querySelector('h3')!.textContent).toBe(Q.topics.family.question);
     const rows = Array.from(section.querySelectorAll('[role="radiogroup"]'));
-    expect(rows.map((row) => host.doc.getElementById(row.getAttribute('aria-labelledby')!)!.textContent)).toEqual(Object.values(Q.topics.family.options));
+    // Each pair is named by its question and its choice.
+    expect(rows.map((row) => row.getAttribute('aria-labelledby')!.split(' ').map((id) => host.doc.getElementById(id)!.textContent).join(' / ')))
+      .toEqual(Object.values(Q.topics.family.options).map((label) => `${Q.topics.family.question} / ${label}`));
     // Real labels around real radio buttons: keyboard operable as a group.
     const logistics = rows[3]!;
     const inputs = Array.from(logistics.querySelectorAll('input')) as unknown as HTMLInputElement[];
@@ -726,6 +728,37 @@ describe('follow-up questions', () => {
     expect(radio(host, 'family:medical:share').checked).toBe(true);
     // Not named in the sentence: its default.
     expect(radio(host, 'family:history:share').checked).toBe(true);
+  });
+
+  test('a choice too long to add changes nothing, keeps the radio, and says why until the words change', async () => {
+    const long = `my family ${'x'.repeat(1_900)}`;
+    const { host } = await openPrivacy({ description: long });
+    const share = radio(host, 'family:medical:share');
+    share.checked = true;
+    share.dispatchEvent(new host.win.Event('change') as unknown as Event);
+    expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe(long);
+    expect(radio(host, 'family:medical:private').checked).toBe(true);
+    expect(radio(host, 'family:medical:share').checked).toBe(false);
+    const note = host.doc.querySelector('section.questions [role="alert"]')!;
+    expect(note.textContent).toBe(Q.tooLong);
+    // Nothing changed, so leaving needs no discard prompt.
+    host.button(W.cancel).click();
+    expect(host.text()).not.toContain(W.discardPrompt);
+  });
+
+  test('a sentence edited by hand redraws the radios; an owner line that looks like one is left alone', async () => {
+    const owner = 'About family: never share anything about my kids.\nmy family stuff';
+    const { host } = await openPrivacy({ description: owner });
+    const pick = radio(host, 'family:contacts:private');
+    pick.checked = true;
+    pick.dispatchEvent(new host.win.Event('change') as unknown as Event);
+    const area = () => host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    expect(area().value.split('\n').slice(0, 2)).toEqual(owner.split('\n'));
+    expect(area().value.split('\n')[2]).toStartWith('About family: private — ');
+    const field = area();
+    field.value = field.value.replace(', Alumni, contact and address lists;', ';').replace('fine to share — ', 'fine to share — Alumni, contact and address lists, ');
+    field.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    expect(radio(host, 'family:contacts:share').checked).toBe(true);
   });
 
   test('a choice marks the draft changed: Cancel asks before discarding it', async () => {

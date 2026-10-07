@@ -256,12 +256,20 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     return words.about.split('{topic}').join(words.topics[id]!.name);
   }
 
-  /** The area whose generated sentence this line is, or ''. */
+  /**
+   * The area whose generated sentence this line is, or ''. Only the full
+   * generated shape counts: the lead, then the private or the shared part
+   * ("About family: private — …"). An owner's line that merely starts with
+   * the lead ("About family: never share …") is theirs, never replaced or read.
+   */
   function lineTopic(line: string): string {
+    if (!words) return '';
     const trimmed = line.trim();
+    const parts = [words.privateList.split('{list}')[0]!, words.shareList.split('{list}')[0]!];
     for (const topic of TOPICS) {
       const lead = leadOf(topic.id);
-      if (lead && trimmed.indexOf(lead) === 0) return topic.id;
+      if (!lead) continue;
+      for (const part of parts) if (part && trimmed.indexOf(lead + ' ' + part) === 0) return topic.id;
     }
     return '';
   }
@@ -336,37 +344,36 @@ export function privacyLogic(config: PrivacyLogicConfig) {
   /**
    * The owner's text with one generated sentence per answered area: an area
    * answered before has its sentence replaced in place; a new one goes on its
-   * own line at the end. Kept within the description limit by shortening the
-   * generated sentences, never the owner's words.
+   * own line at the end. A sentence is never shortened (a cut one would drop
+   * choices): when the whole result would pass the description limit, the
+   * description comes back unchanged (`fitsAnswers` tells the editor why).
    */
   function refineDescription(description: string, answers: PrivacyTopicAnswers): string {
     const text = String(description || '').replace(/\r\n/g, '\n');
+    const refined = refineUnbounded(text, answers);
+    return refined.length > DESCRIPTION_MAX ? text : refined;
+  }
+
+  /** Whether these answers' sentences fit within the description limit. */
+  function fitsAnswers(description: string, answers: PrivacyTopicAnswers): boolean {
+    return refineUnbounded(String(description || '').replace(/\r\n/g, '\n'), answers).length <= DESCRIPTION_MAX;
+  }
+
+  function refineUnbounded(text: string, answers: PrivacyTopicAnswers): string {
     if (!words) return text;
     const lines = text.split('\n');
-    const generated: number[] = [];
     for (const topic of TOPICS) {
       const answer = answers[topic.id];
       const line = answer ? sentence(topic.id, answer) : '';
       if (!line) continue;
       const at = lines.map(lineTopic).indexOf(topic.id);
-      if (at >= 0) {
-        lines[at] = line;
-        generated.push(at);
-      } else {
+      if (at >= 0) lines[at] = line;
+      else {
         while (lines.length && lines[lines.length - 1]!.trim() === '') lines.pop();
         lines.push(line);
-        generated.push(lines.length - 1);
       }
     }
-    let over = lines.join('\n').length - DESCRIPTION_MAX;
-    for (let i = generated.length - 1; over > 0 && i >= 0; i--) {
-      const at = generated[i]!;
-      const line = lines[at]!;
-      const room = line.length - over - 1;
-      lines[at] = room > leadOf(lineTopic(line)).length + 1 ? line.slice(0, room).replace(/[\s,;]+$/, '') + '…' : '';
-      over = lines.join('\n').length - DESCRIPTION_MAX;
-    }
-    return lines.filter((line, index) => line !== '' || generated.indexOf(index) < 0).join('\n');
+    return lines.join('\n');
   }
 
   /** The questions for a description: each area it names, each choice at its saved side or its default. */
@@ -394,20 +401,38 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     return out;
   }
 
-  /** The description after one choice changes: that area's sentence, with every other choice as it stands. */
-  function answerTopic(description: string, topicId: string, optionId: string, side: PrivacyTopicSide): string {
+  /** One choice as answers: that area's choices as they stand, with this one changed. */
+  function choiceAnswers(description: string, topicId: string, optionId: string, side: PrivacyTopicSide): PrivacyTopicAnswers | null {
     const question = questions(description).filter((entry) => entry.id === topicId)[0];
-    if (!question || (side !== 'private' && side !== 'share')) return description;
+    if (!question || (side !== 'private' && side !== 'share')) return null;
     const answer: Record<string, PrivacyTopicSide> = {};
     for (const option of question.options) answer[option.id] = option.id === optionId ? side : option.side;
     const answers: PrivacyTopicAnswers = {};
     answers[topicId] = answer;
-    return refineDescription(description, answers);
+    return answers;
+  }
+
+  /**
+   * The description after one choice changes: that area's sentence, with
+   * every other choice as it stands. `fits` is false when the sentence would
+   * pass the description limit; the description then comes back unchanged
+   * and the editor asks the owner to shorten their words.
+   */
+  function answerTopic(description: string, topicId: string, optionId: string, side: PrivacyTopicSide): { description: string; fits: boolean } {
+    const answers = choiceAnswers(description, topicId, optionId, side);
+    if (!answers) return { description, fits: true };
+    if (!fitsAnswers(description, answers)) return { description, fits: false };
+    return { description: refineDescription(description, answers), fits: true };
+  }
+
+  /** What the questions show for a description, as one comparable string: redraw when it changes. */
+  function questionsKey(description: string): string {
+    return JSON.stringify(questions(description));
   }
 
   return {
     validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
-    detectTopics, topicAnswers, refineDescription, questions, answerTopic,
+    detectTopics, topicAnswers, refineDescription, fitsAnswers, questions, questionsKey, answerTopic,
   };
 }
 

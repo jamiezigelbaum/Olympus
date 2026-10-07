@@ -48688,6 +48688,7 @@ var init_vocabulary = __esm(() => {
     intro: "Your words name some broad areas. Pick what's private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.",
     private: "Private",
     share: "Fine to share",
+    tooLong: "Your description is too long to add this answer. Shorten your own words, then choose again.",
     about: "About {topic}:",
     privateList: "private — {list}",
     shareList: "fine to share — {list}",
@@ -87683,7 +87684,7 @@ function mountDashboardController(options) {
       ...topicWords && typeof topicWords === "object" ? { topicWords } : {}
     }) : undefined;
   }
-  function renderPrivacyQuestions(form, focus) {
+  function renderPrivacyQuestions(form, focus, message = "") {
     const holder = form.querySelector("[data-privacy-questions]");
     const field = form.querySelector('textarea[name="description"]');
     const logic = privacyLogicFor(form);
@@ -87691,11 +87692,12 @@ function mountDashboardController(options) {
       return;
     const words = privacyJson(form.dataset.questions, null) || {};
     const asked = logic.questions(field.value);
+    shownPrivacyQuestions.set(holder, logic.questionsKey(field.value));
     holder.setAttribute("data-privacy-questions", asked.map((topic) => topic.id).join(","));
     holder.hidden = asked.length === 0;
     const children = [];
     if (asked.length > 0) {
-      const title = document.createElement("div");
+      const title = document.createElement("h3");
       title.className = "sect";
       title.textContent = words.title || "";
       const intro = document.createElement("p");
@@ -87707,8 +87709,9 @@ function mountDashboardController(options) {
     for (const topic of asked) {
       const group = document.createElement("div");
       group.className = "pqtopic";
-      const heading = document.createElement("h3");
+      const heading = document.createElement("h4");
       heading.className = "pqtitle";
+      heading.id = `privacy-q-${topic.id}`;
       heading.textContent = topic.question;
       group.append(heading);
       for (const option of topic.options) {
@@ -87716,7 +87719,7 @@ function mountDashboardController(options) {
         const row = document.createElement("div");
         row.className = "pqopt";
         row.setAttribute("role", "radiogroup");
-        row.setAttribute("aria-labelledby", id);
+        row.setAttribute("aria-labelledby", `${heading.id} ${id}`);
         const name = document.createElement("span");
         name.className = "pqlabel";
         name.id = id;
@@ -87748,6 +87751,14 @@ function mountDashboardController(options) {
       }
       children.push(group);
     }
+    if (message) {
+      const note = document.createElement("p");
+      note.className = "pnote pqmessage";
+      note.setAttribute("data-privacy-questions-message", "");
+      note.setAttribute("role", "alert");
+      note.textContent = message;
+      children.push(note);
+    }
     holder.replaceChildren(...children);
     if (focus) {
       holder.querySelectorAll("input[data-privacy-topic]").forEach((input) => {
@@ -87756,6 +87767,7 @@ function mountDashboardController(options) {
       });
     }
   }
+  const shownPrivacyQuestions = new WeakMap;
   function onPrivacyInput(event) {
     const field = event.target instanceof HTMLTextAreaElement ? event.target : null;
     const form = field?.closest("form[data-privacy-form]");
@@ -87765,7 +87777,8 @@ function mountDashboardController(options) {
     const logic = privacyLogicFor(form);
     if (!holder || !logic)
       return;
-    if (logic.detectTopics(field.value).join(",") !== (holder.getAttribute("data-privacy-questions") || ""))
+    const shown = shownPrivacyQuestions.get(holder) ?? logic.questionsKey(field.defaultValue);
+    if (logic.questionsKey(field.value) !== shown || holder.querySelector("[data-privacy-questions-message]"))
       renderPrivacyQuestions(form);
   }
   function onPrivacyChange(event) {
@@ -87780,7 +87793,13 @@ function mountDashboardController(options) {
       return;
     const topic = input.dataset.privacyTopic || "";
     const option = input.dataset.privacyOption || "";
-    field.value = logic.answerTopic(field.value, topic, option, side);
+    const next = logic.answerTopic(field.value, topic, option, side);
+    if (!next.fits) {
+      const words = privacyJson(form.dataset.questions, null) || {};
+      renderPrivacyQuestions(form, { topic, option, side: side === "share" ? "private" : "share" }, words.tooLong || "");
+      return;
+    }
+    field.value = next.description;
     setPrivacyDirty(form);
     renderPrivacyQuestions(form, { topic, option, side });
   }
@@ -90473,11 +90492,17 @@ function privacyLogic(config2) {
     return words.about.split("{topic}").join(words.topics[id].name);
   }
   function lineTopic(line) {
+    if (!words)
+      return "";
     const trimmed2 = line.trim();
+    const parts = [words.privateList.split("{list}")[0], words.shareList.split("{list}")[0]];
     for (const topic of TOPICS) {
       const lead = leadOf(topic.id);
-      if (lead && trimmed2.indexOf(lead) === 0)
-        return topic.id;
+      if (!lead)
+        continue;
+      for (const part of parts)
+        if (part && trimmed2.indexOf(lead + " " + part) === 0)
+          return topic.id;
     }
     return "";
   }
@@ -90549,38 +90574,33 @@ function privacyLogic(config2) {
   function refineDescription(description, answers) {
     const text2 = String(description || "").replace(/\r\n/g, `
 `);
+    const refined = refineUnbounded(text2, answers);
+    return refined.length > DESCRIPTION_MAX ? text2 : refined;
+  }
+  function fitsAnswers(description, answers) {
+    return refineUnbounded(String(description || "").replace(/\r\n/g, `
+`), answers).length <= DESCRIPTION_MAX;
+  }
+  function refineUnbounded(text2, answers) {
     if (!words)
       return text2;
     const lines = text2.split(`
 `);
-    const generated = [];
     for (const topic of TOPICS) {
       const answer = answers[topic.id];
       const line = answer ? sentence(topic.id, answer) : "";
       if (!line)
         continue;
       const at = lines.map(lineTopic).indexOf(topic.id);
-      if (at >= 0) {
+      if (at >= 0)
         lines[at] = line;
-        generated.push(at);
-      } else {
+      else {
         while (lines.length && lines[lines.length - 1].trim() === "")
           lines.pop();
         lines.push(line);
-        generated.push(lines.length - 1);
       }
     }
-    let over = lines.join(`
-`).length - DESCRIPTION_MAX;
-    for (let i = generated.length - 1;over > 0 && i >= 0; i--) {
-      const at = generated[i];
-      const line = lines[at];
-      const room = line.length - over - 1;
-      lines[at] = room > leadOf(lineTopic(line)).length + 1 ? line.slice(0, room).replace(/[\s,;]+$/, "") + "…" : "";
-      over = lines.join(`
-`).length - DESCRIPTION_MAX;
-    }
-    return lines.filter((line, index) => line !== "" || generated.indexOf(index) < 0).join(`
+    return lines.join(`
 `);
   }
   function questions(description) {
@@ -90608,16 +90628,27 @@ function privacyLogic(config2) {
     }
     return out;
   }
-  function answerTopic(description, topicId, optionId, side) {
+  function choiceAnswers(description, topicId, optionId, side) {
     const question = questions(description).filter((entry) => entry.id === topicId)[0];
     if (!question || side !== "private" && side !== "share")
-      return description;
+      return null;
     const answer = {};
     for (const option of question.options)
       answer[option.id] = option.id === optionId ? side : option.side;
     const answers = {};
     answers[topicId] = answer;
-    return refineDescription(description, answers);
+    return answers;
+  }
+  function answerTopic(description, topicId, optionId, side) {
+    const answers = choiceAnswers(description, topicId, optionId, side);
+    if (!answers)
+      return { description, fits: true };
+    if (!fitsAnswers(description, answers))
+      return { description, fits: false };
+    return { description: refineDescription(description, answers), fits: true };
+  }
+  function questionsKey(description) {
+    return JSON.stringify(questions(description));
   }
   return {
     validRule,
@@ -90633,7 +90664,9 @@ function privacyLogic(config2) {
     detectTopics,
     topicAnswers,
     refineDescription,
+    fitsAnswers,
     questions,
+    questionsKey,
     answerTopic
   };
 }
@@ -95267,11 +95300,11 @@ function privacyQuestions(description, canEdit) {
     const options = topic.options.map((option) => {
       const id = `privacy-q-${topic.id}-${option.id}`;
       const choices = ["private", "share"].map((side) => `<label class="pqchoice"><input type="radio" name="${id}" value="${side}"` + ` data-privacy-topic="${escapeHtml2(topic.id)}" data-privacy-option="${escapeHtml2(option.id)}"` + `${option.side === side ? " checked" : ""}${disabled}><span>${escapeHtml2(side === "private" ? Q.private : Q.share)}</span></label>`).join("");
-      return `<div class="pqopt" role="radiogroup" aria-labelledby="${id}"><span class="pqlabel" id="${id}">${escapeHtml2(option.label)}</span>` + `<span class="pqchoices">${choices}</span></div>`;
+      return `<div class="pqopt" role="radiogroup" aria-labelledby="privacy-q-${topic.id} ${id}"><span class="pqlabel" id="${id}">${escapeHtml2(option.label)}</span>` + `<span class="pqchoices">${choices}</span></div>`;
     }).join("");
-    return `<div class="pqtopic"><h3 class="pqtitle">${escapeHtml2(topic.question)}</h3>${options}</div>`;
+    return `<div class="pqtopic"><h4 class="pqtitle" id="privacy-q-${topic.id}">${escapeHtml2(topic.question)}</h4>${options}</div>`;
   }).join("");
-  return `<div class="pquestions" data-privacy-questions="${escapeHtml2(asked.map((topic) => topic.id).join(","))}">` + `<div class="sect">${escapeHtml2(Q.title)}</div><p class="pnote">${escapeHtml2(Q.intro)}</p>${topics}</div>`;
+  return `<div class="pquestions" data-privacy-questions="${escapeHtml2(asked.map((topic) => topic.id).join(","))}">` + `<h3 class="sect">${escapeHtml2(Q.title)}</h3><p class="pnote">${escapeHtml2(Q.intro)}</p>${topics}</div>`;
 }
 function senderPanel() {
   return `<div class="ppanel" data-privacy-panel="sender" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.senderIntro)}</p>` + `<label class="plabel" for="privacy-sender">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.senderLabel)}</label>` + `<div class="prow"><input class="keyfield ptextline" id="privacy-sender" type="text" autocomplete="off"` + ` placeholder="${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.senderPlaceholder)}" data-privacy-sender>` + `<button type="button" class="btn" data-privacy-sender-add>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.senderAdd)}</button>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<p class="actmsg" data-privacy-panel-message role="status"></p></div>`;
@@ -111032,7 +111065,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       labelsLoading: false,
       labelsError: "",
       sender: "",
-      senderError: ""
+      senderError: "",
+      questionsError: ""
     };
     load();
   }
@@ -111413,12 +111447,14 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       return null;
     const section = add(el("section", "fsection questions"), el("h2", "", Q.title), el("p", "reason", Q.intro));
     for (const topic of asked) {
-      const group = add(el("div", "qtopic"), el("h3", "qtitle", topic.question));
+      const heading = el("h3", "qtitle", topic.question);
+      heading.id = "privacy-q-" + topic.id;
+      const group = add(el("div", "qtopic"), heading);
       for (const option of topic.options) {
         const id = "privacy-q-" + topic.id + "-" + option.id;
         const row = el("div", "qopt");
         row.setAttribute("role", "radiogroup");
-        row.setAttribute("aria-labelledby", id);
+        row.setAttribute("aria-labelledby", heading.id + " " + id);
         const name = el("span", "qlabel", option.label);
         name.id = id;
         const choices = el("span", "qchoices");
@@ -111434,9 +111470,13 @@ function chatgptPrivacyProgram(kit, makeLogic) {
           input.addEventListener("change", () => {
             if (!input.checked || !s)
               return;
-            s.description = L.answerTopic(s.description, topic.id, option.id, side);
-            changed();
-            s.saveError = "";
+            const next = L.answerTopic(s.description, topic.id, option.id, side);
+            s.questionsError = next.fits ? "" : Q.tooLong;
+            if (next.fits) {
+              s.description = next.description;
+              changed();
+              s.saveError = "";
+            }
             kit.render("privacy:q:" + topic.id + ":" + option.id + ":" + side);
           });
           add(choices, add(choice, input, el("span", "", side === "private" ? Q.private : Q.share)));
@@ -111444,6 +111484,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         add(group, add(row, name, choices));
       }
       add(section, group);
+    }
+    if (s.questionsError) {
+      const message = el("p", "reason error", s.questionsError);
+      message.setAttribute("role", "alert");
+      add(section, message);
     }
     return section;
   }
@@ -111475,12 +111520,14 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     area.disabled = s.saving;
     area.setAttribute("data-key", "privacy:description");
     area.setAttribute("aria-describedby", "privacy-description-shared");
-    const asked = L.detectTopics(s.description).join(",");
+    const asked = L.questionsKey(s.description);
     area.addEventListener("input", () => {
       s.description = area.value;
       const open6 = s.confirmStep;
       changed();
-      if (open6 || L.detectTopics(s.description).join(",") !== asked)
+      const noted = !!s.questionsError;
+      s.questionsError = "";
+      if (open6 || noted || L.questionsKey(s.description) !== asked)
         kit.render("privacy:description");
     });
     add(page, add(field, area));
