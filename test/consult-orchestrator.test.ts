@@ -249,12 +249,12 @@ describe('the gate fixtures behave as the tests assume', () => {
     expect(defaults.domains).toMatchObject({ countries: true, technical: true });
     // Countries are admitted by default (owner decision 2026-10-07), so the
     // vocabulary no longer refuses "Portugal"; the snapshot name rule does,
-    // because the documents hold it. Turned off, the vocabulary refuses too.
+    // because the documents hold it. Turned off (with the places pack, which also holds a Portugal), the vocabulary refuses too.
     const portugal = evaluateConsultRequest(['What entry rules apply to visitors arriving in Portugal?'], context, {}, {}, defaults);
     expect(portugal.decision).toBe('refuse');
     expect(portugal.reasons).toContain('snapshot_name');
     expect(portugal.reasons).not.toContain('unknown_word');
-    const noCountries = evaluateConsultRequest(['What entry rules apply to visitors arriving in Portugal?'], context, {}, {}, { ...defaults, domains: { ...defaults.domains, countries: false } });
+    const noCountries = evaluateConsultRequest(['What entry rules apply to visitors arriving in Portugal?'], context, {}, {}, { ...defaults, domains: { ...defaults.domains, countries: false, places: false } });
     expect(noCountries.reasons).toContain('unknown_word');
     expect(evaluateConsultRequest(['What passport validity do most countries require from visitors?'], context, {}, {}, defaults)).toEqual({ decision: 'pass', reasons: [] });
     // The temperature scale names (C4b review round 1 found them refused) are

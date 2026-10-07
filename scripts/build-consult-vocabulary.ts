@@ -45,6 +45,7 @@
  *   de-hunspell      unpacked npm dictionary-de 3.0.0 (user-installed only, GPL)
  *   it-hunspell      unpacked npm dictionary-it 2.0.0 (user-installed only, GPL)
  *   olympus-terms    scripts/data/consult-olympus-terms.txt (Olympus-authored; no upstream source)
+ *   places           GeoNames cities15000.txt then admin1CodesASCII.txt (CC BY 4.0)
  *   cldr-units       unpacked npm cldr-units-full 48.2.0
  *   cldr-countries   unpacked npm cldr-localenames-full 48.2.0
  *   rx-ingredients   RXNCONSO.RRF of RxNorm Current Prescribable Content (IN, PIN)
@@ -264,6 +265,23 @@ export function buildPack(
       source: `npm ${packageVersion(sources[0]!)}, expanded with its own affix rules (one level, no compounds) by scripts/build-consult-vocabulary.ts`,
       licence: licence.startsWith('MPL') ? `${licence}. This file is Covered Software under the MPL; its source form is the upstream package named above plus scripts/build-consult-vocabulary.ts.` : licence,
     }, expandHunspell(sources[0]!, pack === 'de-hunspell', exclude));
+  }
+  if (pack === 'places') {
+    // cities15000.txt (tab-separated; columns 1 and 2 are name and asciiname) and
+    // admin1CodesASCII.txt (code, name, asciiname, id). Alternate names are not used.
+    const words = new Set<string>();
+    for (const [file, minColumns] of [[sources[0]!, 3], [sources[1]!, 3]] as const) {
+      for (const line of readFileSync(file, 'utf8').split('\n')) {
+        const fields = line.split('\t');
+        if (fields.length < minColumns) continue;
+        for (const name of [fields[1]!, fields[2]!]) for (const word of vocabularyWords(name)) words.add(word);
+      }
+    }
+    return writePack(outDir, {
+      id: pack,
+      source: 'GeoNames (https://www.geonames.org/) cities15000.txt (populated places of 15,000 or more) and admin1CodesASCII.txt (first-level regions), downloaded 2026-10-07 from https://download.geonames.org/export/dump/; name and asciiname columns only',
+      licence: 'CC BY 4.0 (attribution: GeoNames); see places.LICENSE.txt',
+    }, words);
   }
   if (pack === 'olympus-terms') {
     const words = new Set<string>();

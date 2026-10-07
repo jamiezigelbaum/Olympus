@@ -144,9 +144,10 @@ yourself.
   avoid.
 - **Prefer class words; expect refusals for proper nouns.** The gate admits
   only words from its vocabulary: ordinary words, units, common file formats,
-  protocols and device terms, medicine ingredient names and country names.
-  Proper nouns, brands, product names, cities and other place names are not in
-  it and are refused as unknown words. Write "a mid-size European city", "a
+  protocols and device terms, medicine ingredient names, country names and
+  place names (cities of 15,000 or more, regions). Other proper nouns, brands
+  and product names are not in it and are refused as unknown words; a place
+  the owner's documents hold is refused by the name check. Write "a mid-size European city", "a
   Roth-style retirement account", "a popular lossless audio format" rather
   than the name, and do not rephrase a refused question word by word until it
   passes: write a different, more general question or propose nothing. If a

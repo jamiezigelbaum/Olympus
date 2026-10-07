@@ -4,7 +4,7 @@
 // One small file, `~/.olympus/consult.json`:
 //
 //   {"v": 1, "revision": N, "enabled": bool, "languages": [...],
-//    "domains": {"units", "countries", "technical", "medicines", "medicineBrands"},
+//    "domains": {"units", "countries", "places", "technical", "medicines", "medicineBrands"},
 //    "strict": bool}
 //
 // - Read at every use, never cached, so a change needs no worker restart.
