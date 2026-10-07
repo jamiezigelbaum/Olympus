@@ -249,6 +249,7 @@ export function createBuiltInTranscriber(options: BuiltInTranscriberOptions = {}
   let installing: Promise<void> | undefined;
   let failedAt: number | undefined;
   let consecutiveFailures = 0;
+  const readyListeners: Array<() => void> = [];
   let server: LlamaServerHandle | undefined;
 
   const prepare = (): 'ready' | 'pending' | 'unavailable' => {
@@ -265,6 +266,13 @@ export function createBuiltInTranscriber(options: BuiltInTranscriberOptions = {}
         installed = result;
         failedAt = undefined;
         consecutiveFailures = 0;
+        for (const listener of readyListeners) {
+          try {
+            listener();
+          } catch {
+            // A listener's fault never undoes a verified install.
+          }
+        }
       }, (error: unknown) => {
         if (error instanceof BuiltInReasoningInstallError
           && (error.reason === 'unsupported_platform' || error.reason === 'insufficient_memory')) {
@@ -315,6 +323,9 @@ export function createBuiltInTranscriber(options: BuiltInTranscriberOptions = {}
 
   return {
     prepare,
+    onReady(listener) {
+      readyListeners.push(listener);
+    },
     async stop() {
       await server?.stop();
     },
@@ -447,6 +458,28 @@ let sharedTranscriber: BuiltInTranscriptionEngine | undefined;
  */
 export function runningBuiltInTranscriber(): BuiltInTranscriptionEngine | undefined {
   return sharedTranscriber;
+}
+
+/**
+ * Engine start for built-in transcription. The model downloads only when the
+ * owner's chosen sources contain audio (owner decision 2026-10-07): when the
+ * scheduler starts, each approved extraction lane asks its readers to get
+ * ready if that lane already has work waiting for them
+ * (`fileExtractionSchedulerTask` atStart), and the plan pass after every sync
+ * with new items does the same for newly queued audio (runner.ts). This wires
+ * the other half: once the model is ready, `wake` brings the extraction
+ * tasks forward so audio left unread is read within seconds. Every engine
+ * gate (an owner command wins, test env, platform, memory, disk, failure
+ * backoff) still applies. Returns the engine it wired, if any.
+ */
+export function wireBuiltInTranscriptionAtBoot(input: {
+  env: Record<string, string | undefined>;
+  engine: BuiltInTranscriptionEngine | undefined;
+  wake?: () => void;
+}): BuiltInTranscriptionEngine | undefined {
+  if (input.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || input.env.NODE_ENV === 'test' || !input.engine) return undefined;
+  if (input.wake) input.engine.onReady?.(input.wake);
+  return input.engine;
 }
 
 /**

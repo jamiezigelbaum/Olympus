@@ -52,7 +52,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve as resolvePath } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import {
   FileLeaseBusyError,
@@ -1219,13 +1219,95 @@ function childEnvironment(env: Record<string, string | undefined>): NodeJS.Proce
   return out;
 }
 
-/** An absolute executable path, or the first match on PATH. */
+/**
+ * Where installers put these programs when PATH does not say so: a service
+ * manager starts the worker with a minimal PATH (the engine's LaunchAgent has
+ * only Bun's directory and the system ones), so a Homebrew `tor` or a
+ * `~/.local/bin/zkapi-clientd` would otherwise read as not installed. Searched
+ * after PATH, in this order. HOME comes from the passed environment.
+ */
+export function standardExecutableDirectories(
+  env: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const home = env.HOME?.trim();
+  const local = home && isAbsolute(home) ? [join(home, '.local', 'bin')] : [];
+  if (platform === 'darwin') return [...local, '/opt/homebrew/bin', '/usr/local/bin'];
+  if (platform === 'linux') return [...local, '/usr/local/bin'];
+  return local;
+}
+
+/** What the fallback-folder trust check reads; a seam so tests can describe owners and modes. */
+export interface ExecutableTrustProbe {
+  realpath: (path: string) => string;
+  stat: (path: string) => { uid: number; mode: number; isFile(): boolean; isDirectory(): boolean };
+  executable: (path: string) => boolean;
+  uid: () => number | undefined;
+}
+
+export const DEFAULT_EXECUTABLE_TRUST: ExecutableTrustProbe = {
+  realpath: (path) => realpathSync(path),
+  stat: (path) => statSync(path),
+  executable: (path) => {
+    try {
+      accessSync(path, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  uid: () => (typeof process.getuid === 'function' ? process.getuid() : undefined),
+};
+
+/** Every directory from `path` up to the root is owned by this user or root and writable by neither group nor others. */
+function trustedChain(path: string, probe: ExecutableTrustProbe, uid: number): boolean {
+  for (let current = path; ; current = dirname(current)) {
+    const stats = probe.stat(current);
+    if (current !== path && !stats.isDirectory()) return false;
+    if (stats.uid !== uid && stats.uid !== 0) return false;
+    if ((stats.mode & 0o022) !== 0) return false;
+    if (dirname(current) === current) return true;
+  }
+}
+
+/**
+ * A program found only in a standard install folder (never on PATH, never
+ * named explicitly) runs only if nobody else could have put it there: the
+ * canonical file and every ancestor directory, and the folder it was found in
+ * and its ancestors, are owned by this user or root and are not group- or
+ * world-writable. Returns the canonical path, so the readiness probe and the
+ * session execute the same file; undefined when absent or untrusted.
+ */
+export function trustedFallbackExecutable(candidate: string, probe: ExecutableTrustProbe = DEFAULT_EXECUTABLE_TRUST): string | undefined {
+  const uid = probe.uid();
+  if (uid === undefined) return undefined;
+  try {
+    const real = probe.realpath(candidate);
+    const target = probe.stat(real);
+    if (!target.isFile() || !probe.executable(real)) return undefined;
+    if (!trustedChain(real, probe, uid)) return undefined;
+    if (!trustedChain(probe.realpath(dirname(candidate)), probe, uid)) return undefined;
+    return real;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * An explicit executable path (only that path), or the first match on PATH
+ * (both as before), and then in the standard install directories, where a
+ * match must also pass trustedFallbackExecutable. The readiness probe and the
+ * real session both resolve through here, so they always agree.
+ */
 export function resolveExecutable(
   name: string,
   explicit: string | undefined,
   env: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
+  trust: ExecutableTrustProbe = DEFAULT_EXECUTABLE_TRUST,
 ): string | undefined {
-  const candidates = explicit ? [explicit] : (env.PATH ?? '').split(delimiter).filter(Boolean).map((dir) => join(dir, name));
+  const pathDirectories = (env.PATH ?? '').split(delimiter).filter(Boolean);
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync(candidate, constants.X_OK);
@@ -1233,6 +1315,12 @@ export function resolveExecutable(
     } catch {
       // not here
     }
+  }
+  if (explicit) return undefined;
+  for (const dir of standardExecutableDirectories(env, platform)) {
+    if (pathDirectories.includes(dir)) continue;
+    const found = trustedFallbackExecutable(join(dir, name), trust);
+    if (found) return found;
   }
   return undefined;
 }

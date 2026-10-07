@@ -27,8 +27,10 @@ import {
   runningBuiltInTranscriber,
   sharedBuiltInTranscriber,
   transcriptionDeadlineFromLease,
+  wireBuiltInTranscriptionAtBoot,
   type AudioConverter,
 } from '../src/workers/file-extraction/extractors/built-in-transcriber.ts';
+import { SourceScheduler, fileExtractionSchedulerTask } from '../src/workers/source-scheduler.ts';
 import { ExtractionCommandError } from '../src/workers/file-extraction/extractors/command-runner.ts';
 import {
   LEGACY_TRANSCRIBER_NOT_CONFIGURED_KIND,
@@ -679,5 +681,199 @@ describe('reading unread audio again once a reader is ready', () => {
     } finally {
       empty.jobs.close();
     }
+  });
+});
+
+describe('download only when the chosen sources contain audio', () => {
+  const LANE = { corpusId: 'secure_local.fake.files', provider: 'fake', accountScope: 'personal', approvedScopeKey: 'fake.personal:/Files' };
+
+  function lane(candidates: Array<{ name: string; mimeType?: string }>) {
+    const jobs = new LocalFileExtractionJobStore(':memory:');
+    let prepares = 0;
+    const builtIn = engineStub({ prepare: () => { prepares += 1; return 'pending'; } });
+    const text: Extractor = {
+      kind: 'fake_text', version: 'v1', needsBytes: false, egress: 'local',
+      accepts: () => true,
+      async extract() { return { status: 'indexed', text: 'words' }; },
+    };
+    const listed = { candidates };
+    const runner = createFileExtractionRunner({
+      jobs,
+      registry: buildExtractorRegistry([createTranscriptionExtractor({ builtIn }), text], [TRANSCRIPTION_EXTRACTOR_KIND, 'fake_text']),
+      corpora: [{
+        corpusId: LANE.corpusId,
+        trustDomain: 'secure_local',
+        source: {
+          id: 'fake', corpusId: LANE.corpusId, provider: LANE.provider,
+          async listCandidates() {
+            return {
+              candidates: listed.candidates.map((item, index) => ({
+                ...LANE, providerItemId: `item-${index}`, localItemId: `personal:item-${index}`, ...item,
+              })),
+              done: true,
+            };
+          },
+          async fetch() { return { bytes: new Uint8Array([1]) }; },
+        },
+        sink: { async accept() { return { accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 1 }; } },
+      }],
+    });
+    return { jobs, runner, listed, prepares: () => prepares };
+  }
+
+  test('no audio in the chosen sources: nothing asks the transcriber to download', async () => {
+    const { jobs, runner, prepares } = lane([{ name: 'notes.txt', mimeType: 'text/plain' }, { name: 'scan.pdf' }]);
+    try {
+      expect(runner.prepareReadersWithWaitingWork?.([LANE])).toEqual([]);
+      await runner.plan({ ...LANE, limit: 10 });
+      expect(runner.prepareReadersWithWaitingWork?.([LANE])).toEqual([]);
+      expect(prepares()).toBe(0);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('audio appearing after a sync starts the download at plan time, and at the next engine start', async () => {
+    const { jobs, runner, listed, prepares } = lane([{ name: 'notes.txt', mimeType: 'text/plain' }]);
+    try {
+      await runner.plan({ ...LANE, limit: 10 });
+      expect(prepares()).toBe(0);
+      // The next sync catalogues a voice note, recognised by its extension only.
+      listed.candidates = [...listed.candidates, { name: 'voice-note.ogg' }];
+      const plan = await runner.plan({ ...LANE, limit: 10 });
+      expect(plan.extractorKinds).toContain(TRANSCRIPTION_EXTRACTOR_KIND);
+      expect(prepares()).toBe(1);
+      // A restart with that audio still queued asks again at boot.
+      expect(runner.prepareReadersWithWaitingWork?.([LANE])).toEqual([TRANSCRIPTION_EXTRACTOR_KIND]);
+      expect(prepares()).toBe(2);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('the boot wiring keeps the command gate, and a ready model wakes the extraction tasks within seconds', async () => {
+    const T0 = Date.parse('2026-10-07T20:00:00.000Z');
+    const clock = { now: T0 };
+    const runs: string[] = [];
+    const sched = new SourceScheduler({
+      enabled: true,
+      tickMs: 60_000,
+      errorBackoffMs: 60_000,
+      maxTransientRetries: 1,
+      now: () => new Date(clock.now),
+      sources: [{
+        sourceId: 'files.fixture', corpusId: 'secure_local.files.fixture', cadence: 'continuous',
+        intervalMs: 30 * 60_000, freshnessThresholdHours: 26,
+        tasks: [
+          { id: 'sync', kind: 'sync', writer: true, run: async () => { runs.push('sync'); return { status: 'idle' }; } },
+          { id: 'extract', kind: 'extract', writer: true, run: async () => { runs.push('extract'); return { status: 'idle' }; } },
+        ],
+      }],
+    });
+    await sched.runDueTasks(new Date(clock.now));
+    expect(runs).toEqual(['sync', 'extract']);
+
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const engine = createBuiltInTranscriber({
+      env: { OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR: tempDir(), OLYMPUS_BUILT_IN_REASONING_DIR: tempDir() },
+      platform: 'darwin-arm64',
+      totalMemoryBytes: 16 * 1024 ** 3,
+      install: async () => { await gate; return { modelPath: '/m', mmprojPath: '/p', serverPath: '/s', gpu: true }; },
+    });
+    let wakes = 0;
+    // An owner command wins: nothing is wired.
+    expect(wireBuiltInTranscriptionAtBoot({
+      env: { OLYMPUS_TRANSCRIBE_COMMAND: 'whisper {input}' }, engine, wake: () => { wakes += 1; },
+    })).toBeUndefined();
+    wireBuiltInTranscriptionAtBoot({
+      env: {},
+      engine,
+      wake: () => { wakes += 1; sched.wakeTasksOfKind('extract'); },
+    });
+    // The approved lane with waiting audio asked the engine to get ready.
+    engine.prepare();
+    clock.now = T0 + 2 * 60_000;
+    finish();
+    await gate;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(engine.prepare()).toBe('ready');
+    expect(wakes).toBe(1);
+    const tasks = sched.status().sources[0]!.tasks;
+    expect(Date.parse(tasks.find((task) => task.id === 'extract')!.next_run_at!)).toBe(clock.now);
+    expect(Date.parse(tasks.find((task) => task.id === 'sync')!.next_run_at!)).toBe(T0 + 30 * 60_000);
+  });
+});
+
+describe('review follow-ups: lane scope and running tasks', () => {
+  test('waiting audio counts only in the lanes passed in (the approved ones)', async () => {
+    const jobs = new LocalFileExtractionJobStore(':memory:');
+    try {
+      const approved = { corpusId: 'secure_local.fake.files', provider: 'fake', accountScope: 'personal', approvedScopeKey: 'fake.personal:/Chosen' };
+      const dropped = { ...approved, approvedScopeKey: 'fake.personal:/NoLongerChosen' };
+      let prepares = 0;
+      const builtIn = engineStub({ prepare: () => { prepares += 1; return 'pending'; } });
+      const runner = createFileExtractionRunner({
+        jobs,
+        registry: buildExtractorRegistry([createTranscriptionExtractor({ builtIn })]),
+        corpora: [],
+      });
+      // Audio left behind in a folder the owner no longer chooses.
+      jobs.enqueue({
+        refs: [{ ...dropped, providerItemId: 'old', localItemId: 'personal:old', name: 'old.m4a' }],
+        extractorKind: TRANSCRIPTION_EXTRACTOR_KIND, extractorVersion: 'v1', policyDecision: 'index_allowed',
+      });
+      expect(runner.prepareReadersWithWaitingWork?.([approved])).toEqual([]);
+      expect(prepares).toBe(0);
+      expect(runner.prepareReadersWithWaitingWork?.([approved, dropped])).toEqual([TRANSCRIPTION_EXTRACTOR_KIND]);
+      expect(prepares).toBe(1);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('each extraction task checks its own lane when the scheduler starts', () => {
+    const lanes: unknown[] = [];
+    const lane = { corpusId: 'c', provider: 'p', accountScope: 'a', approvedScopeKey: 'k' };
+    const fakeRunner = { prepareReadersWithWaitingWork: (passed: unknown[]) => { lanes.push(...passed); return []; } };
+    const sched = new SourceScheduler({
+      enabled: true, tickMs: 60_000, errorBackoffMs: 60_000, maxTransientRetries: 1,
+      sources: [{
+        // Manual cadence: start() asks the lane, but runs nothing.
+        sourceId: 'files.fixture', corpusId: 'c', cadence: 'manual', intervalMs: 30 * 60_000, freshnessThresholdHours: 26,
+        tasks: [fileExtractionSchedulerTask({ id: 'extract', runner: fakeRunner as never, lane, planLimit: 1, batchSize: 1 })],
+      }],
+      setIntervalImpl: (() => ({ unref() {} })) as unknown as typeof setInterval,
+      clearIntervalImpl: (() => undefined) as unknown as typeof clearInterval,
+    });
+    sched.start();
+    sched.stop();
+    expect(lanes).toEqual([lane]);
+  });
+
+  test('an extraction task running when the model becomes ready runs again within seconds of finishing', async () => {
+    const T0 = Date.parse('2026-10-07T20:00:00.000Z');
+    const clock = { now: T0 };
+    let release!: () => void;
+    const midRun = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    const sched = new SourceScheduler({
+      enabled: true, tickMs: 60_000, errorBackoffMs: 60_000, maxTransientRetries: 1,
+      now: () => new Date(clock.now),
+      continueAfterMs: 5_000,
+      sources: [{
+        sourceId: 'files.fixture', corpusId: 'c', cadence: 'continuous', intervalMs: 30 * 60_000, freshnessThresholdHours: 26,
+        tasks: [{ id: 'extract', kind: 'extract', writer: true, run: async () => { started(); await midRun; return { status: 'idle' }; } }],
+      }],
+    });
+    const pass = sched.runDueTasks(new Date(clock.now));
+    await running;
+    expect(sched.wakeTasksOfKind('extract')).toBe(1);
+    clock.now = T0 + 60_000;
+    release();
+    const status = await pass;
+    const extract = status.sources[0]!.tasks.find((task) => task.id === 'extract')!;
+    expect(Date.parse(extract.next_run_at!)).toBe(T0 + 65_000);
   });
 });

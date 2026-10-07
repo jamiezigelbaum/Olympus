@@ -10,7 +10,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { createModelKeyReload } from '../../core/model-key-reload.ts';
+import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
@@ -70,7 +70,7 @@ import {
   workerAuthTokenFromEnv,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
-import { runningBuiltInTranscriber, sharedBuiltInTranscriber } from '../file-extraction/extractors/built-in-transcriber.ts';
+import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscriptionAtBoot } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
   answerPrivately,
   builtInAnalystEnabled,
@@ -1775,6 +1775,18 @@ export function createFileExtractionLocalVlmClientFromEnv(
           : {}),
       })
     : undefined;
+}
+
+/** How this process was launched; set only by startWorkerWithLaunch from the validated entry point. */
+let workerLaunch: WorkerLaunch = {};
+
+/**
+ * The CLI's entry: the launch state runWorkerForeground validated (never an
+ * ambient variable) rides into main() for the restart decision.
+ */
+export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void> {
+  workerLaunch = { ...launch };
+  await main();
 }
 
 export async function main(): Promise<void> {
@@ -3832,6 +3844,15 @@ export async function main(): Promise<void> {
         : {}),
     })
     : undefined;
+  // Built-in transcription installs only when the chosen sources contain
+  // audio (each approved extraction lane checks at scheduler start, and each
+  // plan pass after a sync), and once ready wakes every extraction task so
+  // unread audio is read within seconds.
+  wireBuiltInTranscriptionAtBoot({
+    env: process.env,
+    engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
+    ...(sourceScheduler ? { wake: () => { sourceScheduler.wakeTasksOfKind('extract'); } } : {}),
+  });
   // Content-free latency ledger: on by default so the next "why was that answer
   // slow?" is answerable from the host. Only wired when the answer path exists.
   const sourceAnswerLatencyLogPath = sourceAnswer
@@ -4813,7 +4834,7 @@ export async function main(): Promise<void> {
     void server.stop();
   };
   requestModelReload = createModelKeyReload({
-    managed: process.env.OLYMPUS_MANAGED_WORKER === '1',
+    managed: workerRestartsItself(workerLaunch, process.env),
     shutdown: async () => { shutdown('SIGTERM'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });

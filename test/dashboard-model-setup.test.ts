@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
-import { createModelKeyReload } from '../src/core/model-key-reload.ts';
+import { createModelKeyReload, workerRestartsItself } from '../src/core/model-key-reload.ts';
 import type { ModelSetupView } from '../src/core/model-setup.ts';
 import { parseDashboardControlParams } from '../src/core/control-ui-gateway.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
@@ -157,4 +157,14 @@ test('credential activation schedules one supervised reload after the response, 
   scheduled!(); await new Promise((resolve) => setTimeout(resolve, 0));
   expect(events).toEqual(['scheduled', 'shutdown', 'exit']);
   expect(createModelKeyReload({ managed: false, shutdown: () => { throw new Error('must not stop'); }, exit: () => { throw new Error('must not exit'); } })()).toBe(false);
+});
+
+test('a worker restarts itself only after a validated native-service launch or under the generated unit, never on an ambient marker', () => {
+  expect(workerRestartsItself({ nativeServiceSupervised: true }, {})).toBe(true);
+  expect(workerRestartsItself({}, { OLYMPUS_MANAGED_WORKER: '1' })).toBe(true);
+  // A foreground worker that inherited (or loaded from worker.env) a stale
+  // native-service marker is not supervised: it must not exit 75 and stay down.
+  expect(workerRestartsItself({}, { OLYMPUS_ENGINE_HOST: '1', OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '0f8fad5b-d9cb-469f-a165-70867728950e' })).toBe(false);
+  expect(workerRestartsItself({ nativeServiceSupervised: false }, { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '0f8fad5b-d9cb-469f-a165-70867728950e' })).toBe(false);
+  expect(workerRestartsItself({}, {})).toBe(false);
 });
