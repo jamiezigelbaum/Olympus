@@ -16337,8 +16337,8 @@ function zkapiAsset(name, sha256, bytes) {
   return { url: `${ZKAPI_RELEASE}/${name}`, sha256, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
 }
 var TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24";
-function torMacAsset(name, sha256, bytes) {
-  return { url: `${TOR_RELEASE}/${name}`, sha256, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"] };
+function torMacAsset(name, sha256, bytes, adhocSign) {
+  return { url: `${TOR_RELEASE}/${name}`, sha256, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"], ...adhocSign ? { adhocSign } : {} };
 }
 function torLinuxAsset(name, sha256, bytes) {
   return {
@@ -16358,7 +16358,7 @@ var MANAGED_TOOL_PINS = {
     version: "15.0.24",
     versionLine: /^Tor version \d+\.\d+\.\d+/,
     assets: {
-      "darwin-arm64": torMacAsset("tor-expert-bundle-macos-aarch64-15.0.24.tar.gz", "d47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644", 18724201),
+      "darwin-arm64": torMacAsset("tor-expert-bundle-macos-aarch64-15.0.24.tar.gz", "d47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644", 18724201, ["tor/tor", "tor/libevent-2.1.7.dylib"]),
       "darwin-x64": torMacAsset("tor-expert-bundle-macos-x86_64-15.0.24.tar.gz", "8acb0b590f6be34084dcb6d84009ac0c61cc7c5261b7a19d2ab94845aa9bd5b6", 19356806),
       "linux-x64": torLinuxAsset("tor-expert-bundle-linux-x86_64-15.0.24.tar.gz", "8e012ec6815d7899cb64011582e2dade88e74119c6661068a2a3252de0ccd7f2", 32348376),
       "linux-ia32": torLinuxAsset("tor-expert-bundle-linux-i686-15.0.24.tar.gz", "7537fea3478d05b8af25d7f8199c031b281f7015c32bb4177bef71f8e5100d9b", 25964591)

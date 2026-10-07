@@ -104,7 +104,8 @@ or the API key. The only command Olympus runs on either program is
 
 Folders are 0700 and must belong to the user; files are 0600, programs 0700.
 Each version folder holds a manifest, `olympus-tool.json` (tool, version,
-platform, asset, sha256, installedAt).
+platform, asset, sha256, installedAt, and `adhocSigned` when Olympus signed
+any file).
 
 ### How
 
@@ -124,7 +125,8 @@ platform, asset, sha256, installedAt).
    Archives over 512 MB unpacked are refused.
 5. Extract into a private `.staging-<id>` folder; check the files each program
    needs; on macOS clear `com.apple.quarantine` on that staging folder only
-   (it holds nothing but the verified extraction); run `<program> --version`
+   (it holds nothing but the verified extraction); on Apple silicon ad-hoc
+   sign the unsigned Tor files (below); run `<program> --version`
    and require the pinned version line. A program the system will not run is
    not installed, and the card says so plainly.
 6. Write the manifest, then publish with one rename of the staging folder to
@@ -198,7 +200,7 @@ gpg as good signatures from the Tor Browser Developers signing key
 keys.openpgp.org into a throwaway keyring. Tor publishes no Linux arm64 expert
 bundle; there the card says to install Tor from the system's package manager.
 
-### Gatekeeper and code signing (finding)
+### Gatekeeper and code signing
 
 - A download made by Olympus (Bun's `fetch`) carries no
   `com.apple.quarantine` attribute, so Gatekeeper does not assess these
@@ -207,15 +209,20 @@ bundle; there the card says to install Tor from the system's package manager.
 - The zkAPI macOS binaries are ad-hoc signed, which Apple silicon accepts.
 - **The Tor macOS arm64 bundle's `tor/tor` and `tor/libevent-2.1.7.dylib` are
   not code-signed at all** (`codesign -dv`: "code object is not signed at
-  all"). Apple silicon refuses to run unsigned arm64 code, so the expected
-  behaviour is that the `--version` check is killed (SIGKILL) and the install
-  of Tor stops with "this computer would not run it", leaving zkAPI
-  installed. This was not executed on the build Mac (no downloaded program was
-  run there). Olympus does not sign the binary itself; the options are an
-  explicit, owner-approved ad-hoc signature of the verified files after the
-  hash check (`codesign --sign - --force`), Tor Browser's signed app bundle
-  instead of the expert bundle, or Homebrew's tor (which signs on install).
-  Intel Macs and Linux are unaffected.
+  all"), and Apple silicon runs no unsigned arm64 code. Owner decision
+  (2026-10-07): do what Homebrew does for relocated arm64 binaries. After the
+  archive's SHA-256 matched and it was extracted into the staging folder, and
+  before the `--version` check, Olympus runs
+  `/usr/bin/codesign --force --sign - <file>` on each of those two files.
+  Bounds: codesign only from `/usr/bin`; only files inside the verified
+  staging folder (real path checked); only on darwin-arm64; only when
+  `/usr/bin/codesign -dv` reports the file unsigned. Nothing already signed
+  is ever re-signed, including the zkAPI binaries (which are never passed to
+  codesign at all). The manifest records `adhocSigned: [...]`. If codesign is
+  missing, cannot read the signature, or fails, the Tor install stops with a
+  plain message and nothing is installed. Intel Macs and Linux never sign.
+  An ad-hoc signature only lets the kernel run the code; it adds no identity,
+  and the trust still comes from the pinned SHA-256 and the Tor signing key.
 
 ### Proof
 
@@ -224,6 +231,8 @@ injected fetch, no network, no downloaded program run): hash and size
 mismatch refused, traversal, absolute, symlink-escape (direct and chained),
 write-through-link, hard-link and device entries refused, idempotent rerun,
 interrupted install never shadowing a good one, manifest written, lease busy,
-discovery's ownership and permission checks, the transport preferring the
+discovery's ownership and permission checks, ad-hoc signing (order, bounds,
+never re-signing, codesign missing or failing) through an injected command
+runner, the transport preferring the
 managed copy, the route's local-grade boundary, and the card's progress and
 failure states.

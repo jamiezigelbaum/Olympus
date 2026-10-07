@@ -55956,6 +55956,7 @@ __export(exports_managed_tools, {
   managedToolExecutable: () => managedToolExecutable,
   installManagedTools: () => installManagedTools,
   defaultVersionCheck: () => defaultVersionCheck,
+  defaultCommandRunner: () => defaultCommandRunner,
   createManagedToolsJob: () => createManagedToolsJob,
   ManagedToolsError: () => ManagedToolsError,
   MANAGED_TOOL_PINS: () => MANAGED_TOOL_PINS,
@@ -55985,8 +55986,8 @@ import { gunzip } from "node:zlib";
 function zkapiAsset(name, sha2563, bytes) {
   return { url: `${ZKAPI_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
 }
-function torMacAsset(name, sha2563, bytes) {
-  return { url: `${TOR_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"] };
+function torMacAsset(name, sha2563, bytes, adhocSign) {
+  return { url: `${TOR_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"], ...adhocSign ? { adhocSign } : {} };
 }
 function torLinuxAsset(name, sha2563, bytes) {
   return {
@@ -56106,6 +56107,39 @@ function managedToolsState(host = {}) {
     };
   });
 }
+async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) {
+  if (platformKey !== "darwin-arm64" || !asset.adhocSign?.length)
+    return [];
+  const realStaging = realpathSync2(staging);
+  const signed = [];
+  for (const relative6 of asset.adhocSign) {
+    const file = join48(staging, relative6);
+    let real;
+    try {
+      real = realpathSync2(file);
+    } catch {
+      throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${relative6}, so nothing was installed.`, tool);
+    }
+    if (!within(realStaging, real) || !lstatSync13(file).isFile()) {
+      throw new ManagedToolsError("unsafe_archive", `The ${label} download has an unexpected ${relative6}, so nothing was installed.`, tool);
+    }
+    const inspect = await run(CODESIGN, ["-dv", real]);
+    if (inspect.error)
+      throw new ManagedToolsError("signing_failed", `Olympus could not find the macOS code-signing tool, so ${label} was not installed.`, tool);
+    if (inspect.code === 0)
+      continue;
+    if (!/code object is not signed at all/.test(`${inspect.stderr}
+${inspect.stdout}`)) {
+      throw new ManagedToolsError("signing_failed", `macOS could not read the signature of ${label}'s ${relative6}, so it was not installed.`, tool);
+    }
+    const sign = await run(CODESIGN, ["--force", "--sign", "-", real]);
+    if (sign.error || sign.code !== 0) {
+      throw new ManagedToolsError("signing_failed", `macOS could not prepare ${label} to run on this Mac (signing ${relative6} failed), so it was not installed.`, tool);
+    }
+    signed.push(relative6);
+  }
+  return signed;
+}
 async function defaultClearQuarantine(dir) {
   await new Promise((resolve8) => {
     execFile("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve8());
@@ -56204,6 +56238,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, commit) {
     }
     if ((options.platform ?? process.platform) === "darwin")
       await (options.clearQuarantine ?? defaultClearQuarantine)(staging);
+    const adhocSigned = await adhocSignUnsigned(staging, asset, platformKey, options.runCommand ?? defaultCommandRunner, pin.label, tool);
     const check = await (options.versionCheck ?? defaultVersionCheck)(join48(staging, asset.executable), {
       cwd: staging,
       env: { PATH: "/usr/bin:/bin", ...options.env?.HOME ? { HOME: options.env.HOME } : process.env.HOME ? { HOME: process.env.HOME } : {} }
@@ -56220,7 +56255,8 @@ async function installOne(tool, pin, platformKey, root, uid, options, commit) {
       platform: platformKey,
       asset: asset.url.slice(asset.url.lastIndexOf("/") + 1),
       sha256: asset.sha256,
-      installedAt: (options.now ?? (() => new Date))().toISOString()
+      installedAt: (options.now ?? (() => new Date))().toISOString(),
+      ...adhocSigned.length > 0 ? { adhocSigned } : {}
     };
     writeFileSync7(join48(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}
 `, { mode: 384, flag: "wx" });
@@ -56537,7 +56573,19 @@ function createManagedToolsJob(options = {}) {
     settled: () => current
   };
 }
-var ZKAPI_RELEASE = "https://github.com/ethereum/zkapi/releases/download/clientd-v0.1.6", ZKAPI_REQUIRED, ZKAPI_RENAME, TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultVersionCheck = (executable, options) => new Promise((resolve8) => {
+var ZKAPI_RELEASE = "https://github.com/ethereum/zkapi/releases/download/clientd-v0.1.6", ZKAPI_REQUIRED, ZKAPI_RENAME, TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve8) => {
+  execFile(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
+    if (!error) {
+      resolve8({ code: 0, stdout, stderr });
+      return;
+    }
+    const failure = error;
+    if (typeof failure.code === "string")
+      resolve8({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
+    else
+      resolve8({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
+  });
+}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve8) => {
   execFile(executable, ["--version"], { cwd: options.cwd, env: options.env, timeout: VERSION_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (error, stdout) => {
     if (error) {
       const failure = error;
@@ -56568,7 +56616,7 @@ var init_managed_tools = __esm(() => {
       version: "15.0.24",
       versionLine: /^Tor version \d+\.\d+\.\d+/,
       assets: {
-        "darwin-arm64": torMacAsset("tor-expert-bundle-macos-aarch64-15.0.24.tar.gz", "d47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644", 18724201),
+        "darwin-arm64": torMacAsset("tor-expert-bundle-macos-aarch64-15.0.24.tar.gz", "d47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644", 18724201, ["tor/tor", "tor/libevent-2.1.7.dylib"]),
         "darwin-x64": torMacAsset("tor-expert-bundle-macos-x86_64-15.0.24.tar.gz", "8acb0b590f6be34084dcb6d84009ac0c61cc7c5261b7a19d2ab94845aa9bd5b6", 19356806),
         "linux-x64": torLinuxAsset("tor-expert-bundle-linux-x86_64-15.0.24.tar.gz", "8e012ec6815d7899cb64011582e2dade88e74119c6661068a2a3252de0ccd7f2", 32348376),
         "linux-ia32": torLinuxAsset("tor-expert-bundle-linux-i686-15.0.24.tar.gz", "7537fea3478d05b8af25d7f8199c031b281f7015c32bb4177bef71f8e5100d9b", 25964591)

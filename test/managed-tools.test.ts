@@ -25,6 +25,7 @@ import {
   managedToolsRoot,
   MANAGED_TOOL_PINS,
   type ManagedToolName,
+  type ManagedToolsCommandRunner,
   type ManagedToolPin,
   type ManagedToolsInstallOptions,
   type ManagedToolsProgressEvent,
@@ -170,6 +171,7 @@ function setup(input: { tor?: Buffer; zkapi?: Buffer; platform?: NodeJS.Platform
   const fetched: string[] = [];
   const quarantined: string[] = [];
   const events: ManagedToolsProgressEvent[] = [];
+  const commands: string[] = [];
   const platform = input.platform ?? 'darwin';
   const options: ManagedToolsInstallOptions = {
     env: { HOME: home },
@@ -179,11 +181,13 @@ function setup(input: { tor?: Buffer; zkapi?: Buffer; platform?: NodeJS.Platform
     fetchImpl: servingFetch({ 'https://fixture.test/tor.tar.gz': input.served?.tor ?? tor, 'https://fixture.test/zkapi.tar.gz': input.served?.zkapi ?? zkapi }, fetched),
     versionCheck: okVersion,
     clearQuarantine: async (dir) => { quarantined.push(dir); },
+    // A Mac where every file reads as already signed: nothing is re-signed.
+    runCommand: async (command, args) => { commands.push(`${command} ${args.join(' ')}`); return { code: 0, stdout: '', stderr: 'Signature=adhoc' }; },
     onProgress: (event) => events.push(event),
     now: () => new Date('2026-10-07T12:00:00.000Z'),
   };
   const host = { env: { HOME: home }, platform, arch: options.arch!, pins };
-  return { home, tor, zkapi, pins, options, host, fetched, quarantined, events, root: managedToolsRoot(host)! };
+  return { home, tor, zkapi, pins, options, host, fetched, quarantined, events, commands, root: managedToolsRoot(host)! };
 }
 
 function leftovers(dir: string): string[] {
@@ -415,6 +419,61 @@ describe('installing', () => {
     expect(second.tools.every((tool) => tool.code === 'busy')).toBe(true);
     release();
     expect((await first).ok).toBe(true);
+  });
+
+  test('Apple silicon: the unsigned Tor files are ad-hoc signed with /usr/bin/codesign inside staging, before the version check, and recorded', async () => {
+    const f = setup();
+    const order: string[] = [];
+    const runCommand: ManagedToolsCommandRunner = async (command, args) => {
+      order.push(`${command} ${args.slice(0, -1).join(' ')} ${args.at(-1)!.split('/').slice(-3).join('/')}`);
+      expect(command).toBe('/usr/bin/codesign');
+      expect(args.at(-1)!).toMatch(/\/tor\/\.staging-[0-9a-f-]+\/tor\/(tor|libevent-2\.1\.7\.dylib)$/);
+      if (args[0] === '-dv') return { code: 1, stdout: '', stderr: `${args.at(-1)}: code object is not signed at all\n` };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const versionCheck: ManagedToolVersionCheck = async (executable, options) => { order.push('version'); return okVersion(executable, options); };
+    const result = await installManagedTools({ ...f.options, tools: ['tor'], runCommand, versionCheck });
+    expect(result.tools[0]!.outcome).toBe('installed');
+    expect(order.map((line) => line.replace(/\.staging-[0-9a-f-]+/, 'S'))).toEqual([
+      '/usr/bin/codesign -dv S/tor/tor',
+      '/usr/bin/codesign --force --sign - S/tor/tor',
+      '/usr/bin/codesign -dv S/tor/libevent-2.1.7.dylib',
+      '/usr/bin/codesign --force --sign - S/tor/libevent-2.1.7.dylib',
+      'version',
+    ]);
+    const manifest = JSON.parse(readFileSync(join(f.root, 'tor', '15.0.24', 'olympus-tool.json'), 'utf8'));
+    expect(manifest.adhocSigned).toEqual(['tor/tor', 'tor/libevent-2.1.7.dylib']);
+  });
+
+  test('already-signed files are never re-signed; zkAPI is never touched by codesign; Intel and Linux never sign', async () => {
+    const f = setup();
+    const result = await installManagedTools(f.options);
+    expect(result.ok).toBe(true);
+    // Only the two Tor files were inspected; each read as signed, so no --sign ran.
+    expect(f.commands.map((line) => line.split(' ').slice(0, 2).join(' '))).toEqual(['/usr/bin/codesign -dv', '/usr/bin/codesign -dv']);
+    expect(f.commands.some((line) => line.includes('zkapi'))).toBe(false);
+    expect(JSON.parse(readFileSync(join(f.root, 'tor', '15.0.24', 'olympus-tool.json'), 'utf8')).adhocSigned).toBeUndefined();
+    const intel = setup();
+    const intelResult = await installManagedTools({ ...intel.options, arch: 'x64', pins: { ...intel.pins, tor: { ...intel.pins.tor, assets: { 'darwin-x64': { ...intel.pins.tor.assets['darwin-arm64']! } } } }, tools: ['tor'] });
+    expect(intelResult.tools[0]!.outcome).toBe('installed');
+    expect(intel.commands).toEqual([]);
+  });
+
+  test('codesign missing or failing stops the Tor install with a plain message; nothing is installed', async () => {
+    for (const runCommand of [
+      (async () => ({ code: null, stdout: '', stderr: '', error: 'ENOENT' })) as ManagedToolsCommandRunner,
+      (async (_command: string, args: readonly string[]) => args[0] === '-dv'
+        ? { code: 1, stdout: '', stderr: 'code object is not signed at all' }
+        : { code: 1, stdout: '', stderr: 'internal error' }) as ManagedToolsCommandRunner,
+      (async () => ({ code: 1, stdout: '', stderr: 'something else entirely' })) as ManagedToolsCommandRunner,
+    ]) {
+      const f = setup();
+      const result = await installManagedTools({ ...f.options, tools: ['tor'], runCommand });
+      expect(result.tools[0]).toMatchObject({ tool: 'tor', outcome: 'failed', code: 'signing_failed' });
+      expect(result.tools[0]!.message).toContain('was not installed');
+      expect(existsSync(join(f.root, 'tor', '15.0.24'))).toBe(false);
+      expect(leftovers(join(f.root, 'tor'))).toEqual([]);
+    }
   });
 
   test('the background job: start returns at once, a second start while running is refused, and the state reads the outcome', async () => {

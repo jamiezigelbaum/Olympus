@@ -12,7 +12,9 @@
  *     `..`, no hard links, no device or FIFO entries, and no symlink that
  *     resolves outside the install;
  *   - extracts into a private staging folder, clears macOS quarantine on those
- *     verified files only, asks each program for its version (a program the
+ *     verified files only, on Apple silicon ad-hoc signs the Tor files that
+ *     `/usr/bin/codesign -dv` reports unsigned (never anything already
+ *     signed), asks each program for its version (a program the
  *     system will not run is not installed), writes a manifest, and only then
  *     renames the staging folder into `<tool>/<version>` in one step;
  *   - holds one install lease, so the dashboard and the CLI never install at
@@ -69,6 +71,12 @@ export interface ManagedToolAsset {
   readonly rename?: Readonly<Record<string, string>>;
   /** A small launcher Olympus writes (Linux Tor needs its bundled libraries on LD_LIBRARY_PATH). */
   readonly launcher?: { readonly path: string; readonly target: string; readonly libraryDir: string };
+  /**
+   * Mach-O files Olympus ad-hoc signs after verification when, and only when,
+   * `codesign -dv` reports them unsigned (Apple silicon runs no unsigned arm64
+   * code; Homebrew does the same for relocated binaries). darwin-arm64 only.
+   */
+  readonly adhocSign?: readonly string[];
 }
 
 export interface ManagedToolPin {
@@ -102,8 +110,8 @@ function zkapiAsset(name: string, sha256: string, bytes: number): ManagedToolAss
 
 const TOR_RELEASE = 'https://dist.torproject.org/torbrowser/15.0.24';
 
-function torMacAsset(name: string, sha256: string, bytes: number): ManagedToolAsset {
-  return { url: `${TOR_RELEASE}/${name}`, sha256, bytes, executable: 'tor/tor', required: ['tor/tor', 'tor/libevent-2.1.7.dylib'] };
+function torMacAsset(name: string, sha256: string, bytes: number, adhocSign?: readonly string[]): ManagedToolAsset {
+  return { url: `${TOR_RELEASE}/${name}`, sha256, bytes, executable: 'tor/tor', required: ['tor/tor', 'tor/libevent-2.1.7.dylib'], ...(adhocSign ? { adhocSign } : {}) };
 }
 
 function torLinuxAsset(name: string, sha256: string, bytes: number): ManagedToolAsset {
@@ -134,7 +142,7 @@ export const MANAGED_TOOL_PINS: Readonly<Record<ManagedToolName, ManagedToolPin>
     version: '15.0.24',
     versionLine: /^Tor version \d+\.\d+\.\d+/,
     assets: {
-      'darwin-arm64': torMacAsset('tor-expert-bundle-macos-aarch64-15.0.24.tar.gz', 'd47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644', 18_724_201),
+      'darwin-arm64': torMacAsset('tor-expert-bundle-macos-aarch64-15.0.24.tar.gz', 'd47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644', 18_724_201, ['tor/tor', 'tor/libevent-2.1.7.dylib']),
       'darwin-x64': torMacAsset('tor-expert-bundle-macos-x86_64-15.0.24.tar.gz', '8acb0b590f6be34084dcb6d84009ac0c61cc7c5261b7a19d2ab94845aa9bd5b6', 19_356_806),
       'linux-x64': torLinuxAsset('tor-expert-bundle-linux-x86_64-15.0.24.tar.gz', '8e012ec6815d7899cb64011582e2dade88e74119c6661068a2a3252de0ccd7f2', 32_348_376),
       'linux-ia32': torLinuxAsset('tor-expert-bundle-linux-i686-15.0.24.tar.gz', '7537fea3478d05b8af25d7f8199c031b281f7015c32bb4177bef71f8e5100d9b', 25_964_591),
@@ -216,6 +224,8 @@ interface ToolManifest {
   asset: string;
   sha256: string;
   installedAt: string;
+  /** Files Olympus ad-hoc signed after verification (darwin-arm64 Tor); absent when none. */
+  adhocSigned?: string[];
 }
 
 function currentUid(host: ManagedToolsHost): number | undefined {
@@ -330,6 +340,7 @@ export type ManagedToolsErrorCode =
   | 'unsafe_archive'
   | 'archive_incomplete'
   | 'will_not_run'
+  | 'signing_failed'
   | 'install_failed';
 
 export class ManagedToolsError extends Error {
@@ -371,10 +382,64 @@ export interface ManagedToolsInstallOptions extends ManagedToolsHost {
   versionCheck?: ManagedToolVersionCheck;
   /** Clears com.apple.quarantine on the verified staging folder (macOS). */
   clearQuarantine?: (dir: string) => Promise<void>;
+  /** Runs a system command (codesign); the seam tests replace. */
+  runCommand?: ManagedToolsCommandRunner;
   now?: () => Date;
   /** Which tools; default both. */
   tools?: readonly ManagedToolName[];
   signal?: AbortSignal;
+}
+
+export type ManagedToolsCommandRunner = (command: string, args: readonly string[]) => Promise<{ code: number | null; stdout: string; stderr: string; error?: string }>;
+
+export const defaultCommandRunner: ManagedToolsCommandRunner = (command, args) => new Promise((resolve) => {
+  execFile(command, [...args], { timeout: 60_000, maxBuffer: 256 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
+    if (!error) {
+      resolve({ code: 0, stdout, stderr });
+      return;
+    }
+    const failure = error as NodeJS.ErrnoException & { code?: number | string };
+    // A spawn failure (ENOENT: no codesign) has a string code and no exit status.
+    if (typeof failure.code === 'string') resolve({ code: null, stdout: stdout ?? '', stderr: stderr ?? '', error: failure.code });
+    else resolve({ code: typeof failure.code === 'number' ? failure.code : 1, stdout: stdout ?? '', stderr: stderr ?? '' });
+  });
+});
+
+const CODESIGN = '/usr/bin/codesign';
+
+/**
+ * Ad-hoc signs the asset's listed Mach-O files in the verified staging folder
+ * when codesign reports them unsigned; anything already signed is left alone.
+ * Returns the files signed. darwin-arm64 only; codesign only from /usr/bin.
+ */
+async function adhocSignUnsigned(staging: string, asset: ManagedToolAsset, platformKey: ManagedToolPlatform, run: ManagedToolsCommandRunner, label: string, tool: ManagedToolName): Promise<string[]> {
+  if (platformKey !== 'darwin-arm64' || !asset.adhocSign?.length) return [];
+  const realStaging = realpathSync(staging);
+  const signed: string[] = [];
+  for (const relative of asset.adhocSign) {
+    const file = join(staging, relative);
+    let real: string;
+    try {
+      real = realpathSync(file);
+    } catch {
+      throw new ManagedToolsError('archive_incomplete', `The ${label} download is missing ${relative}, so nothing was installed.`, tool);
+    }
+    if (!within(realStaging, real) || !lstatSync(file).isFile()) {
+      throw new ManagedToolsError('unsafe_archive', `The ${label} download has an unexpected ${relative}, so nothing was installed.`, tool);
+    }
+    const inspect = await run(CODESIGN, ['-dv', real]);
+    if (inspect.error) throw new ManagedToolsError('signing_failed', `Olympus could not find the macOS code-signing tool, so ${label} was not installed.`, tool);
+    if (inspect.code === 0) continue; // already signed: never re-signed
+    if (!/code object is not signed at all/.test(`${inspect.stderr}\n${inspect.stdout}`)) {
+      throw new ManagedToolsError('signing_failed', `macOS could not read the signature of ${label}'s ${relative}, so it was not installed.`, tool);
+    }
+    const sign = await run(CODESIGN, ['--force', '--sign', '-', real]);
+    if (sign.error || sign.code !== 0) {
+      throw new ManagedToolsError('signing_failed', `macOS could not prepare ${label} to run on this Mac (signing ${relative} failed), so it was not installed.`, tool);
+    }
+    signed.push(relative);
+  }
+  return signed;
 }
 
 export const defaultVersionCheck: ManagedToolVersionCheck = (executable, options) => new Promise((resolve) => {
@@ -502,6 +567,7 @@ async function installOne(
       }
     }
     if ((options.platform ?? process.platform) === 'darwin') await (options.clearQuarantine ?? defaultClearQuarantine)(staging);
+    const adhocSigned = await adhocSignUnsigned(staging, asset, platformKey, options.runCommand ?? defaultCommandRunner, pin.label, tool);
     const check = await (options.versionCheck ?? defaultVersionCheck)(join(staging, asset.executable), {
       cwd: staging,
       env: { PATH: '/usr/bin:/bin', ...(options.env?.HOME ? { HOME: options.env.HOME } : process.env.HOME ? { HOME: process.env.HOME } : {}) },
@@ -518,6 +584,7 @@ async function installOne(
       asset: asset.url.slice(asset.url.lastIndexOf('/') + 1),
       sha256: asset.sha256,
       installedAt: (options.now ?? (() => new Date()))().toISOString(),
+      ...(adhocSigned.length > 0 ? { adhocSigned } : {}),
     };
     writeFileSync(join(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
     // Publish: one rename. Whatever stood at the version folder failed
