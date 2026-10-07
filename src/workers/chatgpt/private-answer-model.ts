@@ -358,7 +358,14 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       const unanswered = [...result.unanswered];
       if (unreadable > 0) unanswered.push(unreadableNote(unreadable));
-      return { answer: withoutEvidenceMarkers(result.answer), citations, unanswered };
+      // The consult snapshot (verdict and the fitted pack) rides along for
+      // the jobs engine; it is never part of what the panel decrypts.
+      return {
+        answer: withoutEvidenceMarkers(result.answer),
+        citations,
+        unanswered,
+        ...(result.consult ? { consult: { verdict: result.consult.verdict, pack: result.consult.pack } } : {}),
+      };
     },
     async reset() {
       await model?.stop();

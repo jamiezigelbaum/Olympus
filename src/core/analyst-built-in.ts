@@ -88,6 +88,12 @@ export interface BuiltInAnalystModel extends AnalystModel {
   status(): BuiltInReasoningStatus;
   /** Stops the model server process (it restarts on the next request). */
   stop(): Promise<void>;
+  /**
+   * The verified model file and server binary this model runs, once they are
+   * installed in this process (undefined before that). The consult writer
+   * starts its own server process on the same files (consult-writer.ts).
+   */
+  installedRuntime?(): InstalledBuiltInReasoning | undefined;
 }
 
 /**
@@ -224,6 +230,9 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
     },
     async stop() {
       await server?.stop();
+    },
+    installedRuntime() {
+      return installed;
     },
     async complete(request: AnalystModelRequest): Promise<AnalystModelCompletion> {
       let paths = installed;
@@ -443,6 +452,29 @@ export interface PrivateAnswer {
   unanswered: string[];
   /** The model that wrote the answer, e.g. `built_in/qwen3.5-4b-q4_k_m-e87f176`. */
   modelId: string;
+  /**
+   * Internal metadata for the consult trigger and the outbound gate (design
+   * frontier-consult-lane.md §A.2–A.3, stage C4b): the model's own verdict
+   * on its answer and the exact evidence pack its main call received, after
+   * relevance selection, depth reads and fitting. Never part of the answer
+   * the panel shows; it stays in this process. Absent from a stub answer,
+   * which then never triggers a consult.
+   */
+  consult?: PrivateAnswerConsultMetadata;
+}
+
+/** The model's verdict on its own answer, carried internally; never in the panel plaintext. */
+export interface PrivateAnswerVerdict {
+  /** The model's `"sufficient"` field: true when it called its answer complete; undefined when it did not say. */
+  readonly sufficient: boolean | undefined;
+  /** The answer is the fixed "these items do not answer" text (an ungrounded or failed answer). */
+  readonly noAnswer: boolean;
+}
+
+export interface PrivateAnswerConsultMetadata {
+  readonly verdict: PrivateAnswerVerdict;
+  /** The fitted pack exactly as the main model call received it (deep-frozen). */
+  readonly pack: EvidencePack;
 }
 
 export interface AnswerPrivatelyOptions {
@@ -527,11 +559,19 @@ export async function answerPrivately(
   // plainly that these items did not answer the question. An answer that
   // reproduces the evidence blocks' formatting (field labels, provenance
   // JSON) is a failed answer, not an answer, and is reported the same way.
+  const frozenPack = deepFreeze(structuredClone(pack));
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
-    return { answer: PRIVATE_ANSWER_NOT_FOUND, citations: [], unanswered: cleanUnanswered(unanswered, '', { maxChars: gapChars, complete: false }), modelId };
+    return {
+      answer: PRIVATE_ANSWER_NOT_FOUND,
+      citations: [],
+      unanswered: cleanUnanswered(unanswered, '', { maxChars: gapChars, complete: false }),
+      modelId,
+      consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer: true }), pack: frozenPack }),
+    };
   }
   return {
     answer: result.answer,
+    consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer: false }), pack: frozenPack }),
     unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
@@ -549,6 +589,14 @@ export async function answerPrivately(
 
 // The Analyst's default answer budget (analyst.ts), which sizes the schema's gaps when no budget is given.
 const DEFAULT_PRIVATE_ANSWER_CHARS = 1_600;
+
+/** Freezes a plain-data value and everything reachable from it (the consult snapshot is immutable). */
+export function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const entry of Object.values(value as Record<string, unknown>)) deepFreeze(entry);
+  return value;
+}
 
 /** The model, recording whether its last reply called the answer complete (`"sufficient": true`). */
 function withVerdict(model: AnalystModel, verdict: { sufficient: boolean | undefined }): AnalystModel {

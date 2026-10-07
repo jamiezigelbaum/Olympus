@@ -72,6 +72,8 @@
  * long it keeps polling). That inference is accepted for version one.
  */
 
+import type { EvidencePack } from '../../core/contracts.ts';
+
 export const PRIVATE_ANSWER_RESOURCE_URI = 'ui://olympus/private-answer';
 export const PRIVATE_ANSWER_META_KEY = 'olympus/privateAnswer';
 /** A job lives this long from the search that created it, collected or not. */
@@ -237,6 +239,31 @@ export interface PrivateAnswerModelCall {
 }
 
 /**
+ * What the model returns for one answer. `consult` is internal metadata for
+ * the consult trigger and the outbound gate (design frontier-consult-lane.md
+ * §A.2–A.3, stage C4b): the model's verdict on its own answer and the exact
+ * evidence pack its main call received. It never enters the plaintext the
+ * panel decrypts; a model that does not supply it never triggers a consult.
+ */
+export interface PrivateAnswerModelResult {
+  answer: string;
+  citations: PrivateAnswerSourceCitation[];
+  unanswered?: string[];
+  consult?: PrivateAnswerConsultSnapshotInput;
+}
+
+export interface PrivateAnswerConsultSnapshotInput {
+  readonly verdict: {
+    /** The model's own "sufficient" verdict; undefined when it did not say. */
+    readonly sufficient: boolean | undefined;
+    /** The answer is the fixed "these items do not answer" text. */
+    readonly noAnswer: boolean;
+  };
+  /** The fitted pack exactly as the model's main call received it (frozen). */
+  readonly pack: EvidencePack;
+}
+
+/**
  * The private answer model, provided by the private-model lane (an
  * AnalystModel named `built_in`). This lane codes against this interface and
  * ships an unavailable stub until that lane lands.
@@ -249,7 +276,7 @@ export interface PrivateAnswerModel {
     signal?: AbortSignal,
     observe?: PrivateAnswerObserver,
     options?: { detail?: PrivateAnswerDetail },
-  ): Promise<{ answer: string; citations: PrivateAnswerSourceCitation[]; unanswered?: string[] }>;
+  ): Promise<PrivateAnswerModelResult>;
   /**
    * Kill or reset the model runtime (its child process or session). Called
    * when an analysis passes its hard deadline, after the engine has already
