@@ -3725,6 +3725,307 @@ var init_http_timeout = __esm(() => {
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
+// src/core/worker-auth.ts
+import { readFileSync as readFileSync6, statSync as statSync3 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join4 } from "node:path";
+function workerAuthTokenFromConfig(config, options = {}) {
+  if (config.worker.authTokenSecretRefUnresolved)
+    return;
+  return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
+}
+function workerAuthTokenProvider(config, options = {}) {
+  return () => workerAuthTokenFromConfig(config, options);
+}
+function withWorkerAuthHeader(init, authToken) {
+  const token = optionalToken(authToken);
+  if (!token)
+    return init;
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  return {
+    ...init,
+    headers
+  };
+}
+function workerAuthTokenFromSetupEnv(options = {}) {
+  return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
+}
+function applyWorkerSetupEnv(options = {}) {
+  const targetEnv = options.env ?? process.env;
+  const path = workerSetupEnvPath(options);
+  const setupEnv = readWorkerSetupEnv({ ...options, workerEnvPath: path });
+  if (!setupEnv)
+    return { loaded: false, path, keys: [] };
+  const keys = [];
+  for (const [key, value] of Object.entries(setupEnv)) {
+    if (targetEnv[key]?.trim())
+      continue;
+    targetEnv[key] = value;
+    keys.push(key);
+  }
+  return { loaded: true, path, keys };
+}
+function readWorkerSetupEnv(options = {}) {
+  const path = workerSetupEnvPath(options);
+  try {
+    const stat2 = statSync3(path, { bigint: true });
+    if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
+      return;
+    const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
+    const cached = setupEnvCache.get(path);
+    if (cached?.key === key)
+      return { ...cached.env };
+    const env = parseWorkerSetupEnv(readFileSync6(path, "utf8"));
+    setupEnvCache.set(path, { key, env });
+    return { ...env };
+  } catch {
+    return;
+  }
+}
+function environmentWithWorkerSetupEnv(options = {}) {
+  const env = options.env ?? process.env;
+  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
+    return env;
+  const setupEnv = readWorkerSetupEnv(options);
+  if (!setupEnv)
+    return env;
+  const merged = { ...setupEnv };
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && value.trim() !== "")
+      merged[key] = value;
+    else if (!(key in setupEnv))
+      merged[key] = value;
+  }
+  return merged;
+}
+function workerSetupEnvPath(options = {}) {
+  const env = options.env ?? process.env;
+  return options.workerEnvPath ?? join4(options.homeDir ?? optionalToken(env.HOME) ?? homedir3(), ".config", "olympus", "worker.env");
+}
+function isWorkerAuthTokenPlaceholder(value) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "replace-with-generated-token" || normalized === "change-me" || normalized === "changeme" || normalized === "placeholder";
+}
+function normalizeWorkerAuthToken(value) {
+  const trimmed = value?.trim();
+  if (isWorkerAuthTokenPlaceholder(trimmed))
+    return;
+  return trimmed ? trimmed : undefined;
+}
+function optionalToken(value) {
+  return normalizeWorkerAuthToken(value);
+}
+function parseWorkerSetupEnv(text) {
+  const env = {};
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#"))
+      continue;
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed);
+    if (!match)
+      continue;
+    env[match[1]] = unquoteEnvValue(match[2] ?? "");
+  }
+  return env;
+}
+function unquoteEnvValue(value) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+var setupEnvCache;
+var init_worker_auth = __esm(() => {
+  setupEnvCache = new Map;
+});
+
+// src/core/remote-public-url.ts
+function parseRemotePublicBaseUrl(value, installId) {
+  const raw = value?.trim();
+  if (!raw)
+    return { enabled: false, reason: "not_configured" };
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} is not a URL.` };
+  }
+  if (url.username || url.password) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not carry credentials.` };
+  }
+  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not have a query or fragment.` };
+  }
+  if (url.pathname !== "/" && url.pathname !== "") {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must be an origin such as https://example.com, with no path.` };
+  }
+  const secure = url.protocol === "https:";
+  if (!secure && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname))) {
+    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must use https (plain http is allowed only on a loopback host).` };
+  }
+  const origin = url.origin;
+  return {
+    enabled: true,
+    urls: {
+      origin,
+      host: url.host.toLowerCase(),
+      issuer: origin,
+      resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
+      protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
+      secure,
+      ...installId ? { installId } : {}
+    }
+  };
+}
+var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
+var init_remote_public_url = __esm(() => {
+  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/core/remote-access.ts
+import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
+import {
+  chmodSync as raChmodSync,
+  lstatSync as raLstatSync,
+  mkdirSync as raMkdirSync,
+  readFileSync as raReadFileSync,
+  renameSync as raRenameSync,
+  statSync as raStatSync,
+  unlinkSync as raUnlinkSync,
+  writeFileSync as raWriteFileSync
+} from "node:fs";
+import { homedir as raHomedir } from "node:os";
+import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
+function resolveRemoteAccessMode(remote) {
+  if (!remote?.enabled)
+    return { mode: "off" };
+  const { relayHost, publicBaseUrl } = remote;
+  if (relayHost && publicBaseUrl) {
+    return {
+      mode: "error",
+      error: "remote.relayHost and remote.publicBaseUrl are mutually exclusive: the relay sets the public address itself. " + "Unset one of them (openclaw config unset plugins.entries.olympus.config.remote.publicBaseUrl, or .relayHost)."
+    };
+  }
+  if (publicBaseUrl) {
+    const parsed = parseRemotePublicBaseUrl(publicBaseUrl);
+    if (!parsed.enabled) {
+      return { mode: "error", error: `remote.publicBaseUrl is invalid: ${(parsed.detail ?? "not a URL").replace(REMOTE_PUBLIC_BASE_URL_ENV, "it")}` };
+    }
+    return { mode: "manual", publicBaseUrl: parsed.urls.origin };
+  }
+  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
+  if (!DNS_NAME.test(host)) {
+    return { mode: "error", error: "remote.relayHost must be a DNS name such as mcp.olympusplugin.ai, with no scheme, port or path." };
+  }
+  return { mode: "relay", relayHost: host };
+}
+function olympusDataDir(env = process.env) {
+  const configured = env.XDG_DATA_HOME?.trim();
+  const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), ".local", "share");
+  if (!raIsAbsolute(dataRoot))
+    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
+  return raJoin(dataRoot, "openclaw", "olympus");
+}
+function remoteAccessDir(env = process.env) {
+  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
+}
+function ensureRemoteAccessDir(dir) {
+  raMkdirSync(dir, { recursive: true, mode: 448 });
+  const stat2 = raLstatSync(dir);
+  if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid()) {
+    throw new Error("the remote access state directory must be a directory owned by this user");
+  }
+  raChmodSync(dir, 448);
+  return dir;
+}
+function writePrivateText(path, text) {
+  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
+  raWriteFileSync(temporary, text, { mode: 384, flag: "wx" });
+  raChmodSync(temporary, 384);
+  raRenameSync(temporary, path);
+}
+function readPrivateFile(path) {
+  try {
+    const stat2 = raLstatSync(path);
+    if (!stat2.isFile() || typeof process.getuid === "function" && stat2.uid !== process.getuid())
+      return;
+    return raReadFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+}
+function emptyRemoteAccessStatus(mode, now = new Date) {
+  return {
+    schema: REMOTE_ACCESS_STATUS_SCHEMA,
+    updated_at: now.toISOString(),
+    mode,
+    error: null,
+    relay_host: null,
+    local_url: null,
+    public_base_url: null,
+    instance_id: null,
+    pid: null,
+    install_id: null,
+    relay: null,
+    last_connected_at: null
+  };
+}
+function writeRemoteAccessStatus(dir, status) {
+  ensureRemoteAccessDir(dir);
+  writePrivateText(raJoin(dir, STATUS_FILE), `${JSON.stringify(status, null, 2)}
+`);
+}
+function parseStatus(text) {
+  try {
+    const value = JSON.parse(text);
+    return value && value.schema === REMOTE_ACCESS_STATUS_SCHEMA ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function readRemoteAccessStatus(dir) {
+  const text = readPrivateFile(raJoin(dir, STATUS_FILE));
+  return text === undefined ? undefined : parseStatus(text);
+}
+function originOf(value) {
+  if (!value?.trim())
+    return;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return;
+  }
+}
+function loopbackWorkerOrigin(value) {
+  const origin = originOf(value);
+  if (!origin)
+    return;
+  const url = new URL(origin);
+  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
+}
+function relayProcessRunning(dir, isAlive = processIsAlive) {
+  const status = readRemoteAccessStatus(dir);
+  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
+}
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2", REMOTE_ACCESS_DIR_NAME = "connect-relay", STATUS_FILE = "status.json", DNS_NAME, LOOPBACK_HOSTNAMES2, DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai";
+var init_remote_access = __esm(() => {
+  init_remote_public_url();
+  init_worker_auth();
+  DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
 // src/core/openclaw-executable.ts
 import { accessSync as accessSync2, constants as fsConstants, statSync as statSync8 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
@@ -4002,6 +4303,7 @@ var init_manifest = __esm(() => {
     pooling: "model",
     queryPrefix: "task: search result | query: ",
     documentPrefix: "title: {title} | text: ",
+    vision: { tokensPerImage: 140 },
     model: {
       name: "embeddinggemma-2-740m.litertlm",
       url: `${EMBEDDINGGEMMA_2_BASE}/embeddinggemma-2-740m.litertlm`,
@@ -8991,6 +9293,11 @@ var init_corpus_adapter = __esm(() => {
   init_corpus();
   init_source_corpus_registry();
 });
+// src/core/media-cache.ts
+var init_media_cache = __esm(() => {
+  init_remote_access();
+});
+
 // src/workers/dropbox-files/content-policy.ts
 var init_content_policy = () => {};
 
@@ -9342,6 +9649,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
 var init_local_index = __esm(() => {
   init_operation_error();
+  init_media_cache();
   init_sqlite_migrations();
   init_engine();
   init_tier_ledger();
@@ -9584,7 +9892,8 @@ class HelperProcess {
       cacheDir: options.cacheDir,
       threads: options.threads,
       device,
-      maxInputTokens: options.maxInputTokens
+      maxInputTokens: options.maxInputTokens,
+      ...options.visionTokensPerImage !== undefined ? { visionTokensPerImage: options.visionTokensPerImage } : {}
     };
     const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -9652,7 +9961,7 @@ class HelperProcess {
       });
     });
   }
-  embed(texts) {
+  embed(items) {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
@@ -9662,8 +9971,9 @@ class HelperProcess {
         this.exited = true;
         this.failAll(new Error("The built-in search model stopped responding and was restarted."));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolve3, reject, count: texts.length, timer });
-      this.child.stdin.write(`${JSON.stringify({ id, texts })}
+      this.pending.set(id, { resolve: resolve3, reject, count: items.length, timer });
+      const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
+      this.child.stdin.write(`${JSON.stringify(request)}
 `);
     });
   }
@@ -13190,120 +13500,8 @@ var SYSTEM_CLOCK = Object.freeze({
   now: () => new Date
 });
 
-// src/core/worker-auth.ts
-import { readFileSync as readFileSync6, statSync as statSync3 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join4 } from "node:path";
-function workerAuthTokenFromConfig(config, options = {}) {
-  if (config.worker.authTokenSecretRefUnresolved)
-    return;
-  return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
-}
-function workerAuthTokenProvider(config, options = {}) {
-  return () => workerAuthTokenFromConfig(config, options);
-}
-function withWorkerAuthHeader(init, authToken) {
-  const token = optionalToken(authToken);
-  if (!token)
-    return init;
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  return {
-    ...init,
-    headers
-  };
-}
-function workerAuthTokenFromSetupEnv(options = {}) {
-  return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
-}
-function applyWorkerSetupEnv(options = {}) {
-  const targetEnv = options.env ?? process.env;
-  const path = workerSetupEnvPath(options);
-  const setupEnv = readWorkerSetupEnv({ ...options, workerEnvPath: path });
-  if (!setupEnv)
-    return { loaded: false, path, keys: [] };
-  const keys = [];
-  for (const [key, value] of Object.entries(setupEnv)) {
-    if (targetEnv[key]?.trim())
-      continue;
-    targetEnv[key] = value;
-    keys.push(key);
-  }
-  return { loaded: true, path, keys };
-}
-function readWorkerSetupEnv(options = {}) {
-  const path = workerSetupEnvPath(options);
-  try {
-    const stat2 = statSync3(path, { bigint: true });
-    if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
-      return;
-    const key = `${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeNs}:${stat2.ctimeNs}:${stat2.mode}`;
-    const cached = setupEnvCache.get(path);
-    if (cached?.key === key)
-      return { ...cached.env };
-    const env = parseWorkerSetupEnv(readFileSync6(path, "utf8"));
-    setupEnvCache.set(path, { key, env });
-    return { ...env };
-  } catch {
-    return;
-  }
-}
-var setupEnvCache = new Map;
-function environmentWithWorkerSetupEnv(options = {}) {
-  const env = options.env ?? process.env;
-  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
-    return env;
-  const setupEnv = readWorkerSetupEnv(options);
-  if (!setupEnv)
-    return env;
-  const merged = { ...setupEnv };
-  for (const [key, value] of Object.entries(env)) {
-    if (value !== undefined && value.trim() !== "")
-      merged[key] = value;
-    else if (!(key in setupEnv))
-      merged[key] = value;
-  }
-  return merged;
-}
-function workerSetupEnvPath(options = {}) {
-  const env = options.env ?? process.env;
-  return options.workerEnvPath ?? join4(options.homeDir ?? optionalToken(env.HOME) ?? homedir3(), ".config", "olympus", "worker.env");
-}
-function isWorkerAuthTokenPlaceholder(value) {
-  const normalized = value?.trim().toLowerCase();
-  return normalized === "replace-with-generated-token" || normalized === "change-me" || normalized === "changeme" || normalized === "placeholder";
-}
-function normalizeWorkerAuthToken(value) {
-  const trimmed = value?.trim();
-  if (isWorkerAuthTokenPlaceholder(trimmed))
-    return;
-  return trimmed ? trimmed : undefined;
-}
-function optionalToken(value) {
-  return normalizeWorkerAuthToken(value);
-}
-function parseWorkerSetupEnv(text) {
-  const env = {};
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#"))
-      continue;
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed);
-    if (!match)
-      continue;
-    env[match[1]] = unquoteEnvValue(match[2] ?? "");
-  }
-  return env;
-}
-function unquoteEnvValue(value) {
-  const trimmed = value.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
 // src/core/email.ts
+init_worker_auth();
 var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512;
 var MAX_EMAIL_WORKER_ERROR_BODY_LENGTH = 8 * 1024;
 var PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
@@ -14276,12 +14474,16 @@ function shouldExposeOperation(operation, context) {
   return true;
 }
 
+// src/native-plugin.ts
+init_worker_auth();
+
 // src/core/native-worker-service.ts
 init_config();
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { statSync as statSync4 } from "node:fs";
 import { basename, delimiter, isAbsolute as isAbsolute4, join as join5 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+init_worker_auth();
 var SERVICE_ID3 = "olympus-worker";
 var SERVICE_LABEL = "worker";
 var READINESS_PROBE_TIMEOUT_MS = 1000;
@@ -14581,6 +14783,7 @@ import { readFileSync as readFileSync7, statSync as statSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { isAbsolute as isAbsolute5, join as join6 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
+init_worker_auth();
 var SERVICE_ID4 = "olympus-telegram-capture";
 var SERVICE_LABEL2 = "Telegram capture service";
 var DEFAULT_STARTUP_TIMEOUT_MS = 30000;
@@ -14871,6 +15074,7 @@ import { randomUUID as randomUUID6 } from "node:crypto";
 import { readFileSync as readFileSync9, statSync as statSync7 } from "node:fs";
 import { delimiter as delimiter2, dirname as dirname6, isAbsolute as isAbsolute7, join as join9 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
+init_worker_auth();
 
 // src/workers/dashboard/embedding-runtime.ts
 init_model_transport();
@@ -15108,193 +15312,9 @@ import { randomUUID as relayRandomUUID } from "node:crypto";
 import { statSync as relayStatSync } from "node:fs";
 import { isAbsolute as relayIsAbsolute } from "node:path";
 import { fileURLToPath as relayFileURLToPath } from "node:url";
-
-// src/core/remote-access.ts
-import { randomBytes as raRandomBytes, timingSafeEqual as raTimingSafeEqual } from "node:crypto";
-import {
-  chmodSync as raChmodSync,
-  lstatSync as raLstatSync,
-  mkdirSync as raMkdirSync,
-  readFileSync as raReadFileSync,
-  renameSync as raRenameSync,
-  statSync as raStatSync,
-  unlinkSync as raUnlinkSync,
-  writeFileSync as raWriteFileSync
-} from "node:fs";
-import { homedir as raHomedir } from "node:os";
-import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
-
-// src/core/remote-public-url.ts
-var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL";
-var REMOTE_MCP_RESOURCE_PATH = "/mcp";
-var LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
-function parseRemotePublicBaseUrl(value, installId) {
-  const raw = value?.trim();
-  if (!raw)
-    return { enabled: false, reason: "not_configured" };
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} is not a URL.` };
-  }
-  if (url.username || url.password) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not carry credentials.` };
-  }
-  if (url.search || url.hash || raw.includes("?") || raw.includes("#")) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must not have a query or fragment.` };
-  }
-  if (url.pathname !== "/" && url.pathname !== "") {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must be an origin such as https://example.com, with no path.` };
-  }
-  const secure = url.protocol === "https:";
-  if (!secure && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname))) {
-    return { enabled: false, reason: "invalid", detail: `${REMOTE_PUBLIC_BASE_URL_ENV} must use https (plain http is allowed only on a loopback host).` };
-  }
-  const origin = url.origin;
-  return {
-    enabled: true,
-    urls: {
-      origin,
-      host: url.host.toLowerCase(),
-      issuer: origin,
-      resource: `${origin}${REMOTE_MCP_RESOURCE_PATH}`,
-      protectedResourceMetadataUrl: `${origin}/.well-known/oauth-protected-resource${REMOTE_MCP_RESOURCE_PATH}`,
-      secure,
-      ...installId ? { installId } : {}
-    }
-  };
-}
-
-// src/core/remote-access.ts
-var REMOTE_ACCESS_STATUS_SCHEMA = "olympus.remote-access.status.v2";
-var REMOTE_ACCESS_DIR_NAME = "connect-relay";
-var STATUS_FILE = "status.json";
-var DNS_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
-var LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
-var DEFAULT_RELAY_HOST = "mcp.olympusplugin.ai";
-function resolveRemoteAccessMode(remote) {
-  if (!remote?.enabled)
-    return { mode: "off" };
-  const { relayHost, publicBaseUrl } = remote;
-  if (relayHost && publicBaseUrl) {
-    return {
-      mode: "error",
-      error: "remote.relayHost and remote.publicBaseUrl are mutually exclusive: the relay sets the public address itself. " + "Unset one of them (openclaw config unset plugins.entries.olympus.config.remote.publicBaseUrl, or .relayHost)."
-    };
-  }
-  if (publicBaseUrl) {
-    const parsed = parseRemotePublicBaseUrl(publicBaseUrl);
-    if (!parsed.enabled) {
-      return { mode: "error", error: `remote.publicBaseUrl is invalid: ${(parsed.detail ?? "not a URL").replace(REMOTE_PUBLIC_BASE_URL_ENV, "it")}` };
-    }
-    return { mode: "manual", publicBaseUrl: parsed.urls.origin };
-  }
-  const host = (relayHost ?? DEFAULT_RELAY_HOST).toLowerCase();
-  if (!DNS_NAME.test(host)) {
-    return { mode: "error", error: "remote.relayHost must be a DNS name such as mcp.olympusplugin.ai, with no scheme, port or path." };
-  }
-  return { mode: "relay", relayHost: host };
-}
-function olympusDataDir(env = process.env) {
-  const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || raJoin(env.HOME?.trim() || raHomedir(), ".local", "share");
-  if (!raIsAbsolute(dataRoot))
-    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
-  return raJoin(dataRoot, "openclaw", "olympus");
-}
-function remoteAccessDir(env = process.env) {
-  return raJoin(olympusDataDir(env), REMOTE_ACCESS_DIR_NAME);
-}
-function ensureRemoteAccessDir(dir) {
-  raMkdirSync(dir, { recursive: true, mode: 448 });
-  const stat2 = raLstatSync(dir);
-  if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid()) {
-    throw new Error("the remote access state directory must be a directory owned by this user");
-  }
-  raChmodSync(dir, 448);
-  return dir;
-}
-function writePrivateText(path, text) {
-  const temporary = `${path}.tmp.${process.pid}.${raRandomBytes(8).toString("hex")}`;
-  raWriteFileSync(temporary, text, { mode: 384, flag: "wx" });
-  raChmodSync(temporary, 384);
-  raRenameSync(temporary, path);
-}
-function readPrivateFile(path) {
-  try {
-    const stat2 = raLstatSync(path);
-    if (!stat2.isFile() || typeof process.getuid === "function" && stat2.uid !== process.getuid())
-      return;
-    return raReadFileSync(path, "utf8");
-  } catch {
-    return;
-  }
-}
-function emptyRemoteAccessStatus(mode, now = new Date) {
-  return {
-    schema: REMOTE_ACCESS_STATUS_SCHEMA,
-    updated_at: now.toISOString(),
-    mode,
-    error: null,
-    relay_host: null,
-    local_url: null,
-    public_base_url: null,
-    instance_id: null,
-    pid: null,
-    install_id: null,
-    relay: null,
-    last_connected_at: null
-  };
-}
-function writeRemoteAccessStatus(dir, status) {
-  ensureRemoteAccessDir(dir);
-  writePrivateText(raJoin(dir, STATUS_FILE), `${JSON.stringify(status, null, 2)}
-`);
-}
-function parseStatus(text) {
-  try {
-    const value = JSON.parse(text);
-    return value && value.schema === REMOTE_ACCESS_STATUS_SCHEMA ? value : undefined;
-  } catch {
-    return;
-  }
-}
-function readRemoteAccessStatus(dir) {
-  const text = readPrivateFile(raJoin(dir, STATUS_FILE));
-  return text === undefined ? undefined : parseStatus(text);
-}
-function originOf(value) {
-  if (!value?.trim())
-    return;
-  try {
-    const url = new URL(value.trim());
-    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
-  } catch {
-    return;
-  }
-}
-function loopbackWorkerOrigin(value) {
-  const origin = originOf(value);
-  if (!origin)
-    return;
-  const url = new URL(origin);
-  return url.protocol === "http:" && LOOPBACK_HOSTNAMES2.has(url.hostname) ? origin : undefined;
-}
-function relayProcessRunning(dir, isAlive = processIsAlive) {
-  const status = readRemoteAccessStatus(dir);
-  return status?.mode === "relay" && status.pid !== null && status.relay?.state !== "stopped" && isAlive(status.pid);
-}
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-
-// src/core/native-relay-service.ts
+init_remote_access();
+init_remote_public_url();
+init_worker_auth();
 var SERVICE_ID7 = "olympus-remote-relay";
 var SERVICE_LABEL5 = "remote relay";
 var DEFAULT_STARTUP_TIMEOUT_MS4 = 15000;
@@ -15495,6 +15515,7 @@ function relayConfigRecord(value) {
 // src/workers/source-watch-runtime.ts
 init_openclaw_executable();
 init_http_timeout();
+init_worker_auth();
 init_source_corpus_registry();
 init_router();
 var SOURCE_WATCH_DELIVERY_ROUTE = "/plugins/olympus/watch-delivery";
@@ -15541,6 +15562,9 @@ import { createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:c
 
 // src/core/request-peer.ts
 var peers = new WeakMap;
+
+// src/workers/http.ts
+init_worker_auth();
 
 // src/core/dashboard-launch.ts
 import { createHash, randomBytes as randomBytes2 } from "node:crypto";
@@ -15713,6 +15737,7 @@ import { basename as basename3, dirname as dirname10, isAbsolute as isAbsolute10
 
 // src/core/engine-children.ts
 init_atomic_file();
+init_remote_access();
 import { dirname as dirname7, join as join11 } from "node:path";
 function engineChildrenPath(env = process.env) {
   return join11(olympusDataDir(env), "engine", "children.json");
@@ -15723,13 +15748,16 @@ var PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UT
 
 // src/core/engine-service.ts
 init_operation_error();
+init_remote_access();
 init_sovereignty();
+init_worker_auth();
 
 // src/core/worker-service.ts
 import { basename as basename2, dirname as dirname9, isAbsolute as isAbsolute9, join as join13, relative as relative2, sep as sep2 } from "node:path";
 init_atomic_file();
 init_openclaw_executable();
 init_operation_error();
+init_worker_auth();
 var WORKER_LOG_TAIL_BYTES = 64 * 1024;
 function workerServicePaths(platform2, homeDir) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
@@ -15871,10 +15899,12 @@ function absolute(value, label) {
 
 // src/core/doctor.ts
 init_openclaw_executable();
+init_worker_auth();
 init_sovereignty();
 
 // src/core/setup-preflight.ts
 init_secret_store();
+init_worker_auth();
 import { existsSync as existsSync7 } from "node:fs";
 async function setupPreflight(options) {
   const env = environmentWithWorkerSetupEnv({
@@ -20326,6 +20356,9 @@ var OLYMPUS_DASHBOARD_VIEWS = [
   "source",
   "dispositions"
 ];
+
+// src/core/control-ui-gateway.ts
+init_worker_auth();
 
 // src/workers/dashboard/shared-privacy-logic.ts
 var PRIVACY_FOLDER_SOURCE_NAMES = {

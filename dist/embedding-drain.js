@@ -3501,6 +3501,7 @@ var init_manifest = __esm(() => {
     pooling: "model",
     queryPrefix: "task: search result | query: ",
     documentPrefix: "title: {title} | text: ",
+    vision: { tokensPerImage: 140 },
     model: {
       name: "embeddinggemma-2-740m.litertlm",
       url: `${EMBEDDINGGEMMA_2_BASE}/embeddinggemma-2-740m.litertlm`,
@@ -8599,6 +8600,9 @@ function snifferContentMaterial(names, excerpt) {
   return trimmed ? `Names: ${trimmed}
 Excerpt: ${excerpt}` : excerpt;
 }
+function isImageMediaType(mimeType) {
+  return (mimeType?.split(";", 1)[0]?.trim().toLowerCase() ?? "").startsWith("image/");
+}
 function withPublicRetired(decision) {
   if (decision.metadataTier !== "public" && decision.contentTier !== "public")
     return decision;
@@ -8655,6 +8659,7 @@ function classifyItemTiersWithPublic(input, options) {
     signals,
     text,
     ...input.namesOnly ? { namesOnly: true } : {},
+    ...isImageMediaType(input.mimeType) ? { image: true } : {},
     matchInput,
     names: snifferNames(signals),
     metadata,
@@ -8703,6 +8708,7 @@ function classifyContentTier(input, options = {}) {
   const content = contentPass({
     signals: {},
     text,
+    ...isImageMediaType(input.mimeType) ? { image: true } : {},
     matchInput: namesMatchInput({
       ...input.title?.trim() ? { title: input.title } : {},
       ...input.path?.trim() ? { path: input.path } : {},
@@ -8854,6 +8860,9 @@ function contentPass(args) {
         pending: false
       };
     }
+  }
+  if (args.image) {
+    return { tier: maxTier(metadata.tier, "secure"), decidedBy: "default", reasons: [IMAGE_PRIVATE_DEFAULT_REASON], pending: false };
   }
   if (metadata.forced) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [], pending: false };
@@ -9023,7 +9032,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-02.p4", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-02.p4", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_engine();
   init_sender_rules();
@@ -10936,6 +10945,69 @@ var init_tier_ledger = __esm(() => {
   };
 });
 
+// src/core/remote-public-url.ts
+var LOOPBACK_HOSTNAMES;
+var init_remote_public_url = __esm(() => {
+  LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/core/remote-access.ts
+var LOOPBACK_HOSTNAMES2;
+var init_remote_access = __esm(() => {
+  init_remote_public_url();
+  init_worker_auth();
+  LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+});
+
+// src/core/media-cache.ts
+import { createHash as createHash4, randomUUID as randomUUID3 } from "node:crypto";
+import {
+  chmodSync as chmodSync3,
+  existsSync as existsSync7,
+  mkdirSync as mkdirSync7,
+  readdirSync,
+  renameSync as renameSync2,
+  rmSync as rmSync2,
+  rmdirSync,
+  writeFileSync as writeFileSync3
+} from "node:fs";
+import { basename, dirname as dirname8, isAbsolute as isAbsolute2, join as join7 } from "node:path";
+function retainMediaCacheFile(path, holder) {
+  try {
+    const refs = refsDir(path);
+    ensureOwnerOnlyDir(refs);
+    writeFileSync3(join7(refs, holderName(holder)), "", { mode: 384 });
+  } catch {}
+}
+function releaseMediaCacheFile(path, holder) {
+  try {
+    const refs = refsDir(path);
+    rmSync2(join7(refs, holderName(holder)), { force: true });
+    const remaining = existsSync7(refs) ? readdirSync(refs) : [];
+    if (remaining.length > 0)
+      return false;
+    if (existsSync7(refs))
+      rmdirSync(refs);
+    rmSync2(path, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function refsDir(path) {
+  return join7(dirname8(path), `${basename(path)}.refs`);
+}
+function holderName(holder) {
+  return createHash4("sha256").update(holder).digest("hex").slice(0, 32);
+}
+function ensureOwnerOnlyDir(dir) {
+  mkdirSync7(dir, { recursive: true, mode: 448 });
+  chmodSync3(dir, 448);
+}
+var init_media_cache = __esm(() => {
+  init_remote_access();
+});
+
 // src/workers/classification/installed-tier-classification-registry.ts
 function registeredInstalledTierClassification() {
   return registered;
@@ -10998,6 +11070,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     provider: item.identity.provider,
     ...text !== undefined ? { text } : {},
     ...extra.namesOnly ? { namesOnly: true } : {},
+    mimeType: item.mimeType,
     subject: item.identity
   }, {
     ...options?.rules ? { rules: options.rules } : {},
@@ -11609,9 +11682,9 @@ var init_reactions = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash4, randomUUID as randomUUID3 } from "node:crypto";
-import { existsSync as existsSync7, lstatSync as lstatSync2, mkdirSync as mkdirSync7, statSync as statSync4 } from "node:fs";
-import { dirname as dirname8 } from "node:path";
+import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
+import { existsSync as existsSync8, lstatSync as lstatSync2, mkdirSync as mkdirSync8, statSync as statSync4 } from "node:fs";
+import { dirname as dirname9 } from "node:path";
 import { Database as Database2 } from "bun:sqlite";
 function connectorStoreMigrations() {
   return [
@@ -11719,15 +11792,39 @@ function connectorStoreMigrations() {
       }
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 12,
       name: "connector_store_trusted_source_scope_observation",
       up(db) {
         addColumnIfMissing(db, "items", "source_scope_generation", "TEXT");
         addColumnIfMissing(db, "items", "source_scope_revision", "TEXT");
         addColumnIfMissing(db, "items", "source_scope_folder_keys_json", "TEXT");
       }
+    },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: "connector_store_chunk_media",
+      up(db) {
+        addColumnIfMissing(db, "chunks", "media_path", "TEXT");
+        addColumnIfMissing(db, "chunks", "media_sha256", "TEXT");
+        createConnectorStoreChunkMediaReleases(db);
+      }
     }
   ];
+}
+function createConnectorStoreChunkMediaReleases(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chunk_media_releases (
+      media_sha256 TEXT PRIMARY KEY,
+      media_path TEXT NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_chunk_media_release
+    AFTER DELETE ON chunks
+    WHEN OLD.media_sha256 IS NOT NULL AND OLD.media_path IS NOT NULL
+    BEGIN
+      INSERT OR IGNORE INTO chunk_media_releases (media_sha256, media_path)
+      VALUES (OLD.media_sha256, OLD.media_path);
+    END;
+  `);
 }
 function emptyMetadataOnlyStripSummary(corpusId, dryRun, matcher) {
   return {
@@ -12148,7 +12245,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash4("sha256");
+  const digest = createHash5("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -12241,7 +12338,7 @@ function namesOnlyKept(db, itemPks) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash4("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash5("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function textFromRawItem(item) {
   if (item.content.kind === "text")
@@ -12389,6 +12486,10 @@ async function assertEmbeddingProviderCanEmbed(provider) {
 }
 function usableEmbeddingVector(vector, dimension) {
   return vector.length === dimension && vector.every((value) => typeof value === "number" && Number.isFinite(value));
+}
+function connectorStoreChunkEmbeddingInputHash(embeddingText, mediaSha256) {
+  return mediaSha256 ? hashString2(`${embeddingText}
+\x00image:sha256:${mediaSha256}`) : hashString2(embeddingText);
 }
 function buildConnectorStoreEmbeddingText(row) {
   return [
@@ -13091,6 +13192,8 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV10Schema(db);
   if (version === 11)
     validateConnectorStoreV11Schema(db);
+  if (version === 12)
+    validateConnectorStoreV12Schema(db);
   if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION)
     validateConnectorStoreSchema(db);
 }
@@ -13099,10 +13202,15 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreFtsOwnership(db, "v6");
 }
 function validateConnectorStoreSchema(db) {
-  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, "v12");
-  assertExactTableColumns(db, "embedding_models", CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, false, "v12");
-  assertExactTableColumns(db, "item_write_claims", CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, false, "v12");
-  validateConnectorStoreLocatorIdentitySchema(db, "v12");
+  validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
+  assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
+}
+function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
+  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
+  assertExactTableColumns(db, "embedding_models", CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, false, versionLabel);
+  assertExactTableColumns(db, "item_write_claims", CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, false, versionLabel);
+  validateConnectorStoreLocatorIdentitySchema(db, versionLabel);
 }
 function validateConnectorStoreV11Schema(db) {
   validateConnectorStoreV10Schema(db);
@@ -13135,8 +13243,8 @@ function validateConnectorStoreV8Schema(db) {
 function validateConnectorStoreV7Schema(db) {
   validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V7_ITEM_COLUMNS, "v7");
 }
-function validateConnectorStoreItemSchema(db, itemColumns, versionLabel) {
-  validateConnectorStoreSchemaShape(db, itemColumns, true, versionLabel);
+function validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
+  validateConnectorStoreSchemaShape(db, itemColumns, true, versionLabel, chunkColumns);
   validateConnectorStoreFtsOwnership(db, versionLabel);
   assertIndexColumns(db, "idx_connector_store_items_sender_id", ["sender_id"], versionLabel);
   assertIndexColumns(db, "idx_connector_store_items_sender_label", ["sender_label"], versionLabel);
@@ -13155,10 +13263,10 @@ function validateConnectorStoreFtsOwnership(db, versionLabel) {
     throw new Error("Connector store schema has broken foreign-key references after migration.");
   }
 }
-function validateConnectorStoreSchemaShape(db, itemColumns, conversationScoped, versionLabel) {
+function validateConnectorStoreSchemaShape(db, itemColumns, conversationScoped, versionLabel, chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
   assertExactTableColumns(db, "items", itemColumns, true, versionLabel);
   for (const [table, columns] of Object.entries(CONNECTOR_STORE_REQUIRED_COLUMNS)) {
-    assertExactTableColumns(db, table, columns, false, versionLabel);
+    assertExactTableColumns(db, table, table === "chunks" ? chunkColumns : columns, false, versionLabel);
   }
   assertIndexColumns(db, "idx_items_local_item_id", ["local_item_id"], versionLabel);
   assertIndexColumns(db, "idx_connector_store_chunk_embeddings_item", ["item_pk", "model_id"], versionLabel);
@@ -13543,7 +13651,7 @@ function requireNonEmpty(value, label) {
   return text;
 }
 function hashString2(value) {
-  return createHash4("sha256").update(value).digest("hex");
+  return createHash5("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -13551,15 +13659,16 @@ function errorMessage2(error) {
 function nowIso() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
+  init_media_cache();
   init_sqlite_migrations();
   init_engine();
   init_tier_ledger();
@@ -13653,6 +13762,8 @@ var init_local_index = __esm(() => {
     trustReconciliationReadyCursors;
     exclusions;
     reactionsColumnPresent = false;
+    chunkMediaColumnsPresent = false;
+    mediaHolder;
     tierLedgerHandle;
     tierLedgerOwned;
     tierLedgerDisabled;
@@ -13663,6 +13774,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID4()}` : this.dbPath;
       this.family = options.family;
       this.trustDomain = options.trustDomain;
       this.now = options.now ?? (() => new Date);
@@ -13684,7 +13796,7 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync7(dirname8(this.dbPath), { recursive: true });
+        mkdirSync8(dirname9(this.dbPath), { recursive: true });
       }
       this.db = new Database2(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       try {
@@ -13703,6 +13815,7 @@ var init_local_index = __esm(() => {
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
+        this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
       } catch (error) {
         closeSqliteStore(this.db);
         throw error;
@@ -13761,6 +13874,7 @@ var init_local_index = __esm(() => {
           metadataOwnerDecided: namesDecidedByOwner(existing.reasons),
           ...title ? { title } : {},
           ...path ? { path } : {},
+          mimeType: item.mimeType,
           subject: item.identity
         }, {
           ...inputs?.sniffer ? { sniffer: inputs.sniffer } : {},
@@ -13800,14 +13914,14 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       const path = tierLedgerPathForStore(this.dbPath);
-      if (path === ":memory:" || !existsSync7(path))
+      if (path === ":memory:" || !existsSync8(path))
         return;
       return this.tierLedger();
     }
     boundTierLedger(ledgerPath) {
       if (this.boundLedgerHandle?.dbPath === ledgerPath)
         return this.boundLedgerHandle;
-      if (ledgerPath !== ":memory:" && !existsSync7(ledgerPath))
+      if (ledgerPath !== ":memory:" && !existsSync8(ledgerPath))
         throw new TierLedgerUnavailableError(this.corpusId);
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = new TierLedger({ dbPath: ledgerPath, now: this.now });
@@ -13984,7 +14098,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID3()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID4()}`;
       const startedAt = nowIso();
       return this.db.transaction(() => {
         this.db.query(`
@@ -14022,13 +14136,15 @@ var init_local_index = __esm(() => {
         lastSeenAt: owner.last_seen_at
       }));
       const chunks = this.db.query(`
-      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? "media_path, media_sha256" : "NULL AS media_path, NULL AS media_sha256"}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(row.item_pk).map((chunk) => ({
         chunkIndex: chunk.chunk_index,
         boundedText: chunk.bounded_text,
         contentHash: chunk.content_hash,
-        embeddingInputHash: chunk.embedding_input_hash
+        embeddingInputHash: chunk.embedding_input_hash,
+        ...chunk.media_path && chunk.media_sha256 ? { mediaPath: chunk.media_path, mediaSha256: chunk.media_sha256 } : {}
       }));
       const vectors = this.db.query(`
       SELECT c.chunk_index, e.model_id, e.content_hash, e.embedding
@@ -14078,9 +14194,9 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID3()}`;
+      const syncRunId = `connector-tier-move-${randomUUID4()}`;
       const now = nowIso();
-      return this.db.transaction(() => {
+      const imported = this.db.transaction(() => {
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
@@ -14112,23 +14228,38 @@ var init_local_index = __esm(() => {
         `).run(itemPk, owner.connectorId, owner.ownershipKind, syncRunId, syncRunId, owner.firstSeenAt, owner.lastSeenAt);
         }
         const existing = this.db.query(`
-        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+          ${this.chunkMediaColumnsPresent ? "media_sha256" : "NULL AS media_sha256"}
         FROM chunks WHERE item_pk = ? ORDER BY chunk_index
       `).all(itemPk);
         const namesOnly = options.layers === "metadata";
+        if (!namesOnly && !this.chunkMediaColumnsPresent && copy.chunks.some((chunk) => chunk.mediaSha256)) {
+          throw new Error("Connector store chunks cannot carry media before the v13 schema.");
+        }
         const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
           const current = existing[index];
-          return current?.chunk_index === chunk.chunkIndex && current.bounded_text === chunk.boundedText && current.content_hash === chunk.contentHash && current.embedding_input_hash === chunk.embeddingInputHash;
+          return current?.chunk_index === chunk.chunkIndex && current.bounded_text === chunk.boundedText && current.content_hash === chunk.contentHash && current.embedding_input_hash === chunk.embeddingInputHash && (current.media_sha256 ?? undefined) === (chunk.mediaSha256 ?? undefined);
         });
         let chunksWritten = 0;
         if (!unchanged) {
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(itemPk);
-          const insert = this.db.query(`
-          INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
+          const insert = this.chunkMediaColumnsPresent ? this.db.query(`
+            INSERT INTO chunks (
+              item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at,
+              media_path, media_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `) : this.db.query(`
+            INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `);
           for (const chunk of copy.chunks) {
-            insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+            if (this.chunkMediaColumnsPresent) {
+              insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now, chunk.mediaPath ?? null, chunk.mediaSha256 ?? null);
+            } else {
+              insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+            }
+            if (chunk.mediaPath)
+              retainMediaCacheFile(chunk.mediaPath, this.mediaHolder);
             chunksWritten += 1;
           }
         }
@@ -14180,6 +14311,8 @@ var init_local_index = __esm(() => {
           ...vectorsCopied === 0 ? { vectorsNotCopiedReason: hashMismatch ? "input_hash_mismatch" : "no_current_vectors" } : {}
         };
       })();
+      this.releaseUnreferencedChunkMedia();
+      return imported;
     }
     matchOrMintEmbeddingWriteAuthority(provider) {
       const existing = this.db.query(`
@@ -14883,6 +15016,7 @@ var init_local_index = __esm(() => {
       }
       const chunks = this.db.query(`
       SELECT c.chunk_index, c.content_hash,
+        ${this.chunkMediaColumnsPresent ? "c.media_sha256" : "NULL AS media_sha256"},
         CASE WHEN ? IS NULL THEN 1 ELSE EXISTS (
           SELECT 1 FROM chunk_embeddings embedding
           WHERE embedding.chunk_pk = c.chunk_pk
@@ -14893,7 +15027,7 @@ var init_local_index = __esm(() => {
       WHERE c.item_pk = ?
       ORDER BY c.chunk_index
     `).all(expectation.embeddingModelId ?? null, expectation.embeddingModelId ?? null, item.item_pk);
-      const exactChunks = chunks.filter((chunk) => chunk.chunk_index >= 0 && chunk.chunk_index < expectation.chunkContentHashes.length && chunk.content_hash === expectation.chunkContentHashes[chunk.chunk_index]);
+      const exactChunks = chunks.filter((chunk) => chunk.chunk_index >= 0 && chunk.chunk_index < expectation.chunkContentHashes.length && chunk.content_hash === expectation.chunkContentHashes[chunk.chunk_index] && (chunk.media_sha256 ?? undefined) === (chunk.chunk_index === 0 ? expectation.mediaSha256 : undefined));
       const chunksIndexed = exactChunks.length;
       const chunksEmbeddingCurrent = exactChunks.filter((chunk) => chunk.embedding_current === 1).length;
       const expectedFtsRows = chunks.length + 1;
@@ -14941,7 +15075,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash4("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash5("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -15091,14 +15225,17 @@ var init_local_index = __esm(() => {
         if (!sameSourceItemIdentity(item.identity, record.expectation.sourceItem)) {
           throw new Error("Representation restore expectation identity does not match its item.");
         }
+        if (record.media?.sha256 !== record.expectation.mediaSha256) {
+          throw new Error("Representation restore media does not match its expectation.");
+        }
         const key = sourceItemIdentityKey(item.identity);
         if (seenIdentities.has(key)) {
           throw new Error("Representation restore contains a duplicate item identity.");
         }
         seenIdentities.add(key);
       }
-      return this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID3()}`;
+      const summary = this.db.transaction(() => {
+        const syncRunId = `connector-representation-restore-${randomUUID4()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -15177,7 +15314,7 @@ var init_local_index = __esm(() => {
             throw new Error("Representation restore item classification is not eligible for this store.");
           }
           const upsert = this.upsertItemWithOwner(item, sensitivity, ownerConnectorId, options.ownershipKind, syncRunId, "local_write", options.preserveStoredSearchText === true, options.preserveStoredSearchTextOwnedFacets === true);
-          this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars);
+          this.indexKnownItemContent(item, upsert.itemPk, maxChunkChars, record.media);
           this.refreshFtsForItem(upsert.itemPk);
           chunksAwaitingEmbedding += this.db.query(`
           SELECT COUNT(*) AS count
@@ -15216,6 +15353,21 @@ var init_local_index = __esm(() => {
           skippedProviderItemIds: skippedProviderItemIds.sort()
         };
       })();
+      this.releaseUnreferencedChunkMedia();
+      return summary;
+    }
+    releaseUnreferencedChunkMedia() {
+      if (!this.chunkMediaColumnsPresent)
+        return;
+      try {
+        const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000").all();
+        for (const entry of queued) {
+          const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
+          if (!referenced)
+            releaseMediaCacheFile(entry.media_path, this.mediaHolder);
+          this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
+        }
+      } catch {}
     }
     relinquishItems(options) {
       const syncConnectorId = requireNonEmpty(options.syncConnectorId, "Relinquish sync connector id");
@@ -15248,7 +15400,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID3()}`;
+        const syncRunId = `connector-relinquish-${randomUUID4()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -15387,7 +15539,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID3()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID4()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -15588,8 +15740,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash4("sha256");
-      const outputDigest = createHash4("sha256");
+      const inputDigest = createHash5("sha256");
+      const outputDigest = createHash5("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -15659,8 +15811,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash4("sha256");
-      const outputDigest = createHash4("sha256");
+      const inputDigest = createHash5("sha256");
+      const outputDigest = createHash5("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -15985,7 +16137,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID3()}`;
+      const syncRunId = `connector-sync-${randomUUID4()}`;
       const startedAt = nowIso();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -16557,8 +16709,8 @@ var init_local_index = __esm(() => {
       }
       return { ...this.indexItemText(item, itemPk, maxChunkChars, text), secretsTierExcluded: false };
     }
-    indexKnownItemContent(item, itemPk, maxChunkChars) {
-      return this.indexItemText(item, itemPk, maxChunkChars, textFromRawItem(item));
+    indexKnownItemContent(item, itemPk, maxChunkChars, media) {
+      return this.indexItemText(item, itemPk, maxChunkChars, textFromRawItem(item), media);
     }
     itemEmbeddingSeasoning(itemPk, item) {
       const row = this.db.query(`
@@ -16576,7 +16728,7 @@ var init_local_index = __esm(() => {
         updated_at: metadataString(item.metadata, "updatedAt") ?? metadataString(item.metadata, "serverModifiedAt") ?? null
       };
     }
-    indexItemText(item, itemPk, maxChunkChars, text) {
+    indexItemText(item, itemPk, maxChunkChars, text, media) {
       const disposition = this.exclusions.evaluateMetadata(item.metadata);
       if (disposition.disposition === "metadata_only") {
         throw new ConnectorStoreMetadataOnlyViolationError(disposition.ruleId);
@@ -16590,19 +16742,27 @@ var init_local_index = __esm(() => {
       }
       const seasoning = this.itemEmbeddingSeasoning(itemPk, item);
       const chunks = chunkText(text, maxChunkChars);
-      const desired = chunks.map((chunk, index) => ({
-        index,
-        text: chunk,
-        hash: hashString2(chunk),
-        embeddingHash: hashString2(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk }))
-      }));
+      if (media && !this.chunkMediaColumnsPresent) {
+        throw new Error("Connector store chunks cannot carry media before the v13 schema.");
+      }
+      const desired = chunks.map((chunk, index) => {
+        const chunkMedia = index === 0 ? media : undefined;
+        return {
+          index,
+          text: chunk,
+          hash: hashString2(chunk),
+          media: chunkMedia,
+          embeddingHash: connectorStoreChunkEmbeddingInputHash(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk }), chunkMedia?.sha256)
+        };
+      });
       const existing = this.db.query(`
-      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? "media_path, media_sha256" : "NULL AS media_path, NULL AS media_sha256"}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(itemPk);
       const contentUnchanged = existing.length === desired.length && desired.every((chunk, index) => {
         const current = existing[index];
-        return current?.chunk_index === chunk.index && current.bounded_text === chunk.text && current.content_hash === chunk.hash;
+        return current?.chunk_index === chunk.index && current.bounded_text === chunk.text && current.content_hash === chunk.hash && (current.media_sha256 ?? undefined) === chunk.media?.sha256 && (current.media_path ?? undefined) === chunk.media?.path;
       });
       if (contentUnchanged) {
         const update = this.db.query(`
@@ -16619,28 +16779,40 @@ var init_local_index = __esm(() => {
       this.db.transaction(() => {
         this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(itemPk);
         const now = nowIso();
-        const insert = this.db.query(`
-        INSERT INTO chunks (
-          item_pk, chunk_index, bounded_text, content_hash,
-          embedding_input_hash, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `);
+        const insert = this.chunkMediaColumnsPresent ? this.db.query(`
+          INSERT INTO chunks (
+            item_pk, chunk_index, bounded_text, content_hash,
+            embedding_input_hash, indexed_at, media_path, media_sha256
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `) : this.db.query(`
+          INSERT INTO chunks (
+            item_pk, chunk_index, bounded_text, content_hash,
+            embedding_input_hash, indexed_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `);
         for (const chunk of desired) {
-          insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
+          if (this.chunkMediaColumnsPresent) {
+            insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now, chunk.media?.path ?? null, chunk.media?.sha256 ?? null);
+          } else {
+            insert.run(itemPk, chunk.index, chunk.text, chunk.hash, chunk.embeddingHash, now);
+          }
         }
         this.refreshFtsForItem(itemPk);
       })();
+      if (media)
+        retainMediaCacheFile(media.path, this.mediaHolder);
       return { chunksIndexed: chunks.length, ftsContentChanged: true };
     }
     reseasonItemEmbeddingInputs(itemPk, seasoning) {
       const chunks = this.db.query(`
-      SELECT chunk_index, bounded_text, embedding_input_hash
+      SELECT chunk_index, bounded_text, embedding_input_hash,
+        ${this.chunkMediaColumnsPresent ? "media_sha256" : "NULL AS media_sha256"}
       FROM chunks WHERE item_pk = ? ORDER BY chunk_index
     `).all(itemPk);
       const update = this.db.query("UPDATE chunks SET embedding_input_hash = ? WHERE item_pk = ? AND chunk_index = ?");
       let invalidated = 0;
       for (const chunk of chunks) {
-        const embeddingHash = hashString2(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk.bounded_text }));
+        const embeddingHash = connectorStoreChunkEmbeddingInputHash(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk.bounded_text }), chunk.media_sha256 ?? undefined);
         if (chunk.embedding_input_hash === embeddingHash)
           continue;
         update.run(embeddingHash, itemPk, chunk.chunk_index);
@@ -16869,6 +17041,7 @@ var init_local_index = __esm(() => {
       }
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
       await options.assertAuthorized?.();
+      this.releaseUnreferencedChunkMedia();
       const limit = normalizeEmbedLimit(options.limit);
       const journalId = normalizeMaintenanceJournalId(options.journalId);
       const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(journalId, options.journalLeaseGeneration);
@@ -16996,9 +17169,17 @@ var init_local_index = __esm(() => {
           if (batch.length === 0)
             continue;
         }
+        const mediaMissing = batch.filter((row) => row.media_path && !existsSync8(row.media_path));
+        if (mediaMissing.length > 0) {
+          staleSkipped += mediaMissing.length;
+          batch = batch.filter((row) => !mediaMissing.includes(row));
+          if (batch.length === 0)
+            continue;
+        }
         const vectors = await provider.embed(batch.map((row) => ({
           ...row.title ? { title: row.title } : {},
-          text: buildConnectorStoreEmbeddingText(row)
+          text: buildConnectorStoreEmbeddingText(row),
+          ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
         })), { taskType: "RETRIEVAL_DOCUMENT" });
         if (vectors.length !== batch.length) {
           throw new Error("Connector store embedding provider returned the wrong number of vectors.");
@@ -17473,7 +17654,8 @@ var init_local_index = __esm(() => {
         i.mime_type,
         i.authored_at,
         i.updated_at,
-        i.trust_tier
+        i.trust_tier,
+        ${this.chunkMediaColumnsPresent ? "c.media_path, c.media_sha256" : "NULL AS media_path, NULL AS media_sha256"}
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
@@ -18007,7 +18189,20 @@ var init_local_index = __esm(() => {
     "idx_connector_store_locator_identity",
     "locator_identity_index_state",
     "connector_store_locator_identity_insert",
-    "connector_store_locator_identity_update"
+    "connector_store_locator_identity_update",
+    "chunk_media_releases",
+    "connector_store_chunk_media_release"
+  ];
+  CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
+    "chunk_pk",
+    "item_pk",
+    "chunk_index",
+    "bounded_text",
+    "content_hash",
+    "embedding_input_hash",
+    "indexed_at",
+    "media_path",
+    "media_sha256"
   ];
   CONNECTOR_STORE_REQUIRED_COLUMNS = {
     sync_runs: [
@@ -18363,43 +18558,43 @@ var END_OF_CENTRAL_DIRECTORY = 101010256, CENTRAL_DIRECTORY_ENTRY = 33639248, LO
 var init_zip = () => {};
 
 // src/workers/source-index/built-in-embedding/assets.ts
-import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash6, randomUUID as randomUUID5 } from "node:crypto";
 import {
   closeSync as closeSync4,
   createReadStream,
-  existsSync as existsSync8,
-  mkdirSync as mkdirSync8,
+  existsSync as existsSync9,
+  mkdirSync as mkdirSync9,
   openSync as openSync4,
   readFileSync as readFileSync8,
-  renameSync as renameSync2,
-  rmSync as rmSync2,
+  renameSync as renameSync3,
+  rmSync as rmSync3,
   statSync as statSync5,
-  writeFileSync as writeFileSync3,
+  writeFileSync as writeFileSync4,
   writeSync
 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { basename, dirname as dirname9, isAbsolute as isAbsolute2, join as join7 } from "node:path";
+import { basename as basename2, dirname as dirname10, isAbsolute as isAbsolute3, join as join8 } from "node:path";
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform2 = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join7(env.HOME?.trim() || homedir7(), ".local", "share");
-  const root = configured || join7(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
-  if (!isAbsolute2(root))
+  const dataRoot = env.XDG_DATA_HOME?.trim() || join8(env.HOME?.trim() || homedir7(), ".local", "share");
+  const root = configured || join8(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
+  if (!isAbsolute3(root))
     throw new TypeError("The built-in embedding directory must be an absolute path.");
   return {
     root,
-    modelDir: join7(root, model.modelId),
-    runtimeDir: model.runtime === "litert" ? join7(root, `litert-lm-${liteRtRuntime.version}-${platform2}`) : join7(root, `onnxruntime-${runtime.version}-${platform2}`),
-    statusPath: join7(root, "status.json"),
-    lockPath: join7(root, "install.lock")
+    modelDir: join8(root, model.modelId),
+    runtimeDir: model.runtime === "litert" ? join8(root, `litert-lm-${liteRtRuntime.version}-${platform2}`) : join8(root, `onnxruntime-${runtime.version}-${platform2}`),
+    statusPath: join8(root, "status.json"),
+    lockPath: join8(root, "install.lock")
   };
 }
 function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, platform2 = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const liteRt = model.runtime === "litert" ? liteRtRuntime.platforms[platform2] : undefined;
   return {
-    modelPath: join7(paths.modelDir, model.model.name),
-    ...model.vocabulary ? { vocabularyPath: join7(paths.modelDir, model.vocabulary.name) } : {},
+    modelPath: join8(paths.modelDir, model.model.name),
+    ...model.vocabulary ? { vocabularyPath: join8(paths.modelDir, model.vocabulary.name) } : {},
     runtimeDir: paths.runtimeDir,
-    ...liteRt ? { libraryPath: join7(paths.runtimeDir, basename(liteRt.library)) } : {}
+    ...liteRt ? { libraryPath: join8(paths.runtimeDir, basename2(liteRt.library)) } : {}
   };
 }
 function currentPlatform() {
@@ -18448,14 +18643,14 @@ async function installBuiltInEmbedding(options = {}) {
       const fetchImpl = options.fetchImpl ?? fetch;
       const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS;
       const pending = [
-        ...modelFiles.filter((file) => !existsSync8(join7(paths.modelDir, file.name)))
+        ...modelFiles.filter((file) => !existsSync9(join8(paths.modelDir, file.name)))
       ];
       const pendingPackages = runtimePackages.length > 0 && !runtimeInstalled(paths.runtimeDir, runtimePackages) ? runtimePackages : [];
       const bytesTotal = pending.reduce((sum, file) => sum + file.bytes, 0) + pendingPackages.reduce((sum, pack) => sum + pack.bytes, 0);
       reporter.begin(bytesTotal);
       ensureDirectory(paths.modelDir);
       for (const file of pending) {
-        await downloadVerified(fetchImpl, file.url, join7(paths.modelDir, file.name), file.bytes, {
+        await downloadVerified(fetchImpl, file.url, join8(paths.modelDir, file.name), file.bytes, {
           kind: "sha256",
           expected: file.sha256
         }, reporter, labelFor(file), stallMs);
@@ -18486,21 +18681,21 @@ async function installLiteRt(options, model, paths, platform2, reporter, install
     const modelFiles = builtInEmbeddingModelFiles(model);
     const wantsRuntime = Boolean(wheel) && !options.skipRuntime;
     if (wantsRuntime && liteRtInstalled(paths.runtimeDir, wheel) && !await liteRtLibraryIntact(paths.runtimeDir, wheel)) {
-      rmSync2(paths.runtimeDir, { recursive: true, force: true });
+      rmSync3(paths.runtimeDir, { recursive: true, force: true });
     }
-    const complete = () => modelFiles.every((file) => existsSync8(join7(paths.modelDir, file.name))) && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel));
+    const complete = () => modelFiles.every((file) => existsSync9(join8(paths.modelDir, file.name))) && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel));
     if (!complete()) {
       await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
         if (complete())
           return;
         const fetchImpl = options.fetchImpl ?? fetch;
         const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS;
-        const pending = modelFiles.filter((file) => !existsSync8(join7(paths.modelDir, file.name)));
+        const pending = modelFiles.filter((file) => !existsSync9(join8(paths.modelDir, file.name)));
         const runtimePending = wantsRuntime && !liteRtInstalled(paths.runtimeDir, wheel);
         reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0) + (runtimePending ? wheel.bytes : 0));
         ensureDirectory(paths.modelDir);
         for (const file of pending) {
-          await downloadVerified(fetchImpl, file.url, join7(paths.modelDir, file.name), file.bytes, {
+          await downloadVerified(fetchImpl, file.url, join8(paths.modelDir, file.name), file.bytes, {
             kind: "sha256",
             expected: file.sha256
           }, reporter, "Downloading the built-in search model", stallMs);
@@ -18522,24 +18717,24 @@ async function installLiteRt(options, model, paths, platform2, reporter, install
 }
 function readLiteRtMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync8(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
+    return JSON.parse(readFileSync8(join8(runtimeDir, RUNTIME_MARKER), "utf8"));
   } catch {
     return;
   }
 }
 function liteRtInstalled(runtimeDir, wheel) {
   const marker = readLiteRtMarker(runtimeDir);
-  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync8(join7(runtimeDir, basename(wheel.library)));
+  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync9(join8(runtimeDir, basename2(wheel.library)));
 }
 async function liteRtLibraryIntact(runtimeDir, wheel) {
   const expected = readLiteRtMarker(runtimeDir)?.librarySha256;
-  return expected !== undefined && await sha256File(join7(runtimeDir, basename(wheel.library))) === expected;
+  return expected !== undefined && await sha256File(join8(runtimeDir, basename2(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID4()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID5()}`;
   ensureDirectory(staging);
   try {
-    const archivePath = join7(staging, wheel.name);
+    const archivePath = join8(staging, wheel.name);
     await downloadVerified(fetchImpl, wheel.url, archivePath, wheel.bytes, {
       kind: "sha256",
       expected: wheel.sha256
@@ -18548,19 +18743,19 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     const library = readZipEntry(readFileSync8(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
-    writeFileSync3(join7(staging, basename(wheel.library)), library, { mode: 493 });
-    rmSync2(archivePath, { force: true });
+    writeFileSync4(join8(staging, basename2(wheel.library)), library, { mode: 493 });
+    rmSync3(archivePath, { force: true });
     const marker = {
       wheel: wheel.name,
       sha256: wheel.sha256,
-      librarySha256: createHash5("sha256").update(library).digest("hex")
+      librarySha256: createHash6("sha256").update(library).digest("hex")
     };
-    writeFileSync3(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync4(join8(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
-    rmSync2(runtimeDir, { recursive: true, force: true });
-    renameSync2(staging, runtimeDir);
+    rmSync3(runtimeDir, { recursive: true, force: true });
+    renameSync3(staging, runtimeDir);
   } catch (error) {
-    rmSync2(staging, { recursive: true, force: true });
+    rmSync3(staging, { recursive: true, force: true });
     throw error;
   }
 }
@@ -18577,11 +18772,11 @@ function labelFor(file) {
   return file.name.endsWith(".onnx") ? "Downloading the built-in search model" : "Downloading the model vocabulary";
 }
 function installComplete(paths, modelFiles, runtimePackages) {
-  return modelFiles.every((file) => existsSync8(join7(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
+  return modelFiles.every((file) => existsSync9(join8(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
 }
 async function verifyModelFiles(dir, files, reporter) {
   for (const file of files) {
-    const path = join7(dir, file.name);
+    const path = join8(dir, file.name);
     const key = `${path}:${file.sha256}`;
     verifiedThisProcess ??= new Set;
     if (verifiedThisProcess.has(key))
@@ -18589,7 +18784,7 @@ async function verifyModelFiles(dir, files, reporter) {
     const size = statSync5(path).size;
     const digest = size === file.bytes ? await sha256File(path) : undefined;
     if (digest !== file.sha256) {
-      rmSync2(path, { force: true });
+      rmSync3(path, { force: true });
       throw new BuiltInEmbeddingInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
     }
     verifiedThisProcess.add(key);
@@ -18598,18 +18793,18 @@ async function verifyModelFiles(dir, files, reporter) {
 }
 function runtimeInstalled(runtimeDir, packages) {
   try {
-    const marker = JSON.parse(readFileSync8(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
+    const marker = JSON.parse(readFileSync8(join8(runtimeDir, RUNTIME_MARKER), "utf8"));
     return packages.every((pack) => marker.packages.some((entry) => entry.name === pack.name && entry.integrity === pack.integrity));
   } catch {
     return false;
   }
 }
 async function installRuntime(fetchImpl, runtimeDir, packages, platform2, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID4()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID5()}`;
   ensureDirectory(staging);
   try {
     for (const pack of packages) {
-      const archivePath = join7(staging, `${pack.name}.tgz`);
+      const archivePath = join8(staging, `${pack.name}.tgz`);
       await downloadVerified(fetchImpl, pack.url, archivePath, pack.bytes, {
         kind: "integrity",
         expected: pack.integrity
@@ -18621,21 +18816,21 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform2, report
         throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${pack.name} had no files for ${platform2}.`);
       }
       for (const file of files) {
-        const target = join7(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
-        ensureDirectory(dirname9(target));
-        writeFileSync3(target, file.data, { mode: file.mode & 493 || 420 });
+        const target = join8(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
+        ensureDirectory(dirname10(target));
+        writeFileSync4(target, file.data, { mode: file.mode & 493 || 420 });
       }
-      rmSync2(archivePath, { force: true });
+      rmSync3(archivePath, { force: true });
     }
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync3(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync4(join8(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
-    rmSync2(runtimeDir, { recursive: true, force: true });
-    renameSync2(staging, runtimeDir);
+    rmSync3(runtimeDir, { recursive: true, force: true });
+    renameSync3(staging, runtimeDir);
   } catch (error) {
-    rmSync2(staging, { recursive: true, force: true });
+    rmSync3(staging, { recursive: true, force: true });
     throw error;
   }
 }
@@ -18650,9 +18845,9 @@ function runtimeEntryWanted(packageName, path, platform2) {
   return path === "package/package.json" || path.startsWith("package/dist/") || path.startsWith(`package/bin/napi-v6/${os}/${arch}/`) || path === "package/LICENSE" || path === "package/ThirdPartyNotices.txt";
 }
 async function downloadVerified(fetchImpl, url, target, expectedBytes, expected, reporter, label, stallMs) {
-  const partial = `${target}.partial-${process.pid}-${randomUUID4()}`;
+  const partial = `${target}.partial-${process.pid}-${randomUUID5()}`;
   const algorithm = expected.kind === "sha256" ? "sha256" : integrityAlgorithm(expected.expected);
-  const hash = createHash5(algorithm);
+  const hash = createHash6(algorithm);
   let received = 0;
   let response;
   const controller = new AbortController;
@@ -18723,7 +18918,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
   } catch (error) {
     disarmStall();
     closeSync4(fd);
-    rmSync2(partial, { force: true });
+    rmSync3(partial, { force: true });
     if (error instanceof BuiltInEmbeddingInstallError)
       throw error;
     throw new BuiltInEmbeddingInstallError("download_failed", `The built-in search model download was interrupted (${error instanceof Error ? error.message : String(error)}).`);
@@ -18732,10 +18927,10 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
   closeSync4(fd);
   const digest = expected.kind === "sha256" ? hash.digest("hex") : `${algorithm}-${hash.digest("base64")}`;
   if (received !== expectedBytes || digest !== expected.expected) {
-    rmSync2(partial, { force: true });
+    rmSync3(partial, { force: true });
     throw new BuiltInEmbeddingInstallError("checksum_mismatch", `${url} did not match its pinned checksum; nothing was installed.`);
   }
-  renameSync2(partial, target);
+  renameSync3(partial, target);
 }
 function integrityAlgorithm(integrity) {
   const algorithm = integrity.split("-", 1)[0];
@@ -18746,7 +18941,7 @@ function integrityAlgorithm(integrity) {
 }
 function sha256File(path, timeoutMs = 10 * 60000) {
   return new Promise((resolve3, reject) => {
-    const hash = createHash5("sha256");
+    const hash = createHash6("sha256");
     let settled = false;
     const stream = createReadStream(path);
     const finish = (error) => {
@@ -18778,7 +18973,7 @@ async function withInstallLock(lockPath, waitMs, run) {
   try {
     await run();
   } finally {
-    rmSync2(lockPath, { force: true });
+    rmSync3(lockPath, { force: true });
   }
 }
 function tryAcquireLock(lockPath) {
@@ -18789,7 +18984,7 @@ function tryAcquireLock(lockPath) {
     return true;
   } catch {
     if (lockIsStale(lockPath)) {
-      rmSync2(lockPath, { force: true });
+      rmSync3(lockPath, { force: true });
       return tryAcquireLock(lockPath);
     }
     return false;
@@ -18819,7 +19014,7 @@ function lockIsStale(lockPath) {
 }
 function ensureDirectory(path) {
   try {
-    mkdirSync8(path, { recursive: true, mode: 448 });
+    mkdirSync9(path, { recursive: true, mode: 448 });
   } catch (error) {
     throw new BuiltInEmbeddingInstallError("disk_write_failed", `Could not create ${path}: ${String(error)}`);
   }
@@ -18884,11 +19079,11 @@ class ProgressReporter {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync8(dirname9(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync9(dirname10(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync3(temporary, `${JSON.stringify(this.status)}
+      writeFileSync4(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
-      renameSync2(temporary, this.statusPath);
+      renameSync3(temporary, this.statusPath);
     } catch {}
   }
 }
@@ -18911,9 +19106,9 @@ var init_assets = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync9, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync10, statSync as statSync6 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { delimiter, dirname as dirname10, isAbsolute as isAbsolute3, join as join8 } from "node:path";
+import { delimiter, dirname as dirname11, isAbsolute as isAbsolute4, join as join9 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 function helperEnvironment() {
@@ -18957,7 +19152,8 @@ class HelperProcess {
       cacheDir: options.cacheDir,
       threads: options.threads,
       device,
-      maxInputTokens: options.maxInputTokens
+      maxInputTokens: options.maxInputTokens,
+      ...options.visionTokensPerImage !== undefined ? { visionTokensPerImage: options.visionTokensPerImage } : {}
     };
     const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -19025,7 +19221,7 @@ class HelperProcess {
       });
     });
   }
-  embed(texts) {
+  embed(items) {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
@@ -19035,8 +19231,9 @@ class HelperProcess {
         this.exited = true;
         this.failAll(new Error("The built-in search model stopped responding and was restarted."));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolve3, reject, count: texts.length, timer });
-      this.child.stdin.write(`${JSON.stringify({ id, texts })}
+      this.pending.set(id, { resolve: resolve3, reject, count: items.length, timer });
+      const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
+      this.child.stdin.write(`${JSON.stringify(request)}
 `);
     });
   }
@@ -19093,13 +19290,13 @@ async function startLiteRtEmbedder(options) {
     get device() {
       return helper.device;
     },
-    async embed(texts) {
+    async embed(items) {
       if (helper.exited) {
         if (helper.device === "gpu")
           device = "cpu";
         helper = await HelperProcess.start(options, device);
       }
-      return helper.embed(texts);
+      return helper.embed(items);
     },
     async release() {
       process.removeListener("exit", releaseAtExit);
@@ -19108,10 +19305,10 @@ async function startLiteRtEmbedder(options) {
   };
 }
 function helperPath() {
-  const here = dirname10(fileURLToPath(import.meta.url));
+  const here = dirname11(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join8(here, name);
-    if (existsSync9(candidate))
+    const candidate = join9(here, name);
+    if (existsSync10(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -19120,12 +19317,12 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join8(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join8(directory, bunName)),
-    join8(homedir8(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join9(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join9(directory, bunName)),
+    join9(homedir8(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute3(candidate))
+    if (!candidate || !isAbsolute4(candidate))
       continue;
     try {
       if (statSync6(candidate).isFile())
@@ -19141,11 +19338,11 @@ var init_litert_runtime = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire3 } from "node:module";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire3(join9(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire3(join10(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -19327,10 +19524,10 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 import { readFileSync as readFileSync9 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname11, join as join10 } from "node:path";
+import { dirname as dirname12, join as join11 } from "node:path";
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -19374,7 +19571,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash6("sha256").update(JSON.stringify({
+    this.configHash = createHash7("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -19461,10 +19658,11 @@ class BuiltInSourceEmbeddingProvider {
         const embedder = await this.liteRtFactory({
           library: installed.libraryPath,
           model: installed.modelPath,
-          cacheDir: join10(dirname11(installed.modelPath), "cache"),
+          cacheDir: join11(dirname12(installed.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
-          maxInputTokens: this.spec.maxTokens
+          maxInputTokens: this.spec.maxTokens,
+          ...this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}
         });
         model = { kind: "litert", embedder };
       } else {
@@ -19528,7 +19726,10 @@ class BuiltInSourceEmbeddingProvider {
     return sums.map((sum) => normalize2(sum));
   }
   async embedLiteRt(embedder, inputs, taskType) {
-    const prompts = inputs.map((input) => promptText(this.spec, input, taskType));
+    const prompts = inputs.map((input) => {
+      const text = promptText(this.spec, input, taskType);
+      return taskType === "RETRIEVAL_DOCUMENT" && this.spec.vision && input.image ? { text, image: input.image.path } : text;
+    });
     const out = [];
     for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
       const batch = prompts.slice(offset, offset + LITERT_BATCH);
@@ -19705,18 +19906,18 @@ var init_provider = __esm(() => {
 // src/workers/embedding-ledger.ts
 import { homedir as homedir9 } from "node:os";
 import { mkdir as mkdir3, open as open3, readFile as readFile3 } from "node:fs/promises";
-import { dirname as dirname12, join as join11 } from "node:path";
+import { dirname as dirname13, join as join12 } from "node:path";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir9(), ".local", "share");
-  return join11(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir9(), ".local", "share");
+  return join12(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
 }
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
 `;
-  await mkdir3(dirname12(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname13(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -20273,6 +20474,7 @@ function rejudgeOne(set, record, classification, report, key, autoMoves) {
   const title = columnString(exported.columns["title"]);
   const path = columnString(exported.columns["locator_uri"]);
   const sender = columnString(exported.columns["sender_label"]);
+  const mimeType = columnString(exported.columns["mime_type"]);
   const content = classifyContentTier({
     text,
     metadataTier: record.metadataTier,
@@ -20282,6 +20484,7 @@ function rejudgeOne(set, record, classification, report, key, autoMoves) {
     ...title ? { title } : {},
     ...path ? { path } : {},
     ...sender ? { sender } : {},
+    ...mimeType ? { mimeType } : {},
     subject: identity
   }, {
     sniffer: classification.sniffer,
@@ -20397,7 +20600,7 @@ var init_tier_rejudge = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -20492,7 +20695,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash7("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash8("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function storedSignals(copy) {
   const text = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -20663,13 +20866,13 @@ var init_corpus_adapter = __esm(() => {
 
 // src/workers/dropbox-files/connector-store.ts
 import { homedir as homedir10 } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir10(), ".local", "share");
-  return join12(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir10(), ".local", "share");
+  return join13(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
@@ -20790,7 +20993,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -20836,7 +21039,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join13(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join14(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -20897,14 +21100,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash8("sha256").update(block).digest());
+    blockDigests.push(createHash9("sha256").update(block).digest());
   }
-  return createHash8("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash9("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -21515,9 +21718,9 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 import { homedir as homedir11 } from "node:os";
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -21908,8 +22111,8 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir11(), ".local", "share");
-  return join14(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir11(), ".local", "share");
+  return join15(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -22089,7 +22292,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash10("sha256").update(value).digest("hex");
+  return createHash11("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -22125,13 +22328,13 @@ var init_live_connector = __esm(() => {
 
 // src/workers/whatsapp/store-sync.ts
 import { homedir as homedir12 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join15(env.HOME?.trim() || homedir12(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join15(dataHome, "olympus", "whatsapp-live");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join16(env.HOME?.trim() || homedir12(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join16(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join15(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join16(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync = __esm(() => {
@@ -22306,9 +22509,9 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 import { homedir as homedir14 } from "node:os";
-import { join as join17 } from "node:path";
+import { join as join18 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -22658,8 +22861,8 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir14(), ".local", "share");
-  return join17(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir14(), ".local", "share");
+  return join18(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -22920,7 +23123,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash11("sha256").update(value).digest("hex");
+  return createHash12("sha256").update(value).digest("hex");
 }
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
@@ -22951,13 +23154,13 @@ var init_corpus_adapter2 = __esm(() => {
 
 // src/workers/readwise/connector.ts
 import { homedir as homedir15 } from "node:os";
-import { dirname as dirname14, join as join18 } from "node:path";
+import { dirname as dirname15, join as join19 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir15(), ".local", "share");
-  return join18(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir15(), ".local", "share");
+  return join19(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
 }
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
@@ -23061,13 +23264,13 @@ var init_folder_facets = __esm(() => {
 
 // src/workers/x-bookmarks/connector.ts
 import { homedir as homedir16 } from "node:os";
-import { join as join19 } from "node:path";
+import { join as join20 } from "node:path";
 function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir16(), ".local", "share");
-  return join19(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join20(homedir16(), ".local", "share");
+  return join20(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
 }
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
@@ -23163,12 +23366,12 @@ var init_x_bookmarks = __esm(() => {
 
 // src/workers/telegram-messages/corpus-adapter.ts
 import { homedir as homedir17 } from "node:os";
-import { join as join20 } from "node:path";
+import { join as join21 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join20(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join21(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join20(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join21(env.HOME?.trim() || homedir17(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
@@ -24545,7 +24748,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -24557,7 +24760,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash14("sha256").update(material, "utf8").digest("hex");
+  return createHash15("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -24803,9 +25006,9 @@ var init_owner_config_read = () => {};
 
 // src/workers/classification/tier-rules.ts
 import { homedir as homedir18 } from "node:os";
-import { dirname as dirname16, join as join21 } from "node:path";
+import { dirname as dirname17, join as join22 } from "node:path";
 function defaultTierRulesPath() {
-  return join21(homedir18(), ".olympus", "tier-rules.json");
+  return join22(homedir18(), ".olympus", "tier-rules.json");
 }
 function resolveTierRulesPath(options = {}) {
   const env = options.env ?? process.env;
@@ -24940,9 +25143,9 @@ init_sovereignty();
 init_secret_store();
 init_worker_auth();
 init_dropbox_files();
-import { createHash as createHash18 } from "node:crypto";
-import { existsSync as existsSync13, lstatSync as lstatSync3, mkdirSync as mkdirSync12, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname19, isAbsolute as isAbsolute5 } from "node:path";
+import { createHash as createHash19 } from "node:crypto";
+import { existsSync as existsSync14, lstatSync as lstatSync3, mkdirSync as mkdirSync13, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname20, isAbsolute as isAbsolute6 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_package_root();
@@ -24982,7 +25185,7 @@ init_credential_broker();
 init_types();
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
   source_item_not_found: "failed_terminal",
   source_permission_denied: "failed_terminal",
@@ -25010,7 +25213,7 @@ class FileExtractionSourceError extends Error {
     this.errorKind = errorKind;
     this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
     this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash9("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+    const errorHash = options.detailForHash === undefined ? undefined : createHash10("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
     if (errorHash)
       this.errorHash = errorHash;
   }
@@ -25026,6 +25229,7 @@ function splitScopedLocalItemId(localItemId) {
 }
 
 // src/workers/email-source/file-extraction-runtime.ts
+init_media_cache();
 init_connector_store2();
 
 // src/workers/dropbox-files/extraction-source.ts
@@ -25471,6 +25675,12 @@ var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
   "Do not infer private facts beyond the document."
 ].join(" ");
 
+// src/workers/file-extraction/extractors/image-prepare.ts
+init_media_cache();
+init_command_runner();
+var DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+var MAX_PREPARED_BYTES = 16 * 1024 * 1024;
+
 // src/workers/file-extraction/extractors/transcription.ts
 init_command_runner();
 
@@ -25547,16 +25757,16 @@ init_analyst();
 init_model_transport();
 init_venice_models();
 import {
-  existsSync as existsSync10,
-  mkdirSync as mkdirSync9,
+  existsSync as existsSync11,
+  mkdirSync as mkdirSync10,
   readFileSync as readFileSync10,
-  renameSync as renameSync3,
-  rmSync as rmSync3,
-  writeFileSync as writeFileSync4
+  renameSync as renameSync4,
+  rmSync as rmSync4,
+  writeFileSync as writeFileSync5
 } from "node:fs";
-import { randomUUID as randomUUID5 } from "node:crypto";
+import { randomUUID as randomUUID6 } from "node:crypto";
 import { homedir as homedir13 } from "node:os";
-import { dirname as dirname13, isAbsolute as isAbsolute4, join as join16 } from "node:path";
+import { dirname as dirname14, isAbsolute as isAbsolute5, join as join17 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -25566,8 +25776,8 @@ var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir13(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute4(configuredRoot) ? configuredRoot : join16(homeDir, ".cache");
-  return join16(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute5(configuredRoot) ? configuredRoot : join17(homeDir, ".cache");
+  return join17(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -25737,7 +25947,7 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync10(path))
+  if (!existsSync11(path))
     return;
   let payload;
   try {
@@ -25771,20 +25981,20 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID5()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID6()}.tmp`;
   try {
-    mkdirSync9(dirname13(path), { recursive: true, mode: 448 });
+    mkdirSync10(dirname14(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync4(tempPath, `${JSON.stringify({
+    writeFileSync5(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
       models
     }, null, 2)}
 `, { mode: 384 });
-    renameSync3(tempPath, path);
+    renameSync4(tempPath, path);
   } catch {} finally {
-    rmSync3(tempPath, { force: true });
+    rmSync4(tempPath, { force: true });
   }
 }
 function parsePrivacyCategory(value) {
@@ -26439,7 +26649,7 @@ init_request_peer();
 init_worker_auth();
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash12, randomBytes as randomBytes2 } from "node:crypto";
+import { createHash as createHash13, randomBytes as randomBytes2 } from "node:crypto";
 var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
 var DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900;
 var DASHBOARD_LAUNCH_MAX_TICKETS = 32;
@@ -26493,7 +26703,7 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash12("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash13("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -26622,7 +26832,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -26706,7 +26916,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash13("sha256").update(value).digest("hex");
+  return createHash14("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -27103,7 +27313,7 @@ init_config();
 init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
 init_readwise();
@@ -27879,7 +28089,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash15("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash16("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -28055,7 +28265,7 @@ init_unpaired_sources();
 
 // src/workers/classification/sniffer.ts
 init_engine();
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 
 // src/workers/classification/delphi-scorer.ts
 var SCORER_SYSTEM_PROMPT = [
@@ -28104,12 +28314,12 @@ function stripCodeFences(text) {
 // src/workers/classification/sniffer-store.ts
 init_sqlite_migrations();
 import { Database as Database3 } from "bun:sqlite";
-import { createHash as createHash16 } from "node:crypto";
-import { chmodSync as chmodSync3, existsSync as existsSync11, mkdirSync as mkdirSync10 } from "node:fs";
-import { dirname as dirname15 } from "node:path";
+import { createHash as createHash17 } from "node:crypto";
+import { chmodSync as chmodSync4, existsSync as existsSync12, mkdirSync as mkdirSync11 } from "node:fs";
+import { dirname as dirname16 } from "node:path";
 var TIER_SNIFFER_SCHEMA_VERSION = 1;
 function snifferMaterialHash(pass, material) {
-  return createHash16("sha256").update(`${pass}
+  return createHash17("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 
@@ -28130,7 +28340,7 @@ class TierSnifferStore {
     this.readOnly = false;
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      mkdirSync10(dirname15(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync11(dirname16(this.dbPath), { recursive: true, mode: 448 });
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
@@ -28264,8 +28474,8 @@ function subjectParams(subject) {
 }
 function restrictFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync11(path))
-      chmodSync3(path, 384);
+    if (existsSync12(path))
+      chmodSync4(path, 384);
   }
 }
 function snifferMigrations() {
@@ -28526,13 +28736,13 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_PROMPT_VERSION = `p-${createHash17("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash17("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+var SNIFFER_PROMPT_VERSION = `p-${createHash18("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash18("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 function snifferPromptVersions(ownerContext) {
   const context = boundedOwnerContext(ownerContext);
   if (!context)
     return { approval: SNIFFER_PROMPT_VERSION, cache: SNIFFER_PROMPT_VERSION };
-  const digest = createHash17("sha256").update(context).digest("hex").slice(0, 8);
+  const digest = createHash18("sha256").update(context).digest("hex").slice(0, 8);
   return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest}` };
 }
 function parseSnifferBatchResponse(text, expected) {
@@ -28755,13 +28965,13 @@ init_privacy_profile();
 
 // src/workers/classification-ledger.ts
 import { mkdir as mkdir4, open as open4, readFile as readFile5 } from "node:fs/promises";
-import { dirname as dirname17, join as join22 } from "node:path";
+import { dirname as dirname18, join as join23 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
 var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname17(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname18(path), { recursive: true, mode: 448 });
   const handle = await open4(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -28877,8 +29087,8 @@ init_provider();
 
 // src/workers/classification/sniffer-resolver.ts
 init_atomic_file();
-import { mkdirSync as mkdirSync11, readFileSync as readFileSync12 } from "node:fs";
-import { dirname as dirname18 } from "node:path";
+import { mkdirSync as mkdirSync12, readFileSync as readFileSync12 } from "node:fs";
+import { dirname as dirname19 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
 var DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS = 30;
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
@@ -28920,7 +29130,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync11(dirname18(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync12(dirname19(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -29175,7 +29385,7 @@ function finish(report) {
 }
 
 // src/workers/classification/sniffer-service.ts
-import { existsSync as existsSync12 } from "node:fs";
+import { existsSync as existsSync13 } from "node:fs";
 init_tier_rejudge();
 init_tier_names_only_settle();
 init_tier_rules_sweep();
@@ -29237,7 +29447,7 @@ class TierSnifferService {
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       const path = tierSnifferPathForLedger(ledgerPath);
-      if (path === ":memory:" || !existsSync12(path))
+      if (path === ":memory:" || !existsSync13(path))
         continue;
       let store;
       try {
@@ -29408,11 +29618,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync12(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync13(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync12(own))
+      if (existsSync13(own))
         paths.add(own);
     }
     return [...paths];
@@ -30420,7 +30630,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash18("sha256").update(message).digest("hex"));
+      scopeReport.errors.push(createHash19("sha256").update(message).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -30549,7 +30759,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync13(config.dbPath))
+    if (!config.dbPath || !existsSync14(config.dbPath))
       return [];
     const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
     try {
@@ -30874,7 +31084,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash18("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash19("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
@@ -30980,11 +31190,11 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!instanceId || !CANONICAL_UUID.test(instanceId)) {
     throw new Error(`${NATIVE_SERVICE_INSTANCE_ID_ENV} must be a canonical UUID for native startup.`);
   }
-  if (!readinessPath || !isAbsolute5(readinessPath)) {
+  if (!readinessPath || !isAbsolute6(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname19(readinessPath);
-  mkdirSync12(directory, { recursive: true, mode: 448 });
+  const directory = dirname20(readinessPath);
+  mkdirSync13(directory, { recursive: true, mode: 448 });
   const parent = lstatSync3(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
@@ -31006,8 +31216,8 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync12(dirname19(args.reportPath), { recursive: true });
-      writeFileSync5(args.reportPath, `${json}
+      mkdirSync13(dirname20(args.reportPath), { recursive: true });
+      writeFileSync6(args.reportPath, `${json}
 `);
     }
     console.log(json);
@@ -31016,9 +31226,9 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync12(dirname19(args.reportPath), { recursive: true });
+      mkdirSync13(dirname20(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
-        writeFileSync5(args.reportPath, `${JSON.stringify(report2, null, 2)}
+        writeFileSync6(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);
       };
     }
@@ -31026,7 +31236,7 @@ if (__require.main == __require.module) {
     const report = await runSourceEmbeddingDrain(options);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath)
-      writeFileSync5(args.reportPath, `${json}
+      writeFileSync6(args.reportPath, `${json}
 `);
     console.log(json);
     if (process.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION === "true" && report.status === "attention") {
