@@ -25837,6 +25837,12 @@ var CODEX_SNIPPET = [
 // src/workers/dashboard/pages/setup.ts
 init_source_dashboard();
 init_vocabulary();
+
+// src/workers/dashboard/outside-help.ts
+init_zkapi_consult_settings();
+init_vocabulary();
+
+// src/workers/dashboard/pages/setup.ts
 var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears on this page like any " + "built-in.";
 var CONNECTOR_PROMPT = [
   "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
@@ -25892,6 +25898,9 @@ var CLIENT_COPY = {
   undoFor: DASHBOARD_LOCAL_PRIVACY_COPY.undoFor,
   rulesEmpty: DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty
 };
+
+// src/workers/dashboard/pages/outside-help.ts
+init_vocabulary();
 
 // src/workers/dashboard/index.ts
 init_vocabulary();

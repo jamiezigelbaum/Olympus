@@ -7867,7 +7867,12 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/agents/pairing-code" },
     { method: "POST", path: "/dashboard/agents/keys" },
     { method: "POST", path: "/dashboard/agents/revoke" },
-    { method: "POST", path: "/dashboard/agents/remote-access" }
+    { method: "POST", path: "/dashboard/agents/remote-access" },
+    { method: "POST", path: "/dashboard/consult" },
+    { method: "POST", path: "/dashboard/consult/route" },
+    { method: "POST", path: "/dashboard/consult/route/add" },
+    { method: "POST", path: "/dashboard/consult/recover" },
+    { method: "POST", path: "/dashboard/consult/abandon" }
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -50353,7 +50358,7 @@ function unknownStatus(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_PICKER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_PICKER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -51088,6 +51093,119 @@ var init_vocabulary = __esm(() => {
     discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
     folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
     undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
+  };
+  DASHBOARD_OUTSIDE_HELP_COPY = {
+    crumb: "Outside help",
+    title: "Outside help",
+    experimental: "Experimental · network route not verified on macOS",
+    intro: "Olympus does not upload the evidence pack. With outside help enabled, it may send a short question derived from your private answer; that question can still reveal private information.",
+    state: {
+      off: "Outside help is off.",
+      on: "Outside help is on.",
+      invalid: "Outside help is off: the settings file on this computer is damaged.",
+      route_not_configured: "Outside help is off: no zkAPI route is set up yet.",
+      fence_held: "Consults are paused: an earlier request has not been seen to settle."
+    },
+    restartPending: "A change is saved but not applied: ask your agent to restart the managed Olympus worker.",
+    disclosureTitle: "Before you turn this on",
+    disclosure: [
+      "When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. Each can cost up to $6 from your zkAPI balance; Olympus counts the full $6.",
+      "A question is sent only if the panel was recently active, but closing the panel does not guarantee nothing is sent in that window.",
+      "There is no daily limit unless you set one. Your deposit is the hard limit.",
+      "Depositing and withdrawing are each an expensive on-chain transaction (about $7 at review), paid separately. An unwithdrawn balance becomes claimable by the operator after about 30 days. There is no top-up: each deposit is a new note with its own fee and clock.",
+      "The outside provider reads the question; zkAPI hides who paid. The route is experimental and its network path is not verified on macOS.",
+      "There is no approval step: consults are automatic while this is on. Turn it off here at any time."
+    ],
+    routeTitle: "zkAPI route",
+    routeMissing: "No zkAPI route is set up. Add it here, then follow the steps below in Terminal.",
+    policyNotFile: "Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.",
+    addRoute: "Add the zkAPI route",
+    addRouteConfirm: "This adds a consult-only zkAPI route to your privacy policy and restarts the Olympus worker. No money moves. Continue?",
+    ready: "The route is ready to send.",
+    blocked: "The route is not ready yet:",
+    readinessUnavailable: "Olympus could not check the route right now.",
+    facts: {
+      daemon: "zkapi-clientd {version} found",
+      versionUnknown: "(version unknown)",
+      daemonMissing: "zkapi-clientd not installed",
+      tor: "Tor found (a fresh Tor client per consult)",
+      torMissing: "Tor not installed",
+      key: "API key configured",
+      keyMissing: "API key not configured",
+      today: "{n} requests today (${usd} reserved)",
+      todayOne: "1 request today (${usd} reserved)",
+      expiry: "balance estimated to expire {date} ({days} days left)",
+      expired: "balance past its estimated expiry",
+      expiryUnknown: "balance expiry unknown until you enter the funding date"
+    },
+    routeLabel: "Route: {label}.",
+    blockers: {
+      daemon_not_found: "The zkapi-clientd program is not installed.",
+      daemon_version_unsupported: "This zkapi-clientd version is not one Olympus has reviewed (0.1.5 or 0.1.6).",
+      tor_not_found: "Tor is not installed.",
+      daemon_api_key_missing: "The daemon's API key is not configured in Olympus. Put it where the route's key reference points, then restart the worker.",
+      acknowledgements_incomplete: "The cost and risk statements below are not all acknowledged.",
+      funding_date_missing: "Enter the funding date below so Olympus can estimate when the balance expires.",
+      funding_date_invalid: "The funding date you entered is in the future.",
+      note_expired: "By the funding date you gave, the balance is past its estimated 30-day expiry.",
+      unresolved_session: "An earlier request has not been seen to settle. Use Recover below.",
+      unresolved_session_other_wallet: "A held request belongs to another wallet folder. Recover it there, or abandon it below.",
+      stranded_processes: "Programs from an earlier session could not be confirmed stopped.",
+      daemon_already_running: "Something is already serving on the zkAPI port. Stop your own zkapi-clientd serve; Olympus runs its own for each consult.",
+      tor_port_busy: "Something already listens on the Tor port. Olympus needs it free to start a fresh Tor client.",
+      daily_cap_reached: "Today's request limit you set is reached.",
+      spend_cap_reached: "Another request would exceed today's spending limit you set.",
+      state_unavailable: "The consult ledger on this computer could not be read.",
+      key_reuse_on: "The daemon's key-reuse window is on; run zkapi-clientd config --key-reuse-window-seconds 0."
+    },
+    blockerOther: "The route is not ready ({code}).",
+    stepsTitle: "How to set up the zkAPI route",
+    stepsIntro: "In Terminal, in this order. This is the order that worked live.",
+    steps: [
+      "Install zkapi-clientd (version 0.1.5 or 0.1.6) and Tor.",
+      "Run: zkapi-clientd config --usd N. Send ONE transfer in total: the deposit plus the fee buffer the tool shows. Gas prices move, so the buffer can fall short; a shortfall means another transfer.",
+      'Wait until the tool prints "Private inference balance activated".',
+      "Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050",
+      "Run: zkapi-clientd config --require-api-key",
+      "Run: zkapi-clientd config --api-key <key>. Store the same key where the route's key reference points ({secretRef}); for env:NAME that is a NAME=<key> line in ~/.config/olympus/worker.env (owner-only), then restart the Olympus worker.",
+      "Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on."
+    ],
+    costTitle: "Cost and risk",
+    costIntro: "Read and tick every statement once. They are recorded with the route; the wording version moves when a statement changes, and you are asked again.",
+    acknowledged: "All statements acknowledged.",
+    notAcknowledged: "Not yet acknowledged.",
+    fundingDate: "Funding date: the day your deposit was confirmed (YYYY-MM-DD)",
+    capRequests: "Daily request limit (optional)",
+    capUsd: "Daily spending limit in dollars, counted at $6 per consult (optional)",
+    saveRestarts: "Saving restarts the Olympus worker to apply it.",
+    saveRoute: "Save",
+    fenceTitle: "Held request",
+    fenceIntro: "An earlier request has not been seen to settle. Until it does, no consult is sent.",
+    fenceThis: "Held since {at} (this wallet)",
+    fenceOther: "Held since {at} (another wallet folder)",
+    recover: "Recover",
+    recoverHint: "Sends one fixed request with no content and reserves up to $6.",
+    recoverConfirm: "Recovery sends one fixed request with no content through the same route and reserves up to $6. Continue?",
+    abandon: "Abandon",
+    abandonHint: "Stops the block without settling; the unsettled request may later link two sessions.",
+    abandonConfirm: "Abandoning means the unsettled request may later settle under another session's network identity, linking the two. It stops blocking consults and stays in the ledger as a record. Continue?",
+    languagesTitle: "Languages",
+    languagesIntro: "The outside question may use these languages. Only languages with a vocabulary pack installed on this computer can be chosen.",
+    packMissing: "pack not installed",
+    automatic: "While on, consults run automatically when a private answer in ChatGPT is incomplete. Only this computer can change this setting.",
+    turnOn: "Turn on outside help",
+    turnOff: "Turn off outside help",
+    replaceFile: "Replace the damaged settings file (outside help stays off)",
+    enableBlockedRoute: "Add the zkAPI route first.",
+    enableBlockedAcks: "Tick and save every cost and risk statement first.",
+    edit: "Edit",
+    setUp: "Set up",
+    saving: "Saving…",
+    saveFailed: "Olympus could not save this. Try again.",
+    restarting: "Restarting the worker…",
+    locked: "Unlock dashboard controls in Setup to see and change outside help.",
+    native: "Outside help is set up on this computer's own dashboard only, never from an agent or ChatGPT.",
+    unavailable: "Outside help is not available from this worker."
   };
 });
 
@@ -91271,6 +91389,24 @@ details.models .modelsbody { margin-top: 12px; }
 /* The confirm and conflict steps: a tinted box with a 1px border, never a stripe. */
 .pprompt { padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; display: grid; gap: 8px; }
 .pprompt p { margin: 0; color: var(--t1); }
+`, DASHBOARD_OUTSIDE_HELP_CSS = `
+.outside .ohlabel { color: var(--t3); font-size: var(--fs-caption); margin: -2px 0 10px; }
+.outside .ohstate { font-weight: 600; color: var(--t1); margin: 0 0 12px; }
+.outside .ohready { color: var(--good, var(--t1)); font-weight: 600; margin: 0 0 8px; }
+.outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
+.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; }
+.outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
+.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); }
+.outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
+.outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
+.outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
+.outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.outside .ohoff { color: var(--t3); }
+.outside .ohfence { display: grid; gap: 10px; margin: 8px 0 0; }
+.outside .ohfence .ohform { grid-template-columns: auto 1fr; align-items: center; }
+.outside .ohfence .ohform .actmsg { grid-column: 1 / -1; }
+.outside .actmsg[data-state="error"] { color: var(--bad); }
 `;
 
 // src/control-ui/browser-controller.ts
@@ -99336,6 +99472,216 @@ var init_agents = __esm(() => {
   MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 });
 
+// src/workers/dashboard/outside-help.ts
+function outsideHelpHref(basePath = "/dashboard") {
+  return `${basePath}${basePath.includes("?") ? "&" : "?"}${DASHBOARD_OUTSIDE_HELP_QUERY_PARAM}`;
+}
+function outsideHelpStateLine(summary) {
+  return DASHBOARD_OUTSIDE_HELP_COPY.state[summary.state];
+}
+function summaryOf(status) {
+  if (status.settings.state === "invalid")
+    return { state: "invalid" };
+  if (status.route.state === "not_configured")
+    return { state: "route_not_configured" };
+  if (status.route.state === "configured" && status.route.readiness && status.route.readiness.fences.length > 0)
+    return { state: "fence_held" };
+  return { state: status.settings.state };
+}
+function outsideHelpBlockerWords(code) {
+  return DASHBOARD_OUTSIDE_HELP_COPY.blockers[code] ?? fill(DASHBOARD_OUTSIDE_HELP_COPY.blockerOther, { code });
+}
+function renderOutsideHelpCard(status, input) {
+  const summary = summaryOf(status);
+  const canEdit = input.csrfToken !== undefined;
+  const route = status.route;
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const parts = [];
+  parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
+  parts.push(`<p class="ohlabel">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`);
+  parts.push(`<p class="pintro">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>`);
+  parts.push(`<p class="ohstate" data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</p>`);
+  if (status.restartPending)
+    parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
+  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div><ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`);
+  parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeTitle)}</div>`);
+  if (route.state === "not_configured") {
+    parts.push(`<p class="pnote" data-outside-route="not_configured">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing)}</p>`);
+    if (route.policyWritable) {
+      parts.push(`<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}">` + `<button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+    } else {
+      parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile)}</p>`);
+    }
+  } else {
+    parts.push(renderReadiness(route));
+  }
+  parts.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`));
+  if (route.state === "configured") {
+    parts.push(renderAcknowledgements(route, canEdit));
+  }
+  if (route.state === "configured" && route.readiness && route.readiness.fences.length > 0) {
+    parts.push(renderFence(route.readiness, canEdit));
+  }
+  parts.push(renderEnable(status, summary, canEdit));
+  const config2 = { csrfToken: input.csrfToken ?? "", paths: DASHBOARD_OUTSIDE_HELP_PATHS, copy: { saving: DASHBOARD_OUTSIDE_HELP_COPY.saving, failed: DASHBOARD_OUTSIDE_HELP_COPY.saveFailed, restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting } };
+  const script = canEdit ? `<script>${outsideHelpClientScript(config2)}</script>` : "";
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
+}
+function renderReadiness(route) {
+  if (route.readinessUnavailable || !route.readiness) {
+    return `<p class="pnote ohwarn" data-outside-route="unknown">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.readinessUnavailable)}</p>`;
+  }
+  const ready = route.readiness;
+  const facts = [
+    ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
+    ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
+    ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
+    fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
+    ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown
+  ];
+  const blockers = ready.blockers.map((code) => `<li>${escapeHtml2(outsideHelpBlockerWords(code))}</li>`).join("");
+  const head = ready.ready ? `<p class="ohready" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.ready)}</p>` : `<p class="pnote ohwarn" data-outside-route="blocked">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.blocked)}</p><ul class="ohlist" data-outside-blockers>${blockers}</ul>`;
+  return `${head}<ul class="ohfacts">${facts.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>` + `<p class="pnote ohsmall">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }))}</p>`;
+}
+function renderSetupSteps(secretRef) {
+  const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => fill(step, { secretRef }));
+  return `<details class="howto" data-outside-steps><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle)}</summary>` + `<p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></details>`;
+}
+function renderAcknowledgements(route, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const accepted = new Set(route.acknowledgements.complete ? route.acknowledgements.accepted : []);
+  const boxes = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<label class="ohack"><input type="checkbox" name="acknowledged" value="${escapeHtml2(entry.id)}"` + `${accepted.has(entry.id) ? " checked" : ""}${disabled}><span>${escapeHtml2(entry.statement)}</span></label>`).join("");
+  const state = route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.acknowledged : DASHBOARD_OUTSIDE_HELP_COPY.notAcknowledged;
+  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>` + `<p class="pnote" data-outside-acknowledged="${route.acknowledgements.complete ? "yes" : "no"}">${escapeHtml2(state)}</p>` + `<form class="ohform" data-outside-form="route">${boxes}` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</p>` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></div></form>`;
+}
+function renderFence(ready, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const mine = ready.fences.some((fence) => fence.thisWallet);
+  const rows = ready.fences.map((fence) => `<li>${escapeHtml2(fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: fence.at.slice(0, 16).replace("T", " ") }))}</li>`).join("");
+  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceTitle)}</div><p class="pnote ohwarn" data-outside-fence>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceIntro)}</p><ul class="ohlist">${rows}</ul>` + `<div class="ohfence">` + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary"${mine ? "" : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}</span><span class="actmsg" data-action-message role="status"></span></form>` + ready.fences.map((fence) => `<form class="ohform" data-outside-form="abandon" data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join("") + `</div>`;
+}
+function renderEnable(status, summary, canEdit) {
+  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const chosen = new Set(status.settings.languages);
+  const languages = status.languages.map((entry) => {
+    const name = LANGUAGE_NAMES[entry.language];
+    const off = !entry.installed;
+    return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled}>` + `<span>${escapeHtml2(name)}${off ? ` <span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
+  }).join("");
+  const on = status.settings.state === "on";
+  const route = status.route;
+  const blockedReason = status.settings.state === "invalid" ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
+  const invalid2 = status.settings.state === "invalid";
+  const button = invalid2 ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p>` + `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">${languages}` + `<div class="pfooter"><p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.automatic)}</p><div class="pbuttons">${button}</div>` + `<span class="actmsg" data-action-message role="status"></span></div></form>` + (summary.state === "fence_held" ? "" : "");
+}
+function outsideHelpClientScript(config2) {
+  return `(function () {
+  var config = ${escapeScriptJson(JSON.stringify(config2))};
+  var root = document.querySelector('[data-outside-help]');
+  if (!root) return;
+  function message(form, text, bad) {
+    var out = form.querySelector('[data-action-message]');
+    if (!out) return;
+    out.textContent = text;
+    out.setAttribute('data-state', bad ? 'error' : 'ok');
+  }
+  function numberOrNull(value) {
+    var trimmed = String(value || '').trim();
+    if (trimmed === '') return null;
+    var n = Number(trimmed);
+    return isFinite(n) ? n : NaN;
+  }
+  function bodyFor(form, kind, submitter) {
+    var data = new FormData(form);
+    if (kind === 'enable') {
+      var invalid = form.getAttribute('data-outside-invalid') === 'yes';
+      var enabled = invalid ? false : (submitter && submitter.getAttribute('data-outside-enabled') === 'true');
+      var body = { enabled: enabled, revision: Number(root.getAttribute('data-revision') || '0'), languages: data.getAll('languages') };
+      if (invalid) body.replace_invalid = true;
+      return body;
+    }
+    if (kind === 'route') {
+      return {
+        acknowledged: data.getAll('acknowledged'),
+        funding_date: String(data.get('funding_date') || ''),
+        daily_request_cap: numberOrNull(data.get('daily_request_cap')),
+        daily_spend_cap_usd: numberOrNull(data.get('daily_spend_cap_usd')),
+      };
+    }
+    if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
+    return { confirm: true };
+  }
+  var paths = { enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
+  root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var kind = form.getAttribute('data-outside-form');
+      var confirmText = form.getAttribute('data-outside-confirm');
+      if (confirmText && !window.confirm(confirmText)) return;
+      var buttons = form.querySelectorAll('button');
+      buttons.forEach(function (button) { button.disabled = true; });
+      message(form, config.copy.saving, false);
+      try {
+        var response = await fetch(paths[kind], {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify(bodyFor(form, kind, event.submitter)),
+        });
+        var result = {};
+        try { result = await response.json(); } catch (error) { result = {}; }
+        if (!response.ok || !result.ok) {
+          message(form, (result.error && result.error.message) || config.copy.failed, true);
+          buttons.forEach(function (button) { button.disabled = false; });
+          return;
+        }
+        message(form, result.status_message || '', false);
+        if (result.restarting) {
+          message(form, (result.status_message || '') + ' ' + config.copy.restarting, false);
+          setTimeout(function () { window.location.reload(); }, 6000);
+        } else {
+          setTimeout(function () { window.location.reload(); }, 1200);
+        }
+      } catch (error) {
+        message(form, config.copy.failed, true);
+        buttons.forEach(function (button) { button.disabled = false; });
+      }
+    });
+  });
+})();`;
+}
+function renderOutsideHelpSection(summary, basePath) {
+  if (!summary)
+    return "";
+  const href = outsideHelpHref(basePath);
+  const label = summary.state === "route_not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.setUp : DASHBOARD_OUTSIDE_HELP_COPY.edit;
+  return `<div class="sect" id="outside-help">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</div>` + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml2(outsideHelpStateLine(summary))}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a></div></div></div>`;
+}
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES;
+var init_outside_help = __esm(() => {
+  init_zkapi_consult_settings();
+  init_components();
+  init_vocabulary();
+  init_source_rows();
+  DASHBOARD_OUTSIDE_HELP_PATHS = {
+    enable: "/dashboard/consult",
+    route: "/dashboard/consult/route",
+    addRoute: "/dashboard/consult/route/add",
+    recover: "/dashboard/consult/recover",
+    abandon: "/dashboard/consult/abandon"
+  };
+  LANGUAGE_NAMES = {
+    en: "English",
+    nl: "Dutch",
+    fr: "French",
+    es: "Spanish",
+    "pt-PT": "Portuguese (Portugal)",
+    "pt-BR": "Portuguese (Brazil)",
+    de: "German",
+    it: "Italian"
+  };
+});
+
 // src/workers/dashboard/pages/setup.ts
 function renderDashboardSetupPage(view, options) {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
@@ -99366,6 +99712,7 @@ function renderDashboardSetupPage(view, options) {
       copyButtonLabel: CONNECTOR_SHEET_COPY_LABEL
     }),
     dashboardPrivacySection(rowOptions),
+    options?.controlMode === "native" ? "" : renderOutsideHelpSection(options?.outsideHelpSummary, basePath),
     dashboardModelsSection(states, view),
     ...options?.agents ? [renderDashboardAgentsSection({ view: options.agents, now: new Date(view.generated_at) })] : []
   ].filter((block) => block !== "").join(`
@@ -99502,6 +99849,7 @@ var init_setup = __esm(() => {
   init_source_dashboard();
   init_vocabulary();
   init_components();
+  init_outside_help();
   init_nav();
   init_source_rows();
   CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears on this page like any " + "built-in.";
@@ -99696,6 +100044,47 @@ var init_privacy = __esm(() => {
   };
 });
 
+// src/workers/dashboard/pages/outside-help.ts
+function renderDashboardOutsideHelpPage(view, options) {
+  const now = options?.now ?? new Date;
+  const basePath = options?.basePath;
+  return pageShell({
+    title: "Olympus",
+    crumb: DASHBOARD_OUTSIDE_HELP_COPY.crumb,
+    ...basePath === undefined ? {} : { basePath },
+    meta: dashboardCheckedLabel(view.generated_at, now),
+    body: [
+      renderDashboardNav("setup", { ...basePath === undefined ? {} : { basePath } }),
+      renderOutsideHelpBody(options)
+    ].join(`
+`),
+    styles: [DASHBOARD_NAV_CSS, DASHBOARD_SOURCE_ROWS_CSS, DASHBOARD_PRIVACY_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
+    ...options?.format === undefined ? {} : { format: options.format }
+  });
+}
+function renderOutsideHelpBody(options) {
+  const head = `<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`;
+  if (options?.controlMode === "native") {
+    return `<div class="privacy outside" data-outside-native>${head}<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.native)}</p></div>`;
+  }
+  const csrfToken = options?.controlSessionCsrfToken;
+  if (csrfToken === undefined) {
+    return `<div class="privacy outside" data-outside-locked>${head}` + `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.locked)} <a href="${escapeHtml2(`${setupHref(options?.basePath)}#${DASHBOARD_CONTROL_GATE_ID}`)}">Setup →</a></p></div>`;
+  }
+  const status = options?.outsideHelp;
+  if (!status) {
+    return `<div class="privacy outside" data-outside-unavailable>${head}<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unavailable)}</p></div>`;
+  }
+  return renderOutsideHelpCard(status, { csrfToken, ...options?.basePath === undefined ? {} : { basePath: options.basePath } });
+}
+var init_outside_help2 = __esm(() => {
+  init_components();
+  init_nav();
+  init_outside_help();
+  init_source_rows();
+  init_vocabulary();
+});
+
 // src/workers/dashboard/index.ts
 function dashboardHtmlRoutePage(url) {
   const params = url.searchParams;
@@ -99707,6 +100096,8 @@ function dashboardHtmlRoutePage(url) {
     return "sensitivity";
   if (params.has(DASHBOARD_PRIVACY_QUERY_PARAM))
     return "privacy";
+  if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM))
+    return "outside_help";
   if (params.has(DASHBOARD_SETUP_QUERY_PARAM))
     return "setup";
   return "home";
@@ -99727,6 +100118,8 @@ function renderDashboardHtmlRoute(input) {
       return { html: renderDashboardSensitivityPage(view, options), status: 200 };
     case "privacy":
       return { html: renderDashboardPrivacyPage(view, options), status: 200 };
+    case "outside_help":
+      return { html: renderDashboardOutsideHelpPage(view, options), status: 200 };
     case "setup":
       return { html: renderDashboardSetupPage(view, options), status: 200 };
     case "home":
@@ -99831,12 +100224,15 @@ var init_dashboard = __esm(() => {
   init_background();
   init_sensitivity();
   init_privacy();
+  init_outside_help2();
+  init_outside_help();
   init_home();
   init_detail();
   init_setup();
   init_background();
   init_sensitivity();
   init_privacy();
+  init_outside_help2();
   init_vocabulary();
 });
 
@@ -99951,6 +100347,8 @@ function withWorkerBearerAuth(fetchHandler, options) {
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      if (isDashboardConsultControlRoute(request))
+        return dashboardConsultMacOnlyResponse();
       if (isAgentMintRoute(request) && !agentMintAllowed("bearer"))
         return agentMintLimitedResponse();
       if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed("bearer"))
@@ -99986,7 +100384,8 @@ function withWorkerBearerAuth(fetchHandler, options) {
         if (isRemoteAccessToggleRoute(request) && !remoteAccessToggleAllowed(`session:${authorization.sessionId}`)) {
           return remoteAccessToggleLimitedResponse();
         }
-        return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
+        const proven = isDashboardConsultControlRoute(request) ? withDashboardControlContextHeader(request, authorization.csrfToken) : request;
+        return withRenewedDashboardControlCookie(await fetchHandler(proven), authorization, now());
       }
       if (authorization.status === "origin_mismatch" || authorization.status === "csrf_mismatch") {
         return dashboardControlForbiddenResponse(authorization.status);
@@ -100172,9 +100571,26 @@ function agentMintLimitedResponse() {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "Retry-After": "600" }
   });
 }
+function isDashboardConsultControlRoute(request) {
+  return request.method === "POST" && DASHBOARD_CONSULT_CONTROL_PATHS.includes(new URL(request.url).pathname);
+}
+function dashboardConsultMacOnlyResponse() {
+  return new Response(JSON.stringify({
+    ok: false,
+    error: {
+      code: "mac_dashboard_only",
+      message: "Outside help can be changed only from the dashboard on this computer, in an unlocked browser."
+    }
+  }), {
+    status: 403,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+  });
+}
 function isDashboardControlRoute(request) {
   if (request.method !== "POST")
     return false;
+  if (isDashboardConsultControlRoute(request))
+    return true;
   return new Set([
     "/dashboard/dispositions",
     "/dashboard/connect/oauth/start",
@@ -100521,7 +100937,7 @@ function optionalEnv(value) {
   const trimmed2 = value?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS;
 var init_http = __esm(() => {
   init_worker_auth();
   init_dashboard_launch();
@@ -100529,6 +100945,13 @@ var init_http = __esm(() => {
   AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
   AGENT_MINT_WINDOW_MS = 10 * 60000;
   REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
+  DASHBOARD_CONSULT_CONTROL_PATHS = [
+    "/dashboard/consult",
+    "/dashboard/consult/route",
+    "/dashboard/consult/route/add",
+    "/dashboard/consult/recover",
+    "/dashboard/consult/abandon"
+  ];
 });
 
 // src/workers/dashboard/pages/embedding-ledger.ts
@@ -102593,6 +103016,10 @@ function createEmailSourceWorker(options = {}) {
           const privacyRead = sourceDashboard.privacy && dashboardPage === "privacy" && writeAuthority ? await sourceDashboard.privacy.read().catch(() => {
             return;
           }) : undefined;
+          const outsideHelp = sourceDashboard.consult && !dashboardUi && dashboardPage === "outside_help" && controlSessionCsrfToken !== undefined ? await sourceDashboard.consult.status().catch(() => {
+            return;
+          }) : undefined;
+          const outsideHelpSummary = sourceDashboard.consult && !dashboardUi && dashboardPage === "setup" ? safeOutsideHelpSummary(sourceDashboard.consult) : undefined;
           let modelInstalls;
           try {
             modelInstalls = sourceDashboard.modelInstalls?.();
@@ -102603,6 +103030,8 @@ function createEmailSourceWorker(options = {}) {
             ...modelInstalls ? { modelInstalls } : {},
             ...sourceDashboard.privacy && privacyShown ? { privacy: privacySummary?.ok ? privacySummary.summary : "unreadable" } : {},
             ...privacyRead?.ok ? { privacySettings: privacyRead.settings } : {},
+            ...outsideHelp ? { outsideHelp } : {},
+            ...outsideHelpSummary ? { outsideHelpSummary } : {},
             embeddingRuntime,
             backgroundRuntime,
             ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
@@ -102853,6 +103282,26 @@ function createEmailSourceWorker(options = {}) {
             }, 409);
           }
           return json({ ok: true, settings: outcome.settings, status_message: "Privacy saved." });
+        }
+        if (request.method === "POST" && DASHBOARD_CONSULT_CONTROL_PATHS.includes(url.pathname)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)) {
+            return json({ ok: false, error: { code: "mac_dashboard_only", message: "Outside help can be changed only from the dashboard on this computer, in an unlocked browser." } }, 403);
+          }
+          if (!sourceDashboard?.consult) {
+            throw new EmailSourceWorkerError(501, "consult_not_supported", "This worker does not support outside help.");
+          }
+          const record3 = await parseObjectBody(request);
+          const backend = sourceDashboard.consult;
+          const outcome = url.pathname === "/dashboard/consult" ? await backend.setEnabled(record3) : url.pathname === "/dashboard/consult/route" ? await backend.saveRoute(record3) : url.pathname === "/dashboard/consult/route/add" ? await backend.addRoute(record3) : url.pathname === "/dashboard/consult/recover" ? await backend.recover(record3) : await backend.abandon(record3);
+          if (!outcome.ok) {
+            return json({ ok: false, error: { code: outcome.code, message: outcome.message }, ...outcome.revision !== undefined ? { revision: outcome.revision } : {} }, outcome.httpStatus);
+          }
+          return json({
+            ok: true,
+            status_message: outcome.status_message,
+            ...outcome.restarting !== undefined ? { restarting: outcome.restarting } : {},
+            ...outcome.revision !== undefined ? { revision: outcome.revision } : {}
+          });
         }
         if (request.method === "POST" && url.pathname === "/dashboard/models/retry") {
           if (!sourceDashboard?.retryModel) {
@@ -104031,6 +104480,13 @@ async function retrySqliteBusy(operation) {
     }
   }
   throw lastError;
+}
+function safeOutsideHelpSummary(backend) {
+  try {
+    return backend.summary();
+  } catch {
+    return;
+  }
 }
 function sqliteBusyRetryDelays() {
   const configured = process.env.OLYMPUS_SQLITE_BUSY_RETRY_DELAYS_MS;
@@ -123364,6 +123820,459 @@ var init_dashboard_privacy = __esm(() => {
   init_shared_privacy();
 });
 
+// src/core/consult-settings-writer.ts
+import { chmodSync as chmodSync22, lstatSync as lstatSync21, mkdirSync as mkdirSync41, statSync as statSync22 } from "node:fs";
+import { dirname as dirname54, isAbsolute as isAbsolute14 } from "node:path";
+function writeConsultSettings(input, location = {}) {
+  const path = location.path ?? consultSettingsPath(location.env ?? process.env);
+  if (path === undefined || !isAbsolute14(path))
+    return { ok: false, reason: "no_home" };
+  const nextRevision = input.expectedRevision + 1;
+  const candidate = parseConsultSettings({
+    v: CONSULT_SETTINGS_VERSION,
+    revision: nextRevision,
+    enabled: input.enabled,
+    languages: [...input.languages],
+    domains: { ...input.domains },
+    strict: input.strict
+  });
+  if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+    return { ok: false, reason: "invalid_input" };
+  const custody = ensureSettingsDirectory(dirname54(path));
+  if (custody !== "ok")
+    return { ok: false, reason: custody };
+  try {
+    return withFileLeaseSync(path, (lease) => {
+      const current = readConsultSettings({ path });
+      if (current.state === "invalid") {
+        if (input.replaceInvalid !== true)
+          return { ok: false, reason: "invalid_current", current, invalidReason: current.reason };
+      } else {
+        const currentRevision = current.state === "absent" ? 0 : current.settings.revision;
+        if (currentRevision !== input.expectedRevision)
+          return { ok: false, reason: "revision_conflict", current };
+      }
+      try {
+        lease.commit(() => {
+          writePrivateFileAtomicSync(path, `${JSON.stringify(candidate)}
+`);
+          chmodSync22(path, 384);
+        });
+      } catch {
+        return { ok: false, reason: "write_failed" };
+      }
+      const written = readConsultSettings({ path });
+      if (written.state !== "valid")
+        return { ok: false, reason: "write_failed", current: written };
+      return { ok: true, settings: written.settings };
+    }, { acquireTimeoutMs: CONSULT_SETTINGS_LEASE_TIMEOUT_MS });
+  } catch (error2) {
+    if (error2 instanceof FileLeaseBusyError || error2?.code === "file_lease_busy")
+      return { ok: false, reason: "lease_busy" };
+    return { ok: false, reason: "write_failed" };
+  }
+}
+function ensureSettingsDirectory(directory) {
+  let stats;
+  try {
+    stats = lstatSync21(directory);
+  } catch (error2) {
+    if (error2?.code !== "ENOENT")
+      return "directory_unavailable";
+    try {
+      statSync22(dirname54(directory));
+    } catch {
+      return "home_missing";
+    }
+    try {
+      mkdirSync41(directory, { mode: 448 });
+      chmodSync22(directory, 448);
+    } catch {
+      return "directory_unavailable";
+    }
+    try {
+      stats = lstatSync21(directory);
+    } catch {
+      return "directory_unavailable";
+    }
+  }
+  if (stats.isSymbolicLink())
+    return "directory_symlink";
+  if (!stats.isDirectory())
+    return "directory_custody";
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid())
+    return "directory_custody";
+  if ((stats.mode & 63) !== 0)
+    return "directory_custody";
+  return "ok";
+}
+var CONSULT_SETTINGS_LEASE_TIMEOUT_MS = 2000;
+var init_consult_settings_writer = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_consult_settings();
+});
+
+// src/workers/email-source/dashboard-consult.ts
+var exports_dashboard_consult = {};
+__export(exports_dashboard_consult, {
+  createDashboardConsultAdapter: () => createDashboardConsultAdapter,
+  DASHBOARD_ZKAPI_PROFILE_ID: () => DASHBOARD_ZKAPI_PROFILE_ID,
+  DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
+  DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
+});
+function createDashboardConsultAdapter(options) {
+  const env = options.env ?? process.env;
+  const now = options.now ?? (() => new Date);
+  const statePath = options.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
+  const location = options.settingsLocation ?? { env };
+  const readiness = options.readiness ?? zkapiConsultReadiness;
+  const recover = options.recoverSession ?? recoverZkapiSession;
+  let policy = options.sovereignty.config;
+  let restartPending = false;
+  const zkapiProfile = () => {
+    const entries = Object.entries(policy.modelProfiles).filter(([, profile2]) => profile2.provider === "zkapi");
+    if (entries.length !== 1)
+      return;
+    const [id, profile] = entries[0];
+    return { id, profile };
+  };
+  const transport = () => resolveZkapiConsultTransport(policy.modelProfiles, (secretRef) => options.resolveSecret(secretRef), { env, statePath });
+  const fenceHeld = () => {
+    try {
+      return Object.keys(zkapiOutstandingFences(statePath)).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  const settingsView = () => {
+    const read = readConsultSettings(location);
+    const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS;
+    return {
+      state: read.state === "invalid" ? "invalid" : read.state === "valid" && read.settings.enabled ? "on" : "off",
+      revision: read.state === "valid" ? read.settings.revision : 0,
+      languages: [...settings.languages],
+      domains: { ...settings.domains },
+      strict: settings.strict,
+      ...read.state === "invalid" ? { invalidReason: read.reason } : {}
+    };
+  };
+  const languages = () => {
+    const status = consultVocabularyFileStatus({ languages: ALL_LANGUAGES, domains: { units: false, countries: false, medicines: false, medicineBrands: false } }, env);
+    return ALL_LANGUAGES.map((language) => {
+      const pack = CONSULT_LANGUAGE_PACKS[language];
+      const entry = status.find((item) => item.id === pack);
+      return { language, pack, state: entry?.state ?? "missing", installed: entry?.state === "verified" };
+    });
+  };
+  const routeView = async () => {
+    const route = zkapiProfile();
+    if (!route)
+      return { state: "not_configured", policyWritable: policyWritable() };
+    const settings = route.profile.zkapi;
+    const acknowledgements = settings?.acknowledgements ?? { version: 0, accepted: [] };
+    const complete = acknowledgements.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
+    const base = {
+      state: "configured",
+      profileId: route.id,
+      model: "model" in route.profile && typeof route.profile.model === "string" ? route.profile.model : "",
+      policyWritable: policyWritable(),
+      secretRef: route.profile.secretRef ?? "",
+      acknowledgements: { version: acknowledgements.version, accepted: [...acknowledgements.accepted], complete },
+      ...settings?.fundingDate ? { fundingDate: settings.fundingDate } : {},
+      ...settings?.depositUsd !== undefined ? { depositUsd: settings.depositUsd } : {},
+      ...settings?.dailyRequestCap !== undefined ? { dailyRequestCap: settings.dailyRequestCap } : {},
+      ...settings?.dailySpendCapUsd !== undefined ? { dailySpendCapUsd: settings.dailySpendCapUsd } : {}
+    };
+    const transportOptions = transport();
+    if (!transportOptions)
+      return base;
+    try {
+      const { apiKey: _key, ...probe } = transportOptions;
+      const ready = await readiness({ ...probe, apiKeyPresent: transportOptions.apiKey !== undefined, now: () => now() });
+      return {
+        ...base,
+        readiness: {
+          ready: ready.blockers.length === 0,
+          blockers: [...ready.blockers],
+          daemonFound: ready.daemonExecutable !== undefined,
+          ...ready.daemonVersion ? { daemonVersion: ready.daemonVersion } : {},
+          torFound: ready.tor === "off" || ready.torExecutable !== undefined,
+          apiKeyConfigured: ready.apiKeyConfigured,
+          expiry: {
+            state: ready.money.expiryEstimate.state,
+            ...ready.money.expiryEstimate.daysLeft !== undefined ? { daysLeft: ready.money.expiryEstimate.daysLeft } : {},
+            ...ready.money.expiryEstimate.expiryDate ? { expiryDate: ready.money.expiryEstimate.expiryDate } : {}
+          },
+          requestsToday: { ...ready.requestsToday },
+          spendToday: { ...ready.spendToday },
+          fences: fencesView(),
+          routeLabel: ready.routeLabel,
+          ...ready.lastSession ? { lastSession: { at: ready.lastSession.at, result: ready.lastSession.result } } : {}
+        }
+      };
+    } catch {
+      return { ...base, readinessUnavailable: true };
+    }
+  };
+  const fencesView = () => {
+    try {
+      const mine = zkapiFenceScope({ env });
+      return Object.entries(zkapiOutstandingFences(statePath)).map(([scope, fence]) => ({ scope, at: fence.at, thisWallet: scope === mine }));
+    } catch {
+      return [];
+    }
+  };
+  const policyWritable = () => options.sovereignty.source === "file" && Boolean(options.sovereignty.path);
+  const writePolicy = (next) => {
+    if (!policyWritable())
+      return { ok: false, httpStatus: 409, code: "policy_not_file", message: MESSAGES2.policyNotFile };
+    const validated = validateSovereigntyConfig(next);
+    writeSovereigntyConfigFile({ config: validated, path: options.sovereignty.path, force: true });
+    policy = validated;
+    return;
+  };
+  const invalid3 = (message, code = "invalid_params") => ({ ok: false, httpStatus: 400, code, message });
+  return {
+    summary() {
+      const settings = settingsView();
+      if (settings.state === "invalid")
+        return { state: "invalid" };
+      if (!zkapiProfile())
+        return { state: "route_not_configured" };
+      if (fenceHeld())
+        return { state: "fence_held" };
+      return { state: settings.state };
+    },
+    async status() {
+      return {
+        settings: settingsView(),
+        route: await routeView(),
+        languages: languages(),
+        restartPending
+      };
+    },
+    async setEnabled(update) {
+      const enabled = update.enabled;
+      if (typeof enabled !== "boolean")
+        return invalid3("Say whether outside help should be on or off.");
+      const revision = update.revision;
+      if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
+        return invalid3(MESSAGES2.needsRevision, "needs_revision");
+      const replaceInvalid = update.replace_invalid === true;
+      const current = readConsultSettings(location);
+      const base = current.state === "valid" ? current.settings : DEFAULT_CONSULT_SETTINGS;
+      let chosen = [...base.languages];
+      if (update.languages !== undefined) {
+        if (!Array.isArray(update.languages) || update.languages.length === 0)
+          return invalid3(MESSAGES2.languagesEmpty, "languages_empty");
+        if (!update.languages.every((item) => typeof item === "string" && ALL_LANGUAGES.includes(item))) {
+          return invalid3("An unknown language was chosen.", "language_unknown");
+        }
+        chosen = [...new Set(update.languages)];
+      }
+      if (enabled) {
+        const route = zkapiProfile();
+        if (!route)
+          return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
+        const acknowledgements = route.profile.zkapi?.acknowledgements;
+        const complete = acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
+        if (!complete)
+          return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES2.acknowledgementsIncomplete };
+        const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
+        if (!chosen.every((language) => installed2.has(language)))
+          return invalid3(MESSAGES2.languageMissing, "language_pack_missing");
+      }
+      const result = writeConsultSettings({
+        enabled,
+        languages: chosen,
+        domains: { ...base.domains },
+        strict: base.strict,
+        expectedRevision: revision,
+        ...replaceInvalid ? { replaceInvalid: true } : {}
+      }, location);
+      if (result.ok) {
+        return { ok: true, status_message: enabled ? MESSAGES2.turnedOn : MESSAGES2.turnedOff, revision: result.settings.revision };
+      }
+      return writeRefusal(result.reason, result.current?.state === "valid" ? result.current.settings.revision : 0);
+    },
+    async saveRoute(update) {
+      const route = zkapiProfile();
+      if (!route)
+        return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
+      const acknowledged = update.acknowledged;
+      if (!Array.isArray(acknowledged) || !acknowledged.every((item) => typeof item === "string"))
+        return invalid3(MESSAGES2.tickAll, "acknowledgements_incomplete");
+      const accepted = new Set(acknowledged);
+      if (!ACKNOWLEDGEMENT_IDS.every((id) => accepted.has(id)))
+        return invalid3(MESSAGES2.tickAll, "acknowledgements_incomplete");
+      const zkapi = { ...route.profile.zkapi ?? {} };
+      zkapi.acknowledgements = { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [...ACKNOWLEDGEMENT_IDS] };
+      if (update.funding_date !== undefined && update.funding_date !== null && update.funding_date !== "") {
+        if (typeof update.funding_date !== "string" || parseIsoDate(update.funding_date) === undefined)
+          return invalid3(MESSAGES2.fundingDate, "funding_date_invalid");
+        zkapi.fundingDate = update.funding_date;
+      }
+      for (const [field, key] of [["daily_request_cap", "dailyRequestCap"], ["daily_spend_cap_usd", "dailySpendCapUsd"], ["deposit_usd", "depositUsd"]]) {
+        const raw = update[field];
+        if (raw === undefined)
+          continue;
+        if (raw === null || raw === "") {
+          delete zkapi[key];
+          continue;
+        }
+        if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || key === "dailyRequestCap" && !Number.isInteger(raw))
+          return invalid3(MESSAGES2.caps, "cap_invalid");
+        zkapi[key] = raw;
+      }
+      const next = structuredClone(policy);
+      const profile = next.modelProfiles[route.id];
+      profile.zkapi = zkapi;
+      try {
+        const refused = writePolicy(next);
+        if (refused)
+          return refused;
+      } catch (error2) {
+        return { ok: false, httpStatus: 400, code: "config_error", message: error2.message };
+      }
+      const restarting = options.requestReload();
+      restartPending = !restarting;
+      return { ok: true, status_message: restarting ? MESSAGES2.routeSavedRestart : MESSAGES2.routeSavedNoRestart, restarting };
+    },
+    async addRoute(update) {
+      if (update.confirm !== true)
+        return invalid3(MESSAGES2.confirm, "confirmation_required");
+      if (zkapiProfile())
+        return { ok: false, httpStatus: 409, code: "route_exists", message: MESSAGES2.routeExists };
+      const next = structuredClone(policy);
+      next.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID] = {
+        provider: "zkapi",
+        trust: "standard_cloud",
+        purpose: "consult",
+        baseUrl: ZKAPI_DAEMON_DEFAULT_BASE_URL,
+        model: DASHBOARD_ZKAPI_DEFAULT_MODEL,
+        secretRef: `env:${DASHBOARD_ZKAPI_API_KEY_ENV}`,
+        zkapi: {}
+      };
+      try {
+        const refused = writePolicy(next);
+        if (refused)
+          return refused;
+      } catch (error2) {
+        return { ok: false, httpStatus: 400, code: "config_error", message: error2.message };
+      }
+      const restarting = options.requestReload();
+      restartPending = !restarting;
+      return { ok: true, status_message: MESSAGES2.routeAdded, restarting };
+    },
+    async recover(update) {
+      if (update.confirm !== true)
+        return invalid3(MESSAGES2.confirm, "confirmation_required");
+      const transportOptions = transport();
+      if (!transportOptions)
+        return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
+      let fences;
+      try {
+        fences = zkapiOutstandingFences(statePath);
+      } catch {
+        return { ok: false, httpStatus: 500, code: "state_unavailable", message: "The consult ledger on this computer could not be read." };
+      }
+      const scopes = Object.keys(fences);
+      if (scopes.length === 0)
+        return { ok: false, httpStatus: 409, code: "no_unresolved_session", message: MESSAGES2.noFence };
+      if (!scopes.includes(zkapiFenceScope({ env })))
+        return { ok: false, httpStatus: 409, code: "unresolved_session_other_wallet", message: MESSAGES2.otherWallet };
+      const result = await recover(transportOptions);
+      const receipt = result.ok ? result.receipt : result.error.receipt;
+      if (!result.ok)
+        return { ok: false, httpStatus: 502, code: result.error.code, message: MESSAGES2.recoveryFailed };
+      if (receipt?.fence !== "clear" || receipt.settlement !== "confirmed") {
+        return { ok: false, httpStatus: 502, code: "recovery_incomplete", message: MESSAGES2.recoveryIncomplete };
+      }
+      return { ok: true, status_message: MESSAGES2.recovered };
+    },
+    async abandon(update) {
+      if (update.confirm !== true)
+        return invalid3(MESSAGES2.confirm, "confirmation_required");
+      if (typeof update.scope !== "string" || !/^[0-9a-f]{32}$/.test(update.scope))
+        return invalid3(MESSAGES2.scope, "scope_invalid");
+      let found;
+      try {
+        found = abandonZkapiFence(statePath, update.scope, now());
+      } catch {
+        return { ok: false, httpStatus: 500, code: "state_unavailable", message: "The consult ledger on this computer could not be written." };
+      }
+      if (!found)
+        return { ok: false, httpStatus: 409, code: "no_unresolved_session", message: MESSAGES2.noFence };
+      return { ok: true, status_message: MESSAGES2.abandoned };
+    }
+  };
+}
+function writeRefusal(reason, revision) {
+  switch (reason) {
+    case "revision_conflict":
+      return { ok: false, httpStatus: 409, code: "conflict", message: MESSAGES2.conflict, revision };
+    case "invalid_current":
+      return { ok: false, httpStatus: 409, code: "settings_invalid", message: MESSAGES2.invalidCurrent, revision: 0 };
+    case "no_home":
+    case "home_missing":
+      return { ok: false, httpStatus: 500, code: "no_home", message: MESSAGES2.noHome };
+    case "directory_symlink":
+    case "directory_custody":
+    case "directory_unavailable":
+      return { ok: false, httpStatus: 409, code: "directory_custody", message: MESSAGES2.custody };
+    case "lease_busy":
+      return { ok: false, httpStatus: 503, code: "busy", message: MESSAGES2.busy };
+    case "invalid_input":
+      return { ok: false, httpStatus: 400, code: "invalid_params", message: MESSAGES2.languagesEmpty };
+    case "write_failed":
+      return { ok: false, httpStatus: 500, code: "write_failed", message: MESSAGES2.writeFailed };
+  }
+}
+var DASHBOARD_ZKAPI_PROFILE_ID = "zkapi-consult", DASHBOARD_ZKAPI_API_KEY_ENV = "OLYMPUS_ZKAPI_API_KEY", DASHBOARD_ZKAPI_DEFAULT_MODEL = "openai/gpt-5-mini", ALL_LANGUAGES, ACKNOWLEDGEMENT_IDS, MESSAGES2;
+var init_dashboard_consult = __esm(() => {
+  init_consult_gate();
+  init_consult_settings();
+  init_consult_settings_writer();
+  init_consult_transport_zkapi();
+  init_sovereignty();
+  init_zkapi_consult_settings();
+  init_consult_orchestrator();
+  ALL_LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
+  ACKNOWLEDGEMENT_IDS = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);
+  MESSAGES2 = {
+    needsRevision: "This change needs the settings revision the page was built from. Reload the page and try again.",
+    conflict: "Outside help was changed somewhere else since this page loaded. Reload the page to see the current setting.",
+    invalidCurrent: "The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.",
+    routeMissing: "Add the zkAPI route before turning outside help on.",
+    acknowledgementsIncomplete: "Read and tick every statement about cost and risk before turning outside help on.",
+    languageMissing: "A chosen language has no vocabulary pack installed on this computer.",
+    languagesEmpty: "Choose at least one language.",
+    noHome: "Olympus cannot find your home folder, so it cannot write the settings file.",
+    custody: "The folder ~/.olympus must belong to you alone (owner-only, not a link). Fix its permissions, then try again.",
+    busy: "Another change is being written right now. Try again in a moment.",
+    writeFailed: "Olympus could not write the settings file. Nothing was changed.",
+    policyNotFile: "Your privacy policy is not kept in a file on this computer, so Olympus cannot record this here.",
+    routeExists: "A zkAPI route is already configured.",
+    tickAll: "Tick every statement to record your acknowledgement.",
+    fundingDate: "Enter the funding date as YYYY-MM-DD, the day the deposit was confirmed.",
+    caps: "A daily limit must be a whole number of requests, or a positive number of dollars.",
+    confirm: "This action needs your confirmation.",
+    noFence: "There is no held request to recover.",
+    otherWallet: "The held request belongs to another wallet folder. Recover it there, or abandon it.",
+    scope: "Name which held request to abandon.",
+    turnedOn: "Outside help is on. When a private answer in ChatGPT is incomplete, Olympus may send one outside question for it.",
+    turnedOff: "Outside help is off. No outside question is sent.",
+    routeSavedRestart: "Saved. Olympus is restarting its worker to apply the change; this page will refresh.",
+    routeSavedNoRestart: "Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.",
+    routeAdded: "The zkAPI route is added. Put the daemon's API key in the worker environment file, then finish the steps below.",
+    recovered: "Recovered: the held request settled and consults can run again.",
+    recoveryIncomplete: "The recovery session ran, but settlement was not confirmed. The request is still held; try again later.",
+    recoveryFailed: "The recovery session did not complete. The request is still held.",
+    abandoned: "The held request is marked abandoned. It no longer blocks consults and stays in the ledger as a record."
+  };
+});
+
 // src/workers/email-source/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
@@ -123413,7 +124322,7 @@ __export(exports_server2, {
 });
 import { execFile } from "node:child_process";
 import { existsSync as existsSync50 } from "node:fs";
-import { dirname as dirname54, isAbsolute as isAbsolute14, join as join77 } from "node:path";
+import { dirname as dirname55, isAbsolute as isAbsolute15, join as join77 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -125886,6 +126795,15 @@ async function main() {
           read: () => dashboardPrivacy.read(),
           save: (update) => dashboardPrivacy.save(update)
         },
+        consult: {
+          summary: () => dashboardConsult.summary(),
+          status: () => dashboardConsult.status(),
+          setEnabled: (update) => dashboardConsult.setEnabled(update),
+          saveRoute: (update) => dashboardConsult.saveRoute(update),
+          addRoute: (update) => dashboardConsult.addRoute(update),
+          recover: (update) => dashboardConsult.recover(update),
+          abandon: (update) => dashboardConsult.abandon(update)
+        },
         modelInstalls: () => {
           const embedding = chatgptEmbeddingState();
           const privateModel = chatgptPrivateModelState();
@@ -126151,6 +127069,25 @@ async function main() {
     readSettings: (pending) => readChatGptPrivacySettings2(process.env, pending),
     pendingCount: pendingClassificationCount
   });
+  const { createDashboardConsultAdapter: createDashboardConsultAdapter2 } = await Promise.resolve().then(() => (init_dashboard_consult(), exports_dashboard_consult));
+  const dashboardConsult = createDashboardConsultAdapter2({
+    sovereignty: {
+      config: sovereigntyEngine.config,
+      source: sovereigntyEngine.source,
+      ...sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}
+    },
+    resolveSecret: (secretRef) => {
+      if (!secretRef)
+        return;
+      try {
+        return resolveSecretRefValueSync(secretRef, { env: { ...process.env, ...readWorkerSetupEnv() ?? {} } })?.trim() || undefined;
+      } catch {
+        return;
+      }
+    },
+    requestReload: () => requestModelReload(),
+    env: process.env
+  });
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === "1";
   const chatgptAnswerModelAvailable = () => {
     if (!sourceAnswer || !getModelSetup().ready)
@@ -126252,7 +127189,7 @@ async function main() {
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join77(dirname54(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join77(dirname55(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -126747,7 +127684,7 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!dbPath || !corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
-  if (!isAbsolute14(dbPath)) {
+  if (!isAbsolute15(dbPath)) {
     throw new Error("Connector store dbPath must be absolute.");
   }
   if (!isDeclarableSourceFamily(family)) {
