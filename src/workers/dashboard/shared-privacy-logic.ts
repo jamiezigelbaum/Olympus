@@ -425,6 +425,22 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     return { description: refineDescription(description, answers), fits: true };
   }
 
+  /**
+   * The description with every asked area's sentence written as its choices
+   * stand, defaults included: Save calls this so what the questions show is
+   * what is saved, even when the owner accepts every default. Unchanged when
+   * nothing is asked or the sentences would pass the description limit.
+   */
+  function withShownAnswers(description: string): string {
+    const answers: PrivacyTopicAnswers = {};
+    for (const question of questions(description)) {
+      const answer: Record<string, PrivacyTopicSide> = {};
+      for (const option of question.options) answer[option.id] = option.side;
+      answers[question.id] = answer;
+    }
+    return refineDescription(description, answers);
+  }
+
   /** What the questions show for a description, as one comparable string: redraw when it changes. */
   function questionsKey(description: string): string {
     return JSON.stringify(questions(description));
@@ -432,7 +448,7 @@ export function privacyLogic(config: PrivacyLogicConfig) {
 
   return {
     validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
-    detectTopics, topicAnswers, refineDescription, fitsAnswers, questions, questionsKey, answerTopic,
+    detectTopics, topicAnswers, refineDescription, fitsAnswers, questions, questionsKey, answerTopic, withShownAnswers,
   };
 }
 

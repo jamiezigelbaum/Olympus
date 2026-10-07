@@ -319,6 +319,32 @@ export interface JanitorRequeueExtractionJobsResult {
   reason: string;
 }
 
+/**
+ * Jobs a lane settled unread for want of a reader: `metadata_only` with one of
+ * `warnings` on a derivation of that job, or `failed_terminal` with one of
+ * `terminalErrorKinds` as its last error kind.
+ */
+export interface UnreadExtractionJobsRequest extends ExtractionLaneKey {
+  extractorKind: string;
+  warnings: readonly string[];
+  terminalErrorKinds: readonly string[];
+  /**
+   * Warnings marking a job settled while the reader was not ready yet. Such
+   * a job is eligible again whatever its requeue count: it was never read.
+   */
+  notReadyWarnings?: readonly string[];
+}
+
+export interface RequeueUnreadExtractionJobsRequest extends UnreadExtractionJobsRequest {
+  reason: string;
+  limit?: number;
+}
+
+export interface RequeueUnreadExtractionJobsResult {
+  matchedJobs: number;
+  jobsRequeued: number;
+}
+
 export interface ExtractionJobRecord {
   jobId: string;
   ref: ExtractionItemRef;
@@ -1180,6 +1206,99 @@ export class LocalFileExtractionJobStore {
       dryRun,
       reason,
     };
+  }
+
+  /**
+   * How many jobs wait for a reader (see `UnreadExtractionJobsRequest`) and
+   * have not been read again before. A read: the runner asks this before it
+   * asks a lane whether its reader is ready, so a lane with nothing unread
+   * never starts a first-use download.
+   */
+  unreadJobCount(request: UnreadExtractionJobsRequest): number {
+    const { sql, params } = this.unreadJobsQuery(request);
+    const row = this.db.query(`SELECT COUNT(*) AS count FROM extraction_jobs j WHERE ${sql}`)
+      .get(...params) as { count: number };
+    return row.count;
+  }
+
+  /**
+   * Queues those jobs again, ONCE per job ever: the same one-requeue guard as
+   * the terminal janitor (`janitor_terminal_requeue_count`), so a reader that
+   * becomes ready and then still cannot read a file costs that file exactly
+   * one more try. A job settled while its reader was still getting ready
+   * (`notReadyWarnings`) was never read and stays eligible: a restart that
+   * lands between the requeue and the read cannot strand it. The attempt
+   * count starts over, because the earlier attempts
+   * were spent while no reader existed and say nothing about the file.
+   */
+  requeueUnread(request: RequeueUnreadExtractionJobsRequest): RequeueUnreadExtractionJobsResult {
+    this.assertWritable('unread requeue');
+    const reason = requireReason(request.reason);
+    const limit = clampInteger(request.limit ?? DEFAULT_JANITOR_LIMIT, 1, MAX_JANITOR_LIMIT);
+    const { sql, params } = this.unreadJobsQuery(request);
+    const now = nowIso();
+    let matched: Array<{ job_id: string }> = [];
+    let requeued = 0;
+    this.db.transaction(() => {
+      matched = this.db.query(`
+        SELECT j.job_id FROM extraction_jobs j
+        WHERE ${sql}
+        ORDER BY j.updated_at ASC, j.job_id ASC
+        LIMIT ?
+      `).all(...params, limit) as Array<{ job_id: string }>;
+      const update = this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'queued',
+            attempts = 0,
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            last_error_kind = ?,
+            next_retry_at = NULL,
+            janitor_requeue_count = COALESCE(janitor_requeue_count, 0) + 1,
+            janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1,
+            janitor_requeued_at = ?,
+            janitor_requeue_reason = ?,
+            updated_at = ?
+        WHERE job_id = ?
+          AND status IN ('metadata_only', 'failed_terminal')
+      `);
+      for (const row of matched) {
+        requeued += update.run(JANITOR_TERMINAL_ERROR_KIND, now, reason, now, row.job_id).changes;
+      }
+    })();
+    return { matchedJobs: matched.length, jobsRequeued: requeued };
+  }
+
+  private unreadJobsQuery(request: UnreadExtractionJobsRequest): { sql: string; params: string[] } {
+    const lane = requireLaneKey(request);
+    const extractorKind = requireToken(request.extractorKind, 'extractorKind');
+    const warnings = request.warnings.map((warning) => requireToken(warning, 'warning'));
+    const kinds = request.terminalErrorKinds.map((kind) => requireToken(kind, 'terminalErrorKind'));
+    const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken(warning, 'notReadyWarning'));
+    const clauses: string[] = [];
+    const params: string[] = [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind];
+    const hasWarning = (values: readonly string[]): string => `EXISTS (
+        SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
+        WHERE a.job_id = j.job_id AND a.warnings_json IS NOT NULL
+          AND w.value IN (${values.map(() => '?').join(', ')})
+      )`;
+    const onceGuard = 'COALESCE(j.janitor_terminal_requeue_count, 0) < 1';
+    if (warnings.length > 0) {
+      // Once ever, unless the job was settled while its reader was not ready.
+      clauses.push(`(j.status = 'metadata_only' AND ${hasWarning(warnings)} AND (${onceGuard}${
+        notReady.length > 0 ? ` OR ${hasWarning(notReady)}` : ''}))`);
+      params.push(...warnings, ...notReady);
+    }
+    if (kinds.length > 0) {
+      clauses.push(`(j.status = 'failed_terminal' AND ${onceGuard} AND j.last_error_kind IN (${kinds.map(() => '?').join(', ')}))`);
+      params.push(...kinds);
+    }
+    const sql = `j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ?
+      AND j.extractor_kind = ?
+      AND ${clauses.length > 0 ? `(${clauses.join(' OR ')})` : '0'}`;
+    return { sql, params };
   }
 
   get(jobId: string): ExtractionJobRecord | undefined {

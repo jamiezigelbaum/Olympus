@@ -127,6 +127,7 @@ export function createDefaultExtractorRegistry(
       ...(config.transcription?.maxTranscriptChars !== undefined
         ? { maxTranscriptChars: config.transcription.maxTranscriptChars }
         : {}),
+      ...(config.transcription?.builtIn !== undefined ? { builtIn: config.transcription.builtIn } : {}),
     }),
     createTextExtractor({
       ...(config.text?.pdfTextCommand !== undefined ? { pdfTextCommand: config.text.pdfTextCommand } : {}),

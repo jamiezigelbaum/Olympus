@@ -34,6 +34,7 @@ const ALLOWED_DOCS = new Set([
   'docs/CONTRACTS.md',
   'docs/CREATE_CONNECTOR.md',
   'docs/design/built-in-scan-reading.md',
+  'docs/design/built-in-transcription.md',
   'docs/design/categorization-precision.md',
   'docs/design/chatgpt-plugin.md',
   'docs/design/consult-gate-false-refusals.md',

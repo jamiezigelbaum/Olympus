@@ -232,6 +232,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.confirmStep = false;
   }
 
+  /** Whether Save has anything to do: a change, or questions whose shown choices are not yet in the description. */
+  function canSave(): boolean {
+    return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
+  }
+
   function addRule(rule: Any): void {
     L.addTo(s.rules, rule);
     changed();
@@ -248,7 +253,13 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   /** Save: a save that lowers protection first asks inline, then carries the owner's confirmation. */
   function save(): void {
-    if (!s || !s.loaded || s.saving || s.server) return;
+    if (!s || !s.loaded || s.saving || !canSave()) return;
+    // The questions' choices as shown, defaults included, become their sentences before anything is decided.
+    const shown = L.withShownAnswers(s.description);
+    if (shown !== s.description) {
+      s.description = shown;
+      changed();
+    }
     if (lowers()) {
       s.confirmStep = true;
       s.saveError = '';
@@ -638,12 +649,13 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     area.addEventListener('input', () => {
       s.description = area.value;
       const open = s.confirmStep;
+      const could = canSave();
       changed();
       // Redrawn (caret kept) when the step closes, a too-long note clears, or
       // what the questions show changes (an area, or an answer edited by hand).
       const noted = !!s.questionsError;
       s.questionsError = '';
-      if (open || noted || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
+      if (open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
     });
     add(page, add(field, area));
     const shared = el('p', 'reason field-note', W.descriptionShared);
@@ -683,7 +695,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       const busy = kit.button(W.saving, 'privacy:save', null, 'main');
       busy.setAttribute('aria-busy', 'true');
       add(row, busy);
-    } else add(row, kit.button(W.save, 'privacy:save', s.server ? null : save, 'main'));
+    } else add(row, kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main'));
     add(row, kit.button(W.cancel, 'privacy:cancel', s.saving ? null : backOut, 'plain'));
     const wrap = add(el('div', 'save'), row);
     if (s.saveError) {

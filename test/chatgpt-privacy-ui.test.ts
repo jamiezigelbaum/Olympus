@@ -110,7 +110,7 @@ function model(privacy: Record<string, unknown> | null, overrides: Partial<Dashb
 const unconfigured = () => model({ configured: false, pendingCount: 0 }, { needsYou: [ASK] });
 
 // Private-looking names: they may appear only in the privacy and picker views and those tools' calls.
-const DESCRIPTION = 'my health and my divorce';
+const DESCRIPTION = 'my divorce and my lawyer letters';
 const NAMES = ['Medical Records', 'Lawyer Letters', 'doctor@clinic.example', 'Therapy Notes', 'Tax Returns 2024', 'Kids School', DESCRIPTION];
 const SAVED_RULES = [
   { kind: 'folder', source_id: 'dropbox.files', key: 'k-b', display: 'Medical Records' },
@@ -228,7 +228,12 @@ describe('the Privacy screen', () => {
     expect(ruleRows(host)).toEqual(['Medical RecordsFolder in Dropbox', 'Lawyer LettersGmail label', 'doctor@clinic.exampleSender']);
     for (const label of [W.addFolder, W.addLabel, W.addSender]) expect(host.button(label).disabled).toBe(false);
     expect(text).toContain('12 items are waiting to be checked on your Mac.');
-    // One accent: Save. Cancel is quiet.
+    // Nothing to save yet: Save is inactive. A change makes it the one accent; Cancel is quiet.
+    expect(host.button(W.save).disabled).toBe(true);
+    expect(host.doc.querySelectorAll('.btn.primary')).toHaveLength(0);
+    area.value = `${DESCRIPTION} and more`;
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    expect(host.button(W.save).disabled).toBe(false);
     const primary = Array.from(host.doc.querySelectorAll('.btn.primary'));
     expect(primary.map((node) => node.textContent)).toEqual([W.save]);
     expect(host.button(W.cancel).className).not.toContain('primary');
@@ -569,7 +574,8 @@ describe('saving', () => {
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
     expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe('their words');
     expect(ruleRows(host)).toEqual([]);
-    expect(host.button(W.save).disabled).toBe(false);
+    // What is shown is what is saved: nothing to save until something changes.
+    expect(host.button(W.save).disabled).toBe(true);
   });
 
   test('real engine rules without display load, show, and go back unchanged when only the description changes', async () => {
@@ -721,6 +727,19 @@ describe('follow-up questions', () => {
     expectNamesOnlyInPrivacy(host);
   });
 
+  test('Save without touching a choice still writes the defaults shown, after the usual confirmation', async () => {
+    const { host, saves } = await openPrivacy({ description: OWNER });
+    host.button(W.save).click();
+    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    expect(area.value.split('\n')[0]).toBe(OWNER);
+    expect(area.value.split('\n')[1]).toStartWith('About family: private — ');
+    expect(host.doc.querySelector('.confirm-box')!.textContent).toContain(W.confirmDescription);
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].description).toBe(area.value.trim());
+  });
+
   test('a saved description pre-fills the choices it already answers', async () => {
     const saved = `${OWNER}\nAbout family: private — Alumni, contact and address lists; fine to share — Family members' medical records.`;
     const { host } = await openPrivacy({ description: saved });
@@ -819,7 +838,7 @@ describe('the dashboard Privacy row', () => {
     const saves: any[] = [];
     const host = mount({
       olympus_dashboard: () => ({ structuredContent: dashboard }),
-      [P.get]: () => privacyResult(DESCRIPTION, SAVED_RULES),
+      [P.get]: () => privacyResult(DESCRIPTION, SAVED_RULES, 0, { confirmation: 'conf1' }),
       [P.set]: (args) => {
         saves.push(args);
         return privacyResult(args.description, SAVED_RULES.slice(0, 1));
@@ -830,7 +849,12 @@ describe('the dashboard Privacy row', () => {
     expect(host.text()).not.toContain('waiting to be checked');
     host.button(W.editLabel).click();
     await host.settle();
+    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    area.value = `${DESCRIPTION} and more`;
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.save).click();
+    expect(host.doc.querySelector('.confirm-box')).not.toBeNull();
+    host.button(W.confirm).click();
     await host.settle();
     expect(saves.length).toBe(1);
     expect(host.text()).toContain('Your description · 1 always-private rule');
