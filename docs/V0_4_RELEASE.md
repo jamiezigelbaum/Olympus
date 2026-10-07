@@ -1031,7 +1031,9 @@ in the design note.
 Not in this step: on-device transcription of audio and video. The Speech
 framework needs a speech-recognition privacy permission that a background
 `osascript` cannot ask for without an unexplained system prompt, so it stays
-off; audio keeps the configured transcription command. A local vision model
+off; audio keeps the configured transcription command. With none configured,
+audio settles names-only with a `transcription_required` warning (2026-10-07)
+instead of spending its retries and reading as a failed file. A local vision model
 for charts and photos remains a later step.
 
 ### Deferred: high-value email embeddings

@@ -274,6 +274,13 @@ export interface SourceSchedulerTaskRunResult {
    * seconds instead of waiting out its interval. A retryAt deferral wins.
    */
   continueSoon?: boolean;
+  /**
+   * Work this task deferred comes due at this time (a backed-off retry): run
+   * no later than then, even when that is sooner than the interval. Never a
+   * deferral — a later time than the cadence's own changes nothing, and a
+   * retryAt deferral wins.
+   */
+  wakeAt?: string;
 }
 
 export interface SourceSchedulerSource {
@@ -804,11 +811,14 @@ export class SourceScheduler {
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const continueAt = Date.parse(completedAt) + this.continueAfterMs;
       const continuing = result.continueSoon === true && !retryAt;
+      const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
+      const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
       const nextRunAt = retryAt?.at
         ? Date.parse(retryAt.at)
-        : continuing
-          ? Math.min(continueAt, nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt)))
-          : nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
+        : Math.min(
+          continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt,
+          wakeAt ?? Number.POSITIVE_INFINITY,
+        );
 
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, 'checkpoint');
@@ -1365,6 +1375,9 @@ export function fileExtractionSchedulerTask(input: {
         // (more queued jobs are likely waiting). A scan stuck on one page
         // waits for the interval like any idle lane.
         continueSoon: (!done && cursor !== startCursor) || run.processedJobs >= input.batchSize,
+        // A failed job backs off for minutes; come back when it is due rather
+        // than after the lane's idle interval.
+        ...(run.nextRetryAt !== undefined ? { wakeAt: run.nextRetryAt } : {}),
       };
     },
   };
@@ -1651,6 +1664,7 @@ export function createWhatsAppSchedulerSource(input: {
           },
           ...(run.paused && run.pauseReason ? { warnings: [run.pauseReason] } : {}),
           checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null,
+          ...(run.nextRetryAt !== undefined ? { wakeAt: run.nextRetryAt } : {}),
         };
       },
     });
@@ -2268,6 +2282,18 @@ function parseSchedulerTimestamp(value: string | undefined): number | undefined 
   if (!value) return undefined;
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+/**
+ * A task's own wake time, never earlier than its completion. An unparseable
+ * value is ignored rather than thrown: it can only make a run sooner, so the
+ * cadence is the safe answer.
+ */
+function normalizeWakeAt(wakeAt: string | undefined, completedAt: string): number | undefined {
+  if (wakeAt === undefined) return undefined;
+  const wakeTimestamp = Date.parse(wakeAt);
+  if (!Number.isFinite(wakeTimestamp)) return undefined;
+  return Math.max(Date.parse(completedAt), wakeTimestamp);
 }
 
 function normalizeRetryAt(

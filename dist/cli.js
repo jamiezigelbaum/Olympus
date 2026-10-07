@@ -84486,6 +84486,18 @@ class LocalFileExtractionJobStore {
       return status ? [{ status, extractorKind: row.extractor_kind, jobs: row.jobs }] : [];
     });
   }
+  nextRetryAt(lane, now = new Date) {
+    const key = requireLaneKey(lane);
+    const row = this.db.query(`
+      SELECT MIN(next_retry_at) AS next_retry_at
+      FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status = 'failed_retryable'
+        AND next_retry_at IS NOT NULL
+        AND next_retry_at > ?
+    `).get(key.corpusId, key.provider, key.accountScope, key.approvedScopeKey, now.toISOString());
+    return row?.next_retry_at ?? undefined;
+  }
   scopedReadiness(lanes, options = {}) {
     const uniqueLanes = new Map;
     for (const lane of lanes) {
@@ -85506,14 +85518,17 @@ function readZipEntries(bytes) {
   const entries = new Map;
   const eocdOffset = findZipEndOfCentralDirectory(bytes);
   if (eocdOffset < 0) {
-    throw new Error("Office document zip directory was not found.");
+    if (isCompoundFileContainer(bytes)) {
+      throw new OfficeDocumentUnreadableError("encrypted", "Office document is password-protected.");
+    }
+    throw new OfficeDocumentUnreadableError("damaged", "Office document zip directory was not found.");
   }
   const entryCount = readUint16Le(bytes, eocdOffset + 10);
   const centralDirectoryOffset = readUint32Le(bytes, eocdOffset + 16);
   let offset = centralDirectoryOffset;
   for (let entryIndex = 0;entryIndex < entryCount; entryIndex += 1) {
     if (readUint32Le(bytes, offset) !== 33639248) {
-      throw new Error("Office document zip directory entry is malformed.");
+      throw new OfficeDocumentUnreadableError("damaged", "Office document zip directory entry is malformed.");
     }
     const flags = readUint16Le(bytes, offset + 8);
     const method = readUint16Le(bytes, offset + 10);
@@ -85524,10 +85539,10 @@ function readZipEntries(bytes) {
     const commentLength = readUint16Le(bytes, offset + 32);
     const localHeaderOffset = readUint32Le(bytes, offset + 42);
     if ((flags & 1) !== 0) {
-      throw new Error("Encrypted Office document zip entries are not supported.");
+      throw new OfficeDocumentUnreadableError("encrypted", "Encrypted Office document zip entries are not supported.");
     }
     if (compressedSize === 4294967295 || uncompressedSize === 4294967295) {
-      throw new Error("Zip64 Office document entries are not supported in the local extractor.");
+      throw new OfficeDocumentUnreadableError("unsupported", "Zip64 Office document entries are not supported in the local extractor.");
     }
     const name = decodeUtf8(bytes.subarray(offset + 46, offset + 46 + nameLength));
     if (!name.endsWith("/")) {
@@ -85547,14 +85562,14 @@ function readZipEntryText(bytes, entries, name) {
   if (!entry)
     return;
   if (entry.uncompressedSize > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
-    throw new Error("Office document zip entry exceeds the local extraction cap.");
+    throw new OfficeDocumentUnreadableError("unsupported", "Office document zip entry exceeds the local extraction cap.");
   }
   return decodeZipEntryText(bytes, entry);
 }
 function decodeZipEntryText(bytes, entry) {
   const offset = entry.localHeaderOffset;
   if (readUint32Le(bytes, offset) !== 67324752) {
-    throw new Error("Office document zip local entry is malformed.");
+    throw new OfficeDocumentUnreadableError("damaged", "Office document zip local entry is malformed.");
   }
   const nameLength = readUint16Le(bytes, offset + 26);
   const extraLength = readUint16Le(bytes, offset + 28);
@@ -85563,9 +85578,15 @@ function decodeZipEntryText(bytes, entry) {
   if (entry.method === 0)
     return decodeUtf8(compressed);
   if (entry.method === 8) {
-    return decodeUtf8(new Uint8Array(inflateRawSync2(compressed)));
+    let inflated;
+    try {
+      inflated = inflateRawSync2(compressed);
+    } catch {
+      throw new OfficeDocumentUnreadableError("damaged", "Office document zip entry does not decompress.");
+    }
+    return decodeUtf8(new Uint8Array(inflated));
   }
-  throw new Error(`Unsupported Office document zip compression method ${entry.method}.`);
+  throw new OfficeDocumentUnreadableError("unsupported", `Unsupported Office document zip compression method ${entry.method}.`);
 }
 function findZipEndOfCentralDirectory(bytes) {
   const minimumOffset = Math.max(0, bytes.length - 65558);
@@ -85574,6 +85595,10 @@ function findZipEndOfCentralDirectory(bytes) {
       return offset;
   }
   return -1;
+}
+function isCompoundFileContainer(bytes) {
+  const signature = [208, 207, 17, 224, 161, 177, 26, 225];
+  return signature.every((byte, index) => bytes[index] === byte);
 }
 function readUint16Le(bytes, offset) {
   return (bytes[offset] ?? 0) | (bytes[offset + 1] ?? 0) << 8;
@@ -85721,9 +85746,17 @@ function decodeXmlEntities(input) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-var MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 5000000, XLSX_MAX_COLUMNS = 16384;
+var MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 5000000, OfficeDocumentUnreadableError, XLSX_MAX_COLUMNS = 16384;
 var init_document_formats = __esm(() => {
   init_bounded_text();
+  OfficeDocumentUnreadableError = class OfficeDocumentUnreadableError extends Error {
+    reason;
+    constructor(reason, message) {
+      super(message);
+      this.name = "OfficeDocumentUnreadableError";
+      this.reason = reason;
+    }
+  };
 });
 
 // src/workers/file-extraction/extractors/text.ts
@@ -85840,7 +85873,10 @@ function missingBytesFailure() {
 function structuredExtractionOrFailure(extract) {
   try {
     return extract();
-  } catch {
+  } catch (error2) {
+    if (error2 instanceof OfficeDocumentUnreadableError) {
+      return { status: "failed_terminal", errorKind: `office_document_${error2.reason}` };
+    }
     return { status: "failed_retryable", errorKind: "structured_extraction_failed" };
   }
 }
@@ -87077,9 +87113,8 @@ function createTranscriptionExtractor(options = {}) {
       return transcriptionLaneAccepts(mimeType, name);
     },
     async extract(input) {
-      if (!transcriber) {
-        return { status: "failed_retryable", errorKind: "transcriber_not_configured" };
-      }
+      if (!transcriber)
+        return transcriptionRequiredOutput(input, maxTranscriptChars);
       const bytes = input.bytes;
       if (!bytes && !input.localPath)
         return missingBytesFailure();
@@ -87140,6 +87175,36 @@ function createTranscriptionExtractor(options = {}) {
     }
   };
 }
+function transcriptionRequiredOutput(input, maxBoundedTextChars) {
+  const mimeType = normalizeMimeType2(input.mimeType ?? input.ref.mimeType);
+  const sizeBytes = input.sizeBytes ?? input.bytes?.byteLength;
+  const descriptor = boundText([
+    "Audio file",
+    mimeType ? `MIME type: ${mimeType}` : undefined,
+    sizeBytes !== undefined && Number.isFinite(sizeBytes) ? `Size bytes: ${sizeBytes}` : undefined,
+    "No transcript has been made: transcription is not set up on this computer."
+  ].filter((value) => Boolean(value)).join(`
+`), maxBoundedTextChars);
+  const derivation = buildDerivation({
+    artifact: "media_descriptor",
+    structural: { kind: "media", label: "audio without transcript" },
+    bounded: descriptor,
+    confidence: 0.3,
+    warnings: [TRANSCRIPTION_REQUIRED_WARNING]
+  });
+  return {
+    status: "metadata_only",
+    derivations: [{
+      ...derivation,
+      structuralRef: {
+        ...derivation.structuralRef,
+        ...mimeType !== undefined ? { mimeType } : {},
+        ...sizeBytes !== undefined && Number.isFinite(sizeBytes) ? { sizeBytes } : {}
+      }
+    }],
+    warnings: [TRANSCRIPTION_REQUIRED_WARNING]
+  };
+}
 function transcriptionLaneAccepts(mimeType, name) {
   const normalized = normalizeMimeType2(mimeType);
   if (normalized && TRANSCRIPTION_AUDIO_MIME_TYPES.includes(normalized))
@@ -87173,7 +87238,7 @@ function normalizeTranscriptText(input) {
 
 `).trim();
 }
-var TRANSCRIPTION_EXTRACTOR_KIND = "whisper_transcription", TRANSCRIPTION_EXTRACTOR_VERSION = "2026-06-12", DEFAULT_TRANSCRIBE_TIMEOUT_MS = 1800000, MAX_TRANSCRIPT_CHARS = 200000, TEMP_DIR_PREFIX4 = "olympus-transcribe-", TRANSCRIBE_TERMINAL_EXIT_KINDS, TranscriptionTerminalError, TRANSCRIPTION_AUDIO_MIME_TYPES, TRANSCRIPTION_AUDIO_EXTENSIONS;
+var TRANSCRIPTION_EXTRACTOR_KIND = "whisper_transcription", TRANSCRIPTION_EXTRACTOR_VERSION = "2026-06-12", DEFAULT_TRANSCRIBE_TIMEOUT_MS = 1800000, MAX_TRANSCRIPT_CHARS = 200000, TRANSCRIPTION_REQUIRED_WARNING = "transcription_required", TEMP_DIR_PREFIX4 = "olympus-transcribe-", TRANSCRIBE_TERMINAL_EXIT_KINDS, TranscriptionTerminalError, TRANSCRIPTION_AUDIO_MIME_TYPES, TRANSCRIPTION_AUDIO_EXTENSIONS;
 var init_transcription = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -88102,6 +88167,7 @@ function createFileExtractionRunner(options) {
           leaseToken: abandoned[0].leaseToken
         });
       }
+      const nextRetryAt = jobs.nextRetryAt(lane, now());
       return {
         kind: "file_extraction_run",
         corpusId: lease.corpusId,
@@ -88117,6 +88183,7 @@ function createFileExtractionRunner(options) {
         paused,
         ...paused ? { pauseReason: EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } : {},
         consecutiveRetryableFailures,
+        ...nextRetryAt !== undefined ? { nextRetryAt } : {},
         ...reclassification ? { reclassification } : {},
         policy: {
           workerPrivateSurface: true,
@@ -108912,7 +108979,9 @@ class SourceScheduler {
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const continueAt = Date.parse(completedAt) + this.continueAfterMs;
       const continuing = result.continueSoon === true && !retryAt;
-      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : continuing ? Math.min(continueAt, nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt))) : nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
+      const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
+      const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
+      const nextRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);
       if (this.stateStore) {
         const checkpointSupplied = Object.prototype.hasOwnProperty.call(result, "checkpoint");
         this.applyPersistedState(state, this.stateStore.recordSuccess({
@@ -109362,7 +109431,8 @@ function fileExtractionSchedulerTask(input) {
         status: jobsQueued > 0 || run.processedJobs > 0 ? "progress" : "idle",
         counts,
         checkpoint: done ? null : cursor ?? null,
-        continueSoon: !done && cursor !== startCursor || run.processedJobs >= input.batchSize
+        continueSoon: !done && cursor !== startCursor || run.processedJobs >= input.batchSize,
+        ...run.nextRetryAt !== undefined ? { wakeAt: run.nextRetryAt } : {}
       };
     }
   };
@@ -109546,7 +109616,8 @@ function createWhatsAppSchedulerSource(input) {
             jobs_failed_terminal: run.counts.failed_terminal
           },
           ...run.paused && run.pauseReason ? { warnings: [run.pauseReason] } : {},
-          checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null
+          checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null,
+          ...run.nextRetryAt !== undefined ? { wakeAt: run.nextRetryAt } : {}
         };
       }
     });
@@ -109994,6 +110065,14 @@ function parseSchedulerTimestamp(value) {
     return;
   const timestamp2 = Date.parse(value);
   return Number.isFinite(timestamp2) ? timestamp2 : undefined;
+}
+function normalizeWakeAt(wakeAt, completedAt) {
+  if (wakeAt === undefined)
+    return;
+  const wakeTimestamp = Date.parse(wakeAt);
+  if (!Number.isFinite(wakeTimestamp))
+    return;
+  return Math.max(Date.parse(completedAt), wakeTimestamp);
 }
 function normalizeRetryAt(retryAt, completedAt) {
   if (!retryAt)
