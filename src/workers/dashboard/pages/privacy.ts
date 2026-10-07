@@ -89,6 +89,8 @@ function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPag
   const folderSources = Object.keys(FOLDER_SOURCES).filter((id) => connected(view, id));
   const gmail = connected(view, MAIL_SOURCE_ID);
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+  // Save starts active only when there is something to save: questions whose shown choices are not yet written.
+  const saveDisabled = !canEdit || LOGIC.withShownAnswers(settings.description) === settings.description ? ' disabled aria-disabled="true"' : '';
   const shown = settings.rules.filter((rule) => LOGIC.validRule(rule));
   const rules = shown.map((rule) => privacyRuleRow(rule, canEdit)).join('');
   const pending = Math.max(0, Math.floor(settings.pendingCount));
@@ -136,7 +138,7 @@ function renderPrivacyBody(view: SourceDashboardViewModel, options: DashboardPag
     + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>`
     + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml(W.close)}</button></div>`
     + `<div class="pfooter"><p>${escapeHtml(pendingLine)}</p>`
-    + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(W.save)}</button>`
+    + `<div class="pbuttons"><button type="submit" class="btn primary" data-privacy-save${saveDisabled}>${escapeHtml(W.save)}</button>`
     + `<a class="btn" href="${escapeHtml(setupHref(options?.basePath))}" data-privacy-cancel>${escapeHtml(W.cancel)}</a></div>`
     + `<span class="actmsg" data-action-message role="status"></span></div>`
     + `</form></div>`;

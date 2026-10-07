@@ -92960,6 +92960,7 @@ function mountDashboardController(options) {
     const shown = shownPrivacyQuestions.get(holder) ?? logic.questionsKey(field.defaultValue);
     if (logic.questionsKey(field.value) !== shown || holder.querySelector("[data-privacy-questions-message]"))
       renderPrivacyQuestions(form);
+    syncPrivacySave(form);
   }
   function onPrivacyChange(event) {
     const input = event.target instanceof HTMLInputElement ? event.target : null;
@@ -93022,12 +93023,27 @@ function mountDashboardController(options) {
     const hidden = privacyJson(form.dataset.hidden, []);
     return privacyKept(form).map((rule) => logic.ruleOut(rule)).concat(Array.isArray(hidden) ? hidden : []);
   }
+  function syncPrivacySave(form) {
+    const button = form.querySelector("button[data-privacy-save]");
+    const field = form.querySelector('textarea[name="description"]');
+    const logic = privacyLogicFor(form);
+    if (!button || !logic || !canWrite && !csrfToken)
+      return;
+    const value = field ? field.value : "";
+    const changes = form.dataset.dirty === "true" || field !== null && value !== field.defaultValue || logic.withShownAnswers(value) !== value;
+    button.disabled = !changes;
+    if (changes)
+      button.removeAttribute("aria-disabled");
+    else
+      button.setAttribute("aria-disabled", "true");
+  }
   function setPrivacyDirty(form) {
     form.dataset.dirty = "true";
     form.querySelectorAll("[data-privacy-confirm]").forEach((node) => node.remove());
     const empty = form.querySelector("[data-privacy-empty]");
     if (empty)
       empty.hidden = privacyKept(form).length > 0;
+    syncPrivacySave(form);
   }
   function privacyRow(form, logic, rule) {
     const view2 = rule;
@@ -93432,6 +93448,8 @@ function mountDashboardController(options) {
     }
     if (pendingForms.has(form) || form.dataset.server)
       return;
+    if (form.querySelector("button[data-privacy-save]")?.disabled)
+      return;
     const shownField = form.querySelector('textarea[name="description"]');
     const shown = shownField ? logic.withShownAnswers(shownField.value) : "";
     if (shownField && shown !== shownField.value) {
@@ -93481,6 +93499,7 @@ function mountDashboardController(options) {
       const current = result.body.settings && typeof result.body.settings === "object" ? result.body.settings : {};
       form.dataset.server = JSON.stringify(current);
       form.dataset.dirty = "true";
+      syncPrivacySave(form);
       say(form, "");
       showPrivacyConflict(form, logic, current);
       return;
@@ -100705,6 +100724,7 @@ function renderPrivacyBody(view, options) {
   const folderSources = Object.keys(FOLDER_SOURCES).filter((id) => connected(view, id));
   const gmail = connected(view, MAIL_SOURCE_ID);
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+  const saveDisabled = !canEdit || LOGIC.withShownAnswers(settings.description) === settings.description ? ' disabled aria-disabled="true"' : "";
   const shown = settings.rules.filter((rule) => LOGIC.validRule(rule));
   const rules = shown.map((rule) => privacyRuleRow(rule, canEdit)).join("");
   const pending = Math.max(0, Math.floor(settings.pendingCount));
@@ -100712,7 +100732,7 @@ function renderPrivacyBody(view, options) {
   const note = canEdit ? "" : `<p class="pnote">${escapeHtml2(options?.controlMode === "native" ? DASHBOARD_LOCAL_PRIVACY_COPY.readOnly : DASHBOARD_LOCAL_PRIVACY_COPY.locked)}</p>`;
   const folderButton = folderSources.length > 0 ? `<button type="button" class="btn" data-privacy-add="folder"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addFolder)}</button>` : `<span class="blocked"><button type="button" class="btn" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addFolder)}</button><span class="hint">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.needFolderSource)}</span></span>`;
   const labelButton = gmail ? `<button type="button" class="btn" data-privacy-add="label"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addLabel)}</button>` : `<span class="blocked"><button type="button" class="btn" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addLabel)}</button><span class="hint">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.needGmail)}</span></span>`;
-  return `<div class="privacy" data-privacy-editor>${head}${note}` + `<form class="pform" data-privacy-form` + ` data-folder-sources="${escapeHtml2(JSON.stringify(folderSources.map((id) => ({ id, label: FOLDER_SOURCES[id] }))))}"` + ` data-mail-draft="${escapeHtml2(JSON.stringify(mailScopeDraftView(undefined)))}"` + ` data-copy="${escapeHtml2(JSON.stringify(CLIENT_COPY))}"` + ` data-revision="${escapeHtml2(settings.revision ?? "")}"` + ` data-saved-description="${escapeHtml2(settings.description)}"` + ` data-source-names="${escapeHtml2(JSON.stringify(FOLDER_SOURCES))}"` + ` data-questions="${escapeHtml2(JSON.stringify(DASHBOARD_LOCAL_PRIVACY_COPY.questions))}"` + ` data-hidden="${escapeHtml2(JSON.stringify(settings.rules.filter((rule) => !LOGIC.validRule(rule))))}">` + `<label class="plabel" for="privacy-description">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.descriptionLabel)}</label>` + `<textarea class="ptext" id="privacy-description" name="description" maxlength="2000" rows="5"` + ` placeholder="${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.descriptionPlaceholder)}"${canEdit ? "" : " readonly"}>${escapeHtml2(settings.description)}</textarea>` + privacyQuestions(settings.description, canEdit) + `<div class="sect">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.rulesTitle)}</div>` + `<div class="srows" data-privacy-rules>${rules}</div>` + `<p class="foot pempty" data-privacy-empty${shown.length > 0 ? " hidden" : ""}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty)}</p>` + `<div class="padd">${folderButton}${labelButton}` + `<button type="button" class="btn" data-privacy-add="sender"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addSender)}</button></div>` + senderPanel() + `<div class="ppanel" data-privacy-panel="label" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.labelIntro)}</p>` + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<div class="ppanel" data-privacy-panel="folder" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.folderIntro)}</p>` + `<div class="psources" data-privacy-folder-sources></div><p class="ppath" data-privacy-folder-path></p>` + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<div class="pfooter"><p>${escapeHtml2(pendingLine)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.save)}</button>` + `<a class="btn" href="${escapeHtml2(setupHref(options?.basePath))}" data-privacy-cancel>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.cancel)}</a></div>` + `<span class="actmsg" data-action-message role="status"></span></div>` + `</form></div>`;
+  return `<div class="privacy" data-privacy-editor>${head}${note}` + `<form class="pform" data-privacy-form` + ` data-folder-sources="${escapeHtml2(JSON.stringify(folderSources.map((id) => ({ id, label: FOLDER_SOURCES[id] }))))}"` + ` data-mail-draft="${escapeHtml2(JSON.stringify(mailScopeDraftView(undefined)))}"` + ` data-copy="${escapeHtml2(JSON.stringify(CLIENT_COPY))}"` + ` data-revision="${escapeHtml2(settings.revision ?? "")}"` + ` data-saved-description="${escapeHtml2(settings.description)}"` + ` data-source-names="${escapeHtml2(JSON.stringify(FOLDER_SOURCES))}"` + ` data-questions="${escapeHtml2(JSON.stringify(DASHBOARD_LOCAL_PRIVACY_COPY.questions))}"` + ` data-hidden="${escapeHtml2(JSON.stringify(settings.rules.filter((rule) => !LOGIC.validRule(rule))))}">` + `<label class="plabel" for="privacy-description">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.descriptionLabel)}</label>` + `<textarea class="ptext" id="privacy-description" name="description" maxlength="2000" rows="5"` + ` placeholder="${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.descriptionPlaceholder)}"${canEdit ? "" : " readonly"}>${escapeHtml2(settings.description)}</textarea>` + privacyQuestions(settings.description, canEdit) + `<div class="sect">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.rulesTitle)}</div>` + `<div class="srows" data-privacy-rules>${rules}</div>` + `<p class="foot pempty" data-privacy-empty${shown.length > 0 ? " hidden" : ""}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty)}</p>` + `<div class="padd">${folderButton}${labelButton}` + `<button type="button" class="btn" data-privacy-add="sender"${disabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.addSender)}</button></div>` + senderPanel() + `<div class="ppanel" data-privacy-panel="label" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.labelIntro)}</p>` + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<div class="ppanel" data-privacy-panel="folder" hidden><p class="pnote">${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.folderIntro)}</p>` + `<div class="psources" data-privacy-folder-sources></div><p class="ppath" data-privacy-folder-path></p>` + `<div class="srows" data-privacy-list></div><p class="actmsg" data-privacy-panel-message role="status"></p>` + `<button type="button" class="btn" data-privacy-panel-close>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.close)}</button></div>` + `<div class="pfooter"><p>${escapeHtml2(pendingLine)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary" data-privacy-save${saveDisabled}>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.save)}</button>` + `<a class="btn" href="${escapeHtml2(setupHref(options?.basePath))}" data-privacy-cancel>${escapeHtml2(DASHBOARD_LOCAL_PRIVACY_COPY.cancel)}</a></div>` + `<span class="actmsg" data-action-message role="status"></span></div>` + `</form></div>`;
 }
 function privacyQuestions(description, canEdit) {
   const Q = DASHBOARD_LOCAL_PRIVACY_COPY.questions;
@@ -115927,6 +115947,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     s.edited = true;
     s.confirmStep = false;
   }
+  function canSave() {
+    return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
+  }
   function addRule(rule) {
     L.addTo(s.rules, rule);
     changed();
@@ -115939,7 +115962,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return L.lowers(s.rules, s.description, s.savedDescription);
   }
   function save() {
-    if (!s || !s.loaded || s.saving || s.server)
+    if (!s || !s.loaded || s.saving || !canSave())
       return;
     const shown = L.withShownAnswers(s.description);
     if (shown !== s.description) {
@@ -116306,10 +116329,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     area.addEventListener("input", () => {
       s.description = area.value;
       const open6 = s.confirmStep;
+      const could = canSave();
       changed();
       const noted = !!s.questionsError;
       s.questionsError = "";
-      if (open6 || noted || L.questionsKey(s.description) !== asked)
+      if (open6 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
         kit.render("privacy:description");
     });
     add(page, add(field, area));
@@ -116349,7 +116373,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       busy.setAttribute("aria-busy", "true");
       add(row, busy);
     } else
-      add(row, kit.button(W.save, "privacy:save", s.server ? null : save, "main"));
+      add(row, kit.button(W.save, "privacy:save", canSave() ? save : null, "main"));
     add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
     const wrap = add(el("div", "save"), row);
     if (s.saveError) {
