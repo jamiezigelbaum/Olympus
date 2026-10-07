@@ -118,18 +118,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
     match: /^jamie$/i,
     reason: "Embedding-ledger approver enum value 'jamie', compiled from src/workers/embedding-ledger.ts in the repository-only private bundle; stripped from the public release.",
   },
-  {
-    path: 'config/critical-review.json',
-    label: 'a tenant or host identity',
-    match: /^jamiezigelbaum$/i,
-    reason: 'Reviewer login the `critical-review` publisher trusts; changing it breaks the required CI context.',
-  },
-  {
-    path: 'test/critical-review-workflow.test.ts',
-    label: 'a tenant or host identity',
-    match: /^jamiezigelbaum$/i,
-    reason: 'Pins the reviewer login in `config/critical-review.json`.',
-  },
 
   // ---- 3. Real GitHub URLs and repository paths. ---------------------------
   {

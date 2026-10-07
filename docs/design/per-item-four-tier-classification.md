@@ -394,7 +394,7 @@ Notes from the build:
   - a new fingerprint;
   - a migration note (§4.6);
   - held-out eval plus the new classification eval;
-  - a critical-review receipt.
+  - an independent review.
 - **Also changing:**
   - sensitivity map schemaVersion 2, where categories may target all four tiers (v1 maps still load);
   - INSTALL_FOR_AGENTS.md ("raise-only");
