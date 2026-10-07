@@ -6,6 +6,11 @@
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { join } from 'node:path';
+import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
+import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import { createDropboxTierLane } from '../src/workers/dropbox-files/tier-set.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { EMBEDDING_LEDGER_OWNER_APPROVAL, readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
@@ -22,6 +27,7 @@ import {
   localProvider,
   openLegStore,
   openTierFixture,
+  snapshotStore,
   storePaths,
   tempDir,
   type FixtureSpec,
@@ -291,5 +297,212 @@ describe('Private-row re-home', () => {
     expect(report).toMatchObject({ examined: 0, queued: 0, moved: 0, guardedStores: 1 });
     expect(ledger.getCurrent(identityOf('orchid'))?.routed).toBeFalsy();
     expect(stores.internal.localContent(localId('orchid'))).toBeDefined();
+  });
+
+  describe('review fixes', () => {
+    const rawDb = (store: LocalConnectorStore) => (store as unknown as { db: { query(sql: string): { run(...args: unknown[]): void } } }).db;
+
+    function gate(fixture: TierFixture) {
+      return createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }]);
+    }
+
+    /** Where the real search path serves an item's content from. */
+    function searchedIn(fixture: TierFixture, term: string, id: string): string[] {
+      const hits: SourceIndexRoutedSearchHit[] = [];
+      for (const store of fixture.set.openStores()) {
+        for (const row of store.searchItems(term, 10)) {
+          if (row.sourceItem.providerItemId !== id || !row.chunk) continue;
+          hits.push({ sourceItem: row.sourceItem, corpusId: store.corpusId, trustDomain: store.trustDomain, rawExposed: false });
+        }
+      }
+      return gate(fixture)(hits).map((hit) => hit.corpusId);
+    }
+
+    function reopen(fixture: TierFixture): TierFixture {
+      fixture.close();
+      const next = openTierFixture(fixture.dir);
+      cleanups.push(() => next.close());
+      return next;
+    }
+
+    function currentCorpora(fixture: TierFixture, id: string): string[] {
+      return fixture.ledger.copies(identityOf(id)).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
+    }
+
+    async function receipts(fixture: TierFixture): Promise<number> {
+      return (await readEmbeddingLedger(ledgerPath(fixture))).entries
+        .filter((entry) => entry.what.startsWith('Tier move of one item')).length;
+    }
+
+    test('production Dropbox construction: an unresolved Private embedder leaves the move queued; a cloud one too; a local one moves it', async () => {
+      const { dir, cleanup } = tempDir('olympus-row-rehome-dropbox-');
+      const secure = new LocalConnectorStore({
+        dbPath: join(dir, 'dropbox-secure.sqlite'),
+        corpusId: 'secure_local.dropbox.files',
+        family: 'file',
+        trustDomain: 'secure_local',
+      });
+      const lane = createDropboxTierLane({
+        secureStore: secure,
+        env: {
+          OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(dir, 'dropbox-internal.sqlite'),
+          OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(dir, 'dropbox-public.sqlite'),
+        },
+        policy: defaultDropboxIngestionPolicy(),
+      });
+      cleanups.push(() => {
+        lane.internal.current()?.close();
+        lane.public.current()?.close();
+        secure.close();
+        lane.ledger.close();
+        cleanup();
+      });
+      const internal = lane.internal.open();
+      await internal.syncFromConnector(fixtureConnector(() => [ORCHID]), { fetchContent: true, placement: S4_IN_INTERNAL });
+      internal.bindTierSet(lane.ledger);
+      lane.ledger.adoptLegacyPlacement(
+        identityOf('orchid'),
+        [{ corpusId: lane.internal.corpusId, trustDomain: 'internal', layers: 'both' }],
+        { whenMissing: { family: 'file', metadataTier: 'private', contentTier: 'private' } },
+      );
+      const embeddingLedgerPath = join(dir, 'embedding-ledger.jsonl');
+
+      // No leg declares an embedder and nothing was told which one the Private store uses.
+      expect(lane.set.privateEmbedderBackend()).toBeUndefined();
+      const unknown = await rehomePrivateTierRows({ set: lane.set, embeddingLedgerPath });
+      expect(unknown).toMatchObject({ queued: 1, moved: 0, awaitingMigration: 1 });
+
+      lane.set.declarePrivateEmbedder(Object.assign(cloudProvider(), { provider: 'venice' }));
+      expect(await rehomePrivateTierRows({ set: lane.set, embeddingLedgerPath })).toMatchObject({ moved: 0, awaitingMigration: 1 });
+
+      lane.set.declarePrivateEmbedder(localProvider());
+      expect(await rehomePrivateTierRows({ set: lane.set, embeddingLedgerPath })).toMatchObject({ moved: 1 });
+      expect(lane.ledger.copies(identityOf('orchid')).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId))
+        .toEqual(['secure_local.dropbox.files']);
+    });
+
+    test('an override set after the raise was queued stops the move', async () => {
+      const fixture = fixtureIn();
+      await seedLegacy(fixture, [ORCHID]);
+      await rehomePrivateTierRows({ set: fixture.set, maxMoves: 0, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(fixture.ledger.getCurrent(identityOf('orchid'))).toMatchObject({ state: 'moving' });
+      fixture.ledger.setOverride(identityOf('orchid'), { kind: 'tier', tier: 'private' });
+      const report = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(report.moved).toBe(0);
+      expect(currentCorpora(fixture, 'orchid')).toEqual([CORPORA.internal]);
+    });
+
+    test('a move validated at one generation does not move a newer decision', async () => {
+      const fixture = fixtureIn();
+      await fixture.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      const record = fixture.ledger.getCurrent(identityOf('garden'))!;
+      await expect(moveTieredItem({
+        set: fixture.set,
+        identity: { ...identityOf('garden'), localItemId: localId('garden') },
+        target: { metadataTier: 'secure', contentTier: 'secure' },
+        expectedGeneration: record.generation + 7,
+      })).rejects.toThrow();
+      expect(currentCorpora(fixture, 'garden')).toEqual([CORPORA.internal]);
+    });
+
+    test('unrelated queued moves cannot starve ours: the scan finds our queued rows itself', async () => {
+      const fixture = fixtureIn();
+      await seedLegacy(fixture, [ORCHID]);
+      await rehomePrivateTierRows({ set: fixture.set, maxMoves: 0, embeddingLedgerPath: ledgerPath(fixture) });
+      // The ledger's queue page is entirely someone else's work.
+      const spy = spyOn(TierLedger.prototype, 'listMoving').mockReturnValue([]);
+      try {
+        const report = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+        expect(report.moved).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(currentCorpora(fixture, 'orchid')).toEqual([CORPORA.secure_local]);
+    });
+
+    test('an open re-judge question holds the row where it is', async () => {
+      const fixture = fixtureIn();
+      await fixture.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      rawDb(fixture.stores.internal!).query("UPDATE items SET trust_tier = 'S4' WHERE local_item_id = ?").run(localId('garden'));
+      const record = fixture.ledger.getCurrent(identityOf('garden'))!;
+      expect(fixture.ledger.openRejudgeQuestion(identityOf('garden'), {
+        expectedGeneration: record.generation,
+        keepVisible: true,
+        decision: {
+          metadataTier: record.metadataTier, contentTier: 'secure', decidedBy: 'sniffer', reasons: ['content:sniffer'],
+          state: 'current', contentRead: true, metadataPending: false, contentPending: false, metadataForced: false,
+          metadataFlagged: false, engineVersion: record.engineVersion, mapRevision: record.mapRevision, snifferId: 'test',
+        },
+      })).toBe(true);
+      const report = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(report).toMatchObject({ examined: 1, queued: 0, moved: 0, skipped: 1 });
+      expect(fixture.ledger.getCurrent(identityOf('garden'))).toMatchObject({ state: 'current' });
+    });
+
+    test('a destination that keeps different text refuses for good: recorded once, counted, never retried as a failure', async () => {
+      const fixture = fixtureIn();
+      await fixture.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      const identity = { ...identityOf('garden'), localItemId: localId('garden') };
+      await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+      await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
+      // The Private store keeps an older, different copy; the row is S4 again.
+      rawDb(fixture.stores.secure_local!).query("UPDATE chunks SET bounded_text = 'older different text'").run();
+      rawDb(fixture.stores.internal!).query("UPDATE items SET trust_tier = 'S4' WHERE local_item_id = ?").run(localId('garden'));
+      const first = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(first).toMatchObject({ queued: 1, moved: 0, failed: 0, refused: 1 });
+      const second = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(second).toMatchObject({ moved: 0, failed: 0, refused: 1 });
+      expect(fixture.ledger.moveAttempts(identityOf('garden'))).toBe(0);
+      expect(fixture.set.rowRehomeReport()?.refused).toBe(1);
+      expect(currentCorpora(fixture, 'garden')).toEqual([CORPORA.internal]);
+    });
+
+    for (const boundary of ['decision', 'staging', 'import'] as const) {
+      test(`restart at the ${boundary} boundary: fresh handles resume to one serving copy, source bytes kept, destination searchable`, async () => {
+        let fixture = fixtureIn();
+        await seedLegacy(fixture, [ORCHID]);
+        const before = snapshotStore(fixture.paths.internal, [localId('orchid')]).chunks
+          .map((chunk) => [chunk.chunk_index, chunk.bounded_text, chunk.embedding_input_hash]);
+        expect(before.length).toBeGreaterThan(0);
+
+        if (boundary === 'import') {
+          const original = LocalConnectorStore.prototype.importItemCopy;
+          const spy = spyOn(LocalConnectorStore.prototype, 'importItemCopy').mockImplementationOnce(function (this: LocalConnectorStore, ...args: Parameters<typeof original>) {
+            original.apply(this, args);
+            throw new Error('process died after the destination write');
+          });
+          try {
+            const crashed = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+            expect(crashed).toMatchObject({ queued: 1, moved: 0, failed: 1 });
+          } finally {
+            spy.mockRestore();
+          }
+          expect(await receipts(fixture)).toBe(0);
+        } else {
+          await rehomePrivateTierRows({ set: fixture.set, maxMoves: 0, embeddingLedgerPath: ledgerPath(fixture) });
+          if (boundary === 'staging') {
+            const record = fixture.ledger.getCurrent(identityOf('orchid'))!;
+            fixture.ledger.stageMove(identityOf('orchid'), {
+              expectedGeneration: record.generation,
+              target: { metadataTier: 'secure', contentTier: 'secure' },
+              destination: [{ corpusId: CORPORA.secure_local, trustDomain: 'secure_local', layers: 'both' }],
+              hideSource: true,
+            });
+          }
+        }
+
+        // Everything reopened on fresh handles before resuming.
+        fixture = reopen(fixture);
+        const resumed = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+        expect(resumed).toMatchObject({ moved: 1, failed: 0 });
+        expect(currentCorpora(fixture, 'orchid')).toEqual([CORPORA.secure_local]);
+        expect(fixture.ledger.getCurrent(identityOf('orchid'))).toMatchObject({ state: 'current' });
+        const after = snapshotStore(fixture.paths.internal, [localId('orchid')]).chunks
+          .map((chunk) => [chunk.chunk_index, chunk.bounded_text, chunk.embedding_input_hash]);
+        expect(after).toEqual(before);
+        expect(searchedIn(fixture, 'orchid', 'orchid')).toEqual([CORPORA.secure_local]);
+        expect(await receipts(fixture)).toBe(1);
+      });
+    }
   });
 });

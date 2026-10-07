@@ -25325,6 +25325,9 @@ async function moveTieredItem(options) {
   const record = ledger.getCurrent(identity);
   if (!record || !record.routed)
     throw new Error("Only a routed item can move; adopt a legacy placement first.");
+  if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
+    throw new TierLedgerGenerationConflictError;
+  }
   if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
     return moveToSecrets(options, record.generation);
   }
@@ -25546,7 +25549,7 @@ var init_tier_move = __esm(() => {
 
 // src/workers/connector-store/tier-row-rehome.ts
 function emptyTierRowRehomeReport() {
-  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0 };
+  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0, refused: 0 };
 }
 async function rehomePrivateTierRows(options) {
   const report = emptyTierRowRehomeReport();
@@ -25554,6 +25557,7 @@ async function rehomePrivateTierRows(options) {
   const ledger = set.ledger;
   const window2 = Math.max(1, options.scanWindow ?? DEFAULT_ROW_REHOME_SCAN_WINDOW);
   const limit = Math.max(1, options.candidates ?? DEFAULT_ROW_REHOME_CANDIDATES);
+  const ours = [];
   for (const domain of NON_SECURE_DOMAINS) {
     try {
       const store = set.store(domain);
@@ -25574,14 +25578,15 @@ async function rehomePrivateTierRows(options) {
       for (const row of page.rows) {
         report.examined += 1;
         try {
-          considerRow(set, domain, row.identity, report);
+          considerRow(set, domain, row.identity, report, ours);
         } catch {
           report.skipped += 1;
         }
       }
     } catch {}
   }
-  await runQueuedMoves(options, report);
+  await runQueuedMoves(options, report, ours);
+  set.recordRowRehomeReport(report);
   return report;
 }
 function domainRestsAtPrivateTier(set, domain) {
@@ -25597,7 +25602,7 @@ function domainRestsAtPrivateTier(set, domain) {
   });
   return placement.copies.every((copy) => trustDomainRank(copy.trustDomain) <= trustDomainRank(domain));
 }
-function considerRow(set, domain, row, report) {
+function considerRow(set, domain, row, report, ours) {
   const ledger = set.ledger;
   const store = set.store(domain);
   const identity = {
@@ -25606,9 +25611,13 @@ function considerRow(set, domain, row, report) {
     providerItemId: row.providerItemId,
     ...row.providerConversationId ? { providerConversationId: row.providerConversationId } : {}
   };
-  if (ledger.getOverride(identity))
+  if (ledger.getOverride(identity) || ledger.rejudgeQuestion(identity))
     return void (report.skipped += 1);
   let record = ledger.getCurrent(identity);
+  if (record?.routed && record.state === "moving" && record.reasons.includes(ROW_REHOME_REASON)) {
+    ours.push(identity);
+    return void (report.skipped += 1);
+  }
   if (record && (openQuestion(record) || record.state === "moving" || forced(record) || record.contentTier === "secrets" || record.metadataTier === "secrets")) {
     return void (report.skipped += 1);
   }
@@ -25654,36 +25663,62 @@ function considerRow(set, domain, row, report) {
   else
     report.skipped += 1;
 }
-async function runQueuedMoves(options, report) {
+function readRefused(ledger) {
+  try {
+    const parsed = JSON.parse(ledger.readMeta(REFUSED_META_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function isOurQueuedRaise(record) {
+  return record.routed && record.state === "moving" && record.targetMetadataTier !== null && record.targetContentTier !== null && record.targetMetadataTier !== "secrets" && record.targetContentTier !== "secrets" && record.reasons.includes(ROW_REHOME_REASON) && (record.targetMetadataTier === "secure" || record.targetContentTier === "secure");
+}
+async function runQueuedMoves(options, report, found) {
   const { set } = options;
   const ledger = set.ledger;
   let budget = Math.max(0, options.maxMoves ?? DEFAULT_ROW_REHOME_MOVES);
   if (budget === 0)
     return;
-  let queued;
+  const work = new Map;
   try {
-    queued = ledger.listMoving({ limit: budget * 4 }).filter((record) => record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null && record.targetMetadataTier !== "secrets" && record.targetContentTier !== "secrets" && record.reasons.includes(ROW_REHOME_REASON) && (record.targetMetadataTier === "secure" || record.targetContentTier === "secure"));
+    for (const record of ledger.listMoving({ limit: 5000 })) {
+      if (isOurQueuedRaise(record))
+        work.set(tierLedgerIdentityKey(identityOfRecord(record)), record);
+    }
+    for (const identity of found) {
+      const key = tierLedgerIdentityKey(identity);
+      const record = work.has(key) ? undefined : ledger.getCurrent(identity);
+      if (record && isOurQueuedRaise(record))
+        work.set(key, record);
+    }
   } catch {
     return;
   }
-  if (queued.length === 0)
+  if (work.size === 0)
     return;
-  if (set.legSpec("secure_local")?.embeddingProvider?.backend === "cloud") {
-    report.awaitingMigration += queued.length;
+  if (set.privateEmbedderBackend() !== "local") {
+    report.awaitingMigration += work.size;
     return;
   }
   const builtInOnly = setEmbedsWithBuiltInOnly(set);
   const embeddingLedgerPath = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
-  for (const record of queued) {
+  const refused = new Set(readRefused(ledger));
+  for (const queued of work.values()) {
     if (budget === 0)
       break;
-    const identity = {
-      provider: record.provider,
-      accountScope: record.accountScope,
-      providerItemId: record.providerItemId,
-      ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-    };
+    const identity = identityOfRecord(queued);
+    const refusedKey = `${tierLedgerIdentityKey(identity)}#${queued.generation}`;
+    if (refused.has(refusedKey)) {
+      report.refused += 1;
+      continue;
+    }
     try {
+      const record = ledger.getCurrent(identity);
+      if (!record || !isOurQueuedRaise(record) || record.generation !== queued.generation || ledger.getOverride(identity) || ledger.rejudgeQuestion(identity) || record.targetMetadataTier !== queued.targetMetadataTier || record.targetContentTier !== queued.targetContentTier) {
+        report.skipped += 1;
+        continue;
+      }
       const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1);
       if (sources.length === 0 || sources.every((copy) => copy.trustDomain === "secure_local"))
         continue;
@@ -25697,6 +25732,7 @@ async function runQueuedMoves(options, report) {
         identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
         target: { metadataTier: record.targetMetadataTier, contentTier: record.targetContentTier },
         embeddingLedger: { path: embeddingLedgerPath, approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL, why: MOVE_WHY },
+        expectedGeneration: record.generation,
         ...builtInOnly ? { replaceOwnSupersededCopy: true } : {}
       });
       report.moved += 1;
@@ -25704,12 +25740,26 @@ async function runQueuedMoves(options, report) {
       if (error instanceof TierLedgerGenerationConflictError) {
         continue;
       }
+      if (error instanceof TierMoveRefusedError) {
+        refused.add(refusedKey);
+        ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...refused].slice(-REFUSED_META_LIMIT)));
+        report.refused += 1;
+        continue;
+      }
       report.failed += 1;
       try {
-        ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
+        ledger.recordMoveFailure(identity, { expectedGeneration: queued.generation });
       } catch {}
     }
   }
+}
+function identityOfRecord(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
 }
 function openQuestion(record) {
   return record.state === "pending" || record.metadataPending || record.contentPending;
@@ -25724,7 +25774,7 @@ function setEmbedsWithBuiltInOnly(set) {
     return false;
   }
 }
-var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, ROW_REHOME_REASON = "row_tier:private_rehome", CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY;
+var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, ROW_REHOME_REASON = "row_tier:private_rehome", CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY, REFUSED_META_KEY = "private_row_rehome_refused", REFUSED_META_LIMIT = 200;
 var init_tier_row_rehome = __esm(() => {
   init_provider();
   init_types();
@@ -26082,6 +26132,8 @@ class TieredStoreSet {
   onLegOpened;
   laneFloor;
   contentArrivesLater;
+  privateEmbedder;
+  lastRowRehome;
   constructor(options) {
     if (!options.setId.trim())
       throw new Error("A tiered store set needs a stable id.");
@@ -26173,6 +26225,29 @@ class TieredStoreSet {
       embedHold: contentHeld,
       stored: { trustDomain: contentDomain, trustTier: this.restingTierFor(contentDomain) }
     };
+  }
+  declarePrivateEmbedder(provider) {
+    this.privateEmbedder = provider;
+  }
+  privateEmbedderBackend() {
+    const declared = this.privateEmbedder ?? this.legs.get("secure_local")?.spec.embeddingProvider;
+    if (declared)
+      return declared.backend === "local" ? "local" : declared.backend === "cloud" ? "cloud" : undefined;
+    try {
+      const backends = new Set((this.store("secure_local")?.embeddingAuthorities() ?? []).map((authority) => authority.backend));
+      if (backends.size !== 1)
+        return;
+      const [only] = [...backends];
+      return only === "local" ? "local" : only === "cloud" ? "cloud" : undefined;
+    } catch {
+      return;
+    }
+  }
+  rowRehomeReport() {
+    return this.lastRowRehome;
+  }
+  recordRowRehomeReport(report) {
+    this.lastRowRehome = report;
   }
   readsContentLater() {
     return this.contentArrivesLater;
@@ -120166,6 +120241,9 @@ async function main() {
     ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
     onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
   }) : undefined;
+  if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
+    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider);
+  }
   if (dropboxTierLane && dropboxConnectorStore) {
     adoptTierLane({
       ledger: dropboxTierLane.ledger,

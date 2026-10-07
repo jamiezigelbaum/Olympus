@@ -2390,6 +2390,12 @@ export async function main(): Promise<void> {
         ),
       })
     : undefined;
+  // The Dropbox set declares no embedder on its legs; the Private store's real
+  // one is chosen here and handed to the scheduler. Tell the set, so the Private
+  // row re-home pass knows whether it is local (it moves only when it is).
+  if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
+    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider);
+  }
   if (dropboxTierLane && dropboxConnectorStore) {
     adoptTierLane({
       ledger: dropboxTierLane.ledger,

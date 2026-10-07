@@ -95,7 +95,7 @@ import { registerTierSetPlanner } from '../classification/installed-tier-classif
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
-import { rehomePrivateTierRows } from './tier-row-rehome.ts';
+import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 
 
@@ -232,6 +232,8 @@ export class TieredStoreSet {
   private readonly onLegOpened: TieredStoreSetOptions['onLegOpened'];
   private readonly laneFloor: TieredLaneFloor | undefined;
   private readonly contentArrivesLater: boolean;
+  private privateEmbedder: SourceEmbeddingProvider | undefined;
+  private lastRowRehome: TierRowRehomeReport | undefined;
 
   constructor(options: TieredStoreSetOptions) {
     if (!options.setId.trim()) throw new Error('A tiered store set needs a stable id.');
@@ -352,6 +354,43 @@ export class TieredStoreSet {
       embedHold: contentHeld,
       stored: { trustDomain: contentDomain, trustTier: this.restingTierFor(contentDomain) },
     };
+  }
+
+  /**
+   * Tell the set which embedder the Private store really uses when its leg
+   * declares none (a lane whose embedder is chosen at runtime and handed to a
+   * scheduler). The Private-row re-home pass moves only when this is local.
+   */
+  declarePrivateEmbedder(provider: SourceEmbeddingProvider): void {
+    this.privateEmbedder = provider;
+  }
+
+  /**
+   * Where the Private store embeds: 'local' or 'cloud' when known (declared,
+   * on the leg, or recorded by the store's own embedding authority), otherwise
+   * undefined. Unknown is never treated as local.
+   */
+  privateEmbedderBackend(): 'local' | 'cloud' | undefined {
+    const declared = this.privateEmbedder ?? this.legs.get('secure_local')?.spec.embeddingProvider;
+    if (declared) return declared.backend === 'local' ? 'local' : declared.backend === 'cloud' ? 'cloud' : undefined;
+    try {
+      const backends = new Set((this.store('secure_local')?.embeddingAuthorities() ?? []).map((authority) => authority.backend));
+      if (backends.size !== 1) return undefined;
+      const [only] = [...backends];
+      return only === 'local' ? 'local' : only === 'cloud' ? 'cloud' : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Counts from the last Private-row re-home pass this process ran (content-free). */
+  rowRehomeReport(): TierRowRehomeReport | undefined {
+    return this.lastRowRehome;
+  }
+
+  /** @internal */
+  recordRowRehomeReport(report: TierRowRehomeReport): void {
+    this.lastRowRehome = report;
   }
 
   /** @internal Whether this lane's content arrives after listing (see the option). */

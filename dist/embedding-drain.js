@@ -19454,6 +19454,9 @@ async function moveTieredItem(options) {
   const record = ledger.getCurrent(identity);
   if (!record || !record.routed)
     throw new Error("Only a routed item can move; adopt a legacy placement first.");
+  if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
+    throw new TierLedgerGenerationConflictError;
+  }
   if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
     return moveToSecrets(options, record.generation);
   }

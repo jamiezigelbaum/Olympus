@@ -37,12 +37,13 @@ import type { TierDecision } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   TierLedgerGenerationConflictError,
+  tierLedgerIdentityKey,
   trustDomainRank,
   type TierLedgerIdentity,
   type TierLedgerRecord,
 } from '../classification/tier-ledger.ts';
 import { EMBEDDING_LEDGER_OWNER_APPROVAL, resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { moveTieredItem } from './tier-move.ts';
+import { moveTieredItem, TierMoveRefusedError } from './tier-move.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 /** item_pk values scanned per store per call. */
@@ -74,8 +75,10 @@ export interface TierRowRehomeReport {
   skipped: number;
   /** Stores skipped because their placement policy rests items at a Private tier. */
   guardedStores: number;
-  /** Queued raises left for the owner-approved migration (the Private embedder is a cloud model). */
+  /** Queued raises left for the owner-approved migration (the Private embedder is not known to be local). */
   awaitingMigration: number;
+  /** Moves the destination refuses for good (it keeps different text); recorded once, never retried. */
+  refused: number;
 }
 
 export interface TierRowRehomeOptions {
@@ -88,7 +91,7 @@ export interface TierRowRehomeOptions {
 }
 
 export function emptyTierRowRehomeReport(): TierRowRehomeReport {
-  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0 };
+  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0, refused: 0 };
 }
 
 export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Promise<TierRowRehomeReport> {
@@ -97,6 +100,8 @@ export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Prom
   const ledger = set.ledger;
   const window = Math.max(1, options.scanWindow ?? DEFAULT_ROW_REHOME_SCAN_WINDOW);
   const limit = Math.max(1, options.candidates ?? DEFAULT_ROW_REHOME_CANDIDATES);
+  // Moves this pass queued earlier that the scan met again (found in the store, not through the queue).
+  const ours: TierLedgerIdentity[] = [];
 
   for (const domain of NON_SECURE_DOMAINS) {
     try {
@@ -119,7 +124,7 @@ export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Prom
       for (const row of page.rows) {
         report.examined += 1;
         try {
-          considerRow(set, domain, row.identity, report);
+          considerRow(set, domain, row.identity, report, ours);
         } catch {
           // Left where it is; a later call tries again.
           report.skipped += 1;
@@ -130,7 +135,8 @@ export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Prom
     }
   }
 
-  await runQueuedMoves(options, report);
+  await runQueuedMoves(options, report, ours);
+  set.recordRowRehomeReport(report);
   return report;
 }
 
@@ -154,6 +160,7 @@ function considerRow(
   domain: SourceTrustDomain,
   row: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string; family: string },
   report: TierRowRehomeReport,
+  ours: TierLedgerIdentity[],
 ): void {
   const ledger = set.ledger;
   const store = set.store(domain)!;
@@ -163,8 +170,14 @@ function considerRow(
     providerItemId: row.providerItemId,
     ...(row.providerConversationId ? { providerConversationId: row.providerConversationId } : {}),
   };
-  if (ledger.getOverride(identity)) return void (report.skipped += 1);
+  if (ledger.getOverride(identity) || ledger.rejudgeQuestion(identity)) return void (report.skipped += 1);
   let record = ledger.getCurrent(identity);
+  // Our own queued raise, met again through its store row: the queue may be
+  // too long to reach it, so the scan hands it to the move step.
+  if (record?.routed && record.state === 'moving' && record.reasons.includes(ROW_REHOME_REASON)) {
+    ours.push(identity);
+    return void (report.skipped += 1);
+  }
   if (record && (openQuestion(record) || record.state === 'moving' || forced(record) || record.contentTier === 'secrets' || record.metadataTier === 'secrets')) {
     return void (report.skipped += 1);
   }
@@ -218,41 +231,83 @@ function considerRow(
   else report.skipped += 1;
 }
 
-async function runQueuedMoves(options: TierRowRehomeOptions, report: TierRowRehomeReport): Promise<void> {
+const REFUSED_META_KEY = 'private_row_rehome_refused';
+const REFUSED_META_LIMIT = 200;
+
+function readRefused(ledger: TieredStoreSet['ledger']): string[] {
+  try {
+    const parsed = JSON.parse(ledger.readMeta(REFUSED_META_KEY) ?? '[]') as unknown;
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function isOurQueuedRaise(record: TierLedgerRecord): boolean {
+  return record.routed
+    && record.state === 'moving'
+    && record.targetMetadataTier !== null && record.targetContentTier !== null
+    && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets'
+    // Only the raises this pass queued (its reason code is on the queued
+    // decision): every other queued move keeps its own path and approval.
+    && record.reasons.includes(ROW_REHOME_REASON)
+    && (record.targetMetadataTier === 'secure' || record.targetContentTier === 'secure');
+}
+
+async function runQueuedMoves(
+  options: TierRowRehomeOptions,
+  report: TierRowRehomeReport,
+  found: readonly TierLedgerIdentity[],
+): Promise<void> {
   const { set } = options;
   const ledger = set.ledger;
   let budget = Math.max(0, options.maxMoves ?? DEFAULT_ROW_REHOME_MOVES);
   if (budget === 0) return;
-  let queued: TierLedgerRecord[];
+  // The ledger's queue has no filter or cursor to export, so the widest page it
+  // allows is read and filtered; anything past it is reached through the scan
+  // (`found`: our queued rows met again in their store), which cycles the whole
+  // table over successive calls. Unrelated queued moves cannot starve ours.
+  const work = new Map<string, TierLedgerRecord>();
   try {
-    queued = ledger.listMoving({ limit: budget * 4 }).filter((record) => record.routed
-      && record.targetMetadataTier !== null && record.targetContentTier !== null
-      && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets'
-      // Only the raises this pass queued (its reason code is on the queued
-      // decision): every other queued move keeps its own path and approval.
-      && record.reasons.includes(ROW_REHOME_REASON)
-      && (record.targetMetadataTier === 'secure' || record.targetContentTier === 'secure'));
+    for (const record of ledger.listMoving({ limit: 5_000 })) {
+      if (isOurQueuedRaise(record)) work.set(tierLedgerIdentityKey(identityOfRecord(record)), record);
+    }
+    for (const identity of found) {
+      const key = tierLedgerIdentityKey(identity);
+      const record = work.has(key) ? undefined : ledger.getCurrent(identity);
+      if (record && isOurQueuedRaise(record)) work.set(key, record);
+    }
   } catch {
     return;
   }
-  if (queued.length === 0) return;
-  // The approval covers the LOCAL Private embedder. A Private embedder that is
-  // a cloud model keeps its queued moves for the migration (which prices them).
-  if (set.legSpec('secure_local')?.embeddingProvider?.backend === 'cloud') {
-    report.awaitingMigration += queued.length;
+  if (work.size === 0) return;
+  // The approval covers the LOCAL Private embedder. Anything not known to be
+  // local (a cloud model, or an embedder this set cannot resolve) keeps its
+  // queued moves for the migration, which prices them.
+  if (set.privateEmbedderBackend() !== 'local') {
+    report.awaitingMigration += work.size;
     return;
   }
   const builtInOnly = setEmbedsWithBuiltInOnly(set);
   const embeddingLedgerPath = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
-  for (const record of queued) {
+  const refused = new Set(readRefused(ledger));
+  for (const queued of work.values()) {
     if (budget === 0) break;
-    const identity: TierLedgerIdentity = {
-      provider: record.provider,
-      accountScope: record.accountScope,
-      providerItemId: record.providerItemId,
-      ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
-    };
+    const identity = identityOfRecord(queued);
+    const refusedKey = `${tierLedgerIdentityKey(identity)}#${queued.generation}`;
+    if (refused.has(refusedKey)) {
+      report.refused += 1;
+      continue;
+    }
     try {
+      // Re-check everything against the ledger right now, not the queue-time record.
+      const record = ledger.getCurrent(identity);
+      if (!record || !isOurQueuedRaise(record) || record.generation !== queued.generation
+        || ledger.getOverride(identity) || ledger.rejudgeQuestion(identity)
+        || record.targetMetadataTier !== queued.targetMetadataTier || record.targetContentTier !== queued.targetContentTier) {
+        report.skipped += 1;
+        continue;
+      }
       const sources = ledger.copies(identity).filter((copy) => copy.state === 'current'
         || (copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1));
       // Already (at least partly) in the Private store, or nothing to move from.
@@ -266,22 +321,41 @@ async function runQueuedMoves(options: TierRowRehomeOptions, report: TierRowReho
         identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
         target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
         embeddingLedger: { path: embeddingLedgerPath, approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL, why: MOVE_WHY },
+        expectedGeneration: record.generation,
         ...(builtInOnly ? { replaceOwnSupersededCopy: true } : {}),
       });
       report.moved += 1;
     } catch (error) {
       if (error instanceof TierLedgerGenerationConflictError) {
-        // Someone else (the sniffer's automatic move) settled it first.
+        // Decided again, or settled by someone else (the sniffer's automatic move) first.
+        continue;
+      }
+      if (error instanceof TierMoveRefusedError) {
+        // The destination keeps different text of this item: a permanent
+        // refusal until an approved purge. Recorded once, not retried; the
+        // guard in the move primitive stays.
+        refused.add(refusedKey);
+        ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...refused].slice(-REFUSED_META_LIMIT)));
+        report.refused += 1;
         continue;
       }
       report.failed += 1;
       try {
-        ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
+        ledger.recordMoveFailure(identity, { expectedGeneration: queued.generation });
       } catch {
         // Counting is best effort.
       }
     }
   }
+}
+
+function identityOfRecord(record: TierLedgerRecord): TierLedgerIdentity {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
+  };
 }
 
 function openQuestion(record: TierLedgerRecord): boolean {

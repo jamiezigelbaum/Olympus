@@ -30,6 +30,7 @@ import type { TierDecision, TierKey } from '../classification/tier-classifier.ts
 import {
   copyServingLayer,
   placementIsRaise,
+  TierLedgerGenerationConflictError,
   type TierCopy,
   type TierCopyLayers,
 } from '../classification/tier-ledger.ts';
@@ -90,6 +91,12 @@ export interface TierMoveOptions {
    * it such a destination refuses the move (an approved purge comes first).
    */
   replaceOwnSupersededCopy?: boolean;
+  /**
+   * The ledger generation the caller selected and validated this move
+   * against. A newer generation (the item was decided again meanwhile) fails
+   * the move with a generation conflict instead of moving the newer record.
+   */
+  expectedGeneration?: number;
 }
 
 export interface TierMoveDestination {
@@ -128,6 +135,9 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   const ledger = set.ledger;
   const record = ledger.getCurrent(identity);
   if (!record || !record.routed) throw new Error('Only a routed item can move; adopt a legacy placement first.');
+  if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
+    throw new TierLedgerGenerationConflictError();
+  }
 
   if (target.contentTier === 'secrets' || target.metadataTier === 'secrets') {
     return moveToSecrets(options, record.generation);
