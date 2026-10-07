@@ -324,7 +324,7 @@ describe('the Privacy editor in the browser', () => {
 
   const BASE_SETTINGS: PrivacySettings = {
     configured: true,
-    description: 'My health',
+    description: 'My divorce',
     pendingCount: 3,
     revision: 'rev-1',
     rules: [
@@ -399,7 +399,7 @@ describe('the Privacy editor in the browser', () => {
     expect(root.querySelector('[data-privacy-confirm]')).toBeNull();
     expect(sent).toEqual([{
       action: 'save_privacy',
-      description: 'My health',
+      description: 'My divorce',
       rules: [...BASE_SETTINGS.rules, { kind: 'sender', source_id: 'gmail.email', value: '@doctor.example' }],
       revision: 'rev-1',
     } as OlympusDashboardControlParams]);
@@ -432,14 +432,14 @@ describe('the Privacy editor in the browser', () => {
   test('a description-only change asks to confirm', async () => {
     const sent: OlympusDashboardControlParams[] = [];
     const { root, click, submit, abort } = mount(async (params) => { sent.push(params); return ok(); });
-    (root.querySelector('textarea[name="description"]') as HTMLTextAreaElement).value = 'My health and money';
+    (root.querySelector('textarea[name="description"]') as HTMLTextAreaElement).value = 'My divorce and my lawyer';
     await submit();
     expect(sent).toEqual([]);
     expect(root.querySelector('[data-privacy-confirm]')!.textContent)
       .toContain('This changes your description, which decides what Olympus keeps private.');
     click('[data-privacy-confirm-yes]');
     await settle();
-    expect(sent[0]).toMatchObject({ description: 'My health and money', confirm: true, revision: 'rev-1' });
+    expect(sent[0]).toMatchObject({ description: 'My divorce and my lawyer', confirm: true, revision: 'rev-1' });
     abort.abort();
   });
 
@@ -534,6 +534,22 @@ describe('the Privacy editor in the browser', () => {
     abort.abort();
   });
 
+  test('follow-up questions: Save without touching a choice still writes the defaults shown', async () => {
+    const sent: OlympusDashboardControlParams[] = [];
+    const owner = 'I want my family stuff to stay private';
+    const { root, click, submit, abort } = mount(async (params) => { sent.push(params); return ok(); }, { ...BASE_SETTINGS, description: owner });
+    await submit();
+    const field = root.querySelector('textarea[name="description"]') as HTMLTextAreaElement;
+    expect(field.value.split('\n')[0]).toBe(owner);
+    expect(field.value.split('\n')[1]).toStartWith('About family: private — ');
+    expect(root.querySelector('[data-privacy-confirm]')).not.toBeNull();
+    click('[data-privacy-confirm-yes]');
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: 'save_privacy', description: field.value.trim(), confirm: true });
+    abort.abort();
+  });
+
   test('a conflict keeps the draft and shows what is saved now; applying again replays the draft onto it', async () => {
     const sent: OlympusDashboardControlParams[] = [];
     const elsewhere = { kind: 'sender', source_id: 'gmail.email', value: 'new@elsewhere.example' };
@@ -566,7 +582,7 @@ describe('the Privacy editor in the browser', () => {
     expect(root.querySelector('[data-privacy-confirm]')).toBeNull();
     expect(sent[1]).toEqual({
       action: 'save_privacy',
-      description: 'My health',
+      description: 'My divorce',
       rules: [...BASE_SETTINGS.rules, elsewhere, { kind: 'sender', source_id: 'gmail.email', value: 'me@here.example' }],
       revision: 'rev-2',
     } as OlympusDashboardControlParams);

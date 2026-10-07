@@ -249,6 +249,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   /** Save: a save that lowers protection first asks inline, then carries the owner's confirmation. */
   function save(): void {
     if (!s || !s.loaded || s.saving || s.server) return;
+    // The questions' choices as shown, defaults included, become their sentences before anything is decided.
+    const shown = L.withShownAnswers(s.description);
+    if (shown !== s.description) {
+      s.description = shown;
+      changed();
+    }
     if (lowers()) {
       s.confirmStep = true;
       s.saveError = '';

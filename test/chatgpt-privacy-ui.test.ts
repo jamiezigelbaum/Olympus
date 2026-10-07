@@ -110,7 +110,7 @@ function model(privacy: Record<string, unknown> | null, overrides: Partial<Dashb
 const unconfigured = () => model({ configured: false, pendingCount: 0 }, { needsYou: [ASK] });
 
 // Private-looking names: they may appear only in the privacy and picker views and those tools' calls.
-const DESCRIPTION = 'my health and my divorce';
+const DESCRIPTION = 'my divorce and my lawyer letters';
 const NAMES = ['Medical Records', 'Lawyer Letters', 'doctor@clinic.example', 'Therapy Notes', 'Tax Returns 2024', 'Kids School', DESCRIPTION];
 const SAVED_RULES = [
   { kind: 'folder', source_id: 'dropbox.files', key: 'k-b', display: 'Medical Records' },
@@ -719,6 +719,19 @@ describe('follow-up questions', () => {
     expect(saves[0].description).toBe(refined);
     expect(saves[0].confirmation).toBe('conf1');
     expectNamesOnlyInPrivacy(host);
+  });
+
+  test('Save without touching a choice still writes the defaults shown, after the usual confirmation', async () => {
+    const { host, saves } = await openPrivacy({ description: OWNER });
+    host.button(W.save).click();
+    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    expect(area.value.split('\n')[0]).toBe(OWNER);
+    expect(area.value.split('\n')[1]).toStartWith('About family: private — ');
+    expect(host.doc.querySelector('.confirm-box')!.textContent).toContain(W.confirmDescription);
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].description).toBe(area.value.trim());
   });
 
   test('a saved description pre-fills the choices it already answers', async () => {

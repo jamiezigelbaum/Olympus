@@ -136,6 +136,26 @@ describe('the sentence an answer adds', () => {
   });
 });
 
+describe('Save writes what the questions show', () => {
+  test('accepting every default writes each asked area\'s sentence; saving again changes nothing', () => {
+    const saved = L.withShownAnswers(OWNER);
+    const lines = saved.split('\n');
+    expect(lines[0]).toBe(OWNER);
+    expect(lines.slice(1).map((line) => line.split(':')[0])).toEqual(['About family', 'About health', 'About money']);
+    for (const question of L.questions(OWNER)) {
+      const read = L.topicAnswers(saved)[question.id]!;
+      for (const option of question.options) expect(read[option.id]).toBe(option.side);
+    }
+    expect(L.withShownAnswers(saved)).toBe(saved);
+  });
+
+  test('an answered area keeps its answer; no broad word, nothing added', () => {
+    const answered = answer('my family', 'family', 'medical', 'share');
+    expect(L.withShownAnswers(answered)).toBe(answered);
+    expect(L.withShownAnswers('my divorce')).toBe('my divorce');
+  });
+});
+
 describe('answers read back from a saved description', () => {
   test('pre-fills each choice from the sentence, and unanswered areas at their defaults', () => {
     const saved = answer(answer(OWNER, 'family', 'logistics', 'private'), 'family', 'medical', 'share');

@@ -20633,6 +20633,16 @@ function privacyLogic(config) {
       return { description, fits: false };
     return { description: refineDescription(description, answers), fits: true };
   }
+  function withShownAnswers(description) {
+    const answers = {};
+    for (const question of questions(description)) {
+      const answer = {};
+      for (const option of question.options)
+        answer[option.id] = option.side;
+      answers[question.id] = answer;
+    }
+    return refineDescription(description, answers);
+  }
   function questionsKey(description) {
     return JSON.stringify(questions(description));
   }
@@ -20653,7 +20663,8 @@ function privacyLogic(config) {
     fitsAnswers,
     questions,
     questionsKey,
-    answerTopic
+    answerTopic,
+    withShownAnswers
   };
 }
 
