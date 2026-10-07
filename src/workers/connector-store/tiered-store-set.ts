@@ -95,6 +95,7 @@ import { registerTierSetPlanner } from '../classification/installed-tier-classif
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
+import { rehomePrivateTierRows } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 
 
@@ -403,7 +404,7 @@ export class TieredStoreSet {
     } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
-    this.settleStoredItems();
+    await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -438,7 +439,7 @@ export class TieredStoreSet {
     entries: ReadonlyArray<{ trustDomain: SourceTrustDomain; connector: SourceConnector; sync?: ConnectorStoreSyncOptions }>,
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
-    this.settleStoredItems();
+    await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'per_leg');
     const legRuns: TieredStoreLegRun[] = [];
     for (const entry of entries) {
@@ -457,10 +458,12 @@ export class TieredStoreSet {
    * already stored is settled: a newly saved raising owner rule (an "always
    * Private" folder) raises the ones it matches (tier-rules-sweep.ts), and
    * items a names-only folder covers stop waiting for text that never comes
-   * (tier-names-only-settle.ts). The sniffer's tick runs both too. Never
-   * fails the sync.
+   * (tier-names-only-settle.ts). The sniffer's tick runs both too. Rows that
+   * are Private by their own stored tier but sit in a Personal or Public
+   * store are queued and moved to the Private store (tier-row-rehome.ts).
+   * Never fails the sync.
    */
-  private settleStoredItems(): void {
+  private async settleStoredItems(): Promise<void> {
     try {
       sweepOwnerRuleRaises({ set: this });
     } catch {
@@ -470,6 +473,11 @@ export class TieredStoreSet {
       settleNamesOnlyItems({ set: this });
     } catch {
       // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      await rehomePrivateTierRows({ set: this });
+    } catch {
+      // The next run tries again.
     }
   }
 

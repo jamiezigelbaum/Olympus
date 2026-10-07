@@ -9464,6 +9464,177 @@ var init_live_control = __esm(() => {
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
 });
+// src/workers/source-index/built-in-embedding/tar.ts
+var init_tar = () => {};
+
+// src/workers/source-index/built-in-embedding/assets.ts
+var STALE_LOCK_MS, DOWNLOAD_STALL_MS;
+var init_assets = __esm(() => {
+  init_manifest();
+  init_tar();
+  STALE_LOCK_MS = 30 * 60000;
+  DOWNLOAD_STALL_MS = 2 * 60000;
+});
+
+// src/workers/source-index/built-in-embedding/runtime.ts
+var init_runtime = () => {};
+
+// src/workers/source-index/built-in-embedding/wordpiece.ts
+var init_wordpiece = () => {};
+
+// src/workers/source-index/built-in-embedding/provider.ts
+var RETRY_AFTER_FAILURE_MS;
+var init_provider = __esm(() => {
+  init_operation_error();
+  init_embedding_identity();
+  init_embeddings();
+  init_assets();
+  init_manifest();
+  init_runtime();
+  init_wordpiece();
+  RETRY_AFTER_FAILURE_MS = 2 * 60000;
+});
+
+// src/workers/embedding-ledger.ts
+var EMBEDDING_LEDGER_OWNER_APPROVAL, EMBEDDING_LEDGER_APPROVAL_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
+var init_embedding_ledger = __esm(() => {
+  EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
+  EMBEDDING_LEDGER_APPROVAL_TEXT = {
+    [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
+    "system-automatic": "Not approved — the system did this on its own",
+    "unattributed-historical": "Not approved — no decision is on record"
+  };
+  WIPED_CORPORA = [
+    "dropbox",
+    "gmail-secure",
+    "drive-secure",
+    "whatsapp-live",
+    "telegram-protected"
+  ];
+  LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
+  EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
+    {
+      entry_id: "backfill-2026-08-20-endpoint-retarget",
+      recorded_at: "2026-08-20T02:42:00.000Z",
+      kind: "endpoint_change",
+      what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
+      approved_by: "unattributed-historical",
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-20-invalidation",
+      recorded_at: "2026-08-20T12:03:00.000Z",
+      kind: "invalidation",
+      what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      scope: { corpora: WIPED_CORPORA },
+      why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
+      approved_by: "system-automatic",
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-20-re-embed",
+      recorded_at: "2026-08-20T12:04:00.000Z",
+      kind: "re_embed_started",
+      what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      scope: { corpora: WIPED_CORPORA },
+      why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
+      approved_by: "system-automatic",
+      status: "in_progress"
+    },
+    {
+      entry_id: "backfill-2026-08-24-model-decision",
+      recorded_at: "2026-08-24T00:00:00.000Z",
+      kind: "model_decision",
+      what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-24-drain-lane-enablement",
+      recorded_at: "2026-08-24T23:30:00.000Z",
+      kind: "note",
+      what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
+      scope: {
+        corpora: LANE_ENABLEMENT_CORPORA,
+        chunks: { dropbox: 52840, "x-bookmarks": 15 }
+      },
+      why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-24-readwise-hybrid",
+      recorded_at: "2026-09-24T13:30:00.000Z",
+      kind: "model_decision",
+      what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
+      scope: { corpora: ["readwise", "readwise-secure"] },
+      why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-25-chat-lane-catch-up",
+      recorded_at: "2026-09-25T07:00:00.000Z",
+      kind: "model_decision",
+      what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
+      scope: {
+        corpora: [
+          "internal.x.bookmarks",
+          "secure_local.x.bookmarks",
+          "internal.whatsapp.messages",
+          "secure_local.whatsapp.messages",
+          "internal.telegram.messages",
+          "secure_local.telegram.protected.messages"
+        ]
+      },
+      why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-30-gmail-catch-up",
+      recorded_at: "2026-09-30T21:05:00.000Z",
+      kind: "model_decision",
+      what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
+      scope: { corpora: ["internal.email"] },
+      why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    }
+  ];
+});
+
+// src/workers/connector-store/tier-move.ts
+var init_tier_move = __esm(() => {
+  init_engine();
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_placement();
+});
+
+// src/workers/connector-store/tier-row-rehome.ts
+var MOVE_WHY;
+var init_tier_row_rehome = __esm(() => {
+  init_provider();
+  init_types();
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_move();
+  MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
+});
 
 // src/workers/connector-store/tier-rejudge.ts
 var init_tier_rejudge = __esm(() => {
@@ -9487,6 +9658,7 @@ var init_tiered_store_set = __esm(() => {
   init_local_index();
   init_tier_placement();
   init_tier_names_only_settle();
+  init_tier_row_rehome();
   init_tier_rules_sweep();
 });
 
