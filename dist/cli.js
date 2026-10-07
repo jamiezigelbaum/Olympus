@@ -92276,16 +92276,26 @@ function createFileExtractionRunner(options) {
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
+      let jobsRefused = 0;
       for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
-        const result = jobs.enqueue({
-          refs,
-          extractorKind,
-          extractorVersion,
-          ...request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {},
-          ...request.priority !== undefined ? { priority: request.priority } : {},
-          ...request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {},
-          ...request.force !== undefined ? { force: request.force } : {}
-        });
+        let result;
+        try {
+          result = jobs.enqueue({
+            refs,
+            extractorKind,
+            extractorVersion,
+            ...request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {},
+            ...request.priority !== undefined ? { priority: request.priority } : {},
+            ...request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {},
+            ...request.force !== undefined ? { force: request.force } : {}
+          });
+        } catch (error2) {
+          if (!(error2 instanceof TypeError))
+            throw error2;
+          jobsRefused += refs.length;
+          console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${request.corpusId} extractor_kind=${extractorKind} ` + `candidates=${refs.length} reason=${boundedErrorMessage(error2)}`);
+          continue;
+        }
         jobsQueued += result.jobsQueued;
         if (result.jobsQueued > 0)
           prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
@@ -92302,6 +92312,7 @@ function createFileExtractionRunner(options) {
         jobsForced,
         jobsSkippedTooLarge,
         jobsUnroutable,
+        jobsRefused,
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {},
         done: page.done,
@@ -92760,6 +92771,11 @@ function summarizeEgressDestinations(values) {
   if (destinations.length === 1)
     return { egressDestination: destinations[0] };
   return { egressDestination: "venice_mixed_approved" };
+}
+function boundedErrorMessage(error2) {
+  const message = error2 instanceof Error ? error2.message : String(error2);
+  return JSON.stringify(message.split(`
+`).join(" ").slice(0, 200));
 }
 function hashToken(value) {
   return createHash52("sha256").update(value).digest("hex");
@@ -113314,6 +113330,7 @@ function fileExtractionSchedulerTask(input) {
       let jobsQueued = 0;
       let jobsExisting = 0;
       let jobsUnroutable = 0;
+      let jobsRefused = 0;
       const extractorKinds = new Set;
       for (let page = 0;page < maxPages; page += 1) {
         const plan = await input.runner.plan({
@@ -113327,6 +113344,7 @@ function fileExtractionSchedulerTask(input) {
         jobsQueued += plan.jobsQueued;
         jobsExisting += plan.jobsExisting;
         jobsUnroutable += plan.jobsUnroutable;
+        jobsRefused += plan.jobsRefused;
         for (const kind of plan.extractorKinds)
           extractorKinds.add(kind);
         if (plan.done) {
@@ -113350,6 +113368,7 @@ function fileExtractionSchedulerTask(input) {
         jobs_queued: jobsQueued,
         jobs_existing: jobsExisting,
         jobs_unroutable: jobsUnroutable,
+        jobs_refused: jobsRefused,
         jobs_processed: run.processedJobs,
         jobs_indexed: run.counts.indexed,
         jobs_metadata_only: run.counts.metadata_only,
