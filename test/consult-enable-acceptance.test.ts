@@ -30,7 +30,7 @@ import { PrivateAnswerJobs, type ClaimResponse } from '../src/workers/chatgpt/pr
 import { DASHBOARD_OUTSIDE_HELP_PATHS } from '../src/workers/dashboard/outside-help.ts';
 import { createDashboardConsultAdapter } from '../src/workers/email-source/dashboard-consult.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const ORIGIN = 'http://127.0.0.1:17777';
 const INSTALL = 'f'.repeat(32);
@@ -98,11 +98,12 @@ function dashboard(home: string) {
   writeFileSync(policyPath, JSON.stringify(config), { mode: 0o600 });
   const consult = createDashboardConsultAdapter({
     sovereignty: { config, source: 'file', path: policyPath },
-    resolveSecret: (ref) => (ref === 'env:OLYMPUS_ZKAPI_API_KEY' ? env.OLYMPUS_ZKAPI_API_KEY : undefined),
+    secretPresent: (ref) => ref === 'env:OLYMPUS_ZKAPI_API_KEY' && env.OLYMPUS_ZKAPI_API_KEY !== undefined,
     requestReload: () => true,
     env,
     statePath: join(home, '.olympus', 'zkapi-consult-state.json'),
     readiness: async () => readiness(),
+    recoverSession: async () => { throw new Error('no recovery in this test'); },
   });
   const dir = mkdtempSync(join(tmpdir(), 'olympus-consult-accept-worker-'));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -116,8 +117,9 @@ function dashboard(home: string) {
   return { env, fetcher };
 }
 
+/** The local-only mint: the one session grade the consult routes take (a loopback browser, no bearer). */
 async function controlSession(fetcher: (request: Request) => Promise<Response>): Promise<Record<string, string>> {
-  const mint = await fetcher(new Request(`${ORIGIN}/dashboard/control/session`, { method: 'POST', headers: { Authorization: 'Bearer worker-secret', Origin: ORIGIN } }));
+  const mint = await fetcher(new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } }));
   expect(mint.status).toBe(200);
   const csrf = ((await mint.json()) as { csrf_token: string }).csrf_token;
   return { Cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, Origin: ORIGIN, 'X-Olympus-CSRF': csrf };
@@ -158,6 +160,9 @@ interface Engine {
   writerCalls: ConsultWriterInput[];
   opens: ZkapiOpenControl[];
   sends: Array<{ question: string; authorized: boolean }>;
+  /** Runs inside the fake session's send, after the writer and the gate, immediately before the real final `authorize` callback. */
+  beforeAuthorize?: () => Promise<void>;
+  authorizeCalls: number;
   logs: string[];
 }
 
@@ -166,6 +171,7 @@ function engine(env: Record<string, string | undefined>): Engine {
   const opens: ZkapiOpenControl[] = [];
   const sends: Array<{ question: string; authorized: boolean }> = [];
   const logs: string[] = [];
+  const result: Partial<Engine> = { authorizeCalls: 0 };
   let orchestrator!: ConsultOrchestrator;
   const jobs = new PrivateAnswerJobs({
     eligible: async (items) => items.map(() => true),
@@ -202,6 +208,8 @@ function engine(env: Record<string, string | undefined>): Engine {
         },
         async send(question, sendControl: ZkapiSendControl = {}): Promise<ZkapiConsultReply> {
           state = 'authorizing';
+          if (result.beforeAuthorize) await result.beforeAuthorize();
+          result.authorizeCalls = (result.authorizeCalls ?? 0) + 1;
           const ok = sendControl.authorize ? await sendControl.authorize(new AbortController().signal) : true;
           sends.push({ question, authorized: ok });
           if (!ok) {
@@ -223,7 +231,9 @@ function engine(env: Record<string, string | undefined>): Engine {
       return { ok: true, session };
     },
   });
-  return { jobs, orchestrator, writerCalls, opens, sends, logs };
+  const engineResult = result as Engine;
+  Object.assign(engineResult, { jobs, orchestrator, writerCalls, opens, sends, logs });
+  return engineResult;
 }
 
 async function settled(jobs: PrivateAnswerJobs, ms = 10_000): Promise<void> {
@@ -314,6 +324,27 @@ describe('C5 acceptance: the Outside help card turns consults on, and off', () =
     expect(straddle.sends.every((send) => !send.authorized)).toBe(true);
     expect(straddle.logs.some((line) => line.includes('authorization_refused') || line.includes('settings_stale'))).toBe(true);
     expect((await envelope(straddleJob, straddlePanel, await straddle.jobs.claim(straddleJob, straddlePanel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+
+    // The later gate (P2-8): a job that passes the trigger, the writer and
+    // the gate with outside help on, then has the settings change while the
+    // session is already warm, reaches the real final authorize callback and
+    // is refused there (stale revision): no dispatch, no reservation, the
+    // block reads idle.
+    const on2 = await setOutsideHelp(fetcher, custody, true, off);
+    expect(on2).toBe(3);
+    const late = engine(env);
+    late.beforeAuthorize = async () => {
+      expect(await setOutsideHelp(fetcher, custody, false, on2)).toBe(4);
+    };
+    const lateRun = await answer(late);
+    expect(late.writerCalls).toHaveLength(1);
+    expect(late.opens).toHaveLength(1);
+    expect(late.authorizeCalls).toBe(1);
+    expect(late.sends).toEqual([{ question: CLEAN_QUESTION, authorized: false }]);
+    expect(late.logs.some((line) => line.includes('authorization_refused'))).toBe(true);
+    expect(late.logs.some((line) => line.startsWith('[consult] outcome=appended'))).toBe(false);
+    expect((await envelope(lateRun.jobId, lateRun.panel, await late.jobs.claim(lateRun.jobId, lateRun.panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
+    expect(late.orchestrator.recentQuestions).toEqual([]);
 
     // Off: inert. No writer, no session, idle.
     const after = engine(env);

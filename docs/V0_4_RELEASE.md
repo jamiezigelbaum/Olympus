@@ -120,9 +120,11 @@ waits for a calendar slot.
   orchestration (wired; inert unless a valid enabled `consult.json` exists),
   C5 the Mac dashboard Outside help card (the settings writer and the only
   enable path, control session only; `docs/design/chatgpt-plugin.md`,
-  "Outside help enable flow"). The quiet-machine B2 rerun of §A.7 is the
-  C5 release gate and is still owed; until it passes the card ships as
-  experimental, "route not verified".
+  "Outside help enable flow"). The quiet-machine B2 first-token rerun of
+  §A.7 is a release prerequisite for the enable path and is still owed: the
+  card does not ship to users until it passes. The "experimental, route not
+  verified" label is about the macOS route verification (§Z.4), not a waiver
+  of that proof.
 
 ## Outcome (0.4, OpenClaw)
 

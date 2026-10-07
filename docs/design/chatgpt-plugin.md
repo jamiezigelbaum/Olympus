@@ -924,16 +924,25 @@ the writer's one caller), `src/workers/dashboard/outside-help.ts` and
   controls. A locked browser or the read-only `dash_` link is pointed at
   Setup's gate.
 - **Who.** The five routes (`POST /dashboard/consult`, `/route`,
-  `/route/add`, `/recover`, `/abandon`) are accepted only from an
-  authenticated local control session: cookie, same origin and CSRF token
-  proven at the HTTP boundary, which then injects the control-session
-  context header it strips from every incoming request
-  (`DASHBOARD_CONSULT_CONTROL_PATHS` in `src/workers/http.ts`). The Gateway
-  bearer, which every other control route also takes, is refused there
-  (403 `mac_dashboard_only`), the worker handler refuses without the
-  header, and no `/dashboard` path is ever on the relay's forward list. An
-  import-graph test holds that no MCP, setup-tool, ChatGPT, relay or remote
-  module reaches the writer or the adapter.
+  `/route/add`, `/recover`, `/abandon`) are accepted only from a
+  **local-grade** control session. Every control session cookie now carries
+  a signed grade: `bearer` for a session the worker bearer minted directly
+  or through a launch ticket a bearer minted (the Gateway bridge holds that
+  bearer for the agents it serves), `local` for a session minted by
+  `POST /dashboard/control/session/local`, which refuses any
+  `Authorization` header and any non-loopback or proxied origin. The card
+  shows a one-click "Unlock outside help on this Mac" to a bearer-grade
+  session; a loopback browser presenting no bearer gets a local-grade
+  cookie. The boundary (`DASHBOARD_CONSULT_CONTROL_PATHS` in
+  `src/workers/http.ts`) refuses the bearer and any bearer-grade session on
+  these routes (403 `mac_dashboard_only`), injects the control-session
+  context and grade headers it strips from every incoming request, and the
+  worker handler refuses without them. No `/dashboard` path is ever on the
+  relay's forward list. An import-graph test holds that no MCP, setup-tool,
+  ChatGPT, relay or remote module reaches the writer or the adapter.
+  Residual: a process on this Mac that can speak to the loopback port as a
+  browser would (no bearer, loopback origin) can mint a local session; the
+  grade removes bearer-derived authority, not local-process authority.
 - **The settings writer.** `~/.olympus/consult.json`, compare-and-swap on
   `revision` under the cross-process file lease, written as an atomic
   owner-only replace (0600) inside an owner-only `~/.olympus` (0700, a real
@@ -955,7 +964,15 @@ the writer's one caller), `src/workers/dashboard/outside-help.ts` and
   `openai/gpt-5-mini`, `secretRef: env:OLYMPUS_ZKAPI_API_KEY`) through the
   same validator `olympus sovereignty init` uses. The acknowledgements, the
   owner-confirmed funding date and the optional daily caps are recorded in
-  that profile's `zkapi` block. The sovereignty policy is read at boot, so
+  that profile's `zkapi` block. Every policy write is one transaction
+  (`updateSovereigntyConfigFile`): the file lease, a re-read of the file as
+  it is now, a patch of only the owned fields, validation, and an atomic
+  durable replace (the old file survives any failure); a file that no
+  longer matches the adapter's view is a 409 `policy_changed` and nothing
+  is written. ChatGPT's `olympus_model_set` uses the same transaction. The
+  adapter never holds a key: it gets a presence answer and hands recovery
+  to the composition root, which resolves the key for the transport. The
+  sovereignty policy is read at boot, so
   each of these writes asks the worker to restart (`requestReload`, the
   Models card's own path); when the worker cannot restart itself the card
   says so and the change waits for a managed restart. The settings file
