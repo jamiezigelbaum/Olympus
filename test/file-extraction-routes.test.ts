@@ -90,6 +90,7 @@ function planResult(corpusId: string): ExtractionPlanResult {
     jobsForced: 0,
     jobsSkippedTooLarge: 0,
     jobsUnroutable: 0,
+    jobsRefused: 0,
     extractorKinds: ['local_text'],
     done: true,
     policy: {

@@ -478,6 +478,43 @@ describe('extraction runner: settlement comes from the source, never re-derived'
   });
 });
 
+describe('extraction runner: one refused bucket never fails a plan pass', () => {
+  // 2026-10-07: an image-scoped extractor version the job store refused
+  // (`+` is not a safe key part) threw out of plan(), so every Dropbox
+  // extract pass failed and no file was queued at all.
+  test('a bucket the job store refuses is counted and the other buckets are queued', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          versionFor: (mimeType) => (mimeType?.startsWith('image/') ? `${FAKE_VERSION}+not-a-safe-key-part` : FAKE_VERSION),
+        })],
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return { candidates: [ref(1), ref(2, { mimeType: 'image/jpeg', name: 'photo.jpg' })], done: true };
+            },
+          }),
+        },
+      });
+      const errors: string[] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+      let plan;
+      try {
+        plan = await runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND });
+      } finally {
+        console.error = original;
+      }
+      expect(plan).toMatchObject({ candidates: 2, jobsQueued: 1, jobsRefused: 1 });
+      expect(errors.some((line) => line.includes('plan_bucket_refused') && line.includes('safe identifier'))).toBe(true);
+    } finally {
+      jobs.close();
+    }
+  });
+});
+
 describe('extraction runner: empty output never reaches the sink', () => {
   test('an empty extraction settles metadata-only without a write', async () => {
     const jobs = jobStore();

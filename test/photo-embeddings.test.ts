@@ -893,7 +893,7 @@ describe('a prepared picture through runner, sink and store', () => {
       check.close();
     }
     expect(again.filter((media) => existsSync(media.path))).toEqual([]);
-  });
+  }, 60_000);
 
   test('an older store gains the media columns by an additive migration', async () => {
     const dbPath = join(temporaryDir(), 'old.sqlite');

@@ -1369,6 +1369,7 @@ export function fileExtractionSchedulerTask(input: {
       let jobsQueued = 0;
       let jobsExisting = 0;
       let jobsUnroutable = 0;
+      let jobsRefused = 0;
       const extractorKinds = new Set<string>();
       for (let page = 0; page < maxPages; page += 1) {
         const plan = await input.runner.plan({
@@ -1382,6 +1383,7 @@ export function fileExtractionSchedulerTask(input: {
         jobsQueued += plan.jobsQueued;
         jobsExisting += plan.jobsExisting;
         jobsUnroutable += plan.jobsUnroutable;
+        jobsRefused += plan.jobsRefused;
         for (const kind of plan.extractorKinds) extractorKinds.add(kind);
         if (plan.done) {
           done = true;
@@ -1404,6 +1406,7 @@ export function fileExtractionSchedulerTask(input: {
         jobs_queued: jobsQueued,
         jobs_existing: jobsExisting,
         jobs_unroutable: jobsUnroutable,
+        jobs_refused: jobsRefused,
         jobs_processed: run.processedJobs,
         jobs_indexed: run.counts.indexed,
         jobs_metadata_only: run.counts.metadata_only,
