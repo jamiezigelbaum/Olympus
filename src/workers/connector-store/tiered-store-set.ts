@@ -95,6 +95,7 @@ import { registerTierSetPlanner } from '../classification/installed-tier-classif
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
+import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 
 
@@ -231,6 +232,9 @@ export class TieredStoreSet {
   private readonly onLegOpened: TieredStoreSetOptions['onLegOpened'];
   private readonly laneFloor: TieredLaneFloor | undefined;
   private readonly contentArrivesLater: boolean;
+  private privateEmbedder: SourceEmbeddingProvider | undefined;
+  private privateEmbedWith: (() => SourceEmbeddingProvider | undefined) | undefined;
+  private lastRowRehome: TierRowRehomeReport | undefined;
 
   constructor(options: TieredStoreSetOptions) {
     if (!options.setId.trim()) throw new Error('A tiered store set needs a stable id.');
@@ -353,6 +357,59 @@ export class TieredStoreSet {
     };
   }
 
+  /**
+   * Tell the set which embedder the Private store really uses when its leg
+   * declares none (a lane whose embedder is chosen at runtime and handed to a
+   * scheduler). The Private-row re-home pass moves only when this is local.
+   */
+  declarePrivateEmbedder(
+    provider: SourceEmbeddingProvider,
+    options: { embedWith?: () => SourceEmbeddingProvider | undefined } = {},
+  ): void {
+    this.privateEmbedder = provider;
+    this.privateEmbedWith = options.embedWith;
+  }
+
+  /**
+   * The provider that embeds rows moved into the Private store, as the lane
+   * would embed them now: with its scope binding when the lane has one
+   * (`embedWith`; undefined while the binding is not current), else the
+   * declared or configured provider. Undefined: nothing may be queued yet.
+   */
+  privateEmbeddingProvider(): SourceEmbeddingProvider | undefined {
+    if (this.privateEmbedWith) {
+      try {
+        return this.privateEmbedWith();
+      } catch {
+        return undefined;
+      }
+    }
+    return this.privateEmbedder ?? this.legs.get('secure_local')?.spec.embeddingProvider;
+  }
+
+  /**
+   * Where the Private store embeds NOW: 'local' or 'cloud' when the runtime
+   * declared its provider or the secure leg is configured with one, otherwise
+   * undefined. Unknown is never treated as local.
+   */
+  privateEmbedderBackend(): 'local' | 'cloud' | undefined {
+    const declared = this.privateEmbedder ?? this.legs.get('secure_local')?.spec.embeddingProvider;
+    if (declared) return declared.backend === 'local' ? 'local' : declared.backend === 'cloud' ? 'cloud' : undefined;
+    // Never inferred from stored vectors: a historical authority says what the
+    // store once used, not what is configured now.
+    return undefined;
+  }
+
+  /** Counts from the last Private-row re-home pass this process ran (content-free). */
+  rowRehomeReport(): TierRowRehomeReport | undefined {
+    return this.lastRowRehome;
+  }
+
+  /** @internal */
+  recordRowRehomeReport(report: TierRowRehomeReport): void {
+    this.lastRowRehome = report;
+  }
+
   /** @internal Whether this lane's content arrives after listing (see the option). */
   readsContentLater(): boolean {
     return this.contentArrivesLater;
@@ -403,7 +460,7 @@ export class TieredStoreSet {
     } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
-    this.settleStoredItems();
+    await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -438,7 +495,7 @@ export class TieredStoreSet {
     entries: ReadonlyArray<{ trustDomain: SourceTrustDomain; connector: SourceConnector; sync?: ConnectorStoreSyncOptions }>,
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
-    this.settleStoredItems();
+    await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'per_leg');
     const legRuns: TieredStoreLegRun[] = [];
     for (const entry of entries) {
@@ -457,10 +514,12 @@ export class TieredStoreSet {
    * already stored is settled: a newly saved raising owner rule (an "always
    * Private" folder) raises the ones it matches (tier-rules-sweep.ts), and
    * items a names-only folder covers stop waiting for text that never comes
-   * (tier-names-only-settle.ts). The sniffer's tick runs both too. Never
-   * fails the sync.
+   * (tier-names-only-settle.ts). The sniffer's tick runs both too. Rows that
+   * are Private by their own stored tier but sit in a Personal or Public
+   * store are queued and moved to the Private store (tier-row-rehome.ts).
+   * Never fails the sync.
    */
-  private settleStoredItems(): void {
+  private async settleStoredItems(): Promise<void> {
     try {
       sweepOwnerRuleRaises({ set: this });
     } catch {
@@ -470,6 +529,11 @@ export class TieredStoreSet {
       settleNamesOnlyItems({ set: this });
     } catch {
       // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      await rehomePrivateTierRows({ set: this });
+    } catch {
+      // The next run tries again.
     }
   }
 

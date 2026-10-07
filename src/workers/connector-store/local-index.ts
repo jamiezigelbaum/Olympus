@@ -7214,6 +7214,28 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Of these items, the ones that still owe an embedding on `modelId`: live
+   * (not tombstoned) with at least one chunk lacking a current vector. A
+   * targeted currency check for named items, not a capped scan, so an item is
+   * never reported done merely because other, older items fill a page. It
+   * ignores the visibility exclusions on purpose: an item hidden or held right
+   * now still owes its vectors once released.
+   */
+  embeddingOwedItemIds(modelId: string, localItemIds: readonly string[]): string[] {
+    if (localItemIds.length === 0) return [];
+    const rows = this.db.query(`
+      SELECT DISTINCT i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0
+        AND i.local_item_id IN (SELECT value FROM json_each(?))
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+    `).all(modelId, JSON.stringify(localItemIds)) as Array<{ local_item_id: string }>;
+    return rows.map((row) => row.local_item_id);
+  }
+
+  /**
    * The chunks still waiting for a vector on `modelId`, and a token estimate of
    * embedding them (characters / 4, the estimate every planner here uses).
    * Same exclusions as missingEmbeddingItemIds; with the embedder named, rows
@@ -8832,6 +8854,45 @@ export class LocalConnectorStore {
       }),
       () => 'content',
     ).map((row) => searchRowFromItemRow(row));
+  }
+
+  /**
+   * A bounded window of live rows that are Private by their OWN stored tier
+   * (S4 and S4+; S5 is Secrets and never listed). The scan covers item_pk in
+   * (after, after + window], so its cost is bounded by `window` whatever the
+   * table holds (no trust_tier index exists); `next` is where the following
+   * call resumes, absent once the end of the table was reached. Identities
+   * only, never text. Used by the Private-row re-home pass (tier-row-rehome.ts).
+   */
+  privateTierRowWindow(options: { after?: number; window: number; limit: number }): {
+    rows: Array<{ itemPk: number; storedTier: SourceTrustTier; identity: SourceItemIdentity }>;
+    next?: number;
+  } {
+    const after = Math.max(0, Math.floor(options.after ?? 0));
+    const window = Math.max(1, Math.floor(options.window));
+    const limit = Math.max(1, Math.floor(options.limit));
+    const upper = after + window;
+    const top = (this.db.query('SELECT MAX(item_pk) AS top FROM items').get() as { top: number | null } | null)?.top ?? 0;
+    const rows = this.db.query(`
+      SELECT item_pk, trust_tier, family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
+      FROM items
+      WHERE item_pk > ? AND item_pk <= ? AND tombstoned = 0 AND trust_tier IN ('S4', 'S4+')
+      ORDER BY item_pk
+      LIMIT ?
+    `).all(after, upper, limit) as Array<ItemRow & { item_pk: number }>;
+    const full = rows.length >= limit;
+    const last = rows.at(-1);
+    // A full page resumes right after its last row; otherwise after the window.
+    const resume = full && last ? last.item_pk : upper;
+    return {
+      rows: rows.map((row) => ({
+        itemPk: row.item_pk,
+        storedTier: trustTierFromRow(row.trust_tier),
+        identity: sourceItemFromRow(row),
+      })),
+      ...(resume < top ? { next: resume } : {}),
+    };
   }
 
   /**
