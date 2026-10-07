@@ -37,12 +37,36 @@ describe('pinning the built-in EmbeddingGemma 2 model', () => {
       repository: 'onnx-community/embeddinggemma-2-ONNX',
       revision: COMMIT,
       model: { name: 'model_quantized.onnx', path: 'onnx/model_quantized.onnx', bytes: 310_000_000, sha256: sha('f') },
+      tokenizerRepository: 'onnx-community/embeddinggemma-2-ONNX',
+      tokenizerRevision: COMMIT,
       vocabulary: { name: 'tokenizer.model', path: 'tokenizer.model', bytes: 4_689_016, sha256: sha('b') },
     });
     expect(pinFromTree(TREE, { ...options, model: 'onnx/model.onnx' }).modelData)
       .toEqual({ name: 'model.onnx_data', path: 'onnx/model.onnx_data', bytes: 1_200_000_000, sha256: sha('e') });
     expect(() => pinFromTree(TREE, { ...options, model: 'onnx/missing.onnx' })).toThrow('has no onnx/missing.onnx');
     expect(() => pinFromTree(TREE, { ...options, model: 'onnx/model.onnx', tokenizer: 'config.json' })).toThrow('not an LFS file');
+  });
+
+  test('pins the tokenizer from another repository\'s commit when the model repository lacks it', () => {
+    const tokenizerCommit = 'fedcba9876543210fedcba9876543210fedcba98';
+    const onnxOnly = TREE.filter((entry) => entry.path !== 'tokenizer.model');
+    const options = { repository: 'onnx-community/embeddinggemma-2-ONNX', commit: COMMIT, model: 'onnx/model_quantized.onnx', tokenizer: 'tokenizer.model' };
+    expect(() => pinFromTree(onnxOnly, options)).toThrow('has no tokenizer.model');
+    const pin = pinFromTree(onnxOnly, {
+      ...options,
+      tokenizerTree: {
+        repository: 'google/embeddinggemma-2',
+        commit: tokenizerCommit,
+        tree: [{ type: 'file', path: 'tokenizer.model', size: 4_689_013, oid: 'g', lfs: { oid: sha('9'), size: 4_689_013 } }],
+      },
+    });
+    expect(pin).toMatchObject({
+      revision: COMMIT,
+      tokenizerRepository: 'google/embeddinggemma-2',
+      tokenizerRevision: tokenizerCommit,
+      vocabulary: { name: 'tokenizer.model', path: 'tokenizer.model', bytes: 4_689_013, sha256: sha('9') },
+    });
+    expect(renderPinBlock(pin)).toContain(`tokenizerRevision: '${tokenizerCommit}',`);
   });
 
   test('rewrites only the manifest\'s PINNED block, and the result still compiles to the same shape', () => {

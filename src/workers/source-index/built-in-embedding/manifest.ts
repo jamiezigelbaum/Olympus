@@ -113,12 +113,14 @@ export const ARCTIC_EMBED_M_V1_5: BuiltInEmbeddingModelSpec = {
 // so this default cannot ship half-pinned.
 // BEGIN PINNED embeddinggemma-2
 const EMBEDDINGGEMMA_2_PIN = {
-  modelId: 'embeddinggemma-2-onnx-UNPINNED',
+  modelId: 'embeddinggemma-2-int8-daa72c5',
   repository: 'onnx-community/embeddinggemma-2-ONNX',
-  revision: 'UNPINNED',
-  model: { name: 'model.onnx', path: 'onnx/model.onnx', bytes: 0, sha256: 'UNPINNED' },
-  modelData: undefined as { name: string; path: string; bytes: number; sha256: string } | undefined,
-  vocabulary: { name: 'tokenizer.model', path: 'tokenizer.model', bytes: 0, sha256: 'UNPINNED' },
+  revision: 'daa72c51243991dfcaf9f9137d2c573d8f7790c0',
+  model: { name: 'model_quantized.onnx', path: 'onnx/model_quantized.onnx', bytes: 495_165, sha256: 'd06edd601f851c633a2519304cbeb8dc6170d7ceb61b436625c17fb9b6e74953' },
+  modelData: { name: 'model_quantized.onnx_data', path: 'onnx/model_quantized.onnx_data', bytes: 313_724_928, sha256: '278a7ff1248c3618e4bd11a607fc54f7bdc7778854230f3956d3f86bd9db4f3b' } as { name: string; path: string; bytes: number; sha256: string } | undefined,
+  tokenizerRepository: 'google/embeddinggemma-2',
+  tokenizerRevision: '914f7f89142e33e77833254d9c9b90c3cef7303b',
+  vocabulary: { name: 'tokenizer.model', path: 'tokenizer.model', bytes: 4_689_013, sha256: 'e594c8a90eb08d8bda498ff4747977dc827ae0c3c56b5c0d41a605a22d02ef03' },
 };
 // END PINNED embeddinggemma-2
 
@@ -151,7 +153,8 @@ export const EMBEDDINGGEMMA_2: BuiltInEmbeddingModelSpec = {
   ...(EMBEDDINGGEMMA_2_PIN.modelData
     ? { modelData: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.modelData) }
     : {}),
-  vocabulary: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.vocabulary),
+  // The ONNX conversion ships only tokenizer.json; Google's repository has the SentencePiece model.
+  vocabulary: pinnedFile(EMBEDDINGGEMMA_2_PIN.tokenizerRepository, EMBEDDINGGEMMA_2_PIN.tokenizerRevision, EMBEDDINGGEMMA_2_PIN.vocabulary),
 };
 
 /** The model new installs embed with. */

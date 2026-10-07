@@ -67,7 +67,8 @@ New installs (setup from 2026-10-06) embed every tier with the **built-in
 model**: Google's EmbeddingGemma 2 (Apache-2.0), text encoder, 768 dimensions,
 running in-process on ONNX Runtime. It needs no account, no key and no extra
 app, and nothing leaves the computer. On first use Olympus downloads the model,
-its tokenizer and the runtime for this platform (114 MB) once into
+its tokenizer and the runtime for this platform (about 430 MB: the int8 text
+encoder is 314 MB, the runtime 114 MB) once into
 `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models/built-in-embedding`
 (override with `OLYMPUS_BUILT_IN_EMBEDDING_DIR`); every file is pinned by size
 and checksum and re-verified before it loads. While it downloads, questions
@@ -81,7 +82,7 @@ The profile is:
 "built-in-embedding": {
   "provider": "built-in",
   "trust": "local",
-  "model": "embeddinggemma-2-onnx-UNPINNED",
+  "model": "embeddinggemma-2-int8-daa72c5",
   "purpose": "embedding"
 }
 ```

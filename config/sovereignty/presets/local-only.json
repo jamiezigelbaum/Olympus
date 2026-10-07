@@ -4,7 +4,7 @@
     "built-in-embedding": {
       "provider": "built-in",
       "trust": "local",
-      "model": "embeddinggemma-2-onnx-UNPINNED",
+      "model": "embeddinggemma-2-int8-daa72c5",
       "purpose": "embedding"
     },
     "local-source-answer": {

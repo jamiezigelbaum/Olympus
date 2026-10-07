@@ -113,7 +113,7 @@ import {
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
-import { ARCTIC_EMBED_M_V1_5 } from '../source-index/built-in-embedding/manifest.ts';
+import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../source-index/built-in-embedding/manifest.ts';
 import type {
   SourceIndexCorpusSearchAdapter,
   SourceIndexCorpusSearchRequest,
@@ -192,12 +192,23 @@ const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map(
 // positives and paraphrases start at 0.40 (most at 0.43 to 0.56; the weaker
 // true positives are lexical matches, which stand on their own merit).
 //
+// EmbeddingGemma 2 (int8), calibrated 2026-10-07 on fresh copies of the same
+// two stores (288 chunks), scoring each true positive and paraphrase against
+// the store that holds its answer. Its cosines sit on a higher, narrower
+// scale: off-topic questions peak at 0.64 for everyday topics and 0.68 for
+// medical topics the corpus does not hold (vaccination record, dental x-ray);
+// true positives start at 0.735 (median 0.82) and paraphrases at 0.70 (median
+// 0.74), save one at 0.66 ("do I have worms", which Arctic also missed). 0.69
+// sits between. The same question set put Arctic's off-topic peak at 0.37,
+// under its 0.40 bar.
+//
 // Every built-in model needs its own bar before it ships: cosine scales differ
 // by model, and a bar carried over from another model either lets everything
 // match or hides true positives. `test/built-in-embedding.test.ts` fails for a
 // registered built-in model without one.
 const CALIBRATED_SEMANTIC_RELEVANCE_BARS: ReadonlyMap<string, number> = new Map([
   [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
+  [EMBEDDINGGEMMA_2.modelId, 0.69],
 ]);
 
 /** The relevance bar calibrated for a model's vector lane, if one has been. */

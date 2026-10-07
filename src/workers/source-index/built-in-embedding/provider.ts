@@ -225,7 +225,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       const tokenizer = loadTokenizer(this.spec, installed.vocabularyPath);
       const session = await this.runtimeFactory(installed).createSession(installed.modelPath, {
         threads: this.threads,
-        output: this.spec.pooling === 'model' ? 'sentence_embedding' : 'last_hidden_state',
+        ...(this.spec.pooling === 'model' ? { output: 'sentence_embedding' as const } : {}),
       });
       reportBuiltInEmbeddingState(reporterOptions, 'ready');
       return { session, tokenizer };

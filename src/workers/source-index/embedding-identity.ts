@@ -199,7 +199,7 @@ export const CANONICAL_EMBEDDING_IDENTITIES: readonly CanonicalEmbeddingIdentity
   // Owner-approved 2026-10-06: EmbeddingGemma 2, the zero-setup default for new installs.
   canonicalIdentity({
     provider: 'built-in',
-    modelId: 'embeddinggemma-2-onnx-UNPINNED',
+    modelId: 'embeddinggemma-2-int8-daa72c5',
     backend: 'local',
     dimension: 768,
   }),

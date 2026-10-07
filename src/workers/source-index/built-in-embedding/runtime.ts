@@ -27,7 +27,7 @@ export interface EmbeddingSession {
 
 export interface EmbeddingSessionOptions {
   threads: number;
-  /** The graph output to read; absent, `last_hidden_state` (or the only output). */
+  /** The graph output to read; absent, `last_hidden_state` (or the first output). */
   output?: 'last_hidden_state' | 'sentence_embedding';
 }
 
@@ -40,15 +40,25 @@ interface OrtTensor {
   dims: readonly number[];
 }
 
+interface OrtValueMetadata {
+  name: string;
+  isTensor: boolean;
+  shape?: ReadonlyArray<number | string>;
+}
+
 interface OrtSession {
   inputNames: readonly string[];
+  inputMetadata?: readonly OrtValueMetadata[];
   outputNames: readonly string[];
   run(feeds: Record<string, OrtTensor>): Promise<Record<string, OrtTensor>>;
   release(): Promise<void>;
 }
 
 interface OrtModule {
-  Tensor: new (type: 'int64', data: BigInt64Array, dims: readonly number[]) => OrtTensor;
+  Tensor: {
+    new (type: 'int64', data: BigInt64Array, dims: readonly number[]): OrtTensor;
+    new (type: 'float32', data: Float32Array, dims: readonly number[]): OrtTensor;
+  };
   InferenceSession: {
     create(path: string, options: Record<string, unknown>): Promise<OrtSession>;
   };
@@ -76,12 +86,25 @@ export function onnxRuntimeFromDirectory(runtimeDir: string): EmbeddingRuntime {
       const releaseAtExit = () => { void session.release().catch(() => undefined); };
       process.once('exit', releaseAtExit);
       const wantsTokenTypes = session.inputNames.includes('token_type_ids');
-      const wanted = options.output ?? 'last_hidden_state';
-      const outputName = session.outputNames.includes(wanted)
-        ? wanted
-        : options.output ? undefined : session.outputNames[0];
+      // A multimodal graph (EmbeddingGemma 2) also requires its image, video
+      // and audio feature inputs; text embeds with each of them empty.
+      const emptyFeatures = session.inputNames
+        .filter((name) => !['input_ids', 'attention_mask', 'token_type_ids'].includes(name))
+        .map((name) => {
+          const width = session.inputMetadata?.find((input) => input.name === name)?.shape?.[1];
+          if (!name.endsWith('_features') || typeof width !== 'number') {
+            throw new Error(`The built-in search model needs an input this runtime cannot feed: ${name}.`);
+          }
+          return [name, new ort.Tensor('float32', new Float32Array(0), [0, width])] as const;
+        });
+      // The per-token output goes by several names (Arctic's graph calls it
+      // `token_embeddings`); a pooled output must be the one asked for.
+      const pooled = options.output === 'sentence_embedding';
+      const outputName = pooled
+        ? session.outputNames.find((name) => name === 'sentence_embedding')
+        : session.outputNames.includes('last_hidden_state') ? 'last_hidden_state' : session.outputNames[0];
       if (!outputName) {
-        throw new Error(`The built-in search model has no ${wanted} output (it has ${session.outputNames.join(', ') || 'none'}).`);
+        throw new Error(`The built-in search model has no ${pooled ? 'sentence_embedding' : ''} output (it has ${session.outputNames.join(', ') || 'none'}).`);
       }
       return {
         async run(batch) {
@@ -91,6 +114,7 @@ export function onnxRuntimeFromDirectory(runtimeDir: string): EmbeddingRuntime {
             attention_mask: new ort.Tensor('int64', batch.attentionMask, dims),
           };
           if (wantsTokenTypes) feeds.token_type_ids = new ort.Tensor('int64', batch.tokenTypeIds, dims);
+          for (const [name, tensor] of emptyFeatures) feeds[name] = tensor;
           const output = (await session.run(feeds))[outputName];
           if (!output || !(output.data instanceof Float32Array)) {
             throw new Error('The built-in search model returned an unexpected output.');

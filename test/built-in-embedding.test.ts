@@ -9,7 +9,7 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -38,7 +38,12 @@ import {
   builtInEmbeddingDashboardState,
   sharedBuiltInSourceEmbeddingProvider,
 } from '../src/workers/source-index/built-in-embedding/provider.ts';
-import type { EmbeddingBatch, EmbeddingRuntime, EmbeddingSessionOptions } from '../src/workers/source-index/built-in-embedding/runtime.ts';
+import {
+  onnxRuntimeFromDirectory,
+  type EmbeddingBatch,
+  type EmbeddingRuntime,
+  type EmbeddingSessionOptions,
+} from '../src/workers/source-index/built-in-embedding/runtime.ts';
 import { SentencePieceTokenizer } from '../src/workers/source-index/built-in-embedding/sentencepiece.ts';
 import { readTarGz } from '../src/workers/source-index/built-in-embedding/tar.ts';
 import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embedding/wordpiece.ts';
@@ -55,7 +60,7 @@ import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 
-const BUILT_IN_EPOCH = 'local:built-in:embeddinggemma-2-onnx-UNPINNED:768';
+const BUILT_IN_EPOCH = 'local:built-in:embeddinggemma-2-int8-daa72c5:768';
 const ARCTIC_EPOCH = 'local:built-in:arctic-embed-m-v1.5-int8-e58a8f7:768';
 
 const VOCAB = [
@@ -741,6 +746,86 @@ describe('built-in embedding with a SentencePiece, self-pooling model', () => {
   });
 });
 
+/**
+ * A runtime pack whose `onnxruntime-node` is a stand-in with the given graph
+ * signature: it records the feeds of each run and returns zeros for the output.
+ */
+function fakeOrtPack(graph: { inputs: Array<{ name: string; shape: Array<number | string> }>; outputs: string[] }): string {
+  const dir = temporaryDir();
+  const module = join(dir, 'node_modules', 'onnxruntime-node');
+  mkdirSync(module, { recursive: true });
+  writeFileSync(join(module, 'index.js'), `
+    const graph = ${JSON.stringify(graph)};
+    class Tensor { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }
+    globalThis.fakeOrtFeeds = [];
+    module.exports = {
+      Tensor,
+      InferenceSession: {
+        async create() {
+          return {
+            inputNames: graph.inputs.map((input) => input.name),
+            inputMetadata: graph.inputs.map((input) => ({ name: input.name, isTensor: true, shape: input.shape })),
+            outputNames: graph.outputs,
+            async run(feeds) {
+              globalThis.fakeOrtFeeds.push(Object.fromEntries(Object.entries(feeds).map(([name, tensor]) => [name, { type: tensor.type, dims: tensor.dims }])));
+              const [rows] = feeds.input_ids.dims;
+              return Object.fromEntries(graph.outputs.map((name) => [name, new Tensor('float32', new Float32Array(rows * 4), [rows, 4])]));
+            },
+            async release() {},
+          };
+        },
+      },
+    };`);
+  return dir;
+}
+
+describe('the ONNX Runtime seam', () => {
+  const batch: EmbeddingBatch = {
+    inputIds: new BigInt64Array([2n, 5n, 1n]),
+    attentionMask: new BigInt64Array([1n, 1n, 1n]),
+    tokenTypeIds: new BigInt64Array(3),
+    batchSize: 1,
+    sequenceLength: 3,
+  };
+  const feeds = () => (globalThis as unknown as { fakeOrtFeeds: Array<Record<string, { type: string; dims: number[] }>> }).fakeOrtFeeds;
+
+  test('reads a per-token graph whose output is not named last_hidden_state (Arctic\'s token_embeddings)', async () => {
+    const pack = fakeOrtPack({
+      inputs: [{ name: 'input_ids', shape: ['batch', 'seq'] }, { name: 'attention_mask', shape: ['batch', 'seq'] }, { name: 'token_type_ids', shape: ['batch', 'seq'] }],
+      outputs: ['token_embeddings', 'sentence_embedding'],
+    });
+    const session = await onnxRuntimeFromDirectory(pack).createSession('model.onnx', { threads: 1 });
+    await session.run(batch);
+    expect(Object.keys(feeds().at(-1)!).sort()).toEqual(['attention_mask', 'input_ids', 'token_type_ids']);
+  });
+
+  test('feeds a multimodal graph empty image, video and audio features, and reads its pooled output', async () => {
+    const pack = fakeOrtPack({
+      inputs: [
+        { name: 'input_ids', shape: ['batch', 'seq'] },
+        { name: 'attention_mask', shape: ['batch', 'seq'] },
+        { name: 'image_features', shape: ['num_image_tokens', 512] },
+        { name: 'video_features', shape: ['num_video_tokens', 512] },
+        { name: 'audio_features', shape: ['num_audio_tokens', 512] },
+      ],
+      outputs: ['last_hidden_state', 'sentence_embedding'],
+    });
+    const session = await onnxRuntimeFromDirectory(pack).createSession('model.onnx', { threads: 1, output: 'sentence_embedding' });
+    expect((await session.run(batch)).dims).toEqual([1, 4]);
+    const fed = feeds().at(-1)!;
+    for (const name of ['image_features', 'video_features', 'audio_features']) expect(fed[name]).toEqual({ type: 'float32', dims: [0, 512] });
+    expect(fed.token_type_ids).toBeUndefined();
+  });
+
+  test('refuses a graph input it cannot feed, and a missing pooled output', async () => {
+    const extra = fakeOrtPack({ inputs: [{ name: 'input_ids', shape: ['b', 's'] }, { name: 'position_ids', shape: ['b', 's'] }], outputs: ['last_hidden_state'] });
+    await expect(onnxRuntimeFromDirectory(extra).createSession('model.onnx', { threads: 1 })).rejects.toThrow('cannot feed: position_ids');
+    const perToken = fakeOrtPack({ inputs: [{ name: 'input_ids', shape: ['b', 's'] }], outputs: ['last_hidden_state'] });
+    await expect(onnxRuntimeFromDirectory(perToken).createSession('model.onnx', { threads: 1, output: 'sentence_embedding' }))
+      .rejects.toThrow('no sentence_embedding output');
+  });
+});
+
 describe('the built-in model registry', () => {
   test('EmbeddingGemma 2 is the new-install default and Arctic stays loadable', () => {
     expect(BUILT_IN_EMBEDDING_MODEL).toBe(EMBEDDINGGEMMA_2);
@@ -783,6 +868,10 @@ describe('the built-in model registry', () => {
       for (const file of builtInEmbeddingModelFiles(model)) {
         expect({ file: file.url, pinned: /^[0-9a-f]{64}$/.test(file.sha256) && file.bytes > 0 })
           .toEqual({ file: file.url, pinned: true });
+        // The weights are at the model's revision; a tokenizer may be pinned from another repository's commit.
+        expect({ file: file.url, exact: /\/resolve\/[0-9a-f]{40}\//.test(file.url) }).toEqual({ file: file.url, exact: true });
+      }
+      for (const file of [model.model, ...(model.modelData ? [model.modelData] : [])]) {
         expect(file.url).toContain(`/resolve/${model.revision}/`);
       }
     }

@@ -3998,12 +3998,14 @@ var init_manifest = __esm(() => {
     }
   };
   EMBEDDINGGEMMA_2_PIN = {
-    modelId: "embeddinggemma-2-onnx-UNPINNED",
+    modelId: "embeddinggemma-2-int8-daa72c5",
     repository: "onnx-community/embeddinggemma-2-ONNX",
-    revision: "UNPINNED",
-    model: { name: "model.onnx", path: "onnx/model.onnx", bytes: 0, sha256: "UNPINNED" },
-    modelData: undefined,
-    vocabulary: { name: "tokenizer.model", path: "tokenizer.model", bytes: 0, sha256: "UNPINNED" }
+    revision: "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+    model: { name: "model_quantized.onnx", path: "onnx/model_quantized.onnx", bytes: 495165, sha256: "d06edd601f851c633a2519304cbeb8dc6170d7ceb61b436625c17fb9b6e74953" },
+    modelData: { name: "model_quantized.onnx_data", path: "onnx/model_quantized.onnx_data", bytes: 313724928, sha256: "278a7ff1248c3618e4bd11a607fc54f7bdc7778854230f3956d3f86bd9db4f3b" },
+    tokenizerRepository: "google/embeddinggemma-2",
+    tokenizerRevision: "914f7f89142e33e77833254d9c9b90c3cef7303b",
+    vocabulary: { name: "tokenizer.model", path: "tokenizer.model", bytes: 4689013, sha256: "e594c8a90eb08d8bda498ff4747977dc827ae0c3c56b5c0d41a605a22d02ef03" }
   };
   EMBEDDINGGEMMA_2 = {
     modelId: EMBEDDINGGEMMA_2_PIN.modelId,
@@ -4018,7 +4020,7 @@ var init_manifest = __esm(() => {
     documentPrefix: "title: {title} | text: ",
     model: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.model),
     ...EMBEDDINGGEMMA_2_PIN.modelData ? { modelData: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.modelData) } : {},
-    vocabulary: pinnedFile(EMBEDDINGGEMMA_2_PIN.repository, EMBEDDINGGEMMA_2_PIN.revision, EMBEDDINGGEMMA_2_PIN.vocabulary)
+    vocabulary: pinnedFile(EMBEDDINGGEMMA_2_PIN.tokenizerRepository, EMBEDDINGGEMMA_2_PIN.tokenizerRevision, EMBEDDINGGEMMA_2_PIN.vocabulary)
   };
   BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL = ARCTIC_EMBED_M_V1_5;
 });
@@ -9217,7 +9219,7 @@ var init_embedding_identity = __esm(() => {
     }),
     canonicalIdentity({
       provider: "built-in",
-      modelId: "embeddinggemma-2-onnx-UNPINNED",
+      modelId: "embeddinggemma-2-int8-daa72c5",
       backend: "local",
       dimension: 768
     })
@@ -9262,7 +9264,8 @@ var init_local_index = __esm(() => {
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
   ]);
   CALIBRATED_SEMANTIC_RELEVANCE_BARS = new Map([
-    [ARCTIC_EMBED_M_V1_5.modelId, 0.4]
+    [ARCTIC_EMBED_M_V1_5.modelId, 0.4],
+    [EMBEDDINGGEMMA_2.modelId, 0.69]
   ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",
