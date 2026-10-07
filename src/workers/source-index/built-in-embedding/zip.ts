@@ -23,9 +23,10 @@ export function readZipEntry(archive: Uint8Array, name: string): Uint8Array | un
   if (end < 0) throw new Error('Not a ZIP archive: no end of central directory.');
   const entries = view.getUint16(end + 10, true);
   let offset = view.getUint32(end + 16, true);
+  const inBounds = (start: number, length: number) => start >= 0 && length >= 0 && start + length <= archive.length;
   const decoder = new TextDecoder();
   for (let index = 0; index < entries; index += 1) {
-    if (view.getUint32(offset, true) !== CENTRAL_DIRECTORY_ENTRY) throw new Error('Corrupt ZIP central directory.');
+    if (!inBounds(offset, 46) || view.getUint32(offset, true) !== CENTRAL_DIRECTORY_ENTRY) throw new Error('Corrupt ZIP central directory.');
     const flags = view.getUint16(offset + 8, true);
     const method = view.getUint16(offset + 10, true);
     const compressedSize = view.getUint32(offset + 20, true);
@@ -38,10 +39,12 @@ export function readZipEntry(archive: Uint8Array, name: string): Uint8Array | un
     offset += 46 + nameLength + extraLength + commentLength;
     if (entryName !== name) continue;
     if (flags & 0x1) throw new Error(`${name} is encrypted.`);
-    if (view.getUint32(localOffset, true) !== LOCAL_FILE_HEADER) throw new Error('Corrupt ZIP local header.');
+    if (!inBounds(localOffset, 30) || view.getUint32(localOffset, true) !== LOCAL_FILE_HEADER) throw new Error('Corrupt ZIP local header.');
     const dataStart = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
+    if (!inBounds(dataStart, compressedSize)) throw new Error(`${name} runs past the end of the archive.`);
     const compressed = archive.subarray(dataStart, dataStart + compressedSize);
-    const data = method === 0 ? compressed : method === 8 ? new Uint8Array(inflateRawSync(compressed)) : undefined;
+    // Inflate no further than the size the directory declares.
+    const data = method === 0 ? compressed : method === 8 ? new Uint8Array(inflateRawSync(compressed, { maxOutputLength: Math.max(1, size) })) : undefined;
     if (!data) throw new Error(`${name} uses unsupported ZIP compression method ${method}.`);
     if (data.length !== size) throw new Error(`${name} unpacked to ${data.length} bytes, expected ${size}.`);
     return data;

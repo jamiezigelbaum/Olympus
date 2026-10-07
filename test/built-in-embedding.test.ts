@@ -564,6 +564,9 @@ describe('ZIP reader', () => {
     expect(new TextDecoder().decode(readZipEntry(archive, 'litert_lm/__init__.py'))).toBe('stored');
     expect(readZipEntry(archive, 'litert_lm/other.so')).toBeUndefined();
     expect(() => readZipEntry(new Uint8Array(64), 'x')).toThrow('Not a ZIP archive');
+    // The directory still names the entry, but its bytes are gone.
+    const truncated = new Uint8Array([...archive.subarray(0, 40), ...archive.subarray(archive.length - 200)]);
+    expect(() => readZipEntry(truncated, 'litert_lm/liblitert-lm.dylib')).toThrow();
   });
 });
 
@@ -605,6 +608,16 @@ describe('built-in embedding installer with a LiteRT model', () => {
     // Installed once: a second call downloads nothing.
     await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl });
     expect(served.requests).toHaveLength(2);
+  });
+
+  test('a library changed on disk after unpacking is unpacked again from the pinned wheel', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    const served = servedLiteRt();
+    const installed = await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl });
+    writeFileSync(installed.libraryPath!, 'tampered');
+    await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl });
+    expect(readFileSync(installed.libraryPath!, 'utf8')).toBe('native library');
+    expect(served.requests.filter((url) => url.endsWith('.whl'))).toHaveLength(2);
   });
 
   test('a wheel that does not match its pin installs nothing; a platform without a wheel is unsupported', async () => {
@@ -677,6 +690,15 @@ describe('built-in embedding with a LiteRT model', () => {
     expect(() => liteRtProvider({ OLYMPUS_BUILT_IN_EMBEDDING_DEVICE: 'metal' })).toThrow('must be "auto" or "cpu"');
   });
 
+  test('a question never waits for a LiteRT start: it falls back and the start begins', async () => {
+    const { provider, log } = liteRtProvider();
+    await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' })).rejects.toBeInstanceOf(BuiltInEmbeddingNotReadyError);
+    await provider.prepare();
+    expect(log.options).toHaveLength(1);
+    await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' });
+    expect(log.batches).toHaveLength(1);
+  });
+
   test('refuses a vector of the wrong size', async () => {
     const { provider } = liteRtProvider({}, 8);
     await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_DOCUMENT' })).rejects.toThrow('returned 8 values, expected 4');
@@ -684,7 +706,7 @@ describe('built-in embedding with a LiteRT model', () => {
 });
 
 /** A helper script that speaks the LiteRT helper's protocol without LiteRT. */
-function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch'): string {
+function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
   const path = join(temporaryDir(), 'fake-helper.js');
   writeFileSync(path, `
     const settings = JSON.parse(process.argv[2]);
@@ -693,7 +715,12 @@ function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch'): string
     const device = settings.device === 'auto' ? 'gpu' : 'cpu';
     console.log('library chatter that is not JSON');
     console.log(JSON.stringify({ ready: true, device }));
-    require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
+    if (behaviour === 'close-stdin') { process.stdin.destroy(); setInterval(() => {}, 1000); return; }
+    const lines = require('node:readline').createInterface({ input: process.stdin });
+    if (behaviour === 'ignore-stdin-close') setInterval(() => {}, 1000);
+    else lines.on('close', () => process.exit(0));
+    lines.on('line', (line) => {
+      if (behaviour === 'hang') return;
       const { id, texts } = JSON.parse(line);
       if (behaviour === 'crash-first-gpu-batch' && device === 'gpu') process.exit(3);
       const vectors = new Float32Array(texts.length * 2);
@@ -704,8 +731,8 @@ function fakeHelper(behaviour: 'ok' | 'fatal' | 'crash-first-gpu-batch'): string
   return path;
 }
 
-function helperOptions(helperPath: string, device: 'auto' | 'cpu' = 'auto'): LiteRtEmbedderOptions {
-  return { library: '/lib.so', model: '/model.litertlm', cacheDir: '/cache', threads: 1, device, maxInputTokens: 2048, bunPath: process.execPath, helperPath };
+function helperOptions(helperPath: string, extra: Partial<LiteRtEmbedderOptions> = {}): LiteRtEmbedderOptions {
+  return { library: '/lib.so', model: '/model.litertlm', cacheDir: '/cache', threads: 1, device: 'auto', maxInputTokens: 2048, bunPath: process.execPath, helperPath, ...extra };
 }
 
 describe('the LiteRT helper process', () => {
@@ -728,6 +755,31 @@ describe('the LiteRT helper process', () => {
     expect(embedder.device).toBe('cpu');
     expect(Array.from(vectors[0]!)).toEqual([3, 2]);
     await embedder.release();
+  });
+
+  test('a write to a helper that closed its input fails the batch, not this process', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('close-stdin'), { requestTimeoutMs: 1_000 }));
+    await Bun.sleep(100);
+    // Large enough to need more than one pipe write after the reader is gone:
+    // the write fails (EPIPE) or goes unanswered; either way only the batch fails.
+    await expect(embedder.embed(['x'.repeat(1_000_000)])).rejects.toThrow(/stopped/);
+    await embedder.release();
+  });
+
+  test('a batch that never answers is abandoned and the helper replaced', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('hang'), { requestTimeoutMs: 200 }));
+    await expect(embedder.embed(['abc'])).rejects.toThrow('stopped responding');
+    // The next batch starts a new helper (on the CPU, since the stuck one was on the GPU); it hangs too, and is abandoned too.
+    await expect(embedder.embed(['abc'])).rejects.toThrow('stopped responding');
+    expect(embedder.device).toBe('cpu');
+    await embedder.release();
+  });
+
+  test('release kills a helper that does not exit when its input closes', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('ignore-stdin-close'), { stopTimeoutMs: 100 }));
+    const started = Date.now();
+    await embedder.release();
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 });
 
@@ -811,6 +863,10 @@ describe('built-in embedding with the real model (opt-in)', () => {
     expect(documents.every((vector) => vector.length === 768)).toBe(true);
     const scores = documents.map((vector) => vector.reduce((sum, value, index) => sum + value * query![index]!, 0));
     expect(scores.indexOf(Math.max(...scores))).toBe(1);
+    // Longer than the model's 2,048-token window: read in pieces, not refused or cut.
+    const [long] = await provider.embed([{ text: 'The plumber fixed the kitchen sink and replaced the faucet. '.repeat(400) }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    expect(long!.length).toBe(768);
+    expect(long!.reduce((sum, value, index) => sum + value * query![index]!, 0)).toBeGreaterThan(scores[0]!);
   }, 900_000);
 });
 

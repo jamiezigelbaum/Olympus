@@ -24,6 +24,8 @@ export interface LiteRtHelperSettings {
 }
 
 const INPUT_TEXT = 0;
+/** kLiteRtLmInputOverflowStrategyChunkAndAverage: a longer input is read in pieces and averaged. */
+const OVERFLOW_CHUNK_AND_AVERAGE = 0;
 const ACTIVATION_FLOAT32 = 0;
 const LOG_ERRORS_ONLY = 4;
 
@@ -40,6 +42,7 @@ function openLibrary(path: string) {
     litert_lm_embedding_engine_create: { args: [FFIType.ptr], returns: FFIType.ptr },
     litert_lm_embedding_options_create: { args: [], returns: FFIType.ptr },
     litert_lm_embedding_options_set_normalize: { args: [FFIType.ptr, FFIType.bool], returns: FFIType.void },
+    litert_lm_embedding_options_set_input_overflow_strategy: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.void },
     litert_lm_input_data_create: { args: [FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.ptr },
     litert_lm_input_data_delete: { args: [FFIType.ptr], returns: FFIType.void },
     litert_lm_embedding_engine_compute_embedding_batch: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.ptr },
@@ -71,16 +74,27 @@ function createEngine(lib: LiteRt, settings: LiteRtHelperSettings, backend: 'gpu
   return engine;
 }
 
-function embedBatch(lib: LiteRt, engine: Pointer, options: Pointer, texts: readonly string[]): { vectors: Float32Array; dimension: number } {
-  const buffers = texts.map((text) => Buffer.from(text, 'utf8'));
-  const inputs = buffers.map((buffer) => lib.litert_lm_input_data_create(INPUT_TEXT, ptr(buffer), buffer.length));
+function embedBatch(lib: LiteRt, engine: Pointer, options: Pointer, texts: readonly unknown[]): { vectors: Float32Array; dimension: number } {
+  if (texts.length === 0) throw new Error('An empty batch has nothing to embed.');
+  // Checked before any native input exists, so a bad one leaks nothing (and
+  // bun:ffi cannot take a pointer to an empty buffer).
+  if (texts.some((text) => typeof text !== 'string' || text.length === 0)) throw new Error('Every input must be non-empty text.');
+  const inputs: Array<Pointer | null> = [];
   try {
+    for (const text of texts as string[]) {
+      const buffer = Buffer.from(text, 'utf8');
+      // input_data_create copies the bytes.
+      inputs.push(lib.litert_lm_input_data_create(INPUT_TEXT, ptr(buffer), buffer.length));
+    }
     if (inputs.some((input) => !input)) throw new Error('LiteRT-LM refused an input.');
-    // A batch of single-input items: each item is a one-pointer array.
+    // A batch of single-input items: each item is a one-pointer array. These
+    // arrays are only reachable through their addresses during the call, so
+    // they stay referenced until it returns.
     const items = inputs.map((input) => new BigUint64Array([BigInt(input as number)]));
     const batch = new BigUint64Array(items.map((item) => BigInt(ptr(item))));
     const counts = new BigUint64Array(texts.length).fill(1n);
     const responses = lib.litert_lm_embedding_engine_compute_embedding_batch(engine, ptr(batch), ptr(counts), texts.length, options);
+    keepAlive(items, batch, counts);
     if (!responses) throw new Error('LiteRT-LM could not embed this batch.');
     try {
       const count = Number(lib.litert_lm_embedding_responses_get_size(responses));
@@ -89,6 +103,7 @@ function embedBatch(lib: LiteRt, engine: Pointer, options: Pointer, texts: reado
       let vectors = new Float32Array(0);
       for (let index = 0; index < count; index += 1) {
         const response = lib.litert_lm_embedding_responses_get_at(responses, index);
+        if (!response) throw new Error('LiteRT-LM returned a missing vector.');
         const size = Number(lib.litert_lm_embedding_response_get_size(response));
         const values = lib.litert_lm_embedding_response_get_values(response);
         if (!values || size === 0) throw new Error('LiteRT-LM returned an empty vector.');
@@ -106,8 +121,13 @@ function embedBatch(lib: LiteRt, engine: Pointer, options: Pointer, texts: reado
     }
   } finally {
     for (const input of inputs) if (input) lib.litert_lm_input_data_delete(input);
-    void buffers;
   }
+}
+
+const held: { values?: unknown[] } = {};
+/** Holds the given values until after a native call that reads them through raw addresses. */
+function keepAlive(...values: unknown[]): void {
+  held.values = values;
 }
 
 function send(message: unknown): void {
@@ -138,13 +158,17 @@ function main(): void {
   }
   const options = lib.litert_lm_embedding_options_create()!;
   lib.litert_lm_embedding_options_set_normalize(options, true);
+  // Set, not assumed: an input over the longest signature is read in pieces
+  // and averaged, never cut short or refused.
+  lib.litert_lm_embedding_options_set_input_overflow_strategy(options, OVERFLOW_CHUNK_AND_AVERAGE);
   send({ ready: true, device });
 
   const lines = createInterface({ input: process.stdin });
   lines.on('line', (line) => {
     let id: unknown;
     try {
-      const request = JSON.parse(line) as { id: number; texts: string[] };
+      const request = JSON.parse(line) as { id: number; texts: unknown[] };
+      if (!Array.isArray(request.texts)) throw new Error('A request needs texts.');
       id = request.id;
       const { vectors, dimension } = embedBatch(lib, engine, options, request.texts);
       send({ id, dimension, vectors: Buffer.from(vectors.buffer, vectors.byteOffset, vectors.byteLength).toString('base64') });

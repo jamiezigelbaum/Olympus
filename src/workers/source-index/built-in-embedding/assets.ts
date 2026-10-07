@@ -119,6 +119,7 @@ export function builtInEmbeddingPaths(
   model: BuiltInEmbeddingModelSpec = BUILT_IN_EMBEDDING_MODEL,
   runtime: OnnxRuntimePackSpec = ONNX_RUNTIME_PACK,
   platform = currentPlatform(),
+  liteRtRuntime: LiteRtRuntimePackSpec = LITERT_RUNTIME_PACK,
 ): BuiltInEmbeddingPaths {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const dataRoot = env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share');
@@ -128,7 +129,7 @@ export function builtInEmbeddingPaths(
     root,
     modelDir: join(root, model.modelId),
     runtimeDir: model.runtime === 'litert'
-      ? join(root, `litert-lm-${LITERT_RUNTIME_PACK.version}-${platform}`)
+      ? join(root, `litert-lm-${liteRtRuntime.version}-${platform}`)
       : join(root, `onnxruntime-${runtime.version}-${platform}`),
     statusPath: join(root, 'status.json'),
     lockPath: join(root, 'install.lock'),
@@ -187,7 +188,7 @@ export async function installBuiltInEmbedding(
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
   const platform = options.platform ?? currentPlatform();
-  const paths = builtInEmbeddingPaths(options.env, model, runtime, platform);
+  const paths = builtInEmbeddingPaths(options.env, model, runtime, platform, options.liteRtRuntime);
   const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
   const installed = installedBuiltInEmbedding(paths, model, platform, options.liteRtRuntime);
 
@@ -265,6 +266,11 @@ async function installLiteRt(
     ensureDirectory(paths.root);
     const modelFiles = builtInEmbeddingModelFiles(model);
     const wantsRuntime = Boolean(wheel) && !options.skipRuntime;
+    // The extracted library is re-hashed against the digest recorded when it
+    // was unpacked; one that changed on disk is removed and unpacked again.
+    if (wantsRuntime && liteRtInstalled(paths.runtimeDir, wheel!) && !(await liteRtLibraryIntact(paths.runtimeDir, wheel!))) {
+      rmSync(paths.runtimeDir, { recursive: true, force: true });
+    }
     const complete = () => modelFiles.every((file) => existsSync(join(paths.modelDir, file.name)))
       && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel!));
     if (!complete()) {
@@ -302,15 +308,28 @@ async function installLiteRt(
 interface LiteRtMarker {
   wheel: string;
   sha256: string;
+  /** SHA-256 of the library as unpacked. */
+  librarySha256: string;
+}
+
+function readLiteRtMarker(runtimeDir: string): LiteRtMarker | undefined {
+  try {
+    return JSON.parse(readFileSync(join(runtimeDir, RUNTIME_MARKER), 'utf8')) as LiteRtMarker;
+  } catch {
+    return undefined;
+  }
 }
 
 function liteRtInstalled(runtimeDir: string, wheel: PinnedDownload & { library: string }): boolean {
-  try {
-    const marker = JSON.parse(readFileSync(join(runtimeDir, RUNTIME_MARKER), 'utf8')) as LiteRtMarker;
-    return marker.sha256 === wheel.sha256 && existsSync(join(runtimeDir, basename(wheel.library)));
-  } catch {
-    return false;
-  }
+  const marker = readLiteRtMarker(runtimeDir);
+  return marker?.sha256 === wheel.sha256
+    && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? '')
+    && existsSync(join(runtimeDir, basename(wheel.library)));
+}
+
+async function liteRtLibraryIntact(runtimeDir: string, wheel: PinnedDownload & { library: string }): Promise<boolean> {
+  const expected = readLiteRtMarker(runtimeDir)?.librarySha256;
+  return expected !== undefined && await sha256File(join(runtimeDir, basename(wheel.library))) === expected;
 }
 
 /** Downloads the pinned wheel, takes the one library out of it, and installs it whole or not at all. */
@@ -334,7 +353,11 @@ async function installLiteRtRuntime(
     if (!library) throw new BuiltInEmbeddingInstallError('runtime_load_failed', `${wheel.name} has no ${wheel.library}.`);
     writeFileSync(join(staging, basename(wheel.library)), library, { mode: 0o755 });
     rmSync(archivePath, { force: true });
-    const marker: LiteRtMarker = { wheel: wheel.name, sha256: wheel.sha256 };
+    const marker: LiteRtMarker = {
+      wheel: wheel.name,
+      sha256: wheel.sha256,
+      librarySha256: createHash('sha256').update(library).digest('hex'),
+    };
     writeFileSync(join(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}\n`);
     rmSync(runtimeDir, { recursive: true, force: true });
     renameSync(staging, runtimeDir);

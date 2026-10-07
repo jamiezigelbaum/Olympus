@@ -9540,6 +9540,18 @@ import { homedir as homedir11 } from "node:os";
 import { delimiter as delimiter4, dirname as dirname14, isAbsolute as isAbsolute11, join as join17 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
+function helperEnvironment() {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined)
+      continue;
+    if (["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"].includes(name) || name.startsWith("VK_")) {
+      env[name] = value;
+    }
+  }
+  env.HOME ??= homedir11();
+  return env;
+}
 
 class HelperProcess {
   child;
@@ -9547,9 +9559,20 @@ class HelperProcess {
   nextId = 1;
   pending = new Map;
   stderr = "";
+  requestTimeoutMs;
+  stopTimeoutMs;
   exited = false;
-  constructor(child) {
+  constructor(child, options) {
     this.child = child;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
+  }
+  failAll(reason) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(reason);
+    }
+    this.pending.clear();
   }
   static start(options, device) {
     const settings = {
@@ -9562,9 +9585,14 @@ class HelperProcess {
     };
     const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir11(), TMPDIR: process.env.TMPDIR ?? "" }
+      env: helperEnvironment()
     });
-    const helper = new HelperProcess(child);
+    const helper = new HelperProcess(child, options);
+    child.stdin.on("error", (error) => {
+      helper.exited = true;
+      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
+      child.kill("SIGKILL");
+    });
     return new Promise((resolve3, reject) => {
       let started = false;
       const timer = setTimeout(() => {
@@ -9605,7 +9633,10 @@ class HelperProcess {
           reject(error);
         }
       });
-      child.on("exit", (code, signal) => {
+      child.on("exit", () => {
+        helper.exited = true;
+      });
+      child.on("close", (code, signal) => {
         helper.exited = true;
         const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split(`
 `).at(-1)}` : ""}.`);
@@ -9614,9 +9645,7 @@ class HelperProcess {
           clearTimeout(timer);
           reject(reason);
         }
-        for (const pending of helper.pending.values())
-          pending.reject(reason);
-        helper.pending.clear();
+        helper.failAll(reason);
       });
     });
   }
@@ -9625,7 +9654,12 @@ class HelperProcess {
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
     return new Promise((resolve3, reject) => {
-      this.pending.set(id, { resolve: resolve3, reject, count: texts.length });
+      const timer = setTimeout(() => {
+        this.child.kill("SIGKILL");
+        this.exited = true;
+        this.failAll(new Error("The built-in search model stopped responding and was restarted."));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve: resolve3, reject, count: texts.length, timer });
       this.child.stdin.write(`${JSON.stringify({ id, texts })}
 `);
     });
@@ -9635,6 +9669,7 @@ class HelperProcess {
     if (!pending || message.id === undefined)
       return;
     this.pending.delete(message.id);
+    clearTimeout(pending.timer);
     if (message.error || !message.vectors || !message.dimension) {
       pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
       return;
@@ -9651,9 +9686,9 @@ class HelperProcess {
   async stop() {
     if (this.exited)
       return;
-    const exited = new Promise((resolve3) => this.child.once("exit", () => resolve3()));
+    const exited = new Promise((resolve3) => this.child.once("close", () => resolve3()));
     this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill("SIGKILL"), 5000);
+    const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
     await exited;
     clearTimeout(timer);
   }
@@ -9685,7 +9720,10 @@ function resolveBun() {
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
-var init_litert_runtime = () => {};
+var REQUEST_TIMEOUT_MS;
+var init_litert_runtime = __esm(() => {
+  REQUEST_TIMEOUT_MS = 3 * 60000;
+});
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 var init_runtime = () => {};

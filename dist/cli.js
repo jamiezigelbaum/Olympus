@@ -24168,9 +24168,10 @@ function readZipEntry(archive, name) {
     throw new Error("Not a ZIP archive: no end of central directory.");
   const entries = view.getUint16(end + 10, true);
   let offset = view.getUint32(end + 16, true);
+  const inBounds = (start, length) => start >= 0 && length >= 0 && start + length <= archive.length;
   const decoder = new TextDecoder;
   for (let index = 0;index < entries; index += 1) {
-    if (view.getUint32(offset, true) !== CENTRAL_DIRECTORY_ENTRY)
+    if (!inBounds(offset, 46) || view.getUint32(offset, true) !== CENTRAL_DIRECTORY_ENTRY)
       throw new Error("Corrupt ZIP central directory.");
     const flags = view.getUint16(offset + 8, true);
     const method = view.getUint16(offset + 10, true);
@@ -24186,11 +24187,13 @@ function readZipEntry(archive, name) {
       continue;
     if (flags & 1)
       throw new Error(`${name} is encrypted.`);
-    if (view.getUint32(localOffset, true) !== LOCAL_FILE_HEADER)
+    if (!inBounds(localOffset, 30) || view.getUint32(localOffset, true) !== LOCAL_FILE_HEADER)
       throw new Error("Corrupt ZIP local header.");
     const dataStart = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
+    if (!inBounds(dataStart, compressedSize))
+      throw new Error(`${name} runs past the end of the archive.`);
     const compressed = archive.subarray(dataStart, dataStart + compressedSize);
-    const data = method === 0 ? compressed : method === 8 ? new Uint8Array(inflateRawSync(compressed)) : undefined;
+    const data = method === 0 ? compressed : method === 8 ? new Uint8Array(inflateRawSync(compressed, { maxOutputLength: Math.max(1, size) })) : undefined;
     if (!data)
       throw new Error(`${name} uses unsupported ZIP compression method ${method}.`);
     if (data.length !== size)
@@ -24219,7 +24222,7 @@ import {
 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute5, join as join17 } from "node:path";
-function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform2 = currentPlatform()) {
+function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform2 = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const dataRoot = env.XDG_DATA_HOME?.trim() || join17(env.HOME?.trim() || homedir16(), ".local", "share");
   const root = configured || join17(dataRoot, "openclaw", "olympus", "models", "built-in-embedding");
@@ -24228,7 +24231,7 @@ function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MOD
   return {
     root,
     modelDir: join17(root, model.modelId),
-    runtimeDir: model.runtime === "litert" ? join17(root, `litert-lm-${LITERT_RUNTIME_PACK.version}-${platform2}`) : join17(root, `onnxruntime-${runtime.version}-${platform2}`),
+    runtimeDir: model.runtime === "litert" ? join17(root, `litert-lm-${liteRtRuntime.version}-${platform2}`) : join17(root, `onnxruntime-${runtime.version}-${platform2}`),
     statusPath: join17(root, "status.json"),
     lockPath: join17(root, "install.lock")
   };
@@ -24266,7 +24269,7 @@ async function installBuiltInEmbedding(options = {}) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
   const platform2 = options.platform ?? currentPlatform();
-  const paths = builtInEmbeddingPaths(options.env, model, runtime, platform2);
+  const paths = builtInEmbeddingPaths(options.env, model, runtime, platform2, options.liteRtRuntime);
   const reporter = new ProgressReporter(paths.statusPath, model.modelId, options.now, options.onProgress);
   const installed = installedBuiltInEmbedding(paths, model, platform2, options.liteRtRuntime);
   if (model.runtime === "litert")
@@ -24325,6 +24328,9 @@ async function installLiteRt(options, model, paths, platform2, reporter, install
     ensureDirectory(paths.root);
     const modelFiles = builtInEmbeddingModelFiles(model);
     const wantsRuntime = Boolean(wheel) && !options.skipRuntime;
+    if (wantsRuntime && liteRtInstalled(paths.runtimeDir, wheel) && !await liteRtLibraryIntact(paths.runtimeDir, wheel)) {
+      rmSync6(paths.runtimeDir, { recursive: true, force: true });
+    }
     const complete = () => modelFiles.every((file) => existsSync15(join17(paths.modelDir, file.name))) && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel));
     if (!complete()) {
       await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
@@ -24357,13 +24363,20 @@ async function installLiteRt(options, model, paths, platform2, reporter, install
     throw failure;
   }
 }
-function liteRtInstalled(runtimeDir, wheel) {
+function readLiteRtMarker(runtimeDir) {
   try {
-    const marker = JSON.parse(readFileSync15(join17(runtimeDir, RUNTIME_MARKER), "utf8"));
-    return marker.sha256 === wheel.sha256 && existsSync15(join17(runtimeDir, basename3(wheel.library)));
+    return JSON.parse(readFileSync15(join17(runtimeDir, RUNTIME_MARKER), "utf8"));
   } catch {
-    return false;
+    return;
   }
+}
+function liteRtInstalled(runtimeDir, wheel) {
+  const marker = readLiteRtMarker(runtimeDir);
+  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync15(join17(runtimeDir, basename3(wheel.library)));
+}
+async function liteRtLibraryIntact(runtimeDir, wheel) {
+  const expected = readLiteRtMarker(runtimeDir)?.librarySha256;
+  return expected !== undefined && await sha256File(join17(runtimeDir, basename3(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
   const staging = `${runtimeDir}.staging-${randomUUID5()}`;
@@ -24380,7 +24393,11 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
     writeFileSync4(join17(staging, basename3(wheel.library)), library, { mode: 493 });
     rmSync6(archivePath, { force: true });
-    const marker = { wheel: wheel.name, sha256: wheel.sha256 };
+    const marker = {
+      wheel: wheel.name,
+      sha256: wheel.sha256,
+      librarySha256: createHash11("sha256").update(library).digest("hex")
+    };
     writeFileSync4(join17(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync6(runtimeDir, { recursive: true, force: true });
@@ -24742,6 +24759,18 @@ import { homedir as homedir17 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname16, isAbsolute as isAbsolute6, join as join18 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
+function helperEnvironment() {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined)
+      continue;
+    if (["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"].includes(name) || name.startsWith("VK_")) {
+      env[name] = value;
+    }
+  }
+  env.HOME ??= homedir17();
+  return env;
+}
 
 class HelperProcess {
   child;
@@ -24749,9 +24778,20 @@ class HelperProcess {
   nextId = 1;
   pending = new Map;
   stderr = "";
+  requestTimeoutMs;
+  stopTimeoutMs;
   exited = false;
-  constructor(child) {
+  constructor(child, options) {
     this.child = child;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
+  }
+  failAll(reason) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(reason);
+    }
+    this.pending.clear();
   }
   static start(options, device) {
     const settings = {
@@ -24764,9 +24804,14 @@ class HelperProcess {
     };
     const child = spawn2(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir17(), TMPDIR: process.env.TMPDIR ?? "" }
+      env: helperEnvironment()
     });
-    const helper = new HelperProcess(child);
+    const helper = new HelperProcess(child, options);
+    child.stdin.on("error", (error) => {
+      helper.exited = true;
+      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
+      child.kill("SIGKILL");
+    });
     return new Promise((resolve5, reject) => {
       let started = false;
       const timer = setTimeout(() => {
@@ -24807,7 +24852,10 @@ class HelperProcess {
           reject(error);
         }
       });
-      child.on("exit", (code, signal) => {
+      child.on("exit", () => {
+        helper.exited = true;
+      });
+      child.on("close", (code, signal) => {
         helper.exited = true;
         const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split(`
 `).at(-1)}` : ""}.`);
@@ -24816,9 +24864,7 @@ class HelperProcess {
           clearTimeout(timer);
           reject(reason);
         }
-        for (const pending of helper.pending.values())
-          pending.reject(reason);
-        helper.pending.clear();
+        helper.failAll(reason);
       });
     });
   }
@@ -24827,7 +24873,12 @@ class HelperProcess {
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
     return new Promise((resolve5, reject) => {
-      this.pending.set(id, { resolve: resolve5, reject, count: texts.length });
+      const timer = setTimeout(() => {
+        this.child.kill("SIGKILL");
+        this.exited = true;
+        this.failAll(new Error("The built-in search model stopped responding and was restarted."));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve: resolve5, reject, count: texts.length, timer });
       this.child.stdin.write(`${JSON.stringify({ id, texts })}
 `);
     });
@@ -24837,6 +24888,7 @@ class HelperProcess {
     if (!pending || message.id === undefined)
       return;
     this.pending.delete(message.id);
+    clearTimeout(pending.timer);
     if (message.error || !message.vectors || !message.dimension) {
       pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
       return;
@@ -24853,9 +24905,9 @@ class HelperProcess {
   async stop() {
     if (this.exited)
       return;
-    const exited = new Promise((resolve5) => this.child.once("exit", () => resolve5()));
+    const exited = new Promise((resolve5) => this.child.once("close", () => resolve5()));
     this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill("SIGKILL"), 5000);
+    const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
     await exited;
     clearTimeout(timer);
   }
@@ -24913,7 +24965,10 @@ function resolveBun() {
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
-var init_litert_runtime = () => {};
+var REQUEST_TIMEOUT_MS;
+var init_litert_runtime = __esm(() => {
+  REQUEST_TIMEOUT_MS = 3 * 60000;
+});
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire3 } from "node:module";
@@ -25163,7 +25218,7 @@ class BuiltInSourceEmbeddingProvider {
       pooling: this.spec.pooling,
       queryPrefix: this.spec.queryPrefix,
       documentPrefix: this.spec.documentPrefix,
-      windows: MAX_WINDOWS_PER_DOCUMENT,
+      ...this.spec.runtime === "litert" ? { overflow: "chunk-and-average" } : { windows: MAX_WINDOWS_PER_DOCUMENT },
       backend: this.backend
     })).digest("hex");
   }
@@ -25187,7 +25242,7 @@ class BuiltInSourceEmbeddingProvider {
       return [];
     if (options.taskType === "RETRIEVAL_QUERY" && !this.loaded) {
       const status = this.status();
-      if (status.state !== "ready" && status.state !== "loading") {
+      if (this.spec.runtime === "litert" || status.state !== "ready" && status.state !== "loading") {
         this.load().catch(() => {
           return;
         });

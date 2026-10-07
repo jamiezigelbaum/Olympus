@@ -154,7 +154,8 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       pooling: this.spec.pooling,
       queryPrefix: this.spec.queryPrefix,
       documentPrefix: this.spec.documentPrefix,
-      windows: MAX_WINDOWS_PER_DOCUMENT,
+      // LiteRT reads a longer input in pieces and averages them (set explicitly in the helper).
+      ...(this.spec.runtime === 'litert' ? { overflow: 'chunk-and-average' } : { windows: MAX_WINDOWS_PER_DOCUMENT }),
       backend: this.backend,
     })).digest('hex');
   }
@@ -190,7 +191,9 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     // let the query lane fall back to keyword search until it finishes.
     if (options.taskType === 'RETRIEVAL_QUERY' && !this.loaded) {
       const status = this.status();
-      if (status.state !== 'ready' && status.state !== 'loading') {
+      // A LiteRT model's start can take half a minute (its first GPU program
+      // compile), so a question never waits for it; an ONNX load takes a second.
+      if (this.spec.runtime === 'litert' || (status.state !== 'ready' && status.state !== 'loading')) {
         void this.load().catch(() => undefined);
         throw new BuiltInEmbeddingNotReadyError(this.status());
       }
@@ -447,12 +450,6 @@ export interface BuiltInEmbeddingAttention {
 export function builtInEmbeddingAttention(status: BuiltInEmbeddingStatus): BuiltInEmbeddingAttention | undefined {
   if (status.state !== 'failed' || !status.failure) return undefined;
   return { id: 'built-in-embedding', reason: status.failure.reason, message: status.failure.message };
-}
-
-export function builtInEmbeddingStatusFromEnv(
-  env: Record<string, string | undefined> = process.env,
-): BuiltInEmbeddingStatus & { directory: string } {
-  return { ...readBuiltInEmbeddingStatus(env), directory: builtInEmbeddingPaths(env).root };
 }
 
 function builtInEmbeddingOperationError(error: unknown): OperationError {

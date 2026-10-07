@@ -33,12 +33,38 @@ export interface LiteRtEmbedderOptions {
   helperPath?: string;
   /** How long a first start (GPU shader and model cache build) may take. */
   startTimeoutMs?: number;
+  /** How long one batch may take before the helper is presumed stuck and replaced. */
+  requestTimeoutMs?: number;
+  /** How long `release` waits for the helper to exit before killing it. */
+  stopTimeoutMs?: number;
+}
+
+/**
+ * A batch is at most 8 inputs of up to 2,048 tokens (longer ones are read in
+ * pieces); on an M3's CPU that is under a minute. A native call still running
+ * after this is stuck (a GPU or driver stall), and it holds the provider's
+ * only slot, so every question would wait behind it.
+ */
+const REQUEST_TIMEOUT_MS = 3 * 60_000;
+
+/** What the helper's environment keeps: enough for Bun to start and for a GPU to be found. */
+function helperEnvironment(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (['PATH', 'HOME', 'TMPDIR', 'XDG_RUNTIME_DIR', 'DISPLAY', 'WAYLAND_DISPLAY'].includes(name) || name.startsWith('VK_')) {
+      env[name] = value;
+    }
+  }
+  env.HOME ??= homedir();
+  return env;
 }
 
 interface Pending {
   resolve(vectors: Float32Array[]): void;
   reject(error: Error): void;
   count: number;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 class HelperProcess {
@@ -47,10 +73,23 @@ class HelperProcess {
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private stderr = '';
+  private requestTimeoutMs: number;
+  private stopTimeoutMs: number;
   exited = false;
 
-  private constructor(child: ChildProcessWithoutNullStreams) {
+  private constructor(child: ChildProcessWithoutNullStreams, options: LiteRtEmbedderOptions) {
     this.child = child;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 5_000;
+  }
+
+  /** Every waiting batch fails with `reason`; the helper is gone or about to be. */
+  private failAll(reason: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(reason);
+    }
+    this.pending.clear();
   }
 
   static start(options: LiteRtEmbedderOptions, device: 'auto' | 'cpu'): Promise<HelperProcess> {
@@ -64,10 +103,16 @@ class HelperProcess {
     };
     const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      // Only what Bun needs to start; the helper reads no other settings.
-      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? homedir(), TMPDIR: process.env.TMPDIR ?? '' },
+      env: helperEnvironment(),
     });
-    const helper = new HelperProcess(child);
+    const helper = new HelperProcess(child, options);
+    // A write to a helper that has just died fails asynchronously (EPIPE);
+    // unheard, that error would take this process down with it.
+    child.stdin.on('error', (error) => {
+      helper.exited = true;
+      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
+      child.kill('SIGKILL');
+    });
     return new Promise((resolve, reject) => {
       let started = false;
       const timer = setTimeout(() => {
@@ -107,7 +152,11 @@ class HelperProcess {
           reject(error);
         }
       });
-      child.on('exit', (code, signal) => {
+      // No new batch goes to a helper that has exited.
+      child.on('exit', () => { helper.exited = true; });
+      // Fail on `close`, which follows the last output line: a helper's final
+      // message (its fatal reason, a last answer) arrives before its exit is acted on.
+      child.on('close', (code, signal) => {
         helper.exited = true;
         const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split('\n').at(-1)}` : ''}.`);
         if (!started) {
@@ -115,8 +164,7 @@ class HelperProcess {
           clearTimeout(timer);
           reject(reason);
         }
-        for (const pending of helper.pending.values()) pending.reject(reason);
-        helper.pending.clear();
+        helper.failAll(reason);
       });
     });
   }
@@ -125,7 +173,13 @@ class HelperProcess {
     if (this.exited) return Promise.reject(new Error('The built-in search model is not running.'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, count: texts.length });
+      const timer = setTimeout(() => {
+        // Replaced, not waited on: the exit handler fails this batch and the next one starts a new helper.
+        this.child.kill('SIGKILL');
+        this.exited = true;
+        this.failAll(new Error('The built-in search model stopped responding and was restarted.'));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve, reject, count: texts.length, timer });
       this.child.stdin.write(`${JSON.stringify({ id, texts })}\n`);
     });
   }
@@ -134,6 +188,7 @@ class HelperProcess {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
     if (!pending || message.id === undefined) return;
     this.pending.delete(message.id);
+    clearTimeout(pending.timer);
     if (message.error || !message.vectors || !message.dimension) {
       pending.reject(new Error(message.error ?? 'The built-in search model returned no vectors.'));
       return;
@@ -150,9 +205,9 @@ class HelperProcess {
 
   async stop(): Promise<void> {
     if (this.exited) return;
-    const exited = new Promise<void>((resolve) => this.child.once('exit', () => resolve()));
+    const exited = new Promise<void>((resolve) => this.child.once('close', () => resolve()));
     this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill('SIGKILL'), 5_000);
+    const timer = setTimeout(() => this.child.kill('SIGKILL'), this.stopTimeoutMs);
     await exited;
     clearTimeout(timer);
   }

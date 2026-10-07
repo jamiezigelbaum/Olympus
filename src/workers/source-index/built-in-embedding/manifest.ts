@@ -105,6 +105,9 @@ export const ARCTIC_EMBED_M_V1_5: BuiltInEmbeddingModelSpec = {
 // only here, and this build carries the media encoders and decoders.
 // Inputs up to 2,048 tokens run in one pass; LiteRT averages longer ones over
 // several.
+// Its identity (configHash) includes the LiteRT-LM version: a runtime bump,
+// even a patch, can change the vectors, so it is an owner-approved re-embed
+// like any other model change.
 const EMBEDDINGGEMMA_2_REVISION = '24d962e906c7d332c6428e71c9676855024569e2';
 const EMBEDDINGGEMMA_2_BASE = `https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm/resolve/${EMBEDDINGGEMMA_2_REVISION}`;
 
