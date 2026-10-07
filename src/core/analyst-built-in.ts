@@ -473,7 +473,7 @@ export interface PrivateAnswerVerdict {
 
 export interface PrivateAnswerConsultMetadata {
   readonly verdict: PrivateAnswerVerdict;
-  /** The fitted pack exactly as the main model call received it (deep-frozen). */
+  /** The fitted pack exactly as the main model call received it (by reference; frozen by the jobs engine on the consulting job's path). */
   readonly pack: EvidencePack;
 }
 
@@ -498,10 +498,11 @@ export interface AnswerPrivatelyOptions {
   onModelCall?: (call: PrivateModelCallTiming) => void;
   signal?: AbortSignal;
   /**
-   * Return the consult metadata (`PrivateAnswer.consult`: the verdict and a
-   * frozen copy of the fitted pack). Off by default, so an install without
-   * outside help does no extra cloning; the jobs engine asks for it only for
-   * a job that bound outside help on.
+   * Return the consult metadata (`PrivateAnswer.consult`: the verdict and the
+   * fitted pack as the main call received it, by reference; the jobs engine
+   * clones and freezes it on the consulting job's own path). Off by default;
+   * the jobs engine asks for it only when a job that bound outside help on
+   * shares the analysis.
    */
   consultMetadata?: boolean;
 }
@@ -566,8 +567,10 @@ export async function answerPrivately(
   // plainly that these items did not answer the question. An answer that
   // reproduces the evidence blocks' formatting (field labels, provenance
   // JSON) is a failed answer, not an answer, and is reported the same way.
+  // By reference: no cloning or freezing on the answer's completion path (a
+  // job without outside help sharing this analysis is unaffected).
   const consult = (noAnswer: boolean): Pick<PrivateAnswer, 'consult'> => (options.consultMetadata
-    ? { consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer }), pack: deepFreeze(structuredClone(pack)) }) }
+    ? { consult: { verdict: { sufficient: verdict.sufficient, noAnswer }, pack } }
     : {});
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
     return {
@@ -598,14 +601,6 @@ export async function answerPrivately(
 
 // The Analyst's default answer budget (analyst.ts), which sizes the schema's gaps when no budget is given.
 const DEFAULT_PRIVATE_ANSWER_CHARS = 1_600;
-
-/** Freezes a plain-data value and everything reachable from it (the consult snapshot is immutable). */
-export function deepFreeze<T>(value: T): T {
-  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
-  Object.freeze(value);
-  for (const entry of Object.values(value as Record<string, unknown>)) deepFreeze(entry);
-  return value;
-}
 
 /** The model, recording whether its last reply called the answer complete (`"sufficient": true`). */
 function withVerdict(model: AnalystModel, verdict: { sufficient: boolean | undefined }): AnalystModel {

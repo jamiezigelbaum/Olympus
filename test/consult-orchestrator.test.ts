@@ -74,7 +74,7 @@ interface Harness {
   route: { available: boolean };
   activity: { busy: boolean };
   writer: { calls: ConsultWriterInput[]; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
-  transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy'; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; reply: 'reply' | 'failed' };
+  transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy'; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; onReply?: () => void; reply: 'reply' | 'failed' };
   logs: string[];
   calls: { n: number; asked: boolean[] };
 }
@@ -176,6 +176,7 @@ function harness(options: {
             return { kind: 'failed', error };
           }
           state = 'replied';
+          transport.onReply?.();
           const receipt = {} as ZkapiConsultReply extends { receipt: infer R } ? R : never;
           queueMicrotask(() => finish({ ok: true, text: OUTSIDE_TEXT, routeLabel: 'zkAPI via Tor', networkIdentity: 'hidden', receipt: receipt as never, elapsedMs: 5 }));
           return { kind: 'reply', text: OUTSIDE_TEXT, routeLabel: 'zkAPI via Tor', networkIdentity: 'hidden', receipt: receipt as never, elapsedMs: 5 };
@@ -393,8 +394,10 @@ describe('the snapshot', () => {
     expect(snapA).toBeDefined();
     expect(snapB).toBeDefined();
     expect(snapA).not.toBe(snapB);
-    // The same frozen search-time pack feeds both.
-    expect(snapA.pack).toBe(snapB.pack);
+    // The same search-time pack feeds both: each job holds its own frozen clone of it (the shared analysis keeps the model's object by reference).
+    expect(snapA.pack).not.toBe(snapB.pack);
+    expect(snapA.pack).toEqual(snapB.pack);
+    expect(Object.isFrozen(snapA.pack) && Object.isFrozen(snapB.pack)).toBe(true);
     h.writer.releaseAll();
     await h.orchestrator.idle();
   });
@@ -712,6 +715,95 @@ describe('round-1 review cases', () => {
     await consult(h);
     expect(h.transport.sessions[0]!.authorizeResults).toEqual([true]);
     expect(h.orchestrator.recentQuestions).toEqual([CLEAN_QUESTION]);
+  });
+});
+
+describe('round-2 review cases', () => {
+  test('a private answer that starts during E1 (without the consult hook) stops the writer from starting', async () => {
+    const h = harness();
+    let armed = false;
+    h.eligible.hold = async () => {
+      if (!armed) return;
+      armed = false;
+      h.activity.busy = true;
+    };
+    (h.jobs as unknown as { options: { onFirstDelivered: (id: string) => void } }).options.onFirstDelivered = (id) => {
+      armed = true;
+      h.orchestrator.onFirstDelivered(id);
+    };
+    const jobId = begin(h);
+    const panel = await generatePanelKeyPair();
+    await deliver(h, jobId, panel);
+    await h.orchestrator.idle();
+    expect(h.writer.calls.length).toBe(0);
+    expect(h.logs.some((line) => line.includes('outcome=superseded code=answer_busy'))).toBe(true);
+  });
+
+  test('the job\'s snapshot is gone before the send is awaited; identities alone carry E2 and the reply-time check', async () => {
+    const h = harness();
+    let snapshotAtSend: unknown = 'unread';
+    let jobIdSeen: string | undefined;
+    h.transport.beforeAuthorize = async () => {
+      snapshotAtSend = h.jobs.consultSnapshot(jobIdSeen!);
+    };
+    const jobId = begin(h);
+    jobIdSeen = jobId;
+    const panel = await generatePanelKeyPair();
+    await deliver(h, jobId, panel);
+    await h.orchestrator.idle();
+    expect(snapshotAtSend).toBeUndefined();
+    expect(h.transport.sessions[0]!.authorizeResults).toEqual([true]);
+    expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside.state).toBe('appended');
+  });
+
+  test('reply-time eligibility: an item revoked after dispatch keeps the reply off the panel', async () => {
+    const h = harness();
+    // Revoked after authorization, as the reply is handed over.
+    h.transport.onReply = () => {
+      h.eligible.refuse = true;
+    };
+    const { jobId, panel } = await consult(h);
+    expect(h.transport.sessions[0]!.authorizeResults).toEqual([true]);
+    expect(h.logs.some((line) => line.includes('outcome=ineligible code=reply'))).toBe(true);
+    // The withdrawal the guard now forces is told inside the envelope; the block itself was never appended.
+    h.eligible.refuse = false;
+    const next = await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2));
+    expect(next.outside).toEqual({ state: 'idle' });
+    expect(h.orchestrator.recentQuestions).toEqual([CLEAN_QUESTION]);
+  });
+
+  test('mixed-policy sharing: an outside-help-off job sharing the analysis gets today\'s bytes, and the metadata it never needs is neither cloned nor frozen on the shared path', async () => {
+    let policy = ON;
+    const h = harness();
+    (h.jobs as unknown as { options: { consultPolicy: () => ConsultJobPolicy } }).options.consultPolicy = () => policy;
+    h.writer.holdAll();
+    const on = begin(h);
+    policy = OFF;
+    const off = h.jobs.begin({ question: QUESTION, count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, caller: 'other' }).jobId!;
+    policy = ON;
+    const panelOn = await generatePanelKeyPair();
+    const panelOff = await generatePanelKeyPair();
+    const offFirst = await deliver(h, off, panelOff);
+    await deliver(h, on, panelOn);
+    expect(h.calls.n).toBe(1);
+    expect(h.calls.asked).toEqual([true]);
+    // The off job: phase 1 bytes, bucket-padded, exactly as without the feature.
+    expect(offFirst.status).toBe(200);
+    const offPlain = await openPrivateAnswer(off, panelOff.privateKey, offFirst.body as unknown as SealedPrivateAnswer);
+    expect(JSON.parse(offPlain)).toMatchObject({ v: 1, answer: ANSWER });
+    expect(h.jobs.consultSnapshot(off)).toBeUndefined();
+    // The shared analysis holds the model's object by reference: no clone, no freeze, on the shared completion path.
+    const shared = (h.jobs as unknown as { shared: Map<string, { result?: { consult?: { pack: unknown } } }> }).shared;
+    const analysis = [...shared.values()][0]!;
+    expect(analysis.result?.consult).toBeDefined();
+    expect(Object.isFrozen(analysis.result!.consult!.pack)).toBe(false);
+    // The on job's snapshot is its own frozen clone of that pack.
+    const snapshot = h.jobs.consultSnapshot(on)!;
+    expect(snapshot.pack).not.toBe(analysis.result!.consult!.pack);
+    expect(snapshot.pack).toEqual(analysis.result!.consult!.pack as typeof snapshot.pack);
+    expect(Object.isFrozen(snapshot.pack)).toBe(true);
+    h.writer.releaseAll();
+    await h.orchestrator.idle();
   });
 });
 

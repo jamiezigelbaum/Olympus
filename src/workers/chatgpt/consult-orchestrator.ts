@@ -23,7 +23,8 @@
  *       synchronously: settings revision, state, panel activity, window and
  *       delivery room, the send-once latch; the questions enter the repeat
  *       history at that instant (dispatched or possibly dispatched)
- *     reply → appendOutsideBlock (fitted; question and route label)
+ *     reply → eligibility over the retained identities once more →
+ *       appendOutsideBlock (fitted; question and route label)
  *     finished runs on in the background; the snapshot is dropped at the
  *       dispatch decision (only item identities are held past it).
  *
@@ -257,6 +258,14 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       record(jobId, 'error', startedAt, 'snapshot_gone');
       return;
     }
+    // Re-checked immediately before the writer starts: a source answer can
+    // begin during E1 through the worker's answer activity without the
+    // consult hook, and the writer never runs beside one.
+    if (safe(options.answerActivityBusy, false)) {
+      fail(jobId);
+      record(jobId, 'superseded', startedAt, 'answer_busy');
+      return;
+    }
     // One bounded input (§A.3): what the writer sees is exactly what the gate compares against.
     const bounded = boundConsultWriterInput({ question: held.question, answer: held.answer, gaps: held.gaps });
     // The writer and the transport warm-up overlap (§A.8, speed measure 2).
@@ -351,11 +360,13 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       }
       return true;
     };
-    // The snapshot's work is done once the dispatch decision is made.
+    // The dispatch decision: the snapshot's work is done. The job's snapshot
+    // is dropped now, before the send is awaited; only the item identities
+    // (`items`) are retained, for E2 and the reply-time check.
+    options.jobs.dropConsultSnapshot(jobId);
     const dispatched = session.send(questionText, { authorize, deadlineMs: sendDeadlineMs });
     dispatched.catch(() => undefined);
     const reply = await dispatched.catch(() => undefined);
-    options.jobs.dropConsultSnapshot(jobId);
     if (!authorized) {
       fail(jobId);
       record(jobId, 'authorization_refused', startedAt, reply && reply.kind === 'failed' ? reply.error.code : undefined);
@@ -375,6 +386,13 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     if (!reply || reply.kind !== 'reply') {
       fail(jobId);
       record(jobId, 'reply_failed', startedAt, reply?.kind === 'failed' ? reply.error.code : 'no_reply');
+      return;
+    }
+    // Reply-time eligibility: an item the answer read that is no longer
+    // eligible when the reply arrives keeps the block off the panel.
+    if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
+      fail(jobId);
+      record(jobId, 'ineligible', startedAt, 'reply');
       return;
     }
     const seam = options.jobs.outsideSeam(jobId);

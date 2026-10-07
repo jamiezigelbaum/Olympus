@@ -333,8 +333,14 @@ interface Analysis {
     usedKeys: readonly string[] | undefined;
     /** The evidence items the answer read, checked against the live guard before it is sealed. */
     usedItems: readonly PrivateEvidenceItem[];
-    /** The model's verdict and the fitted pack it read (C4b); undefined from a model that supplies none. */
-    consult: PrivateAnswerConsultSnapshotInput | undefined;
+    /**
+     * The model's verdict and the fitted pack it read (C4b), exactly as the
+     * model returned them (no clone, no freeze: a job without outside help
+     * sharing this analysis is unaffected); undefined from a model that
+     * supplies none. The consulting job's own continuation validates, clones
+     * and freezes it into its snapshot.
+     */
+    consult: unknown;
   } | undefined;
   failReason: AnalysisTiming['reason'] | undefined;
   startedAt: number | undefined;
@@ -1324,7 +1330,7 @@ export class PrivateAnswerJobs {
         ...preparedAnswer(done.result),
         usedKeys: usedKeys(evidence, done.used),
         usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
-        consult: consultSnapshotInput(done.result.consult),
+        consult: done.result.consult,
       };
       this.finish(analysis, 'done');
     } catch (error) {
@@ -1494,9 +1500,9 @@ export class PrivateAnswerJobs {
               // against, built from the analysis that produced the answer (a
               // reused precompute brings its search-time pack). Frozen; its
               // retention clock starts at first delivery.
-              job.consult.snapshot = result.consult
-                ? consultSnapshot(question, outcome.answer, result.consult, result.usedItems)
-                : undefined;
+              // Validated, cloned and frozen here, on this job's own path only.
+              const input = consultSnapshotInput(result.consult);
+              job.consult.snapshot = input ? consultSnapshot(question, outcome.answer, input, result.usedItems) : undefined;
             }
             settle(outcome);
             return;
