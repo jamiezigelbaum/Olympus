@@ -22144,6 +22144,11 @@ var init_store_sync = __esm(() => {
   });
 });
 
+// src/workers/source-index/built-in-reasoning/server.ts
+var init_server = __esm(() => {
+  init_model_transport();
+});
+
 // src/workers/dashboard/answer-ready-coverage.ts
 var init_answer_ready_coverage = () => {};
 
@@ -24530,11 +24535,6 @@ var init_source_ingestion_ledger = __esm(() => {
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
 });
 
-// src/workers/source-index/built-in-reasoning/server.ts
-var init_server = __esm(() => {
-  init_model_transport();
-});
-
 // src/core/delphi.ts
 var init_delphi = __esm(() => {
   init_operation_error();
@@ -25470,6 +25470,132 @@ var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
   "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
   "Do not infer private facts beyond the document."
 ].join(" ");
+
+// src/workers/file-extraction/extractors/built-in-transcriber.ts
+init_model_transport();
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+var GIB = 1024 ** 3;
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae";
+var QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523";
+var QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5";
+var QWEN35_2B = {
+  modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+  displayName: "Qwen3.5 2B",
+  sizeClass: "small",
+  baseRepository: "Qwen/Qwen3.5-2B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-2B-GGUF",
+  revision: QWEN35_2B_REVISION,
+  file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+  minimumMemoryBytes: 7 * GIB,
+  contextTokens: 12288
+};
+var QWEN35_4B = {
+  modelId: "qwen3.5-4b-q4_k_m-e87f176",
+  displayName: "Qwen3.5 4B",
+  sizeClass: "standard",
+  baseRepository: "Qwen/Qwen3.5-4B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-4B-GGUF",
+  revision: QWEN35_4B_REVISION,
+  file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+  minimumMemoryBytes: 15 * GIB,
+  contextTokens: 12288
+};
+var QWEN35_9B = {
+  modelId: "qwen3.5-9b-q4_k_m-3885219",
+  displayName: "Qwen3.5 9B",
+  sizeClass: "large",
+  baseRepository: "Qwen/Qwen3.5-9B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-9B-GGUF",
+  revision: QWEN35_9B_REVISION,
+  file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+  minimumMemoryBytes: 15 * GIB,
+  contextTokens: 12288
+};
+var LLAMA_CPP_RELEASE = "b11320";
+var LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+var LLAMA_SERVER_RUNTIME = {
+  release: LLAMA_CPP_RELEASE,
+  license: "MIT",
+  archives: [
+    {
+      platform: "darwin-arm64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+      bytes: 11827796,
+      sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+      gpu: true
+    },
+    {
+      platform: "linux-x64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+      bytes: 17544875,
+      sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+      gpu: false
+    },
+    {
+      platform: "linux-arm64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+      bytes: 13590823,
+      sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+      gpu: false
+    }
+  ]
+};
+var QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2";
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var QWEN3_ASR_06B = {
+  modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+  displayName: "Qwen3-ASR 0.6B",
+  baseRepository: "Qwen/Qwen3-ASR-0.6B",
+  license: "Apache-2.0",
+  repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+  revision: QWEN3_ASR_06B_REVISION,
+  files: [
+    ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+    ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+  ],
+  minimumMemoryBytes: 7 * GIB,
+  contextTokens: 4096
+};
+
+// src/workers/source-index/built-in-reasoning/install.ts
+var STALE_LOCK_MS2 = 60 * 60000;
+var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+var SPACE_BACKOFF_MS = 15 * 60000;
+var DOWNLOAD_STALL_MS2 = 2 * 60000;
+var VERIFY_TIMEOUT_MS = 15 * 60000;
+var EXTRACT_TIMEOUT_MS = 5 * 60000;
+
+// src/workers/file-extraction/extractors/built-in-transcriber.ts
+init_server();
+init_command_runner();
+var DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+var DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
+var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
+var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
+var DEFAULT_VERIFY_WAIT_MS = 5 * 60000;
 
 // src/workers/file-extraction/extractors/transcription.ts
 init_command_runner();
@@ -26795,99 +26921,6 @@ init_analyst();
 init_operation_error();
 init_model_transport();
 init_zkapi_consult_settings();
-
-// src/workers/source-index/built-in-reasoning/manifest.ts
-var GIB = 1024 ** 3;
-function unslothQwen(size, revision, bytes, sha256) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae";
-var QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523";
-var QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5";
-var QWEN35_2B = {
-  modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-  displayName: "Qwen3.5 2B",
-  sizeClass: "small",
-  baseRepository: "Qwen/Qwen3.5-2B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-2B-GGUF",
-  revision: QWEN35_2B_REVISION,
-  file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-  minimumMemoryBytes: 7 * GIB,
-  contextTokens: 12288
-};
-var QWEN35_4B = {
-  modelId: "qwen3.5-4b-q4_k_m-e87f176",
-  displayName: "Qwen3.5 4B",
-  sizeClass: "standard",
-  baseRepository: "Qwen/Qwen3.5-4B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-4B-GGUF",
-  revision: QWEN35_4B_REVISION,
-  file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-  minimumMemoryBytes: 15 * GIB,
-  contextTokens: 12288
-};
-var QWEN35_9B = {
-  modelId: "qwen3.5-9b-q4_k_m-3885219",
-  displayName: "Qwen3.5 9B",
-  sizeClass: "large",
-  baseRepository: "Qwen/Qwen3.5-9B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-9B-GGUF",
-  revision: QWEN35_9B_REVISION,
-  file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-  minimumMemoryBytes: 15 * GIB,
-  contextTokens: 12288
-};
-var LLAMA_CPP_RELEASE = "b11320";
-var LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-var LLAMA_SERVER_RUNTIME = {
-  release: LLAMA_CPP_RELEASE,
-  license: "MIT",
-  archives: [
-    {
-      platform: "darwin-arm64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-      bytes: 11827796,
-      sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-      gpu: true
-    },
-    {
-      platform: "linux-x64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-      bytes: 17544875,
-      sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-      gpu: false
-    },
-    {
-      platform: "linux-arm64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-      bytes: 13590823,
-      sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-      gpu: false
-    }
-  ]
-};
-
-// src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2 = 60 * 60000;
-var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-var SPACE_BACKOFF_MS = 15 * 60000;
-var DOWNLOAD_STALL_MS2 = 2 * 60000;
-var VERIFY_TIMEOUT_MS = 15 * 60000;
-var EXTRACT_TIMEOUT_MS = 5 * 60000;
-
-// src/core/analyst-built-in.ts
 init_server();
 var GAP_GENERIC_WORDS = new Set([
   "the",

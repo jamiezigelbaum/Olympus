@@ -353,6 +353,11 @@ export interface ExtractionRunResult {
    */
   nextRetryAt?: string;
   reclassification?: ExtractionReclassificationResult;
+  /**
+   * Jobs settled unread for want of a reader, queued again this run because
+   * their lane's reader became ready (each job at most once ever).
+   */
+  rereadRequeued?: number;
   policy: {
     workerPrivateSurface: true;
     rawSourceExposed: false;
@@ -481,6 +486,36 @@ export function createFileExtractionRunner(
     };
   }
 
+  /**
+   * Read again, once, what a lane left unread because it had no reader then.
+   * Generic over lanes: each extractor names its own unread markers
+   * (`Extractor.reread`), and its reader is asked to get ready only when the
+   * lane actually has such jobs, so an empty lane never triggers a download.
+   */
+  function rereadUnread(lane: ExtractionLaneKey): number {
+    let requeued = 0;
+    for (const extractor of registry.list()) {
+      const policy = extractor.reread;
+      if (!policy) continue;
+      const request = {
+        ...lane,
+        extractorKind: extractor.kind,
+        warnings: policy.unreadWarnings,
+        terminalErrorKinds: policy.unreadTerminalErrorKinds,
+        ...(policy.notReadyWarnings ? { notReadyWarnings: policy.notReadyWarnings } : {}),
+      };
+      try {
+        if (jobs.unreadJobCount(request) === 0) continue;
+        if (policy.prepare() !== 'ready') continue;
+        requeued += jobs.requeueUnread({ ...request, reason: `reader ready: reread ${extractor.kind}` }).jobsRequeued;
+      } catch (error) {
+        // Never a reason to stop the run: the jobs simply wait for the next one.
+        console.error(`Extraction reread check failed for ${extractor.kind}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return requeued;
+  }
+
   return {
     reclassifyTerminal,
 
@@ -592,6 +627,7 @@ export function createFileExtractionRunner(
           ...lane,
           ...(request.reclassifyLimit !== undefined ? { limit: request.reclassifyLimit } : {}),
         });
+      const rereadRequeued = rereadUnread(lane);
 
       // The probe runs BEFORE the lease on purpose. A probe failure must cost
       // throughput and nothing else: leasing first would charge an attempt
@@ -697,6 +733,7 @@ export function createFileExtractionRunner(
         consecutiveRetryableFailures,
         ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
         ...(reclassification ? { reclassification } : {}),
+        ...(rereadRequeued > 0 ? { rereadRequeued } : {}),
         policy: {
           workerPrivateSurface: true,
           rawSourceExposed: false,
