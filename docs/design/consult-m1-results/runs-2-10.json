@@ -1,0 +1,384 @@
+{
+  "generatedAt": "2026-10-07T12:58:53.610Z",
+  "requested": 9,
+  "model": "openai/gpt-5-mini",
+  "questions": [
+    "What is the boiling point of water at sea level in Celsius?",
+    "How many days are in a leap year?",
+    "What is the chemical symbol for gold?",
+    "What is the capital of Australia?",
+    "How many sides does a hexagon have?",
+    "What is the square root of 144?",
+    "Which planet is closest to the sun?",
+    "How many minutes are in one day?",
+    "What is the freezing point of water in Fahrenheit?"
+  ],
+  "runs": [
+    {
+      "run": 1,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 28298,
+      "stageMs": {
+        "leaseAcquireMs": 1,
+        "confinementSelfTestMs": 3098,
+        "torBootstrapMs": 7476,
+        "daemonReadyMs": 311,
+        "daemonVerifyMs": 164,
+        "policyWarmMs": 8439,
+        "reservationMs": 88,
+        "dispatchToFirstByteMs": 28310,
+        "firstByteToCompletionMs": 0,
+        "correlationWaitMs": 0,
+        "settlementWaitMs": 21914,
+        "torStopMs": 102,
+        "postStopProbeMs": 1,
+        "teardownMs": 102,
+        "totalMs": 70048
+      }
+    },
+    {
+      "run": 2,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 30952,
+      "stageMs": {
+        "leaseAcquireMs": 0,
+        "confinementSelfTestMs": 3089,
+        "torBootstrapMs": 28590,
+        "daemonReadyMs": 255,
+        "daemonVerifyMs": 159,
+        "policyWarmMs": 10954,
+        "reservationMs": 91,
+        "dispatchToFirstByteMs": 30952,
+        "firstByteToCompletionMs": 0,
+        "correlationWaitMs": 102,
+        "settlementWaitMs": 21318,
+        "torStopMs": 105,
+        "postStopProbeMs": 2,
+        "teardownMs": 106,
+        "totalMs": 95770
+      }
+    },
+    {
+      "run": 3,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 29063,
+      "stageMs": {
+        "leaseAcquireMs": 0,
+        "confinementSelfTestMs": 3104,
+        "torBootstrapMs": 11944,
+        "daemonReadyMs": 255,
+        "daemonVerifyMs": 214,
+        "policyWarmMs": 8075,
+        "reservationMs": 98,
+        "dispatchToFirstByteMs": 29062,
+        "firstByteToCompletionMs": 1,
+        "correlationWaitMs": 0,
+        "settlementWaitMs": 19710,
+        "torStopMs": 103,
+        "postStopProbeMs": 2,
+        "teardownMs": 104,
+        "totalMs": 72739
+      }
+    },
+    {
+      "run": 4,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 34039,
+      "stageMs": {
+        "leaseAcquireMs": 0,
+        "confinementSelfTestMs": 3204,
+        "torBootstrapMs": 103615,
+        "daemonReadyMs": 257,
+        "daemonVerifyMs": 177,
+        "policyWarmMs": 14752,
+        "reservationMs": 98,
+        "dispatchToFirstByteMs": 34037,
+        "firstByteToCompletionMs": 2,
+        "correlationWaitMs": 102,
+        "settlementWaitMs": 22020,
+        "torStopMs": 108,
+        "postStopProbeMs": 1,
+        "teardownMs": 103,
+        "totalMs": 178526
+      }
+    },
+    {
+      "run": 5,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 32477,
+      "stageMs": {
+        "leaseAcquireMs": 0,
+        "confinementSelfTestMs": 3093,
+        "torBootstrapMs": 9017,
+        "daemonReadyMs": 256,
+        "daemonVerifyMs": 177,
+        "policyWarmMs": 9041,
+        "reservationMs": 85,
+        "dispatchToFirstByteMs": 32477,
+        "firstByteToCompletionMs": 0,
+        "correlationWaitMs": 101,
+        "settlementWaitMs": 20710,
+        "torStopMs": 102,
+        "postStopProbeMs": 1,
+        "teardownMs": 102,
+        "totalMs": 75207
+      }
+    },
+    {
+      "run": 6,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 48435,
+      "stageMs": {
+        "leaseAcquireMs": 0,
+        "confinementSelfTestMs": 3113,
+        "torBootstrapMs": 9750,
+        "daemonReadyMs": 254,
+        "daemonVerifyMs": 214,
+        "policyWarmMs": 66244,
+        "reservationMs": 80,
+        "dispatchToFirstByteMs": 48434,
+        "firstByteToCompletionMs": 1,
+        "correlationWaitMs": 0,
+        "settlementWaitMs": 27766,
+        "torStopMs": 102,
+        "postStopProbeMs": 1,
+        "teardownMs": 105,
+        "totalMs": 156116
+      }
+    },
+    {
+      "run": 7,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 28057,
+      "stageMs": {
+        "leaseAcquireMs": 0,
+        "confinementSelfTestMs": 3213,
+        "torBootstrapMs": 32762,
+        "daemonReadyMs": 256,
+        "daemonVerifyMs": 166,
+        "policyWarmMs": 12505,
+        "reservationMs": 83,
+        "dispatchToFirstByteMs": 28056,
+        "firstByteToCompletionMs": 1,
+        "correlationWaitMs": 0,
+        "settlementWaitMs": 27400,
+        "torStopMs": 101,
+        "postStopProbeMs": 1,
+        "teardownMs": 104,
+        "totalMs": 104699
+      }
+    },
+    {
+      "run": 8,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 51903,
+      "stageMs": {
+        "leaseAcquireMs": 0,
+        "confinementSelfTestMs": 3097,
+        "torBootstrapMs": 60017,
+        "daemonReadyMs": 262,
+        "daemonVerifyMs": 302,
+        "policyWarmMs": 11590,
+        "reservationMs": 110,
+        "dispatchToFirstByteMs": 51902,
+        "firstByteToCompletionMs": 1,
+        "correlationWaitMs": 0,
+        "settlementWaitMs": 40203,
+        "torStopMs": 1377,
+        "postStopProbeMs": 10,
+        "teardownMs": 447,
+        "totalMs": 172512
+      }
+    },
+    {
+      "run": 9,
+      "ok": true,
+      "outcome": "ok",
+      "networkIdentity": "not_verified",
+      "routeLabel": "payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered",
+      "confinement": "non_loopback_blocked",
+      "fence": "clear",
+      "reservedUsd": 6,
+      "elapsedMs": 40165,
+      "stageMs": {
+        "leaseAcquireMs": 10,
+        "confinementSelfTestMs": 4911,
+        "torBootstrapMs": 16106,
+        "daemonReadyMs": 766,
+        "daemonVerifyMs": 1111,
+        "policyWarmMs": 10710,
+        "reservationMs": 248,
+        "dispatchToFirstByteMs": 40165,
+        "firstByteToCompletionMs": 1,
+        "correlationWaitMs": 0,
+        "settlementWaitMs": 22944,
+        "torStopMs": 426,
+        "postStopProbeMs": 23,
+        "teardownMs": 215,
+        "totalMs": 97883
+      }
+    }
+  ],
+  "summary": {
+    "runs": 9,
+    "succeeded": 9,
+    "failed": 0,
+    "failuresByCode": {},
+    "totalWorstCaseReservedUsd": 54,
+    "stages": [
+      {
+        "stage": "leaseAcquireMs",
+        "label": "lease acquire",
+        "runs": 9,
+        "medianMs": 0,
+        "p95Ms": 10
+      },
+      {
+        "stage": "confinementSelfTestMs",
+        "label": "confinement self-test",
+        "runs": 9,
+        "medianMs": 3104,
+        "p95Ms": 4911
+      },
+      {
+        "stage": "torBootstrapMs",
+        "label": "Tor start to bootstrapped",
+        "runs": 9,
+        "medianMs": 16106,
+        "p95Ms": 103615
+      },
+      {
+        "stage": "daemonReadyMs",
+        "label": "daemon start to ready",
+        "runs": 9,
+        "medianMs": 256,
+        "p95Ms": 766
+      },
+      {
+        "stage": "daemonVerifyMs",
+        "label": "daemon verification",
+        "runs": 9,
+        "medianMs": 177,
+        "p95Ms": 1111
+      },
+      {
+        "stage": "policyWarmMs",
+        "label": "models/policy warm",
+        "runs": 9,
+        "medianMs": 10954,
+        "p95Ms": 66244
+      },
+      {
+        "stage": "reservationMs",
+        "label": "reservation",
+        "runs": 9,
+        "medianMs": 91,
+        "p95Ms": 248
+      },
+      {
+        "stage": "dispatchToFirstByteMs",
+        "label": "dispatch to first byte",
+        "runs": 9,
+        "medianMs": 32477,
+        "p95Ms": 51902
+      },
+      {
+        "stage": "firstByteToCompletionMs",
+        "label": "first byte to completion",
+        "runs": 9,
+        "medianMs": 1,
+        "p95Ms": 2
+      },
+      {
+        "stage": "correlationWaitMs",
+        "label": "request correlation wait",
+        "runs": 9,
+        "medianMs": 0,
+        "p95Ms": 102
+      },
+      {
+        "stage": "settlementWaitMs",
+        "label": "settlement wait",
+        "runs": 9,
+        "medianMs": 22020,
+        "p95Ms": 40203
+      },
+      {
+        "stage": "torStopMs",
+        "label": "Tor stop",
+        "runs": 9,
+        "medianMs": 103,
+        "p95Ms": 1377
+      },
+      {
+        "stage": "postStopProbeMs",
+        "label": "post-stop probe",
+        "runs": 9,
+        "medianMs": 1,
+        "p95Ms": 23
+      },
+      {
+        "stage": "teardownMs",
+        "label": "teardown",
+        "runs": 9,
+        "medianMs": 104,
+        "p95Ms": 447
+      },
+      {
+        "stage": "totalMs",
+        "label": "total",
+        "runs": 9,
+        "medianMs": 97883,
+        "p95Ms": 178526
+      }
+    ]
+  }
+}

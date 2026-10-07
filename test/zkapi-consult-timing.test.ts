@@ -1,0 +1,141 @@
+// Tests for scripts/zkapi-consult-timing.ts with stand-in transport functions
+// that return the transport's own result types. No network, no Tor, no daemon.
+
+import { describe, expect, test } from 'bun:test';
+import {
+  DEFAULT_QUESTIONS,
+  median,
+  parseTimingArgs,
+  percentile,
+  runTiming,
+  type TimingDeps,
+  type TimingPlan,
+} from '../scripts/zkapi-consult-timing.ts';
+import type {
+  ZkapiConsultReadiness,
+  ZkapiConsultResult,
+  ZkapiSessionReceipt,
+} from '../src/core/consult-transport-zkapi.ts';
+import { parseZkapiConsultSettings } from '../src/core/zkapi-consult-settings.ts';
+
+const receipt = (totalMs: number, dispatch: number): ZkapiSessionReceipt => ({
+  recovery: false,
+  keyReuse: 'verified_off',
+  inferenceAuth: 'verified',
+  tor: 'per_consult',
+  freshTorClient: true,
+  confinement: 'none',
+  confinementSelfTest: 'failed',
+  postStopProbe: 'route_lost',
+  settlement: 'confirmed',
+  fence: 'clear',
+  reservedUsd: 6,
+  stageMs: { torBootstrapMs: 100, dispatchToFirstByteMs: dispatch, totalMs },
+});
+
+const okResult = (totalMs: number, dispatch: number): ZkapiConsultResult => ({
+  ok: true,
+  text: 'SECRET-REPLY',
+  routeLabel: 'route-x',
+  networkIdentity: 'not_verified',
+  receipt: receipt(totalMs, dispatch),
+  elapsedMs: totalMs,
+});
+
+const ready = (blockers: ZkapiConsultReadiness['blockers'] = []): ZkapiConsultReadiness => ({ blockers } as ZkapiConsultReadiness);
+
+function harness(results: ZkapiConsultResult[], blockersPerCall: ZkapiConsultReadiness['blockers'][] = []) {
+  const out: string[] = [];
+  const errs: string[] = [];
+  const sent: string[] = [];
+  const written: Record<string, string> = {};
+  let readinessCalls = 0;
+  const deps: TimingDeps = {
+    readiness: async () => ready(blockersPerCall[readinessCalls++] ?? []),
+    send: async (question) => {
+      sent.push(question);
+      return results[sent.length - 1]!;
+    },
+    log: (line) => out.push(line),
+    error: (line) => errs.push(line),
+    writeResults: (path, json) => { written[path] = json; },
+    now: () => new Date('2026-10-07T00:00:00.000Z'),
+  };
+  const plan = (n: number, extra: Partial<TimingPlan> = {}): TimingPlan => ({
+    questions: DEFAULT_QUESTIONS,
+    n,
+    showReplies: false,
+    out: 'results.json',
+    transport: { baseUrl: 'http://127.0.0.1:1/v1', model: 'm', settings: parseZkapiConsultSettings({}, 'test') },
+    ...extra,
+  });
+  return { deps, plan, out, errs, sent, written };
+}
+
+describe('zkapi consult timing runner', () => {
+  test('aggregate math: median and nearest-rank p95', () => {
+    expect(median([5, 1, 3])).toBe(3);
+    expect(median([1, 2, 3, 4])).toBe(2.5);
+    expect(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.95)).toBe(10);
+    expect(percentile([10, 20, 30, 40], 0.95)).toBe(40);
+  });
+
+  test('argument parsing', () => {
+    expect(parseTimingArgs([])).toMatchObject({ n: 10, showReplies: false });
+    expect(parseTimingArgs(['--n', '3', '--model', 'x', '--show-replies'])).toMatchObject({ n: 3, model: 'x', showReplies: true });
+    expect(parseTimingArgs(['--n', '0'])).toHaveProperty('error');
+    expect(parseTimingArgs(['--bogus'])).toHaveProperty('error');
+    expect(parseTimingArgs(['--out'])).toHaveProperty('error');
+  });
+
+  test('readiness block stops before any send and exits 2', async () => {
+    const h = harness([], [['unresolved_session']]);
+    const result = await runTiming(h.plan(3), h.deps);
+    expect(result.exitCode).toBe(2);
+    expect(h.sent).toHaveLength(0);
+    expect(h.errs.join('\n')).toContain('unresolved_session');
+    expect(h.errs.join('\n')).toContain('zkapi-consult-recover.ts');
+    expect(JSON.parse(h.written['results.json']!).blockedBefore).toEqual({ run: 1, blockers: ['unresolved_session'] });
+  });
+
+  test('successful runs: rows, medians, p95, reservation, quiet replies, no secrets in file', async () => {
+    const h = harness([okResult(1000, 10), okResult(3000, 30), okResult(2000, 20)]);
+    const result = await runTiming(h.plan(3), h.deps);
+    expect(result.exitCode).toBe(0);
+    expect(h.sent).toEqual(DEFAULT_QUESTIONS.slice(0, 3));
+    const printed = h.out.join('\n');
+    expect(printed).toContain('#1 | ok | outcome=ok | identity=not_verified | route="route-x" | confinement=none | fence=clear | reserved=$6 | elapsed=1000ms');
+    expect(printed).toContain('dispatch to first byte');
+    expect(printed).not.toContain('SECRET-REPLY');
+    expect(result.summary.totalWorstCaseReservedUsd).toBe(18);
+    expect(result.summary.stages.find((s) => s.stage === 'totalMs')).toMatchObject({ runs: 3, medianMs: 2000, p95Ms: 3000 });
+    expect(result.summary.stages.find((s) => s.stage === 'dispatchToFirstByteMs')).toMatchObject({ medianMs: 20, p95Ms: 30 });
+    expect(h.written['results.json']).not.toContain('SECRET-REPLY');
+    expect(JSON.parse(h.written['results.json']!).questions).toHaveLength(3);
+  });
+
+  test('--show-replies prints the reply', async () => {
+    const h = harness([okResult(1000, 10)]);
+    await runTiming(h.plan(1, { showReplies: true }), h.deps);
+    expect(h.out.join('\n')).toContain('reply: SECRET-REPLY');
+  });
+
+  test('a failed run is counted by code, excluded from stage stats, and exits 1', async () => {
+    const failed: ZkapiConsultResult = {
+      ok: false,
+      error: {
+        code: 'timeout',
+        message: 'The zkAPI consult timed out; it may still have been charged.',
+        outcome: 'unknown',
+        networkIdentity: 'not_verified',
+        receipt: { ...receipt(9000, 8000), fence: 'held' },
+      },
+    };
+    const h = harness([okResult(1000, 10), failed]);
+    const result = await runTiming(h.plan(2), h.deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.summary).toMatchObject({ succeeded: 1, failed: 1, failuresByCode: { timeout: 1 }, totalWorstCaseReservedUsd: 12 });
+    expect(result.summary.stages.find((s) => s.stage === 'totalMs')).toMatchObject({ runs: 1, medianMs: 1000 });
+    expect(h.out.join('\n')).toContain('#2 | error timeout | outcome=unknown');
+  });
+});
