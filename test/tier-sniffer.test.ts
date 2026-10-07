@@ -511,6 +511,83 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
+  test('a queue that waits says why, once per change, and a pass that never ends is stopped', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-waiting-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 1, 'therapy');
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      const lines: string[] = [];
+      let busy = true;
+      let clock = 0;
+      let release: (() => void) | undefined;
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'therapy', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        shouldYield: () => busy,
+        log: (line) => lines.push(line),
+        now: () => new Date(clock),
+        maxPassMs: 60_000,
+      });
+      // Yielding: said once, not on every tick.
+      await service.runOnce();
+      await service.runOnce();
+      expect(lines.filter((line) => line.includes('nothing asked: yielding'))).toHaveLength(1);
+      // Asking again is said once too.
+      busy = false;
+      await service.runOnce();
+      expect(lines).toContain('Olympus tier sniffer: asking again.');
+
+      // A pass whose model call never returns: the next tick past the bound aborts it.
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 2, 'divorce papers');
+      const hanging = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: {
+          async complete(request) {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+              if (request.signal?.aborted) resolve();
+              request.signal?.addEventListener('abort', () => resolve(), { once: true });
+            });
+            throw new Error('aborted');
+          },
+        },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        log: (line) => lines.push(line),
+        now: () => new Date(clock),
+        maxPassMs: 60_000,
+      });
+      const first = hanging.runOnce();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect((await hanging.runOnce()).state).toBe('skipped_running');
+      clock += 61_000;
+      expect((await hanging.runOnce()).state).toBe('skipped_running');
+      expect(lines.some((line) => line.includes('without finishing; it was stopped'))).toBe(true);
+      // The stopped pass settles as preempted (nothing counted against the
+      // items), so the next tick can run a fresh one.
+      expect(await first).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted' } });
+      release?.();
+      service.stop();
+      hanging.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('an approval names lane, profile, model and prompt version: changing any one needs a new approval', () => {
     const base = { recorded_at: '2026-09-23T10:00:00.000Z', what: 'x', model_id: 'm', prompt_version: 'p1', lane: 'local', profile_id: 'local-a', status: 'complete' as const };
     const approved = { ...base, kind: 'classifier_model_decision' as const, approved_by: 'owner' as const };

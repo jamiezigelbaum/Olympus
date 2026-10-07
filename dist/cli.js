@@ -107124,6 +107124,9 @@ class TierSnifferService {
   budget;
   timer;
   running = false;
+  runningSinceMs = 0;
+  overrunReported = false;
+  waitingReason;
   moveFailures = new Map;
   abort;
   lastTick;
@@ -107191,17 +107194,30 @@ class TierSnifferService {
     };
   }
   async runOnce() {
-    if (this.running || this.stopped)
+    if (this.stopped)
       return { state: "skipped_running" };
+    if (this.running) {
+      const runningMs = this.clockMs() - this.runningSinceMs;
+      if (runningMs >= (this.options.maxPassMs ?? DEFAULT_TIER_SNIFFER_MAX_PASS_MS) && !this.overrunReported) {
+        this.overrunReported = true;
+        this.abort?.abort();
+        this.options.log?.(`Olympus tier sniffer: a pass ran ${Math.round(runningMs / 60000)} min without finishing; it was stopped.`);
+      }
+      return { state: "skipped_running" };
+    }
     this.running = true;
+    this.runningSinceMs = this.clockMs();
+    this.overrunReported = false;
     this.abort = new AbortController;
     try {
       const tick = await this.tick(this.abort.signal);
       this.lastTick = tick;
+      this.reportWaiting(tick);
       return tick;
     } catch (error2) {
       const tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
       this.lastTick = tick;
+      this.reportWaiting(tick);
       return tick;
     } finally {
       this.running = false;
@@ -107209,6 +107225,34 @@ class TierSnifferService {
       if (this.stopped)
         this.closeLedgers();
     }
+  }
+  clockMs() {
+    return (this.options.now?.() ?? new Date).getTime();
+  }
+  reportWaiting(tick) {
+    let reason;
+    if (tick.state === "model_unavailable")
+      reason = "the private model is not available";
+    else if (tick.state === "awaiting_owner_approval")
+      reason = "waiting for the owner to approve the classifier";
+    else if (tick.state === "failed")
+      reason = `the pass failed (${tick.error})`;
+    else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
+      const stop = tick.report.stoppedBy;
+      reason = stop === "yield" || stop === "preempted" ? "yielding to answers in progress or a resting private model" : stop === "daily_budget" ? "the daily call budget is used up" : stop === "transport_failures" ? "the private model is not answering" : undefined;
+    }
+    const key = reason ?? (tick.state === "ran" && tick.report.calls > 0 ? "asking" : this.waitingReason);
+    if (key === this.waitingReason)
+      return;
+    const previous = this.waitingReason;
+    this.waitingReason = key;
+    if (key === "asking") {
+      if (previous && previous !== "asking")
+        this.options.log?.("Olympus tier sniffer: asking again.");
+      return;
+    }
+    if (reason)
+      this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${reason}.`);
   }
   ledgerPaths() {
     const paths = new Set;
@@ -107485,7 +107529,7 @@ function positiveInteger7(value, fallback, minimum) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_classification_ledger();
   init_tier_move();
@@ -107498,6 +107542,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_names_only_settle();
   init_tier_rules_sweep();
   init_tier_ledger();
+  DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
   DEFAULT_STALE_MOVE_MS = 60 * 60000;
 });
 
