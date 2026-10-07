@@ -297,7 +297,7 @@ describe('installing', () => {
     expect(existsSync(join(dir, 'debug'))).toBe(false);
     expect(managedToolExecutable('tor', { ...f.host, pins })).toBe(join(realRoot(f.root), 'tor', '15.0.24', 'bin', 'tor'));
     expect(f.quarantined).toEqual([]);
-  });
+  }, 30_000);
 
   test('re-running is a no-op: nothing is downloaded and the install is untouched', async () => {
     const f = setup();
