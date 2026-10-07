@@ -36,6 +36,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/built-in-scan-reading.md',
   'docs/design/categorization-precision.md',
   'docs/design/chatgpt-plugin.md',
+  'docs/design/consult-gate-false-refusals.md',
   'docs/design/consult-m1-measurement.md',
   'docs/design/consult-m1-results/run-1.json',
   'docs/design/consult-m1-results/runs-2-10.json',
