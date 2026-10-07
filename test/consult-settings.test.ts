@@ -65,6 +65,7 @@ const VALID = {
   languages: ['en', 'pt-BR'],
   domains: { units: true, countries: false, places: true, technical: true, medicines: true, medicineBrands: false },
   strict: false,
+  level: 'unnamed',
 };
 
 function settingsFile(home: string): string {
@@ -93,6 +94,18 @@ describe('parseConsultSettings', () => {
     const { units: _units, ...missingRequired } = oldDomains;
     expect(parseConsultSettings({ ...VALID, domains: missingRequired })).toBeUndefined();
     expect(parseConsultSettings({ ...VALID, domains: { ...oldDomains, places: 'yes' } })).toBeUndefined();
+  });
+
+  test('level: a file written before it reads as "general" (never widened silently); only the two values are accepted', () => {
+    const { level: _level, ...old } = VALID;
+    expect(parseConsultSettings(old)?.level).toBe('general');
+    expect(parseConsultSettings({ ...VALID, level: 'general' })?.level).toBe('general');
+    expect(parseConsultSettings({ ...VALID, level: 'unnamed' })?.level).toBe('unnamed');
+    for (const level of [null, '', 'Unnamed', 'names', 1, true, ['unnamed']]) expect(parseConsultSettings({ ...VALID, level })).toBeUndefined();
+    // No file at all: outside help off, and a first write records the new-setup level.
+    expect(DEFAULT_CONSULT_SETTINGS.level).toBe('unnamed');
+    expect(consultGateOptionsFromSettings(parseConsultSettings(old)!).level).toBe('general');
+    expect(consultGateOptionsFromSettings(parseConsultSettings(VALID)!).level).toBe('unnamed');
   });
 
   test('accepts exactly the schema', () => {
@@ -175,7 +188,7 @@ describe('readConsultSettings fails closed', () => {
     const read = readConsultSettings({ env: { HOME: home } });
     expect(read.state).toBe('valid');
     expect(consultOutsideHelpEnabled(read)).toBe(true);
-    expect(consultGateOptionsFromSettings(read.settings)).toEqual({ languages: ['en', 'pt-BR'], domains: VALID.domains });
+    expect(consultGateOptionsFromSettings(read.settings)).toEqual({ languages: ['en', 'pt-BR'], domains: VALID.domains, level: 'unnamed' });
   });
 
   test('reads at each use: a change is visible to the next read with no restart', () => {
@@ -305,7 +318,7 @@ describe('per-job binding', () => {
     const location = { env: { HOME: home } };
     placeSettings(home, VALID);
     const policy = bindConsultJobPolicy(readConsultSettings(location));
-    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false });
+    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false, level: 'unnamed' });
     expect(Object.isFrozen(policy) && Object.isFrozen(policy.languages) && Object.isFrozen(policy.domains)).toBe(true);
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
 
@@ -327,6 +340,22 @@ describe('per-job binding', () => {
 
     placeFile(home, 'not json');
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_invalid' });
+  });
+
+  test('the level is bound: a level change refuses as stale, even at the same revision (a hand edit)', () => {
+    const home = tempHome();
+    const location = { env: { HOME: home } };
+    placeSettings(home, { ...VALID, level: 'general' });
+    const policy = bindConsultJobPolicy(readConsultSettings(location));
+    expect(policy.level).toBe('general');
+    placeSettings(home, { ...VALID, level: 'unnamed' });
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
+    placeSettings(home, { ...VALID, revision: 4, level: 'unnamed' });
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
+    // A file without the key reads as general, so a job bound to it still authorizes.
+    const { level: _level, ...old } = VALID;
+    placeSettings(home, old);
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
   });
 
   test('turning outside help off and on again between bind and recheck refuses', () => {

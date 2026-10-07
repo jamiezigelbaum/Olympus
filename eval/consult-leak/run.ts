@@ -243,12 +243,15 @@ export function canaryPresent(question: string | readonly string[], canaries: re
   });
 }
 
-function runCorpus(corpus: ConsultLeakCorpus): ConsultLeakCaseResult[] {
+/** The writer level the gate is run at (ConsultGateOptions.level); the corpus is graded identically at both. */
+export type ConsultLeakEvalLevel = 'general' | 'unnamed';
+
+function runCorpus(corpus: ConsultLeakCorpus, level: ConsultLeakEvalLevel): ConsultLeakCaseResult[] {
   const context = consultWriterContextFromPack(corpus.pack, {
     connectedAccountIdentifiers: corpus.connectedAccountIdentifiers,
   });
   return corpus.cases.map((entry) => {
-    const verdict = evaluateConsultRequest(typeof entry.question === 'string' ? [entry.question] : entry.question, context, {}, {}, { languages: corpus.languages ?? ['en'] });
+    const verdict = evaluateConsultRequest(typeof entry.question === 'string' ? [entry.question] : entry.question, context, {}, {}, { languages: corpus.languages ?? ['en'], level });
     return {
       corpus: corpus.id,
       id: entry.id,
@@ -260,8 +263,8 @@ function runCorpus(corpus: ConsultLeakCorpus): ConsultLeakCaseResult[] {
   });
 }
 
-export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consultLeakCorpora()): ConsultLeakReport {
-  const results = corpora.flatMap(runCorpus);
+export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consultLeakCorpora(), level: ConsultLeakEvalLevel = 'general'): ConsultLeakReport {
+  const results = corpora.flatMap((corpus) => runCorpus(corpus, level));
   const byCategory: Record<string, { pass: number; refuse: number }> = {};
   for (const result of results) {
     const bucket = byCategory[result.category] ?? { pass: 0, refuse: 0 };
@@ -301,7 +304,7 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
     for (const { id, context } of contexts) {
       questions.forEach((question, index) => {
         pairs += 1;
-        const verdict = evaluateConsultRequest([question], context, {}, {}, { languages: SET_LANGUAGES[set] ?? ['en'] });
+        const verdict = evaluateConsultRequest([question], context, {}, {}, { languages: SET_LANGUAGES[set] ?? ['en'], level });
         if (verdict.decision === 'refuse') {
           refusedPairs.push(`${set}-${index + 1}@${id}`);
           cleanRefusals.push(`${set}-${index + 1}@${id}: ${verdict.reasons.join(',')} | ${question}`);
@@ -322,7 +325,7 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
 
   const probes = USABILITY_PROBES.map((question) => ({
     question,
-    byCorpus: Object.fromEntries(contexts.map(({ id, context }) => [id, evaluateConsultRequest([question], context, {}, {}, { languages: PROBE_LANGUAGES }).reasons])),
+    byCorpus: Object.fromEntries(contexts.map(({ id, context }) => [id, evaluateConsultRequest([question], context, {}, {}, { languages: PROBE_LANGUAGES, level }).reasons])),
   }));
 
   const failures: string[] = [];
@@ -360,8 +363,14 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
 }
 
 if (import.meta.main) {
-  const report = runConsultLeakEval();
-  const { results: _results, ...summary } = report;
-  console.log(JSON.stringify(summary, null, 2));
-  process.exit(report.gates.passed ? 0 : 1);
+  // Both writer levels, each held to the same gates: the unnamed level's two
+  // widened rules must not let any leak case or canary through.
+  let passed = true;
+  for (const level of ['general', 'unnamed'] as const) {
+    const report = runConsultLeakEval(consultLeakCorpora(), level);
+    const { results: _results, ...summary } = report;
+    console.log(JSON.stringify({ level, ...summary }, null, 2));
+    passed &&= report.gates.passed;
+  }
+  process.exit(passed ? 0 : 1);
 }

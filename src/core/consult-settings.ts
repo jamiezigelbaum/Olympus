@@ -5,7 +5,7 @@
 //
 //   {"v": 1, "revision": N, "enabled": bool, "languages": [...],
 //    "domains": {"units", "countries", "places", "technical", "medicines", "medicineBrands"},
-//    "strict": bool}
+//    "strict": bool, "level": "unnamed" | "general"}
 //
 // - Read at every use, never cached, so a change needs no worker restart.
 // - The parser is strict: invalid UTF-8, a duplicated key, an unknown key, a
@@ -14,6 +14,13 @@
 // - A job binds the settings current at its creation (`bindConsultJobPolicy`);
 //   final authorization re-reads the file and refuses unless it is still the
 //   same revision with outside help on (`recheckConsultJobPolicy`).
+// - `level` says what the consult writer may send (owner decision
+//   2026-10-07): "unnamed" (the user's situation with names and other
+//   identifying details removed) or "general" (textbook questions only, the
+//   writer's original rules). The key is optional for the reader: a file
+//   written before it existed reads as "general", so an owner who turned
+//   outside help on under the general rules never has the scope widened
+//   silently. The writer always writes it; a new file defaults to "unnamed".
 //
 // This module only reads. The compare-and-swap writer lands with its first
 // caller, the Mac dashboard enable path (stage C5), in its own module; the
@@ -30,11 +37,20 @@ import {
   type ConsultDomainPacks,
   type ConsultGateOptions,
   type ConsultLanguage,
+  type ConsultLevel,
 } from './consult-gate.ts';
+
+export type { ConsultLevel };
 
 export const CONSULT_SETTINGS_VERSION = 1;
 /** A settings file is a few hundred bytes; anything far larger is not one. */
 export const CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
+
+export const CONSULT_LEVELS: readonly ConsultLevel[] = Object.freeze(['unnamed', 'general']);
+/** The level of a file written before `level` existed: the original, narrower rules. */
+export const CONSULT_LEVEL_WHEN_UNSET: ConsultLevel = 'general';
+/** The level a new settings file is written with (no file yet). */
+export const CONSULT_LEVEL_FOR_NEW_SETUP: ConsultLevel = 'unnamed';
 
 export interface ConsultSettings {
   readonly v: typeof CONSULT_SETTINGS_VERSION;
@@ -48,6 +64,8 @@ export interface ConsultSettings {
   readonly domains: ConsultDomainPacks;
   /** Strict mode (C6 adds its approval step; recorded only until then). */
   readonly strict: boolean;
+  /** What the consult writer may send. */
+  readonly level: ConsultLevel;
 }
 
 export type ConsultSettingsInvalidReason =
@@ -65,7 +83,11 @@ export type ConsultSettingsRead =
   | { readonly state: 'valid'; readonly settings: ConsultSettings }
   | { readonly state: 'invalid'; readonly reason: ConsultSettingsInvalidReason; readonly settings: ConsultSettings };
 
-/** What a missing, unreadable or invalid file means: outside help off, gate defaults. */
+/**
+ * What a missing, unreadable or invalid file means: outside help off, gate
+ * defaults. Its level is the new-setup default, which is what a first write
+ * from no file records; it never sends anything, since outside help is off.
+ */
 export const DEFAULT_CONSULT_SETTINGS: ConsultSettings = Object.freeze({
   v: CONSULT_SETTINGS_VERSION,
   revision: 0,
@@ -73,9 +95,11 @@ export const DEFAULT_CONSULT_SETTINGS: ConsultSettings = Object.freeze({
   languages: Object.freeze([...DEFAULT_CONSULT_LANGUAGES]),
   domains: Object.freeze({ ...DEFAULT_CONSULT_DOMAIN_PACKS }),
   strict: false,
+  level: CONSULT_LEVEL_FOR_NEW_SETUP,
 });
 
-const TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'strict'] as const;
+const REQUIRED_TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'strict'] as const;
+const OPTIONAL_TOP_LEVEL_KEYS = ['level'] as const;
 const DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS) as Array<keyof ConsultDomainPacks>;
 const OPTIONAL_DOMAIN_KEYS: readonly string[] = ['places', 'technical'];
 const LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS) as ConsultLanguage[];
@@ -115,12 +139,16 @@ export const __consultSettingsTestHooks: {
  * Strict schema check of a parsed settings document. Returns undefined for
  * anything that is not exactly the schema: unknown or missing keys at either
  * level, a version other than 1, a revision that is not a non-negative safe
- * integer, non-boolean flags, an empty, duplicated or unknown language list.
+ * integer, non-boolean flags, an empty, duplicated or unknown language list,
+ * a level other than "unnamed" or "general". `level` alone may be absent: a
+ * file written before it reads as "general" (CONSULT_LEVEL_WHEN_UNSET).
  */
 export function parseConsultSettings(value: unknown): ConsultSettings | undefined {
   if (!isPlainObject(value)) return undefined;
-  if (!hasExactKeys(value, TOP_LEVEL_KEYS)) return undefined;
+  if (!hasKeys(value, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS)) return undefined;
   const { v, revision, enabled, languages, domains, strict } = value;
+  const level = Object.hasOwn(value, 'level') ? value.level : CONSULT_LEVEL_WHEN_UNSET;
+  if (typeof level !== 'string' || !(CONSULT_LEVELS as readonly string[]).includes(level)) return undefined;
   if (v !== CONSULT_SETTINGS_VERSION) return undefined;
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return undefined;
   if (typeof enabled !== 'boolean' || typeof strict !== 'boolean') return undefined;
@@ -141,6 +169,7 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
     languages: Object.freeze([...languages]),
     domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] as boolean : true])) as unknown as ConsultDomainPacks),
     strict,
+    level: level as ConsultLevel,
   });
 }
 
@@ -223,9 +252,9 @@ export function consultOutsideHelpEnabled(read: ConsultSettingsRead): boolean {
   return read.state === 'valid' && read.settings.enabled;
 }
 
-/** The gate options the settings select (languages and domain packs). */
+/** The gate options the settings select (languages, domain packs and level). */
 export function consultGateOptionsFromSettings(settings: ConsultSettings): ConsultGateOptions {
-  return { languages: [...settings.languages], domains: { ...settings.domains } };
+  return { languages: [...settings.languages], domains: { ...settings.domains }, level: settings.level };
 }
 
 /**
@@ -238,6 +267,8 @@ export interface ConsultJobPolicy {
   readonly languages: readonly ConsultLanguage[];
   readonly domains: ConsultDomainPacks;
   readonly strict: boolean;
+  /** What the writer may send for this job; a change since binding refuses at final authorization. */
+  readonly level: ConsultLevel;
 }
 
 export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolicy {
@@ -248,6 +279,7 @@ export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolic
     languages: Object.freeze([...settings.languages]),
     domains: Object.freeze({ ...settings.domains }),
     strict: settings.strict,
+    level: settings.level,
   });
 }
 
@@ -261,14 +293,18 @@ export type ConsultJobPolicyRecheck =
 /**
  * Final authorization's settings check (design §A.8 step 2, test B5): the job
  * must have bound outside help on, and the file re-read now must be valid,
- * still on, and exactly the revision the job bound. Any change since the job
- * was created, even one that turned outside help off and on again, refuses.
+ * still on, and exactly the revision and level the job bound. Any change
+ * since the job was created, even one that turned outside help off and on
+ * again, refuses. A level change always moves the revision through the
+ * writer; the level is compared as well so a file edited by hand without a
+ * new revision cannot widen what a bound job sends.
  */
 export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: ConsultSettingsRead): ConsultJobPolicyRecheck {
   if (!policy.outsideHelp) return { ok: false, reason: 'bound_off' };
   if (current.state === 'absent') return { ok: false, reason: 'settings_absent' };
   if (current.state === 'invalid') return { ok: false, reason: 'settings_invalid' };
   if (current.settings.revision !== policy.settingsRevision) return { ok: false, reason: 'settings_stale' };
+  if (current.settings.level !== policy.level) return { ok: false, reason: 'settings_stale' };
   if (!current.settings.enabled) return { ok: false, reason: 'settings_off' };
   return { ok: true };
 }
@@ -317,9 +353,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+/** Every required key present, and no key outside required plus optional. */
+function hasKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[]): boolean {
+  return required.every((key) => Object.hasOwn(value, key))
+    && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
 }
 
 function errorCode(error: unknown): string | undefined {

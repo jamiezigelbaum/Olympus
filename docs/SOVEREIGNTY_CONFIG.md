@@ -560,8 +560,9 @@ network; Olympus cannot read that setting, so it cannot confirm this. This
 sequence follows the reference wrapper scripts in `ethereum/zkapi` pull
 request #16.
 
-**The money, plainly.** Turning this on requires accepting eight statements
-(acknowledgement version 3):
+**The money, plainly.** Turning this on requires accepting nine statements
+(acknowledgement version 4; version 4 added the last one, so earlier
+acknowledgements must be given again):
 
 - Each consult authorizes up to the chosen model's per-request allowance,
   currently $1 to $6 depending on the model. Olympus counts every consult at
@@ -576,6 +577,19 @@ request #16.
 - There is no top-up; each deposit is a new note with its own fee and 30-day clock.
 - One operator account can pause deposits and withdrawals while the clock keeps running, and one party ran the proof setup; funds could be frozen or lost.
 - The balance is controlled by files on this computer; losing them loses the money.
+- With "Your situation, without names", the AI provider reads your actual
+  situation, with names, places, exact dates, amounts and account numbers
+  removed; an unusual situation could still hint at who you are.
+
+**What may be sent.** `~/.olympus/consult.json` carries `level`:
+`"unnamed"` ("Your situation, without names", the default for a new setup)
+lets the local writer describe the situation and ask for a verdict, with
+identifying details removed; `"general"` ("General questions only") sends
+textbook questions only. A file written before `level` existed reads as
+`"general"`, so the scope never widens by itself; the card offers the switch.
+Choosing `"unnamed"` needs every statement above accepted at version 4. The
+outbound check runs at both levels (`docs/design/consult-writer-instructions.md`,
+`docs/design/consult-gate-false-refusals.md`).
 
 Deposits are in ETH, so their dollar value moves with the ETH price. The
 daemon activates a deposit before the chain finalizes it; a rare chain

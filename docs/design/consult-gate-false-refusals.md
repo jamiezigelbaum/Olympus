@@ -57,3 +57,89 @@ Expected residual false-refusal rate on ordinary English questions, estimated by
 ## Latency
 
 1,275 gate calls across five configurations (warm, plus one vocabulary load per distinct pack selection): median under 1 ms (0.4 to 0.9 ms across runs), p95 1 to 7 ms. The first call with a given pack selection pays vocabulary decompression, up to about 10 s on a cold first call in this run. The gate is not a latency concern after the first call.
+
+## Unnamed level
+
+Date: 2026-10-07. The "Your situation, without names" level (owner decision
+2026-10-07; rules in `docs/design/consult-writer-instructions.md`). Run
+`bun eval/consult-leak/unnamed-level.ts`; the leak corpus runs at both levels
+in `bun eval/consult-leak/run.ts`.
+
+**Set.** 30 situation cases (`eval/consult-leak/unnamed-questions.ts`):
+housing, employment, health, family, finance, consumer, travel, education.
+Each carries the documents the answer read (names, towns, dates, amounts,
+account numbers, titles), the answer and its gaps, one legitimate question as
+a careful writer at this level would send it, and 67 leak variants (the same
+question with a name, place, date or year, exact amount, identifier or title
+put back). Written before the gate was widened and not edited against its
+verdicts, except one canary ("Greg") that the independent oracle's ROT13 view
+matched in ordinary prose ("after they").
+
+**Review round 1 and the owner's ruling (2026-10-07).** Round 1 found three
+leaks in the first widening: a bare "per" counted as a percent ("120 per
+hour" let 120 through), a figure in digits masked the same value in number
+words ("120 days ... one hundred twenty euros"), and the combined copy
+relaxations admitted a lower-case name copied from the answer ("the red
+lion"). The first two are fixed: a percent must be "%", "percent" or a
+single-word equivalent, and a snapshot figure is repeated only when every
+occurrence of its value, in digits or in words, and every occurrence in the
+question is followed by a duration or percent. The owner then ruled "err on
+the side of allowing more through": the copy relaxations stay, with the
+lower-case-name case recorded as an accepted residual, and a dictionary word
+(or a country) that the snapshot also writes in lower case is no longer taken
+for a name. The loaded example now reads "requires 60 days", because a bare
+repeated figure is refused.
+
+**Before and after (hand-written legitimate questions).**
+
+| | general gate | unnamed, first version (26ae361d) | unnamed, after round 1 |
+|---|---|---|---|
+| legitimate refused | 29 / 30 (97%) | 24 / 30 (80%) | 16 / 30 (53%) |
+| leak variants passed | 0 / 67 | 0 / 67 | 0 / 67 |
+| leak corpus: canary leaks, leak cases passed | 0, 0 | 0, 0 | 0, 0 |
+| leak corpus clean set refused | 22.6% | 22.6% | 22.6% |
+
+The 16 left: 6 copies of five or more document words; 3 figures (two year
+counts, refused as possible ages, and a bare 180); 4 the name rules on a
+word the snapshot only ever capitalizes or also puts in a title ("St Aldhelm
+Primary", "Estate valuation: house", "Offer letter" beside its title, and a
+country written once in a heading); 1 a generic document title ("Fit
+note"); 2 unknown words (INR, timesheets). Two-sentence situations now pass.
+
+**Soft residuals (counted, not failures).** Sample given names, surnames and
+cities (`eval/consult-leak/name-sample.ts`) written once at a sentence start
+and named in the question in lower case: the unnamed level lets through
+exactly what the general level does (2 of 223 given names, 4 of 215
+surnames, 0 of 102 cities: short or dictionary words). Exempting every
+sentence-initial dictionary word as well would have let 39 given names, 47
+surnames and 17 cities through and passed no extra legitimate question, so
+it is not done. Not counted by the corpora, and accepted by the owner: a
+lower-case or dictionary-word name copied from the documents or the answer
+("the red lion"), and a dictionary-word name the snapshot also uses in lower
+case.
+
+**Real local writer.** The built-in Qwen3.5 4B writer on this set with the
+unnamed rules (`eval/consult-reid/run-real.ts`, recorded in
+`eval/consult-reid/recorded-unnamed-set.json`, re-recorded after the prompt
+change): 30 of 30 proposed; 20 pass the unnamed gate (first version: 15 of
+the earlier recording), against 6 of the same outputs at the general gate;
+no output that passes carries a canary. Re-identification
+(`eval/consult-reid/`): 3 of 10 pass the gate, none narrows to a person,
+keeps all three quasi-identifiers, an exact figure or a canary.
+
+**Review round 2 (both levels, stricter).** "7 Park street" beside "a park"
+let "Is 7 park street safe?" through at the unnamed level (lower-case "park"
+exempted the capital, a one-digit house number is under the figure threshold,
+and mixed case defeated the pair match). Address spans (a house number within
+five words of a street word, in every configured language) are now protected
+at both levels whatever their capitalization. The unnamed false refusals
+stayed at 16 of 30, the general and held-out rates did not move, and the
+real-writer pass counts stayed 20 (unnamed) and 6 (general).
+
+**Gate fix found on the way (both levels, stricter).** A snapshot amount with
+a zero fraction ("2,400.00") was keyed only as "240000" and "24", so "2,400"
+in a question was not matched; it now also keys as "2400" and is refused.
+This tightens the general level too.
+
+The unnamed false-refusal rate is held by a regression ceiling at the
+measured 16 of 30 (`UNNAMED_LEVEL_GATES`), not a usability target.

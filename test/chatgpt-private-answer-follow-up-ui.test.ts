@@ -282,8 +282,8 @@ describe('follow-up polling', () => {
       replies: [
         { envelope: { rev: 1, followSeconds: 400, outside: { state: 'idle' } } },
         { envelope: { rev: 2, followSeconds: 300, outside: { state: 'pending' } } },
-        { envelope: { rev: 3, followSeconds: 200, answer: 'A DIFFERENT ANSWER', outside: { state: 'appended', text: OUTSIDE_TEXT, question: QUESTION } } },
-        { envelope: { rev: 3, followSeconds: 0, outside: { state: 'appended', text: OUTSIDE_TEXT, question: QUESTION } } },
+        { envelope: { rev: 3, followSeconds: 200, answer: 'A DIFFERENT ANSWER', outside: { state: 'appended', text: OUTSIDE_TEXT, question: QUESTION, level: 'unnamed' } } },
+        { envelope: { rev: 3, followSeconds: 0, outside: { state: 'appended', text: OUTSIDE_TEXT, question: QUESTION, level: 'unnamed' } } },
       ],
     });
     await reveal(host);
@@ -303,7 +303,7 @@ describe('follow-up polling', () => {
     expect(host.text()).not.toContain('A DIFFERENT ANSWER');
     expect(host.text()).toContain('Sources (1)');
     expect(host.doc.querySelector('.gaps')?.textContent).toBe('Not found in your private items: the monthly rent');
-    // The outside container: attribution first, text as one text node, the question behind its disclosure.
+    // The outside container: attribution first, then exactly what was sent under its level's label, then the text as one text node.
     const outside = host.outside()!;
     expect(outside.getAttribute('aria-label')).toBe(W.outsideTitle);
     expect(outside.firstElementChild!.className).toBe('out-head');
@@ -313,11 +313,14 @@ describe('follow-up polling', () => {
     expect(text.textContent).toBe(OUTSIDE_TEXT);
     expect(text.childNodes.length).toBe(1);
     expect(text.firstChild!.nodeType).toBe(3);
-    expect(host.text()).not.toContain(QUESTION);
-    const asked = outside.querySelector('[data-key="asked"]') as HTMLButtonElement;
-    expect(asked.textContent).toBe(W.outsideAsked);
-    asked.click();
-    expect(host.outside()!.querySelector('.asked-text')?.textContent).toBe(QUESTION);
+    const asked = outside.querySelector('[data-key="asked"]')!;
+    expect(asked.tagName).toBe('DIV');
+    expect(asked.getAttribute('data-level')).toBe('unnamed');
+    expect(asked.querySelector('.asked-label')?.textContent).toBe(W.outsideSentUnnamed);
+    expect(W.outsideSentUnnamed).toBe('Sent without names:');
+    expect(asked.querySelector('.asked-text')?.textContent).toBe(QUESTION);
+    // Shown above the reply, never behind a disclosure.
+    expect(asked.compareDocumentPosition(text) & 4).toBe(4);
     expect(host.outside()!.querySelector('.out-foot')).toBeNull();
     // Hide folds the outside container with the answer; Show brings both back, with no new request.
     host.button(W.hide).click();
@@ -369,6 +372,8 @@ describe('follow-up polling', () => {
     });
     await reveal(host);
     expect(host.outside()!.querySelector('.out-text')?.textContent).toBe(OUTSIDE_TEXT);
+    // An engine that sends no level gets the plain label.
+    expect(host.outside()!.querySelector('.asked-label')?.textContent).toBe(W.outsideAsked);
     await host.until(() => host.text().includes(W.withdrawn), 'the withdrawn sentence');
     expect(host.doc.querySelector('.card .sub.warn')?.textContent).toBe(W.withdrawn);
     expect(host.buttons()).toHaveLength(0);

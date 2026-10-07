@@ -3729,7 +3729,7 @@ function parseAcknowledgements(value, label) {
   }
   return { version: record.version, accepted: [...new Set(record.accepted)] };
 }
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 3, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 4, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
 var init_zkapi_consult_settings = __esm(() => {
   init_operation_error();
   ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
@@ -3776,6 +3776,10 @@ var init_zkapi_consult_settings = __esm(() => {
     {
       id: "local_files_risk",
       statement: "The balance is controlled by files on this computer. Losing them loses the money."
+    },
+    {
+      id: "situation_disclosure",
+      statement: 'With "Your situation, without names", the AI provider reads your actual situation, with names, places, exact dates, amounts and account numbers removed. An unusual situation could still hint at who you are.'
     }
   ];
   INTEGER_BOUNDS = {
@@ -17950,7 +17954,8 @@ var NUMBER_CONNECTORS = new Set(["and", "et", "y", "e", "en", "und"]);
 var SCALE_ARTICLES = new Set(["a", "an", "one", "un", "une", "uno", "una", "um", "uma", "een", "ein", "eine"]);
 var DECIMAL_WORDS = new Set(["point", "virgule", "coma", "virgula", "komma"]);
 var NUMBER_PARTS = [...NUMBER_WORDS.keys(), ...SCALE_WORDS.keys(), "en", "und", "e"].sort((a, b) => b.length - a.length);
-var PROSE_PATHS = new Set(["candidates[].chunks[]", "candidates[].facts[].claim", "writerVisible[]"]);
+var WRITER_ANSWER_PATH = "writerAnswer[]";
+var PROSE_PATHS = new Set(["candidates[].chunks[]", "candidates[].facts[].claim", "writerVisible[]", WRITER_ANSWER_PATH]);
 var SEP = String.fromCharCode(1);
 var MONTH_NAMES = buildMonthNames();
 function buildMonthNames() {
@@ -18093,21 +18098,154 @@ var UNIT_WORDS = new Set([
   "¥",
   "₹"
 ]);
+var RULE_UNIT_WORDS = new Set([
+  "hour",
+  "hours",
+  "hr",
+  "hrs",
+  "h",
+  "minute",
+  "minutes",
+  "min",
+  "mins",
+  "day",
+  "days",
+  "week",
+  "weeks",
+  "month",
+  "months",
+  "%",
+  "percent",
+  "mes",
+  "meses",
+  "mois",
+  "maand",
+  "maanden",
+  "monat",
+  "monate",
+  "mese",
+  "mesi",
+  "dia",
+  "dias",
+  "jour",
+  "jours",
+  "dag",
+  "dagen",
+  "tag",
+  "tage",
+  "giorno",
+  "giorni",
+  "semana",
+  "semanas",
+  "semaine",
+  "semaines",
+  "week",
+  "weken",
+  "woche",
+  "wochen",
+  "settimana",
+  "settimane",
+  "hora",
+  "horas",
+  "heure",
+  "heures",
+  "uur",
+  "stunde",
+  "stunden",
+  "ora",
+  "ore",
+  "minuto",
+  "minutos",
+  "minuten",
+  "minuti",
+  "procent",
+  "prozent",
+  "percento",
+  "porcento",
+  "pourcent"
+]);
+var FIGURE_PREFIX_SYMBOLS = new Set(["$", "€", "£", "¥", "₹", "%"]);
+var STREET_SUFFIXES = new Set([
+  "street",
+  "st",
+  "road",
+  "rd",
+  "avenue",
+  "ave",
+  "av",
+  "lane",
+  "ln",
+  "way",
+  "drive",
+  "dr",
+  "court",
+  "ct",
+  "place",
+  "pl",
+  "square",
+  "sq",
+  "boulevard",
+  "blvd",
+  "terrace",
+  "crescent",
+  "close",
+  "row",
+  "quay",
+  "gardens",
+  "rua",
+  "travessa",
+  "avenida",
+  "largo",
+  "praca",
+  "alameda",
+  "estrada",
+  "rue",
+  "chemin",
+  "allee",
+  "impasse",
+  "quai",
+  "calle",
+  "plaza",
+  "paseo",
+  "carrer",
+  "camino",
+  "via",
+  "viale",
+  "piazza",
+  "corso",
+  "vicolo",
+  "strasse",
+  "str",
+  "gasse",
+  "platz",
+  "weg",
+  "straat",
+  "laan",
+  "plein",
+  "gracht",
+  "kade",
+  "singel"
+]);
 
 // src/core/consult-settings.ts
 import { closeSync as closeSync3, constants as constants3, fstatSync, openSync as openSync3, readSync } from "node:fs";
 import { join as join22 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
+var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
+var CONSULT_LEVEL_WHEN_UNSET = "general";
+var CONSULT_LEVEL_FOR_NEW_SETUP = "unnamed";
 var DEFAULT_CONSULT_SETTINGS = Object.freeze({
   v: CONSULT_SETTINGS_VERSION,
   revision: 0,
   enabled: false,
   languages: Object.freeze([...DEFAULT_CONSULT_LANGUAGES]),
   domains: Object.freeze({ ...DEFAULT_CONSULT_DOMAIN_PACKS }),
-  strict: false
+  strict: false,
+  level: CONSULT_LEVEL_FOR_NEW_SETUP
 });
-var TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
+var REQUIRED_TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
+var OPTIONAL_TOP_LEVEL_KEYS = ["level"];
 var DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
 var OPTIONAL_DOMAIN_KEYS = ["places", "technical"];
 var LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
@@ -18119,9 +18257,12 @@ var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, a
 function parseConsultSettings(value) {
   if (!isPlainObject(value))
     return;
-  if (!hasExactKeys(value, TOP_LEVEL_KEYS))
+  if (!hasKeys(value, REQUIRED_TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS))
     return;
   const { v, revision, enabled, languages, domains, strict } = value;
+  const level = Object.hasOwn(value, "level") ? value.level : CONSULT_LEVEL_WHEN_UNSET;
+  if (typeof level !== "string" || !CONSULT_LEVELS.includes(level))
+    return;
   if (v !== CONSULT_SETTINGS_VERSION)
     return;
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
@@ -18146,7 +18287,8 @@ function parseConsultSettings(value) {
     enabled,
     languages: Object.freeze([...languages]),
     domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] : true]))),
-    strict
+    strict,
+    level
   });
 }
 function parseConsultSettingsText(text) {
@@ -18215,7 +18357,7 @@ function readConsultSettings(location = {}) {
   }
 }
 function consultGateOptionsFromSettings(settings) {
-  return { languages: [...settings.languages], domains: { ...settings.domains } };
+  return { languages: [...settings.languages], domains: { ...settings.domains }, level: settings.level };
 }
 function invalid(reason) {
   return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
@@ -18257,9 +18399,8 @@ function isPlainObject(value) {
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
-function hasExactKeys(value, keys) {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+function hasKeys(value, required, optional) {
+  return required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
 }
 function errorCode(error) {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;

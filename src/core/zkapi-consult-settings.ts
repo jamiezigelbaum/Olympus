@@ -57,11 +57,12 @@ export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
 
 /**
  * The six statements of design §Z.3 plus the per-consult cost and the absence
- * of a default limit (owner ruling, 2026-10-05), in plain words. The version
- * moves when the wording or the set changes, which voids every earlier
- * acknowledgement.
+ * of a default limit (owner ruling, 2026-10-05), and what the "Your situation,
+ * without names" level sends (owner decision 2026-10-07; version 4), in plain
+ * words. The version moves when the wording or the set changes, which voids
+ * every earlier acknowledgement.
  */
-export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 3;
+export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 4;
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   {
     id: 'per_consult_cost',
@@ -94,6 +95,10 @@ export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   {
     id: 'local_files_risk',
     statement: 'The balance is controlled by files on this computer. Losing them loses the money.',
+  },
+  {
+    id: 'situation_disclosure',
+    statement: 'With "Your situation, without names", the AI provider reads your actual situation, with names, places, exact dates, amounts and account numbers removed. An unusual situation could still hint at who you are.',
   },
 ] as const;
 
