@@ -107065,37 +107065,70 @@ var init_built_in_sniffer = __esm(() => {
 });
 
 // src/workers/answer-activity.ts
-function createAnswerActivity(onBusy) {
-  let inFlight = 0;
+function createAnswerActivity(onBusy, options = {}) {
+  const maxLeaseMs = options.maxLeaseMs ?? DEFAULT_ANSWER_LEASE_MS;
+  const now = options.now ?? Date.now;
+  const leases = new Map;
+  let nextId = 0;
+  let expired = 0;
+  const sweep = () => {
+    const at = now();
+    for (const [id, startedAt] of leases) {
+      if (at - startedAt < maxLeaseMs)
+        break;
+      leases.delete(id);
+      expired += 1;
+      try {
+        options.onExpired?.(at - startedAt);
+      } catch {}
+    }
+  };
   const activity = {
     get busy() {
-      return inFlight > 0;
+      sweep();
+      return leases.size > 0;
     },
     get inFlight() {
-      return inFlight;
+      sweep();
+      return leases.size;
+    },
+    get expired() {
+      sweep();
+      return expired;
     },
     begin() {
-      inFlight += 1;
-      if (inFlight === 1) {
+      sweep();
+      const id = nextId++;
+      leases.set(id, now());
+      if (leases.size === 1) {
         try {
           onBusy();
         } catch {}
       }
+      return () => {
+        leases.delete(id);
+      };
     },
     end() {
-      inFlight = Math.max(0, inFlight - 1);
+      const oldest = leases.keys().next();
+      if (!oldest.done)
+        leases.delete(oldest.value);
     },
     async run(work) {
-      activity.begin();
+      const release = activity.begin();
       try {
         return await work();
       } finally {
-        activity.end();
+        release();
       }
     }
   };
   return activity;
 }
+var DEFAULT_ANSWER_LEASE_MS;
+var init_answer_activity = __esm(() => {
+  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+});
 
 // src/workers/classification/privacy-profile.ts
 import { createHash as createHash56 } from "node:crypto";
@@ -107600,7 +107633,10 @@ class TierSnifferService {
   running = false;
   runningSinceMs = 0;
   overrunReported = false;
+  overrunAbortedAtMs = 0;
+  passGeneration = 0;
   waitingReason;
+  waiting;
   moveFailures = new Map;
   abort;
   lastTick;
@@ -107655,8 +107691,9 @@ class TierSnifferService {
     return {
       checkingItems,
       remainingQuestions,
-      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.`,
-      awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval"
+      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
+      awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
+      ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
   }
   status() {
@@ -107664,69 +107701,144 @@ class TierSnifferService {
       lane: this.options.lane.kind,
       modelId: this.options.lane.modelId,
       callsToday: this.budget.usedToday(),
-      ...this.lastTick ? { lastTick: this.lastTick } : {}
+      ...this.lastTick ? { lastTick: this.lastTick } : {},
+      ...this.waiting ? { waiting: { ...this.waiting } } : {}
     };
   }
   async runOnce() {
     if (this.stopped)
       return { state: "skipped_running" };
     if (this.running) {
-      const runningMs = this.clockMs() - this.runningSinceMs;
+      const nowMs = this.clockMs();
+      const runningMs = nowMs - this.runningSinceMs;
       if (runningMs >= (this.options.maxPassMs ?? DEFAULT_TIER_SNIFFER_MAX_PASS_MS) && !this.overrunReported) {
         this.overrunReported = true;
+        this.overrunAbortedAtMs = nowMs;
         this.abort?.abort();
         this.options.log?.(`Olympus tier sniffer: a pass ran ${Math.round(runningMs / 60000)} min without finishing; it was stopped.`);
+        this.setWaiting("pass_stuck");
+        return { state: "skipped_running" };
       }
-      return { state: "skipped_running" };
+      if (this.overrunAbortedAtMs === 0 || nowMs - this.overrunAbortedAtMs < (this.options.abandonAfterMs ?? DEFAULT_TIER_SNIFFER_ABANDON_MS)) {
+        if (this.overrunAbortedAtMs === 0)
+          this.setWaiting("pass_running");
+        return { state: "skipped_running" };
+      }
+      this.options.log?.("Olympus tier sniffer: a stopped pass did not end; it was abandoned and a new pass starts.");
+      this.running = false;
     }
+    const generation = ++this.passGeneration;
     this.running = true;
     this.runningSinceMs = this.clockMs();
     this.overrunReported = false;
-    this.abort = new AbortController;
+    this.overrunAbortedAtMs = 0;
+    const abort = new AbortController;
+    this.abort = abort;
+    let tick;
     try {
-      const tick = await this.tick(this.abort.signal);
-      this.lastTick = tick;
-      this.reportWaiting(tick);
-      return tick;
+      tick = await this.tick(abort.signal);
     } catch (error2) {
-      const tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
-      this.lastTick = tick;
-      this.reportWaiting(tick);
-      return tick;
-    } finally {
-      this.running = false;
-      this.abort = undefined;
-      if (this.stopped)
-        this.closeLedgers();
+      tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
     }
+    if (generation !== this.passGeneration) {
+      abort.abort();
+      return tick;
+    }
+    const overran = this.overrunAbortedAtMs !== 0;
+    this.running = false;
+    this.abort = undefined;
+    this.lastTick = tick;
+    this.reportWaiting(tick, overran);
+    if (this.stopped)
+      this.closeLedgers();
+    return tick;
   }
   clockMs() {
     return (this.options.now?.() ?? new Date).getTime();
   }
-  reportWaiting(tick) {
+  reportWaiting(tick, overran = false) {
     let reason;
     if (tick.state === "model_unavailable")
-      reason = "the private model is not available";
+      reason = "no_model";
     else if (tick.state === "awaiting_owner_approval")
-      reason = "waiting for the owner to approve the classifier";
+      reason = "awaiting_owner_approval";
     else if (tick.state === "failed")
-      reason = `the pass failed (${tick.error})`;
+      reason = "failed";
     else if (tick.state === "ran" && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
-      reason = stop === "yield" || stop === "preempted" ? "yielding to answers in progress or a resting private model" : stop === "daily_budget" ? "the daily call budget is used up" : stop === "transport_failures" ? "the private model is not answering" : undefined;
+      reason = stop === "yield" || stop === "preempted" || stop === "aborted" ? overran ? "pass_stuck" : this.answering() ? "yielding_to_answers" : this.breakerOpen() ? "breaker_open" : "yielding_to_answers" : stop === "daily_budget" ? "daily_budget" : stop === "transport_failures" ? "model_not_answering" : undefined;
     }
-    const key = reason ?? (tick.state === "ran" && tick.report.calls > 0 ? "asking" : this.waitingReason);
-    if (key === this.waitingReason)
+    if (reason) {
+      this.setWaiting(reason, tick);
       return;
+    }
     const previous = this.waitingReason;
-    this.waitingReason = key;
-    if (key === "asking") {
-      if (previous && previous !== "asking")
-        this.options.log?.("Olympus tier sniffer: asking again.");
+    this.waiting = undefined;
+    this.waitingReason = "asking";
+    if (tick.state === "ran" && tick.report.calls > 0 && previous && previous !== "asking") {
+      this.options.log?.("Olympus tier sniffer: asking again.");
+    }
+  }
+  setWaiting(reason, tick) {
+    const label = this.waitLabel(reason, tick);
+    if (!this.waiting || this.waiting.reason !== reason) {
+      this.waiting = { reason, label, since: new Date(this.clockMs()).toISOString() };
+    } else {
+      this.waiting = { ...this.waiting, label };
+    }
+    if (reason === this.waitingReason)
+      return;
+    this.waitingReason = reason;
+    if (reason === "pass_running" || reason === "pass_stuck")
+      return;
+    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}.`);
+  }
+  waitLabel(reason, tick) {
+    switch (reason) {
+      case "yielding_to_answers":
+        return "yielding to answers in progress";
+      case "breaker_open":
+        return "the private model is resting after failures";
+      case "pass_running":
+        return "a pass is still running";
+      case "pass_stuck":
+        return "a pass ran too long and was stopped";
+      case "awaiting_owner_approval":
+        return "waiting for the owner to approve the classifier";
+      case "no_model": {
+        const state = this.modelState();
+        return `the private model is not available${state ? ` (${state})` : ""}`;
+      }
+      case "daily_budget":
+        return "the daily call budget is used up";
+      case "model_not_answering":
+        return "the private model is not answering";
+      case "failed":
+        return `the pass failed (${tick?.state === "failed" ? tick.error : "unknown"})`;
+    }
+  }
+  breakerOpen() {
+    try {
+      return this.options.breakerOpen?.() ?? false;
+    } catch {
+      return false;
+    }
+  }
+  modelState() {
+    try {
+      return this.options.modelState?.();
+    } catch {
       return;
     }
-    if (reason)
-      this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${reason}.`);
+  }
+  yieldNow() {
+    if (this.answering() || this.breakerOpen())
+      return true;
+    try {
+      return this.options.shouldYield?.() ?? false;
+    } catch {
+      return false;
+    }
   }
   ledgerPaths() {
     const paths = new Set;
@@ -107824,7 +107936,7 @@ class TierSnifferService {
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
-      ...this.options.shouldYield ? { shouldYield: this.options.shouldYield } : {},
+      shouldYield: () => this.yieldNow(),
       signal
     });
     if (report.calls > 0 || report.verdictsApplied > 0) {
@@ -108003,7 +108115,7 @@ function positiveInteger7(value, fallback, minimum) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_classification_ledger();
   init_tier_move();
@@ -108017,6 +108129,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_rules_sweep();
   init_tier_ledger();
   DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
+  DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
   DEFAULT_STALE_MOVE_MS = 60 * 60000;
 });
 
@@ -116757,14 +116870,14 @@ class PrivateAnswerJobs {
     const { abort } = analysis;
     analysis.state = "running";
     analysis.startedAt = this.now();
-    this.beginActivity();
+    const endActivity = this.beginActivity();
     let freed = false;
     const free = () => {
       if (freed)
         return;
       freed = true;
       clearTimeout(deadlineTimer);
-      this.endActivity();
+      endActivity();
       if (this.running === analysis)
         this.running = undefined;
       this.pump();
@@ -116866,7 +116979,7 @@ class PrivateAnswerJobs {
       job.analysis.claimedAt ??= claimedAt;
     const timing = { outcome: "failed", reason: "error", queuedMs: 0, calls: [] };
     let settled = false;
-    this.beginActivity();
+    const endActivity = this.beginActivity();
     const settle = (outcome, reason) => {
       if (settled)
         return;
@@ -116879,7 +116992,7 @@ class PrivateAnswerJobs {
       if (reason)
         timing.reason = reason;
       timing.totalMs = this.now() - claimedAt;
-      this.endActivity();
+      endActivity();
       this.logTiming(timing);
       claimSettled();
     };
@@ -116988,14 +117101,26 @@ class PrivateAnswerJobs {
     return detail === "full" ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }
   beginActivity() {
+    let release;
     try {
-      this.options.activity?.begin();
-    } catch {}
-  }
-  endActivity() {
-    try {
-      this.options.activity?.end();
-    } catch {}
+      release = this.options.activity?.begin();
+    } catch {
+      return () => {
+        return;
+      };
+    }
+    let ended = false;
+    return () => {
+      if (ended)
+        return;
+      ended = true;
+      try {
+        if (typeof release === "function")
+          release();
+        else
+          this.options.activity?.end();
+      } catch {}
+    };
   }
   logTiming(timing) {
     try {
@@ -119047,9 +119172,17 @@ function createWorkerSharedBuiltInModel(env) {
   };
   if (base.status().state !== "not_started")
     model.prepare();
+  let lastRetryMs = 0;
   const startIfIdle = () => {
-    if (base.status().state === "not_started")
+    const status = base.status();
+    if (status.state === "not_started") {
       model.prepare();
+      return;
+    }
+    if (prepared && status.state === "failed" && status.failure?.reason === "runtime_load_failed" && Date.now() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
+      lastRetryMs = Date.now();
+      model.prepare();
+    }
   };
   return { model, available: () => prepared && installedOnDisk(), startIfIdle };
 }
@@ -119452,7 +119585,9 @@ async function main() {
   });
   const secureAnalystPoolState = new SecureAnalystPoolState;
   let preemptTierSniffer;
-  const answerActivity = createAnswerActivity(() => preemptTierSniffer?.());
+  const answerActivity = createAnswerActivity(() => preemptTierSniffer?.(), {
+    onExpired: (openMs) => console.warn(`Olympus answer activity: an answer still open after ${Math.round(openMs / 60000)} min stopped holding background work.`)
+  });
   let tierSnifferBacklog;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED");
@@ -120411,7 +120546,8 @@ async function main() {
         checking_items: backlog.checkingItems,
         remaining_questions: backlog.remainingQuestions,
         summary: backlog.summary,
-        awaiting_owner_approval: backlog.awaitingOwnerApproval
+        awaiting_owner_approval: backlog.awaitingOwnerApproval,
+        ...backlog.waiting ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since } : {}
       } : undefined;
     },
     tierMigration: () => tierMigrationStatusSummary(resolveTierMigrationPaths(process.env, resolveEmbeddingLedgerPath(process.env)).statePath),
@@ -121297,14 +121433,18 @@ async function main() {
     model: snifferModel,
     stores: () => connectorStores,
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
-    ...snifferRuntime.source === "built_in" ? { modelAvailable: () => snifferRuntime.builtIn.available(), startModel: () => snifferRuntime.builtIn.startIfIdle?.() } : {},
+    ...snifferRuntime.source === "built_in" ? {
+      modelAvailable: () => snifferRuntime.builtIn.available(),
+      startModel: () => snifferRuntime.builtIn.startIfIdle?.(),
+      modelState: () => workerBuiltInModel?.model.status().state
+    } : {},
     ownerContext: privacyOwnerWords,
     budgetStatePath: join77(dirname54(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
     answersInFlight: () => answerActivity.busy,
-    shouldYield: () => answerActivity.busy || secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
+    breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),
     ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},
     autoMoves: {
@@ -121842,7 +121982,7 @@ function mergeConnectorStores(stores) {
   }
   return [...byCorpusId.values()];
 }
-var INGESTION_DISPOSITION_SOURCES, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES;
+var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES;
 var init_server5 = __esm(async () => {
   init_package_root();
   init_messaging_capture();
@@ -121920,6 +122060,7 @@ var init_server5 = __esm(async () => {
   init_unpaired_sources();
   init_installed_tier_classification();
   init_built_in_sniffer();
+  init_answer_activity();
   init_privacy_profile();
   init_sniffer_service();
   init_classification_ledger();
@@ -121958,6 +122099,7 @@ var init_server5 = __esm(async () => {
       ]
     }
   ];
+  BUILT_IN_MODEL_RETRY_MS = 10 * 60000;
   CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
     [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
     [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }]

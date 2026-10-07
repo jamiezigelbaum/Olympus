@@ -267,6 +267,10 @@ export interface SourceIndexTierClassificationStatus {
   remaining_questions: number;
   summary: string;
   awaiting_owner_approval: boolean;
+  /** Why the sniffer asked nothing while questions wait (content-free code, label, since). */
+  waiting_reason?: string;
+  waiting_label?: string;
+  waiting_since?: string;
 }
 
 /**

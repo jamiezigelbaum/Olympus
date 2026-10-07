@@ -87,10 +87,21 @@ export interface TierSnifferServiceOptions {
   intervalMs?: number;
   /** A pass still running after this long is aborted at the next tick. Default DEFAULT_TIER_SNIFFER_MAX_PASS_MS. */
   maxPassMs?: number;
+  /**
+   * A pass aborted for running too long that still has not settled this long
+   * after its abort (something ignores the signal) is abandoned: its result
+   * is dropped and the next tick runs a fresh pass. Default
+   * DEFAULT_TIER_SNIFFER_ABANDON_MS.
+   */
+  abandonAfterMs?: number;
   maxCallsPerPass?: number;
   maxCallsPerDay?: number;
-  /** True while an answer needs the private pool, or its breaker is open. */
+  /** Any other reason to yield the private pool (the pass also yields to `answersInFlight` and `breakerOpen`). */
   shouldYield?: () => boolean;
+  /** True while the private pool's breaker for the sniffer's model is open (it rests after failures). */
+  breakerOpen?: () => boolean;
+  /** The model's install state when it is not available (content-free, e.g. `failed`), for the waiting reason. */
+  modelState?: () => string | undefined;
   /**
    * True while answers are in flight. The pass's automatic tier moves
    * (which re-embed items on this computer) wait for them as well, so an
@@ -148,6 +159,8 @@ export interface TierSnifferServiceOptions {
 export const DEFAULT_AUTO_MOVES_PER_PASS = 25;
 /** A pass running longer than this is aborted at the next tick. */
 export const DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60_000;
+/** An overrun pass still unsettled this long after its abort is abandoned. */
+export const DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60_000;
 export const DEFAULT_STALE_MOVE_MS = 60 * 60_000;
 export const BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = 'built-in local model, nothing leaves the Mac (owner default 2026-10-01)';
 
@@ -170,6 +183,30 @@ export interface TierClassificationBacklog {
   summary: string;
   /** The sniffer is waiting for the owner to approve its model and prompt. */
   awaitingOwnerApproval: boolean;
+  /** Why the last tick asked nothing while questions wait (absent while asking or idle). */
+  waiting?: TierSnifferWaiting;
+}
+
+/**
+ * Why the sniffer asked nothing while questions wait. Content-free: a code
+ * and a plain sentence, never an item.
+ */
+export type TierSnifferWaitReason =
+  | 'yielding_to_answers'
+  | 'breaker_open'
+  | 'pass_running'
+  | 'pass_stuck'
+  | 'awaiting_owner_approval'
+  | 'no_model'
+  | 'daily_budget'
+  | 'model_not_answering'
+  | 'failed';
+
+export interface TierSnifferWaiting {
+  reason: TierSnifferWaitReason;
+  label: string;
+  /** When this reason was first seen (ISO). */
+  since: string;
 }
 
 export type TierSnifferTick =
@@ -186,8 +223,13 @@ export class TierSnifferService {
   private running = false;
   private runningSinceMs = 0;
   private overrunReported = false;
+  /** When the running pass was aborted for overrunning (0: not aborted). */
+  private overrunAbortedAtMs = 0;
+  /** Bumped when a pass starts or is abandoned: an abandoned pass's late result is dropped. */
+  private passGeneration = 0;
   /** The last reported reason a tick asked nothing (or 'asking'). */
   private waitingReason: string | undefined;
+  private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
   private readonly moveFailures = new Map<string, number>();
   private abort: AbortController | undefined;
@@ -261,17 +303,20 @@ export class TierSnifferService {
       remainingQuestions,
       summary: checkingItems === 0
         ? 'No items waiting for classification.'
-        : `Checking ${checkingItems} item${checkingItems === 1 ? '' : 's'}, about ${remainingQuestions} question${remainingQuestions === 1 ? '' : 's'} remaining.`,
+        : `Checking ${checkingItems} item${checkingItems === 1 ? '' : 's'}, about ${remainingQuestions} question${remainingQuestions === 1 ? '' : 's'} remaining.`
+          + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ''),
       awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
+      ...(checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}),
     };
   }
 
-  status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick } {
+  status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting } {
     return {
       lane: this.options.lane.kind,
       modelId: this.options.lane.modelId,
       callsToday: this.budget.usedToday(),
       ...(this.lastTick ? { lastTick: this.lastTick } : {}),
+      ...(this.waiting ? { waiting: { ...this.waiting } } : {}),
     };
   }
 
@@ -280,35 +325,53 @@ export class TierSnifferService {
     if (this.running) {
       // A pass that never settles would hold every later tick off for good
       // (2026-10-05: the queue sat untouched for two days with no log line).
-      // Past the bound it is aborted (its model calls are cancelled) and said.
-      const runningMs = this.clockMs() - this.runningSinceMs;
+      // Past the bound it is aborted (its model calls are cancelled) and said;
+      // if it still has not settled a while after that (something ignores
+      // the abort), it is abandoned and this tick runs a fresh pass.
+      const nowMs = this.clockMs();
+      const runningMs = nowMs - this.runningSinceMs;
       if (runningMs >= (this.options.maxPassMs ?? DEFAULT_TIER_SNIFFER_MAX_PASS_MS) && !this.overrunReported) {
         this.overrunReported = true;
+        this.overrunAbortedAtMs = nowMs;
         this.abort?.abort();
         this.options.log?.(`Olympus tier sniffer: a pass ran ${Math.round(runningMs / 60_000)} min without finishing; it was stopped.`);
+        this.setWaiting('pass_stuck');
+        return { state: 'skipped_running' };
       }
-      return { state: 'skipped_running' };
+      if (this.overrunAbortedAtMs === 0
+        || nowMs - this.overrunAbortedAtMs < (this.options.abandonAfterMs ?? DEFAULT_TIER_SNIFFER_ABANDON_MS)) {
+        if (this.overrunAbortedAtMs === 0) this.setWaiting('pass_running');
+        return { state: 'skipped_running' };
+      }
+      this.options.log?.('Olympus tier sniffer: a stopped pass did not end; it was abandoned and a new pass starts.');
+      this.running = false;
     }
+    const generation = ++this.passGeneration;
     this.running = true;
     this.runningSinceMs = this.clockMs();
     this.overrunReported = false;
-    this.abort = new AbortController();
+    this.overrunAbortedAtMs = 0;
+    const abort = new AbortController();
+    this.abort = abort;
+    let tick: TierSnifferTick;
     try {
-      const tick = await this.tick(this.abort.signal);
-      this.lastTick = tick;
-      this.reportWaiting(tick);
-      return tick;
+      tick = await this.tick(abort.signal);
     } catch (error) {
       // Content-free: the class of failure only. Items stay pending.
-      const tick: TierSnifferTick = { state: 'failed', error: error instanceof Error ? error.name : 'unknown' };
-      this.lastTick = tick;
-      this.reportWaiting(tick);
-      return tick;
-    } finally {
-      this.running = false;
-      this.abort = undefined;
-      if (this.stopped) this.closeLedgers();
+      tick = { state: 'failed', error: error instanceof Error ? error.name : 'unknown' };
     }
+    // An abandoned pass that ends late changes nothing: a newer pass owns the state.
+    if (generation !== this.passGeneration) {
+      abort.abort();
+      return tick;
+    }
+    const overran = this.overrunAbortedAtMs !== 0;
+    this.running = false;
+    this.abort = undefined;
+    this.lastTick = tick;
+    this.reportWaiting(tick, overran);
+    if (this.stopped) this.closeLedgers();
+    return tick;
   }
 
   private clockMs(): number {
@@ -320,28 +383,92 @@ export class TierSnifferService {
    * reason changes (and once when asking resumes), so a stalled queue is never
    * silent. Content-free: a state name, never an item.
    */
-  private reportWaiting(tick: TierSnifferTick): void {
-    let reason: string | undefined;
-    if (tick.state === 'model_unavailable') reason = 'the private model is not available';
-    else if (tick.state === 'awaiting_owner_approval') reason = 'waiting for the owner to approve the classifier';
-    else if (tick.state === 'failed') reason = `the pass failed (${tick.error})`;
+  private reportWaiting(tick: TierSnifferTick, overran = false): void {
+    let reason: TierSnifferWaitReason | undefined;
+    if (tick.state === 'model_unavailable') reason = 'no_model';
+    else if (tick.state === 'awaiting_owner_approval') reason = 'awaiting_owner_approval';
+    else if (tick.state === 'failed') reason = 'failed';
     else if (tick.state === 'ran' && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
-      reason = stop === 'yield' || stop === 'preempted'
-        ? 'yielding to answers in progress or a resting private model'
-        : stop === 'daily_budget' ? 'the daily call budget is used up'
-          : stop === 'transport_failures' ? 'the private model is not answering'
+      reason = stop === 'yield' || stop === 'preempted' || stop === 'aborted'
+        ? overran ? 'pass_stuck'
+          : this.answering() ? 'yielding_to_answers'
+            : this.breakerOpen() ? 'breaker_open'
+              : 'yielding_to_answers'
+        : stop === 'daily_budget' ? 'daily_budget'
+          : stop === 'transport_failures' ? 'model_not_answering'
             : undefined;
     }
-    const key = reason ?? (tick.state === 'ran' && tick.report.calls > 0 ? 'asking' : this.waitingReason);
-    if (key === this.waitingReason) return;
-    const previous = this.waitingReason;
-    this.waitingReason = key;
-    if (key === 'asking') {
-      if (previous && previous !== 'asking') this.options.log?.('Olympus tier sniffer: asking again.');
+    if (reason) {
+      this.setWaiting(reason, tick);
       return;
     }
-    if (reason) this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${reason}.`);
+    // Any other finished pass (it asked, the queue is empty, or nothing was
+    // left to ask this tick) clears the reason: a stale one never lingers.
+    const previous = this.waitingReason;
+    this.waiting = undefined;
+    this.waitingReason = 'asking';
+    if (tick.state === 'ran' && tick.report.calls > 0 && previous && previous !== 'asking') {
+      this.options.log?.('Olympus tier sniffer: asking again.');
+    }
+  }
+
+  private setWaiting(reason: TierSnifferWaitReason, tick?: TierSnifferTick): void {
+    const label = this.waitLabel(reason, tick);
+    if (!this.waiting || this.waiting.reason !== reason) {
+      this.waiting = { reason, label, since: new Date(this.clockMs()).toISOString() };
+    } else {
+      this.waiting = { ...this.waiting, label };
+    }
+    if (reason === this.waitingReason) return;
+    this.waitingReason = reason;
+    // A pass in progress is normal; only an overrun or a stop is worth a line
+    // (pass_stuck logs its own).
+    if (reason === 'pass_running' || reason === 'pass_stuck') return;
+    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}.`);
+  }
+
+  private waitLabel(reason: TierSnifferWaitReason, tick?: TierSnifferTick): string {
+    switch (reason) {
+      case 'yielding_to_answers': return 'yielding to answers in progress';
+      case 'breaker_open': return 'the private model is resting after failures';
+      case 'pass_running': return 'a pass is still running';
+      case 'pass_stuck': return 'a pass ran too long and was stopped';
+      case 'awaiting_owner_approval': return 'waiting for the owner to approve the classifier';
+      case 'no_model': {
+        const state = this.modelState();
+        return `the private model is not available${state ? ` (${state})` : ''}`;
+      }
+      case 'daily_budget': return 'the daily call budget is used up';
+      case 'model_not_answering': return 'the private model is not answering';
+      case 'failed': return `the pass failed (${tick?.state === 'failed' ? tick.error : 'unknown'})`;
+    }
+  }
+
+  private breakerOpen(): boolean {
+    try {
+      return this.options.breakerOpen?.() ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  private modelState(): string | undefined {
+    try {
+      return this.options.modelState?.();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The pass yields while an answer is in flight, the breaker is open, or the caller says so. */
+  private yieldNow(): boolean {
+    if (this.answering() || this.breakerOpen()) return true;
+    try {
+      return this.options.shouldYield?.() ?? false;
+    } catch {
+      return false;
+    }
   }
 
   /** Every existing ledger behind the stores, each once: bound set ledgers and stores' own. */
@@ -461,7 +588,7 @@ export class TierSnifferService {
       ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
-      ...(this.options.shouldYield ? { shouldYield: this.options.shouldYield } : {}),
+      shouldYield: () => this.yieldNow(),
       signal,
     });
     if (report.calls > 0 || report.verdictsApplied > 0) {
