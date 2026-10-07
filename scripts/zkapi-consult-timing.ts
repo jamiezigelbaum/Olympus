@@ -1,6 +1,8 @@
-// Developer harness for stage M1 of the consult design: send N real zkAPI
-// consults, one at a time, through the existing transport and print the
-// per-stage timings so the owner can measure the route live.
+// Developer harness for stages M1 and C2 of the consult design: send N real
+// zkAPI consults, one at a time, through the session transport (open, send,
+// finished) and print the per-stage timings, the time until the reply was in
+// the caller's hands and the time until the session finished, so the owner can
+// measure the route live.
 //
 //   bun scripts/zkapi-consult-timing.ts [--n 10] [--question-set <path>]
 //     [--model <id>] [--state <path>] [--sovereignty <path>] [--out <path>]
@@ -21,12 +23,14 @@ import { writeFileSync } from 'node:fs';
 import {
   defaultZkapiStatePath,
   formatZkapiStageTable,
-  sendZkapiConsult,
+  openZkapiConsultSession,
+  validZkapiConsultQuestion,
   ZKAPI_STAGE_LABELS,
   zkapiConsultReadiness,
   type ZkapiConsultReadiness,
   type ZkapiConsultResult,
   type ZkapiConsultTransportOptions,
+  type ZkapiOpenSessionResult,
   type ZkapiStageTimings,
 } from '../src/core/consult-transport-zkapi.ts';
 import { resolveSecretRefValue } from '../src/core/secret-store.ts';
@@ -97,12 +101,54 @@ export interface TimingRun {
   fence: string;
   reservedUsd: number | null;
   elapsedMs: number;
+  /** Wall clock from before `open` until the reply was in the caller's hands; null when no reply came. */
+  toReplyMs: number | null;
+  /** Wall clock from before `open` until `finished` resolved. */
+  toFinishedMs: number;
   stageMs: ZkapiStageTimings;
+}
+
+/** One consult through the session API, timed from the caller's side. */
+export interface ConsultTiming {
+  result: ZkapiConsultResult;
+  toReplyMs: number | null;
+  toFinishedMs: number;
+}
+
+/**
+ * open, send, finished: the reply is handed over before settlement, so the
+ * caller-visible time to reply is measured separately from the whole session.
+ */
+export async function sessionConsult(
+  question: string,
+  options: ZkapiConsultTransportOptions,
+  deps: { open: (options: ZkapiConsultTransportOptions) => Promise<ZkapiOpenSessionResult>; now: () => number } = { open: openZkapiConsultSession, now: () => Date.now() },
+): Promise<ConsultTiming> {
+  const started = deps.now();
+  const opened = await deps.open(options);
+  if (!opened.ok) return { result: opened, toReplyMs: null, toFinishedMs: deps.now() - started };
+  const reply = await opened.session.send(question);
+  if (reply.kind === 'failed' && opened.session.state === 'ready') {
+    // The send was refused before it touched the session (an invalid
+    // question): cancel, wait for teardown, and report the refusal.
+    opened.session.cancel();
+    await opened.session.finished;
+    return { result: { ok: false, error: reply.error }, toReplyMs: null, toFinishedMs: deps.now() - started };
+  }
+  const toReplyMs = reply.kind === 'reply' ? deps.now() - started : null;
+  const result = await opened.session.finished;
+  return { result, toReplyMs, toFinishedMs: deps.now() - started };
 }
 
 export interface StageSummary {
   stage: string;
   label: string;
+  runs: number;
+  medianMs: number;
+  p95Ms: number;
+}
+
+export interface SpanSummary {
   runs: number;
   medianMs: number;
   p95Ms: number;
@@ -114,7 +160,15 @@ export interface TimingSummary {
   failed: number;
   failuresByCode: Record<string, number>;
   totalWorstCaseReservedUsd: number;
+  /** Caller-side time to reply over the successful runs; null when none replied. */
+  toReply: SpanSummary | null;
+  /** Caller-side time to finished over the successful runs; null when none succeeded. */
+  toFinished: SpanSummary | null;
   stages: StageSummary[];
+}
+
+function span(values: readonly number[]): SpanSummary | null {
+  return values.length === 0 ? null : { runs: values.length, medianMs: median(values), p95Ms: percentile(values, 0.95) };
 }
 
 export function median(values: readonly number[]): number {
@@ -145,11 +199,14 @@ export function summarizeRuns(runs: readonly TimingRun[]): TimingSummary {
     failed: runs.length - good.length,
     failuresByCode,
     totalWorstCaseReservedUsd: runs.reduce((sum, run) => sum + (run.reservedUsd ?? 0), 0),
+    toReply: span(good.map((run) => run.toReplyMs).filter((value): value is number => value !== null)),
+    toFinished: span(good.map((run) => run.toFinishedMs)),
     stages,
   };
 }
 
-export function toTimingRun(run: number, result: ZkapiConsultResult): TimingRun {
+export function toTimingRun(run: number, timing: ConsultTiming): TimingRun {
+  const { result, toReplyMs, toFinishedMs } = timing;
   if (result.ok) {
     const receipt = result.receipt;
     return {
@@ -162,6 +219,8 @@ export function toTimingRun(run: number, result: ZkapiConsultResult): TimingRun 
       fence: receipt.fence,
       reservedUsd: receipt.reservedUsd ?? null,
       elapsedMs: result.elapsedMs,
+      toReplyMs,
+      toFinishedMs,
       stageMs: receipt.stageMs ?? {},
     };
   }
@@ -177,6 +236,8 @@ export function toTimingRun(run: number, result: ZkapiConsultResult): TimingRun 
     fence: error.receipt?.fence ?? 'n/a',
     reservedUsd: error.receipt?.reservedUsd ?? null,
     elapsedMs: error.receipt?.stageMs?.totalMs ?? error.stageMs?.totalMs ?? 0,
+    toReplyMs,
+    toFinishedMs,
     stageMs: error.receipt?.stageMs ?? error.stageMs ?? {},
   };
 }
@@ -193,6 +254,8 @@ export function formatRow(row: TimingRun): string {
     `fence=${row.fence}`,
     `reserved=${row.reservedUsd === null ? 'n/a' : `$${row.reservedUsd}`}`,
     `elapsed=${row.elapsedMs}ms`,
+    `reply=${row.toReplyMs === null ? 'n/a' : `${row.toReplyMs}ms`}`,
+    `finished=${row.toFinishedMs}ms`,
   ].join(' | ');
   const table = formatZkapiStageTable(row.stageMs).split('\n').map((line) => `    ${line}`).join('\n');
   return `${head}\n${table}`;
@@ -202,6 +265,11 @@ export function formatSummary(summary: TimingSummary): string {
   const lines = [`Runs: ${summary.runs} (${summary.succeeded} ok, ${summary.failed} failed). Total worst-case reservation: $${summary.totalWorstCaseReservedUsd}.`];
   const codes = Object.entries(summary.failuresByCode);
   lines.push(codes.length ? `Failures by code: ${codes.map(([code, count]) => `${code}=${count}`).join(', ')}` : 'Failures by code: none');
+  const spanLine = (label: string, value: SpanSummary | null): string => (
+    value ? `${label}: median ${value.medianMs} ms, p95 ${value.p95Ms} ms (${value.runs} run(s))` : `${label}: no run`
+  );
+  lines.push(spanLine('Time to reply (caller side)', summary.toReply));
+  lines.push(spanLine('Time to finished (caller side)', summary.toFinished));
   if (summary.stages.length === 0) {
     lines.push('No successful runs, so no per-stage medians.');
   } else {
@@ -217,7 +285,7 @@ export function formatSummary(summary: TimingSummary): string {
 
 export interface TimingDeps {
   readiness: (options: Omit<ZkapiConsultTransportOptions, 'fetchImpl' | 'inspectListener'> & { apiKeyPresent?: boolean }) => Promise<ZkapiConsultReadiness>;
-  send: (question: string, options: ZkapiConsultTransportOptions) => Promise<ZkapiConsultResult>;
+  consult: (question: string, options: ZkapiConsultTransportOptions) => Promise<ConsultTiming>;
   log: (line: string) => void;
   error: (line: string) => void;
   writeResults: (path: string, json: string) => void;
@@ -256,8 +324,9 @@ export async function runTiming(plan: TimingPlan, deps: TimingDeps): Promise<Tim
     }
     const question = plan.questions[i % plan.questions.length]!;
     asked.push(question);
-    const result = await deps.send(question, plan.transport);
-    const row = toTimingRun(i + 1, result);
+    const timing = await deps.consult(question, plan.transport);
+    const { result } = timing;
+    const row = toTimingRun(i + 1, timing);
     if (!row.ok && !result.ok) row.routeLabel = result.error.message;
     runs.push(row);
     deps.log(formatRow(row));
@@ -291,6 +360,10 @@ export function loadQuestions(path: string | undefined, readText: (path: string)
     : text.split('\n').map((line) => line.trim()).filter(Boolean);
   if (!Array.isArray(list) || list.length === 0 || list.some((item) => typeof item !== 'string' || !item.trim())) {
     throw new Error('The question set must be a non-empty list of non-empty strings (JSON array, or one question per line).');
+  }
+  const invalid = (list as string[]).findIndex((item) => !validZkapiConsultQuestion(item));
+  if (invalid >= 0) {
+    throw new Error(`Question ${invalid + 1} is not a valid consult question (at most 8 KiB, no control characters other than tab or newline).`);
   }
   return list as string[];
 }
@@ -339,7 +412,7 @@ async function main(argv: string[]): Promise<number> {
     },
   }, {
     readiness: zkapiConsultReadiness,
-    send: sendZkapiConsult,
+    consult: sessionConsult,
     log: (line) => console.log(line),
     error: (line) => console.error(line),
     writeResults: (path, json) => writeFileSync(path, json, { mode: 0o600 }),

@@ -16065,9 +16065,11 @@ var ZKAPI_STAGE_LABELS = [
   ["daemonReadyMs", "daemon start to ready"],
   ["daemonVerifyMs", "daemon verification"],
   ["policyWarmMs", "models/policy warm"],
+  ["warmTotalMs", "warm total"],
   ["reservationMs", "reservation"],
   ["dispatchToFirstByteMs", "dispatch to first byte"],
   ["firstByteToCompletionMs", "first byte to completion"],
+  ["replyHandedOverAtMs", "reply handed over at"],
   ["correlationWaitMs", "request correlation wait"],
   ["settlementWaitMs", "settlement wait"],
   ["torStopMs", "Tor stop"],
@@ -16090,10 +16092,10 @@ function zkapiRouteLabel(receipt) {
     return "payment privacy only: the daemon still reached the network after Tor stopped (Tor bypass observed)";
   }
   const confined = receipt.confinementSelfTest === "passed" ? receipt.confinement : "none";
-  if (confined === "loopback_filtered" && receipt.freshTorClient && receipt.settlement !== "not_confirmed") {
+  if (confined === "loopback_filtered" && receipt.freshTorClient && receipt.settlement !== "not_confirmed" && receipt.settlement !== "pending") {
     return "anonymous route (payment, key and network identity hidden)";
   }
-  const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : "";
+  const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : receipt.settlement === "pending" ? "; lease settlement pending" : "";
   return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
 }
 function zkapiMoneyStatus(settings, now) {
@@ -16488,6 +16490,7 @@ async function zkapiConsultReadiness(options) {
     blockers
   };
 }
+var SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomplete"]);
 
 // src/core/consult-gate.ts
 import { createHash as createHash7 } from "node:crypto";

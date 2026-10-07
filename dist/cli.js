@@ -55259,10 +55259,10 @@ function zkapiRouteLabel(receipt) {
     return "payment privacy only: the daemon still reached the network after Tor stopped (Tor bypass observed)";
   }
   const confined = receipt.confinementSelfTest === "passed" ? receipt.confinement : "none";
-  if (confined === "loopback_filtered" && receipt.freshTorClient && receipt.settlement !== "not_confirmed") {
+  if (confined === "loopback_filtered" && receipt.freshTorClient && receipt.settlement !== "not_confirmed" && receipt.settlement !== "pending") {
     return "anonymous route (payment, key and network identity hidden)";
   }
-  const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : "";
+  const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : receipt.settlement === "pending" ? "; lease settlement pending" : "";
   return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
 }
 function zkapiMoneyStatus(settings, now) {
@@ -55592,7 +55592,7 @@ const resolver = () => new Promise((resolve) => {
   const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
   process.stdout.write(JSON.stringify(result));
 })();
-`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT;
+`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, SESSION_OWNED_FAILURES;
 var init_consult_transport_zkapi = __esm(() => {
   init_atomic_file();
   init_file_lease();
@@ -55619,9 +55619,11 @@ var init_consult_transport_zkapi = __esm(() => {
     ["daemonReadyMs", "daemon start to ready"],
     ["daemonVerifyMs", "daemon verification"],
     ["policyWarmMs", "models/policy warm"],
+    ["warmTotalMs", "warm total"],
     ["reservationMs", "reservation"],
     ["dispatchToFirstByteMs", "dispatch to first byte"],
     ["firstByteToCompletionMs", "first byte to completion"],
+    ["replyHandedOverAtMs", "reply handed over at"],
     ["correlationWaitMs", "request correlation wait"],
     ["settlementWaitMs", "settlement wait"],
     ["torStopMs", "Tor stop"],
@@ -55692,6 +55694,7 @@ process.stdin.on('data', (chunk) => { received += chunk; if (!child && !cleaning
 process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
+  SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomplete"]);
 });
 
 // src/core/consult-gate.ts
