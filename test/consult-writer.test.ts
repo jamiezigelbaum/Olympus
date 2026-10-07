@@ -96,14 +96,14 @@ describe('writer prompt', () => {
     for (const removed of [/names of people, companies, products, projects/, /employers/, /places smaller than a country/, /country only when the answer depends on it/,
       /exact dates and years/, /exact money amounts: use bands or relative terms/, /about two months' rent/, /account, reference, phone and ID numbers/,
       /file and document titles/, /anything quoted word for word/]) expect(rules).toMatch(removed);
-    expect(rules).toMatch(/gave 45 days' notice where the lease requires 60/);
+    expect(rules).toMatch(/gave 45 days' notice where the lease requires 60 days/);
     expect(rules).toMatch(/health, legal, financial and relationship facts/);
     expect(rules).toMatch(/Leave out every detail the answer does not need/);
     expect(rules).toMatch(/Never keep a job, a rare condition and a region together unless the answer needs all three/);
     expect(rules).toMatch(/at most 25 words: at most one short sentence of situation, then a short question of at most twelve content words/);
     expect(rules).toMatch(/\{"questions": null\}/);
     // The owner's example fits the form and the parser as written.
-    const example = 'A tenant gave 45 days notice where the lease requires 60. Can the landlord keep a deposit of about two months rent?';
+    const example = 'A tenant gave 45 days notice where the lease requires 60 days. Can the landlord keep a deposit of about two months rent?';
     expect(parseConsultWriterReply(JSON.stringify({ questions: [example] }))).toEqual({ kind: 'questions', questions: [example] });
   });
 

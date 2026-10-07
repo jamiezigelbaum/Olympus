@@ -18116,7 +18116,6 @@ var RULE_UNIT_WORDS = new Set([
   "months",
   "%",
   "percent",
-  "per",
   "mes",
   "meses",
   "mois",

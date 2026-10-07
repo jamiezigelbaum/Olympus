@@ -58774,7 +58774,7 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
     const nfkc = question.normalize("NFKC");
     for (const reason of scriptReasons(nfkc))
       reasons.add(reason);
-    for (const reason of questionStructureReasons(nfkc, unnamed ? CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION : CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION))
+    for (const reason of unnamed ? questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES) : questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION))
       reasons.add(reason);
     if (hasEncodedBlob(nfkc))
       reasons.add("encoded_blob");
@@ -58802,7 +58802,9 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
   if (reasons.size > 0)
     return refuse2([...reasons]);
   const model = questionModel(subQuestions);
-  for (const reason of compareWithSnapshot(model, context, unnamed))
+  const languageOnly = unnamed ? consultVocabulary({ languages: options?.languages ?? [], domains: { units: false, countries: true, places: false, technical: false, medicines: false, medicineBrands: false } }) : null;
+  const ordinaryWord = languageOnly ? (token) => languageOnly.has(token) : undefined;
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord))
     reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent))
     reasons.add(reason);
@@ -58910,14 +58912,14 @@ function scriptOf(char) {
   }
   return `other:${char}`;
 }
-function questionStructureReasons(text, maxContentWords) {
+function questionStructureReasons(text, maxContentWords, maxPreambleSentences = CONSULT_GATE_MAX_PREAMBLE_SENTENCES) {
   const trimmed2 = text.trim();
   const reasons = [];
   const marks = (trimmed2.match(/[?\u061F]/gu) ?? []).length;
   if (marks !== 1 || !/[?\u061F]$/u.test(trimmed2))
     reasons.push("not_a_question");
   const boundaries = (trimmed2.match(/[.!;](?=\s|$)|[\u3002\uFF01]/gu) ?? []).length;
-  if (boundaries > CONSULT_GATE_MAX_PREAMBLE_SENTENCES)
+  if (boundaries > maxPreambleSentences)
     reasons.push("too_many_sentences");
   let content = 0;
   forEachToken(foldText(trimmed2), (token) => {
@@ -59340,6 +59342,7 @@ function questionModel(subQuestions) {
     compactViews.push(viewTokens.join(""));
   }
   const numberKeys = new Set;
+  const ruleSeen = new Map;
   const dates = { full: new Set, monthDay: new Set };
   let digitConcat = "";
   for (const text of [joined, ...decoded]) {
@@ -59350,6 +59353,10 @@ function questionModel(subQuestions) {
       numberKeys.add(key);
     for (const key of figureKeys(wordDigits.join(" "), false).keys())
       numberKeys.add(key);
+    for (const form of [figureKeys(normalized2, true), figureKeys(wordDigits.join(" "), true)]) {
+      for (const [key, seen] of form)
+        ruleSeen.set(key, mergeFigureSeen(ruleSeen.get(key), seen));
+    }
     digitConcat += (normalized2.match(/\d/gu) ?? []).join("");
     const viewDates = dateKeys(normalized2, wordDigits);
     for (const key of viewDates.full)
@@ -59363,7 +59370,11 @@ function questionModel(subQuestions) {
   for (const host of hostnames(spelled))
     for (const key of hostKeysOf(host))
       hostKeys.add(key);
-  return { tokens, forms, tokenKeys, numberKeys, digitConcat, dates, hostKeys, compactViews };
+  const ruleOnlyKeys = new Set([...numberKeys].filter((key) => {
+    const seen = ruleSeen.get(key);
+    return seen !== undefined && seen.rule && !seen.bare && !seen.other;
+  }));
+  return { tokens, forms, tokenKeys, numberKeys, ruleOnlyKeys, digitConcat, dates, hostKeys, compactViews };
 }
 function rot13(word) {
   let out = "";
@@ -59530,7 +59541,7 @@ function runMatcher(question, minLength, minContent) {
     }
   };
 }
-function compareWithSnapshot(model, context, unnamed) {
+function compareWithSnapshot(model, context, unnamed, ordinaryWord) {
   const reasons = new Set;
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
@@ -59559,6 +59570,8 @@ function compareWithSnapshot(model, context, unnamed) {
   const singleCandidates = new Map;
   const componentCandidates = new Map;
   const figureSeen = new Map;
+  const identifierTokens = new Set;
+  const figureRefused = new Set;
   let group = Number.NaN;
   let previous;
   for (const entry of context.entries) {
@@ -59582,12 +59595,20 @@ function compareWithSnapshot(model, context, unnamed) {
         if (!snapshotFigures.has(key))
           snapshotFigures.set(key, seen);
     }
+    if (unnamed) {
+      const forms = [figureKeys(normalized, true), ...words ? [figureKeys(words.join(" "), true)] : []];
+      for (const form of forms) {
+        for (const [key, seen] of form)
+          if (model.numberKeys.has(key))
+            figureSeen.set(key, mergeFigureSeen(figureSeen.get(key), seen));
+      }
+    }
     for (const [key, seen] of snapshotFigures) {
       if (!model.numberKeys.has(key))
         continue;
       if (key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS || seen.unit) {
         if (unnamed)
-          figureSeen.set(key, mergeFigureSeen(figureSeen.get(key), seen));
+          figureRefused.add(key);
         else
           reasons.add("snapshot_figure");
       }
@@ -59645,6 +59666,7 @@ function compareWithSnapshot(model, context, unnamed) {
             identifierHit(formHit(segmentForm));
         }
         forEachToken(folded, (token) => {
+          identifierTokens.add(token.norm);
           if (token.norm.length < 3 || NAME_STOPWORDS.has(token.norm) || componentCandidates.has(token.norm))
             return;
           const source = formHit(token.norm);
@@ -59729,7 +59751,8 @@ function compareWithSnapshot(model, context, unnamed) {
         singleCandidates.set(token.norm, {
           source: model.forms.get(token.norm),
           labelled: token.labelled || (existing?.labelled ?? false),
-          initialOnly: (existing?.initialOnly ?? true) && initial && !token.labelled
+          initialOnly: (existing?.initialOnly ?? true) && initial && !token.labelled,
+          strongLabel: (existing?.strongLabel ?? false) || token.labelled && token.capitalized
         });
       }
       previous = token;
@@ -59747,8 +59770,10 @@ function compareWithSnapshot(model, context, unnamed) {
   }
   if (reasons.size > 0)
     return reasons;
-  for (const [key, seen] of figureSeen) {
-    if (seen.other || key.length > CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS || key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS && seen.bare) {
+  for (const key of figureRefused) {
+    const seen = figureSeen.get(key);
+    const exempt = seen !== undefined && seen.rule && !seen.bare && !seen.other && key.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key);
+    if (!exempt) {
       reasons.add("snapshot_figure");
       return reasons;
     }
@@ -59761,6 +59786,7 @@ function compareWithSnapshot(model, context, unnamed) {
     }
   }
   const statOf = (token) => stats.get(token) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
+  const ordinary = (token) => ordinaryWord !== undefined && ordinaryWord(token) && !identifierTokens.has(token);
   const neverLower = (token) => statOf(token).lower === 0;
   const nameHit = (source) => {
     reasons.add(source === "decoded" ? "encoded_identifier" : "snapshot_name");
@@ -59783,6 +59809,8 @@ function compareWithSnapshot(model, context, unnamed) {
     }
   }
   for (const [token, single] of singleCandidates) {
+    if (!single.strongLabel && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0)
+      continue;
     const stat3 = statOf(token);
     const dominatedByLower = stat3.lower >= 3 && stat3.lower >= 3 * stat3.capitalized;
     if (single.labelled || (single.initialOnly ? stat3.lower === 0 && stat3.lowerAnywhere === 0 : !dominatedByLower))
@@ -59977,7 +60005,9 @@ function figureKeys(normalized, needUnits) {
     const written = match[2];
     const after = match[3] ?? "";
     const unit = needUnits && (UNIT_WORDS.has(before) || UNIT_WORDS.has(after));
-    const rule = needUnits && /^\d+$/u.test(written) && RULE_UNIT_WORDS.has(after) && !FIGURE_PREFIX_SYMBOLS.has(before);
+    const end = (match.index ?? 0) + match[0].length;
+    const ruleUnit = after === "per" || after === "pour" ? /^\s?cent(?![\p{L}\p{N}])/u.test(normalized.slice(end)) : RULE_UNIT_WORDS.has(after);
+    const rule = needUnits && /^\d+$/u.test(written) && ruleUnit && !FIGURE_PREFIX_SYMBOLS.has(before);
     const seen = { unit, rule, bare: !unit && !rule, other: unit && !rule };
     const parts = new Set([written]);
     if (written.includes(" "))
@@ -59998,7 +60028,7 @@ function figureKeys(normalized, needUnits) {
   }
   return keys;
 }
-var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS;
+var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS;
 var init_consult_gate = __esm(() => {
   init_opsec();
   init_types();
@@ -61295,7 +61325,6 @@ var init_consult_gate = __esm(() => {
     "months",
     "%",
     "percent",
-    "per",
     "mes",
     "meses",
     "mois",
@@ -125874,7 +125903,7 @@ var init_consult_writer = __esm(() => {
     "- exact dates and years;",
     `- exact money amounts: use bands or relative terms ("about two months' rent", "a few thousand");`,
     "- addresses, account, reference, phone and ID numbers, file and document titles, and anything quoted word for word.",
-    `Keep, when the question needs them: durations and rule numbers that define the problem ("gave 45 days' notice where the lease requires 60"), and health, legal, financial and relationship facts.`,
+    `Keep, when the question needs them: durations and rule numbers that define the problem ("gave 45 days' notice where the lease requires 60 days"), and health, legal, financial and relationship facts.`,
     "Leave out every detail the answer does not need, even an allowed one. Never keep a job, a rare condition and a region together unless the answer needs all three: together they can point to one person.",
     "Write every question yourself in plain words; never copy a sentence, or a phrase of five or more words, from the documents, the answer or the user.",
     "",

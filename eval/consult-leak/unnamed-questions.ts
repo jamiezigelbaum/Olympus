@@ -47,7 +47,8 @@ export const UNNAMED_CASES: readonly UnnamedCase[] = [
     ],
     answer: 'Your lease asks for 60 days notice; your email to the landlord gave 45. The landlord says they will keep the two-month deposit.',
     gaps: ['Whether a landlord may keep a full deposit for short notice.'],
-    questions: ['A tenant gave 45 days notice where the lease requires 60. Can the landlord keep a deposit of about two months rent?'],
+    // The owner's example as the writer now loads it: the duration named after the figure (review round 1).
+    questions: ['A tenant gave 45 days notice where the lease requires 60 days. Can the landlord keep a deposit of about two months rent?'],
     leaks: [
       { kind: 'name', questions: ['Marta gave 45 days notice where the lease requires 60. Can the landlord keep a deposit of about two months rent?'] },
       { kind: 'amount', questions: ['A tenant gave 45 days notice where the lease requires 60. Can the landlord keep a deposit of 2,400?'] },

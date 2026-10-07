@@ -164,44 +164,53 @@ export const CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12;
 
 /**
  * The "Your situation, without names" level (ConsultGateOptions.level,
- * owner decision 2026-10-07). The writer may describe the user's situation,
- * so a question carries one short sentence of facts before the ask, and it
- * shares the situation's small durations with the answer it came from
- * ("gave 45 days' notice where the lease requires 60"), and it restates the
- * situation the local answer described. Four rules widen for that level,
- * and only these four; every rule that refuses names, places, dates and
- * years, ages, amounts, identifiers, titles, hosts and secrets is unchanged
- * (eval/consult-leak: zero leaks at both levels):
+ * owner decision 2026-10-07; owner ruling in review, the same day: "err on
+ * the side of allowing more through"). The writer may describe the user's
+ * situation and repeat the durations that define it ("gave 45 days' notice
+ * where the lease requires 60 days"). These rules widen for that level, and
+ * only these; personal names outside the dictionaries, exact dates and
+ * years, ages, exact amounts, account, phone and ID numbers, addresses,
+ * mail addresses, handles, hosts and secrets are refused exactly as at the
+ * general level, which is unchanged (eval/consult-leak: zero leaks at both
+ * levels):
  *
- *   - the content-word size cap of a whole sub-question rises to fit one
- *     situation sentence plus the question (the measured unnamed set needs
- *     up to 16; see docs/design/consult-gate-false-refusals.md, "Unnamed
- *     level"), while the question sentence itself keeps the general cap, so
- *     a run-on list of asks is refused as before;
- *   - a figure from the snapshot of at most
- *     CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS digits, written as plain
- *     digits, may appear in the question when every place the snapshot writes
- *     it is followed by a duration (hours to months) or percent word ("60
- *     days", "a 180 day period", "10 percent") and never by money, years or
- *     another unit. Years and ages, decimals and grouped figures, amounts and
- *     every other unit stay refused exactly as before;
- *   - the copied-wording rules (shared runs, content runs and spans, sentence
- *     overlap) do not compare against the local answer and its gaps
- *     (`writerAnswerTexts`): restating the situation the answer describes is
- *     what this level sends. They still compare against every document text
- *     and the owner's question, so a document quoted in the answer is still
- *     caught where the documents hold it, and every name, identifier, figure
- *     and date rule still reads the answer;
- *   - against those other texts, an ordered shared run must be
- *     CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS tokens instead of four (whole
- *     sentences of three or four tokens are still caught when the question
- *     holds all of them). Describing the same facts reuses four-token stock
- *     phrases ("one week of notice", "by about two metres"); five is a
- *     quote. The content-word runs and spans (four content words in order or
- *     as a set) and the sentence-overlap rule are unchanged.
+ *   - size: a whole sub-question may hold
+ *     CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION content words and
+ *     CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES sentences of situation
+ *     before the ask, while the question sentence itself keeps the general
+ *     cap, so a run-on list of asks is refused as before;
+ *   - rule figures: a figure from the snapshot of at most
+ *     CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS digits may be repeated only
+ *     when (a) every occurrence of that value in the snapshot, in digits or
+ *     in number words, is a plain number followed by a duration (hours to
+ *     months) or a full percent expression ("%", "percent", "per cent"), and
+ *     (b) every occurrence in the question is written the same way. One
+ *     occurrence as money, a rate ("120 per hour"), a year count, a bare
+ *     number or another unit, in any form, refuses it;
+ *   - copied wording: the copy rules (shared runs, content runs and spans,
+ *     sentence overlap) do not compare against the local answer and its gaps
+ *     (`writerAnswerTexts`), and an ordered copy of the documents or the
+ *     owner's question must be CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS tokens
+ *     instead of four (whole three- and four-token sentences still caught);
+ *   - ordinary words: a word of the owner's language dictionaries, or a
+ *     country, is not taken for a name on its own when the snapshot also
+ *     writes it in lower case somewhere ("Retail Park" beside "a retail
+ *     park", "Offer letter: probation"); a dictionary word the snapshot only
+ *     ever capitalizes ("rue des Tanneurs", "Grace called"), a capitalized
+ *     label or quoted value, and a word of a title, path, author or account
+ *     value stay protected.
+ *
+ * Accepted residuals (owner ruling, measured in
+ * eval/consult-leak/unnamed-level.ts): a name, venue or project made of
+ * lower-case or dictionary words ("the red lion", "Retail Park") copied from
+ * the documents or the answer can pass at this level, and so can a person's
+ * name that is itself a dictionary word ("Rose", "Mason") when the snapshot
+ * also uses that word in lower case ("a rose bush", "the mason"). The writer's rules still forbid both; the gate
+ * does not catch them.
  */
 export const CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18;
 export const CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3;
+export const CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2;
 export const CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5;
 
 /**
@@ -685,7 +694,9 @@ function evaluateCheckedRequest(
     for (const reason of characterReasons(question)) reasons.add(reason);
     const nfkc = question.normalize('NFKC');
     for (const reason of scriptReasons(nfkc)) reasons.add(reason);
-    for (const reason of questionStructureReasons(nfkc, unnamed ? CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION : CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION)) reasons.add(reason);
+    for (const reason of unnamed
+      ? questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES)
+      : questionStructureReasons(nfkc, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION)) reasons.add(reason);
     if (hasEncodedBlob(nfkc)) reasons.add('encoded_blob');
     if (secretLabelsInText(question).length > 0 || secretLabelsInText(nfkc).length > 0) reasons.add('secret_detected');
     if (hasIdentifierShape(nfkc)) reasons.add('identifier_shape');
@@ -707,7 +718,13 @@ function evaluateCheckedRequest(
 
   // 3. Comparison. The question side is small; the snapshot is streamed once.
   const model = questionModel(subQuestions);
-  for (const reason of compareWithSnapshot(model, context, unnamed)) reasons.add(reason);
+  // Unnamed level: the owner's language dictionaries and country names (no
+  // place, brand or term pack), for the name rule's ordinary-word exemption.
+  const languageOnly = unnamed
+    ? consultVocabulary({ languages: options?.languages ?? [], domains: { units: false, countries: true, places: false, technical: false, medicines: false, medicineBrands: false } })
+    : null;
+  const ordinaryWord = languageOnly ? (token: string) => languageOnly.has(token) : undefined;
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord)) reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent)) reasons.add(reason);
   return reasons.size > 0 ? refuse([...reasons]) : { decision: 'pass', reasons: [] };
 }
@@ -836,13 +853,13 @@ function scriptOf(char: string): string {
  * a size cap, not an item count: the gate does not infer list items from
  * punctuation. The structural limit on asks is the sub-question array.
  */
-function questionStructureReasons(text: string, maxContentWords: number): ConsultGateReason[] {
+function questionStructureReasons(text: string, maxContentWords: number, maxPreambleSentences: number = CONSULT_GATE_MAX_PREAMBLE_SENTENCES): ConsultGateReason[] {
   const trimmed = text.trim();
   const reasons: ConsultGateReason[] = [];
   const marks = (trimmed.match(/[?\u061F]/gu) ?? []).length;
   if (marks !== 1 || !/[?\u061F]$/u.test(trimmed)) reasons.push('not_a_question');
   const boundaries = (trimmed.match(/[.!;](?=\s|$)|[\u3002\uFF01]/gu) ?? []).length;
-  if (boundaries > CONSULT_GATE_MAX_PREAMBLE_SENTENCES) reasons.push('too_many_sentences');
+  if (boundaries > maxPreambleSentences) reasons.push('too_many_sentences');
   let content = 0;
   forEachToken(foldText(trimmed), (token) => { if (isContent(token.norm)) content += 1; });
   // The question sentence (after the last sentence boundary) never carries
@@ -1600,6 +1617,9 @@ interface QuestionModel {
   // \u0001-joined token sequences of every view, for long identifier containment.
   readonly tokenKeys: readonly string[];
   readonly numberKeys: ReadonlySet<string>;
+  // Unnamed level: figures every occurrence of which, in every view and in
+  // digits or words, is a plain number followed by a duration or percent word.
+  readonly ruleOnlyKeys: ReadonlySet<string>;
   readonly digitConcat: string;
   readonly dates: DateKeys;
   readonly hostKeys: ReadonlySet<string>;
@@ -1656,6 +1676,7 @@ function questionModel(subQuestions: readonly string[]): QuestionModel {
   }
   // Figures and dates are read from the request and from every decoding.
   const numberKeys = new Set<string>();
+  const ruleSeen = new Map<string, FigureSeen>();
   const dates: DateKeys = { full: new Set(), monthDay: new Set() };
   let digitConcat = '';
   for (const text of [joined, ...decoded]) {
@@ -1664,6 +1685,9 @@ function questionModel(subQuestions: readonly string[]): QuestionModel {
     const wordDigits = numberWordsToDigits(wordsOf(viewFolded));
     for (const key of figureKeys(normalized, false).keys()) numberKeys.add(key);
     for (const key of figureKeys(wordDigits.join(' '), false).keys()) numberKeys.add(key);
+    for (const form of [figureKeys(normalized, true), figureKeys(wordDigits.join(' '), true)]) {
+      for (const [key, seen] of form) ruleSeen.set(key, mergeFigureSeen(ruleSeen.get(key), seen));
+    }
     digitConcat += (normalized.match(/\d/gu) ?? []).join('');
     const viewDates = dateKeys(normalized, wordDigits);
     for (const key of viewDates.full) dates.full.add(key);
@@ -1673,7 +1697,11 @@ function questionModel(subQuestions: readonly string[]): QuestionModel {
   const hostKeys = new Set<string>();
   const spelled = normalized.replace(/\s+dot\s+/gu, '.').replace(/[\u3002\uFF0E\uFF61]/gu, '.');
   for (const host of hostnames(spelled)) for (const key of hostKeysOf(host)) hostKeys.add(key);
-  return { tokens, forms, tokenKeys, numberKeys, digitConcat, dates, hostKeys, compactViews };
+  const ruleOnlyKeys = new Set([...numberKeys].filter((key) => {
+    const seen = ruleSeen.get(key);
+    return seen !== undefined && seen.rule && !seen.bare && !seen.other;
+  }));
+  return { tokens, forms, tokenKeys, numberKeys, ruleOnlyKeys, digitConcat, dates, hostKeys, compactViews };
 }
 
 /**
@@ -1976,7 +2004,12 @@ const SEP = String.fromCharCode(1);
  * CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION); false is the general
  * level, unchanged.
  */
-function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext, unnamed: boolean): Set<ConsultGateReason> {
+function compareWithSnapshot(
+  model: QuestionModel,
+  context: ConsultWriterContext,
+  unnamed: boolean,
+  ordinaryWord?: (token: string) => boolean,
+): Set<ConsultGateReason> {
   const reasons = new Set<ConsultGateReason>();
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
@@ -2002,11 +2035,14 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
     sentenceContent = new Set();
     sentenceTokens = 0;
   };
-  const singleCandidates = new Map<string, { source: FormSource; labelled: boolean; initialOnly: boolean }>();
+  const singleCandidates = new Map<string, { source: FormSource; labelled: boolean; initialOnly: boolean; strongLabel: boolean }>();
   const componentCandidates = new Map<string, FormSource>();
   // Unnamed level: every snapshot occurrence of a question figure the general
   // rule would refuse, decided once the whole snapshot is read.
   const figureSeen = new Map<string, FigureSeen>();
+  // Every word of an identifier, provenance, author or account value (titles, paths, labels).
+  const identifierTokens = new Set<string>();
+  const figureRefused = new Set<string>();
   let group = Number.NaN;
   let previous: Token | undefined;
 
@@ -2031,10 +2067,20 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
     const snapshotFigures = figureKeys(normalized, true);
     // Number words add keys; a figure already read from digits keeps how it was written.
     if (words) for (const [key, seen] of figureKeys(words.join(' '), false)) if (!snapshotFigures.has(key)) snapshotFigures.set(key, seen);
+    // Unnamed level: every occurrence of a question figure, in digits and in
+    // number words alike, with what follows it, whether or not the general
+    // rule refuses it here. One occurrence that is not a rule figure, in any
+    // form and in any entry, defeats the exemption.
+    if (unnamed) {
+      const forms = [figureKeys(normalized, true), ...(words ? [figureKeys(words.join(' '), true)] : [])];
+      for (const form of forms) {
+        for (const [key, seen] of form) if (model.numberKeys.has(key)) figureSeen.set(key, mergeFigureSeen(figureSeen.get(key), seen));
+      }
+    }
     for (const [key, seen] of snapshotFigures) {
       if (!model.numberKeys.has(key)) continue;
       if (key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS || seen.unit) {
-        if (unnamed) figureSeen.set(key, mergeFigureSeen(figureSeen.get(key), seen));
+        if (unnamed) figureRefused.add(key);
         else reasons.add('snapshot_figure');
       }
     }
@@ -2082,6 +2128,7 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
           if (segmentForm !== whole && (segmentWords > 1 || /\d/u.test(segmentForm))) identifierHit(formHit(segmentForm));
         }
         forEachToken(folded, (token) => {
+          identifierTokens.add(token.norm);
           if (token.norm.length < 3 || NAME_STOPWORDS.has(token.norm) || componentCandidates.has(token.norm)) return;
           const source = formHit(token.norm);
           if (!source) return;
@@ -2176,6 +2223,9 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
           source: model.forms.get(token.norm)!,
           labelled: token.labelled || (existing?.labelled ?? false),
           initialOnly: (existing?.initialOnly ?? true) && initial && !token.labelled,
+          // A capitalized label or quoted value ("Reporter: 'Fenwick'"): how a
+          // name is written, so never an ordinary word at the unnamed level.
+          strongLabel: (existing?.strongLabel ?? false) || (token.labelled && token.capitalized),
         });
       }
       previous = token;
@@ -2193,10 +2243,14 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
   }
   if (reasons.size > 0) return reasons;
   // Unnamed level: a figure the general rule refuses passes only when every
-  // snapshot occurrence is a plain small number followed by a duration or
-  // percent word.
-  for (const [key, seen] of figureSeen) {
-    if (seen.other || key.length > CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS || (key.length >= CONSULT_GATE_MIN_FIGURE_DIGITS && seen.bare)) {
+  // snapshot occurrence, in digits or in words, is a plain number of at most
+  // three digits followed by a duration or percent word, and the question
+  // itself writes it that way every time (QuestionModel.ruleOnlyKeys).
+  for (const key of figureRefused) {
+    const seen = figureSeen.get(key);
+    const exempt = seen !== undefined && seen.rule && !seen.bare && !seen.other
+      && key.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key);
+    if (!exempt) {
       reasons.add('snapshot_figure');
       return reasons;
     }
@@ -2211,6 +2265,7 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
 
   // Decisions that need whole-snapshot case statistics.
   const statOf = (token: string): NameStats => stats.get(token) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
+  const ordinary = (token: string): boolean => ordinaryWord !== undefined && ordinaryWord(token) && !identifierTokens.has(token);
   const neverLower = (token: string): boolean => statOf(token).lower === 0;
   const nameHit = (source: FormSource): void => { reasons.add(source === 'decoded' ? 'encoded_identifier' : 'snapshot_name'); };
   for (const pair of pairCandidates.values()) {
@@ -2239,6 +2294,17 @@ function compareWithSnapshot(model: QuestionModel, context: ConsultWriterContext
     // case stays a word. A word seen capitalized only at the start of
     // sentences is weaker evidence: it is a name only if never written in
     // lower case anywhere.
+    // Unnamed level (owner ruling): an ordinary dictionary word of the owner's
+    // languages, or a country, is not a name on its own when the snapshot
+    // also writes it in lower case at least once ("Retail Park" beside "a
+    // retail park", "Offer letter: probation"). A dictionary word the
+    // snapshot only ever capitalizes ("rue des Tanneurs", "Grace called"), a
+    // capitalized label or quoted value ("Reporter: 'Fenwick'"), a word of a
+    // title, path, author or account value, and every word outside the
+    // dictionaries keep the general rule. (Exempting sentence-initial-only
+    // words as well let 39 of 223 sample given names through and cut no
+    // false refusal on the measured set, so it is not done.)
+    if (!single.strongLabel && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0) continue;
     const stat = statOf(token);
     const dominatedByLower = stat.lower >= 3 && stat.lower >= 3 * stat.capitalized;
     if (single.labelled || (single.initialOnly ? stat.lower === 0 && stat.lowerAnywhere === 0 : !dominatedByLower)) nameHit(single.source);
@@ -2477,7 +2543,7 @@ const UNIT_WORDS: ReadonlySet<string> = new Set([
  */
 const RULE_UNIT_WORDS: ReadonlySet<string> = new Set([
   'hour', 'hours', 'hr', 'hrs', 'h', 'minute', 'minutes', 'min', 'mins', 'day', 'days', 'week', 'weeks', 'month', 'months',
-  '%', 'percent', 'per',
+  '%', 'percent',
   'mes', 'meses', 'mois',
   'maand', 'maanden', 'monat', 'monate', 'mese', 'mesi', 'dia', 'dias', 'jour', 'jours', 'dag', 'dagen', 'tag', 'tage',
   'giorno', 'giorni', 'semana', 'semanas', 'semaine', 'semaines', 'week', 'weken', 'woche', 'wochen', 'settimana',
@@ -2525,7 +2591,11 @@ function figureKeys(normalized: string, needUnits: boolean): Map<string, FigureS
     const unit = needUnits && (UNIT_WORDS.has(before) || UNIT_WORDS.has(after));
     // A letter before the number ends the previous word; only a symbol there
     // can make the figure money or a share.
-    const rule = needUnits && /^\d+$/u.test(written) && RULE_UNIT_WORDS.has(after) && !FIGURE_PREFIX_SYMBOLS.has(before);
+    // "per" and "pour" count only as the first word of "per cent" / "pour cent";
+    // a bare "per" ("120 per hour") is a rate, never a rule figure.
+    const end = (match.index ?? 0) + match[0].length;
+    const ruleUnit = after === 'per' || after === 'pour' ? /^\s?cent(?![\p{L}\p{N}])/u.test(normalized.slice(end)) : RULE_UNIT_WORDS.has(after);
+    const rule = needUnits && /^\d+$/u.test(written) && ruleUnit && !FIGURE_PREFIX_SYMBOLS.has(before);
     const seen: FigureSeen = { unit, rule, bare: !unit && !rule, other: unit && !rule };
     const parts = new Set<string>([written]);
     if (written.includes(' ')) for (const part of written.split(' ')) parts.add(part);

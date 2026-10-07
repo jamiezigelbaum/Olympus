@@ -141,7 +141,7 @@ export const CONSULT_WRITER_SYSTEM_UNNAMED = [
   '- exact dates and years;',
   '- exact money amounts: use bands or relative terms ("about two months\' rent", "a few thousand");',
   '- addresses, account, reference, phone and ID numbers, file and document titles, and anything quoted word for word.',
-  'Keep, when the question needs them: durations and rule numbers that define the problem ("gave 45 days\' notice where the lease requires 60"), and health, legal, financial and relationship facts.',
+  'Keep, when the question needs them: durations and rule numbers that define the problem ("gave 45 days\' notice where the lease requires 60 days"), and health, legal, financial and relationship facts.',
   'Leave out every detail the answer does not need, even an allowed one. Never keep a job, a rare condition and a region together unless the answer needs all three: together they can point to one person.',
   'Write every question yourself in plain words; never copy a sentence, or a phrase of five or more words, from the documents, the answer or the user.',
   '',
