@@ -1,9 +1,19 @@
 # Design: frontier consult on the private answer panel, over zkAPI
 
-Status: **proposal, revision 7 (2026-10-05).** Revision 6 was reviewed as "ready after listed changes": no further redesign, ten precision problems (P1–P10) and conditions on AD-1. All are applied here; dispositions are in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md), section G. Nothing here changes shipped behavior or the release plan until the owner rules on §10.
+Status: **proposal, revision 8 (2026-10-07).** Revision 7 froze the M0 rule; M0 has now been measured and **failed on the shared server**. Revision 8 records the result, the scheduling choice it authorizes (a separate writer process, killed on arrival) and the owner decisions taken on 2026-10-07. Dispositions are in [`frontier-consult-lane-review.md`](frontier-consult-lane-review.md), sections G and H. Nothing here changes shipped behavior or the release plan.
 Risk class: **Critical** (egress of Private-derived text; money).
 
-## Changes since revision 6
+## Changes since revision 7
+
+1. **M0 is measured and failed on the shared server** (pooled +5.1 s median, +11.3 s p95). The results are in §A.7, from `docs/design/consult-m0-measurement.md` on `claude/consult-m0` (rounds 1 and 2).
+2. **Scheduling choice: candidate B2.** The writer runs on its own `llama-server` process (batch 64), killed, not aborted, when a fresh answer arrives or at the writer's deadline. A memory rule decides whether it may start (§A.7). A, and C (`--parallel 2`), are rejected with reasons.
+3. **Honest status of B2:** it passes the server measure; first-token time is inside this machine's noise floor and is **unproven on a quiet machine**. A quiet-machine rerun, judged by the stricter first-token rule, is now a C4b entry condition.
+4. **Product prerequisite, independent of consults:** the built-in server moves to `--batch-size 64 --ubatch-size 64`, delivered as its own pull request. It also benefits the tier sniffer (§A.7).
+5. **Writer prompt:** 5 of 6 distinct inputs gave usable questions; the sixth named a place only the answer implied. A rule against that, and an eval case, are C4b tasks (§A.7).
+6. **Stage table updated** (§A.14): M0 done; C4a entry condition satisfied; C4b entry conditions rewritten.
+7. **Owner decisions of 2026-10-07 moved from open to decided** (§10): the fork, AD-1 and AD-2, the 640 px cap, the M0 tolerance, the public privacy sentence, fence recovery as a button.
+
+## Changes in revision 7 (since revision 6)
 
 1. **M0 has an exact decision rule** (§A.7): measured from a fresh request's arrival to first reveal, abort delay included, paired against a control. Results drop into a fixed table.
 2. **One authoritative panel payload contract,** enforced before first reveal on every install. A total serializer and an exact-size padder replace the "cannot happen" proof (§A.5.1).
@@ -114,7 +124,7 @@ search → job (policy bound) → first answer (unchanged) → panel claims → 
 | Its gaps | ≤ 4 × 300 characters |
 | Whole prompt, writer rules included | ≤ 2,048 model tokens, counted with the server's tokenizer; over that, no consult |
 | Output | JSON schema `{"consult": null \| [≤ 3 strings]}`, `max_tokens` 160 |
-| Deadline | 60 s, abort only; the writer never causes a model reset |
+| Deadline | 60 s; the writer's own process is killed (§A.7). The answer server is never aborted, signalled or reset by the writer |
 
 **Snapshot handoff:**
 
@@ -340,7 +350,7 @@ Each test asserts that the attribution header stays visible, that only text node
 
 ### A.7 Scheduling and the M0 rule
 
-**Decision: the writer is the lowest-priority work. Whether and how it may run is set by M0, measured before any feature code.**
+**Decision (2026-10-07): the writer is the lowest-priority work and runs on its own process (candidate B2), killed the moment a fresh answer arrives. M0 failed on the shared server; the rule below is unchanged and still the acceptance bar.**
 
 **M0 measurement (frozen):**
 
@@ -365,24 +375,61 @@ Each test asserts that the attribution header stays visible, that only text node
   "Not slower at all" cannot be measured below run-to-run noise; the noise floor is reported beside the result.
 - **What M0 cannot show:** whole-panel latency through the relay and ChatGPT; other Macs, models (2B, 9B) or memory pressure; the larger envelope's first-reveal cost. C4a measures that last one.
 
-**Results (filled in by the M0 run):**
+**Result: FAIL on the shared server.** Measured on 2026-10-05 (round 1) and 2026-10-07 (round 2); full tables, method and reproduction commands are in `docs/design/consult-m0-measurement.md` and `scripts/measure-consult-writer-isolation.ts` on `claude/consult-m0` (base `main` at `bc1cd078`).
 
-| Phase | Pairs | Median added | p95 added | Writer-caused resets | Noise floor (median, p95) | Pass |
-|---|---|---|---|---|---|---|
-| Prefill (summary) | 30 | — | — | — | — | — |
-| Generation (summary) | 30 | — | — | — | — | — |
-| Generation (full) | 10 | — | — | — | — | — |
-| Near deadline | 30 | — | — | — | — | — |
-| Hung writer | 30 | — | — | — | — | — |
+- **Machine:** Apple M3, 24 GB, macOS 26.5.2, Qwen3.5 4B Q4_K_M, llama.cpp `b11320` (Metal), our own server through the product launcher with the product's exact flags. **Load was not quiet:** 1-minute load average 2–9 at pair start (a spike to 59 in one discarded screening run), memory pressure "warn", about 6.7 GB of other processes' swap in use, other sessions running.
+- **Noise floor:** control against control, first token: median 0.5 s, p95 3.3 s in round 1 (n = 37); 0.2–2.6 s median across round 2 candidates (A64 2.6 s / 6.4 s, B2 pooled 1.9 s / 2.0 s). This is larger than the 250 ms tolerance, so the tolerance cannot be confirmed or refuted from first-token figures on this machine. "Server took it" (the delay until the server started the fresh request; control about 12 ms) is the clean signal.
+- **Not run:** the 2B model (not on disk); the 9B model; an idle machine; the real writer prompt (a 2,039-token stand-in); whole-panel latency; the cold-start case (a writer server starting while a fresh answer arrives); candidate A with `--cache-ram` in pairs; samples of n = 30 (round 1 used n = 5 per abort phase and 3 per queue phase; round 2 n = 3–6 per phase and 21–28 pooled); the full-detail generation phase.
 
-**If M0 passes:** the writer runs as the lowest-priority queue item and is aborted when a fresh answer arrives.
+**Causes (round 1, measured separately):**
 
-**If it fails, the owner chooses among:**
+1. **An abort takes effect only at the end of the current prefill batch** (the product default is 2,048 tokens). During generation a step is one token (about 0.1 s) and the slot frees in about 0.2 s; during prompt reading the fresh answer waited 0.2–8.0 s (about 7 s when it arrived just after the writer started).
+2. **Any writer call evicts the cached analyst system prompt** (311 tokens). The next fresh answer re-reads it: +3.25 s median first token, about the same as a full model reset (+3.26 s), even when nothing overlapped.
 
-1. Run the writer only after the queue has been idle for N seconds. This is a hypothesis to test, not proven isolation: a fresh request can arrive just after the writer starts.
+The writer never caused a model reset.
+
+**Results table (§A.7 rule: median ≤ 250 ms, p95 ≤ 1 s, zero writer-caused resets, in every phase).** Added first token and "server took it" in ms, median / p95. Round 1 is the product configuration with the writer aborted as the jobs engine aborts work:
+
+| Phase (round 1, product config, abort) | n | Added first token | Server took it | Resets | Pass |
+|---|---|---|---|---|---|
+| Just started (0.2 s in) | 5 | 10,448 / 12,823 | 7,270 / 8,010 | 0 | No |
+| Prefill | 5 | 7,263 / 10,803 | 2,175 / 3,291 | 0 | No |
+| Generation (summary) | 5 | 3,845 / 4,872 | 173 / 216 | 0 | No |
+| Near deadline (85% of output) | 5 | 3,244 / 5,060 | 770 / 849 | 0 | No |
+| Hung writer (20 s stand-in) | 5 | 2,644 / 5,200 | 249 / 1,010 | 0 | No |
+| **All phases, pooled** | 25 | **5,115 / 11,322** | — | 0 | **No** |
+| Noise floor (control vs control) | 37 | 473 / 3,286 | — | — | — |
+
+Round 2 candidates (all with the writer's own prompt unless "shared prefix"; n pooled over five phases except where noted):
+
+| Candidate | n | Added first token | Server took it (worst phase) | Memory | Verdict |
+|---|---|---|---|---|---|
+| A: one server, shared analyst prefix, batch 64 | 28 | 763 / 5,439 | 1.0 s (prefill) | 0 | **Fail.** Cache kept in 28/28; abort waits for a batch |
+| A32: same, batch 32 | 9 (3 phases) | 311 / 963 | 0.6 s (prefill) | 0 | **Fail** (screening); about +7.5% on ordinary answers |
+| B: second server, default batch, killed | 20 | 572 / 6,478 | 8 ms | +0.6 GB | **Fail in prefill** (+5.1 s median; GPU work already queued by the killed process) |
+| **B2: second server, batch 64, killed** | 21 | **142 / 2,459** | **14 ms** (every phase 1–14 ms) | **+0.6 GB** | **Passes the server measure; first-token unproven** (inside noise; one +7.7 s prefill pair while the machine swapped) |
+| C: `--parallel 2`, batch 64 | 9 (3 phases) | 801 / 5,970 | 0.9 s | +0.5 GB | **Fail** (screening) |
+
+B2 by phase (first run plus extension, n = 21): just started 429 / 1,556 (n = 4); prefill 223 / 6,607 (4); generation −568 / 1,080 (5); near end 142 / 2,213 (5); hung (60 s deadline) 95 / 481 (3). The "near end" excess (+1.0 s in B, +1.2 s in B2) is the one pattern that repeats and needs the larger sample. Not every B2 phase meets the rule on first token at these sample sizes; the server measure passes in all.
+
+**Scheduling decision (candidate B2):**
+
+- The writer runs on its **own `llama-server` process**: same model file (mapped, so the weights are shared), `--batch-size 64 --ubatch-size 64`, its own system prompt, streamed.
+- It is **started on demand** (about 1.0–1.3 s with the file in page cache) or **kept warm when memory allows**.
+- It is **killed (SIGKILL), not aborted,** the moment a fresh answer arrives or at the writer's deadline. The answer server is never touched and never reset, so its cached analyst prompt survives and a hung writer needs no model reset.
+- **Memory rule:** start the writer server only if free memory stays at or above 20% after its footprint (about 0.6 GB physical; 0.8 GB of the 24 GB was observed) and there is no swap pressure. Otherwise **skip the consult for that answer.** No consult is always acceptable.
+- **Status, stated plainly: it passes the server measure; first-token is unproven on a quiet machine.** The quiet-machine rerun (load below 3, n ≥ 20 per phase, 30 control pairs; the hung phase alone takes about 20 minutes at n = 20) is a **C4b entry condition**, and the stricter first-token rule above remains the acceptance bar. If it fails there, §A.7's fallbacks below return to the owner.
+- **Rejected:** **A** (one server, shared prefix, batch 32 or 64) misses by 0.3–1.0 s during the writer's first seconds because an abort lands between batches. **C** (`--parallel 2`) has the same abort limit, 0.5 GB of extra context memory and cache cross-talk between slots.
+
+**Prerequisite, independent of consults: the built-in server moves to `--batch-size 64 --ubatch-size 64`.** Measured: abort-to-next-start about 6 s → about 0.2 s, no measured penalty on an ordinary answer on the 4B model (the 2B is unmeasured). It benefits any aborted job, including the tier sniffer yielding to an answer. It ships as its own pull request. `--cache-ram` is rejected: it did nothing for aborts and costs up to 256 MB.
+
+**Writer prompt (C4b task, and an eval case).** With the shared-prefix variant, 5 of 6 distinct inputs gave usable question sets; the sixth named a place ("Portugal") that the answer never states but the itinerary implies. The gate's snapshot includes the first answer's text, but the writer instructions also need a rule against naming places or entities that are only implied by the answer. A planted implied-place case is added to the writer eval (§A.13).
+
+**If B2 fails the quiet-machine rerun, the owner chooses among:**
+
+1. Run the writer only after the queue has been idle for N seconds (a hypothesis to test, not proven isolation: a fresh request can arrive just after the writer starts).
 2. A smaller writer prompt.
-3. A separate lightweight writer process.
-4. A changed requirement.
+3. A changed requirement.
 
 **Eligibility sites:**
 
@@ -510,13 +557,13 @@ The held-out eval (`eval/`) runs wherever shared answer code changes.
 
 | # | Delivers | Entry conditions | Proof | Risk |
 |---|---|---|---|---|
-| **M0** | Writer-contention measurement (§A.7) | The rule in §A.7 (frozen); a draft writer prompt that fits the token bounds | Results table filled; pass or fail by the rule | Standard |
+| **M0** | Writer-contention measurement (§A.7) | **Done 2026-10-07.** Failed on the shared server; B2 chosen | Results table filled (§A.7) | Standard |
 | **M1** | Stage timers in the transport receipt; ten live consults | Timers merged; **owner-funded daemon (owner-gated)** | Per-stage median and worst case recorded | Critical (declared) |
 | C1 | Gate and packs on `main`; doctor line; 20 pack files listed one by one in `V0_4_PUBLIC_PACKAGE_FILES`; writer rules updated for automatic mode | None | Gate tests; `eval/consult-leak`; public-surface guard; packaged-path fixture; gate timing | Critical (path: `public-surface.ts`) |
 | C2 | Transport session state machine (§A.8) | M1 baseline recorded | B6; then the C2-affected stages re-measured live (owner-gated) | Critical (declared) |
 | C3 | Internal settings mechanism (`consult.json`, compare-and-swap, per-job binding). No public enable command | None | Settings tests; nothing reachable from MCP, setup tools or the relay | Critical (declared) |
-| C4a | Payload contract, serializer, padder, two phases, capability handshake, retained payload, withdrawal and race rules, outcome-independent expiry, geometry, outside container, AD-1 and AD-2 records | M0 result recorded, and the scheduling choice it authorizes stated in §A.7 | B2, B3, B4; phase-2 timing test (§A.5.4); first-reveal cost of the 36 KiB envelope compared with today; design receipt; owner visual acceptance | Critical (declared); design-receipt guarded |
-| C4b | Writer scheduling per M0; snapshot handoff; verdict metadata; token-bounded prompt; E1–E2; clocks and latch | M0 passed, or the owner chose a fallback; C2 and C4a merged | M0 harness re-run against the real scheduler; B5; precompute-reuse snapshot test; held-out eval | Critical (declared) |
+| C4a | Payload contract, serializer, padder, two phases, capability handshake, retained payload, withdrawal and race rules, outcome-independent expiry, geometry, outside container, AD-1 and AD-2 records | **Satisfied:** M0 result recorded and scheduling choice (B2) stated in §A.7 | B2, B3, B4; phase-2 timing test (§A.5.4); first-reveal cost of the 36 KiB envelope compared with today; design receipt; owner visual acceptance | Critical (declared); design-receipt guarded |
+| C4b | Writer scheduling per M0 (own server, kill on arrival, memory rule); writer rule against implied places; snapshot handoff; verdict metadata; token-bounded prompt; E1–E2; clocks and latch | C2 and C4a merged; **batch-64 product pull request merged**; **quiet-machine B2 rerun passing the first-token rule** (§A.7); **memory-rule tests** (writer server refused under 20% free memory or swap pressure) | M0 harness re-run against the real scheduler; B5; precompute-reuse snapshot test; held-out eval; implied-place writer eval case | Critical (declared) |
 | C5 | First usable version: wiring to zkAPI; the Mac dashboard **Outside help** card (disclosure, cost sheet, languages, Recover and Abandon); end-to-end acceptance | C1–C4b merged; B1–B6 green; owner-funded daemon | One real consult end to end; K1–K6 reported; owner review before default-on | Critical (declared); design-receipt guarded |
 | C6 | Strict mode | C5 | Approval binding tests | Critical (declared) |
 | C7 | Speed changes chosen from the post-C2 measurements | C2 re-measurement | Stage timers before and after | Critical (declared) |
@@ -579,7 +626,7 @@ The panel and the Mac dashboard are inside the dashboard design-receipt guard (`
 
 ### Z.4 Route verification: the daemon fork
 
-**Recommended, AWAITING OWNER DECISION.** The upstream issue is unposted. **The macOS label stays "route not verified" until F2 passes.** F1 and F2 do not block the experimental release (C5). Prototype: `~/Code/Claude/zkapi-fork/`.
+**Decided 2026-10-07: F1 and F2 proceed.** The upstream issue is unposted. **The macOS label stays "route not verified" until F2 passes.** F1 and F2 do not block the experimental release (C5). Prototype: `~/Code/Claude/zkapi-fork/`.
 
 **Problem:**
 
@@ -669,19 +716,28 @@ Questions are open with Venice. It needs its own proposal, and nothing in track 
 
 ---
 
-## 10. Decisions needed from the owner
+## 10. Owner decisions
 
-1. **M0 tolerance.** The default recorded in §A.7: in every phase, median added delay ≤ 250 ms, 95th percentile ≤ 1 s, zero writer-caused resets. Your words were "not slower at all", which cannot be measured below run-to-run noise. Confirm this tolerance or set another.
-2. **If M0 fails:** which fallback (§A.7).
-3. **Public wording** (§2, §A.10): adopt the reviewer's sentence.
-4. **Daemon fork** (§Z.4): approve F1 and F2. Without them, macOS stays "route not verified"; the experimental release does not wait.
-5. **AD-1 and AD-2** (§A.11): accept the bounded interpretation and the panel-protocol compatibility record.
-6. **Capped panel height** (§A.5.5): with outside help on, a first answer taller than 464 px scrolls inside a 640 px panel. It is a visible change for long answers.
+**Decided on 2026-10-07 ("all approved"):**
 
-Settled and applied:
+1. **M0 tolerance:** median added delay ≤ 250 ms, 95th percentile ≤ 1 s, zero writer-caused resets (§A.7). The rule stays the acceptance bar for B2.
+2. **Daemon fork** (§Z.4): F1 and F2 proceed. macOS stays "route not verified" until F2 passes; the experimental release does not wait.
+3. **AD-1 and AD-2** (§A.11): accepted, with the bounded interpretation and the panel-protocol compatibility record.
+4. **Capped panel height** (§A.5.5): the 640 px panel cap is accepted (a first answer taller than 464 px scrolls when outside help is on).
+5. **Public privacy sentence** (§2, §A.10): adopted as worded.
+6. **Fence recovery** is a button, never automatic.
+
+**Decided by the project anchor on 2026-10-07 (owner approved the M0 rule as stated):** the scheduling choice B2 and the batch-64 product prerequisite (§A.7).
+
+**Still open:**
+
+- **Quiet-machine rerun** (§A.7): when to run it, and whether a first-token failure there sends the choice back to the owner. Not an approval question until it has a result.
+- **Owner-funded daemon** for M1 and C5 (§A.14).
+- **Visual acceptance** of the panel and Mac card (C4a, C5).
+
+Settled earlier and applied:
 
 - enable from the Mac only;
-- fence recovery as a button;
 - consult only on insufficient answers;
 - ship all ten packs;
 - no rewrite and no stored records in version one;

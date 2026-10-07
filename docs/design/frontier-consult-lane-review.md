@@ -267,3 +267,17 @@ Build plan: the reviewer's suggestions are adopted.
 - The C2-affected stages are re-measured live after C2.
 - F1 and F2 do not block the experimental "route not verified" release.
 - Every stage now lists its entry conditions (§A.14).
+
+## H. M0 measured, revision 8 written (2026-10-07)
+
+No new review round; this records a measurement and the decisions taken on it.
+
+| Item | Disposition |
+|---|---|
+| M0 result | **Failed on the shared server.** Pooled added first token +5.1 s median, +11.3 s p95 (round 1, product configuration, writer aborted). Two causes: an abort takes effect only at the end of the current prefill batch (default 2,048 tokens), and any writer call evicts the cached analyst system prompt (+3.3 s). Source: `docs/design/consult-m0-measurement.md` on `claude/consult-m0`. Recorded in §A.7 with the noise floor, machine and what was not run. |
+| Scheduling | **Candidate B2 chosen** by the project anchor, 2026-10-07, with the owner's M0 rule approved as stated: the writer on its own `llama-server` (batch 64), killed on arrival or at its deadline, behind a 20%-free-memory rule. A and C rejected. |
+| Honest status | Passes the server measure (fresh request taken in 1–14 ms); first-token is inside the machine's noise floor (142 ms median, 2.5 s p95, n = 21, loaded and swapping) and unproven. A quiet-machine rerun (n ≥ 20 per phase, 30 control pairs), judged by the stricter first-token rule, is a C4b entry condition. Round samples were far below the frozen n = 30; this is stated, not hidden. |
+| Product fix | Built-in server to `--batch-size 64 --ubatch-size 64` (abort-to-next-start about 6 s to 0.2 s; 2B unmeasured), its own pull request, a C4b prerequisite. `--cache-ram` rejected. |
+| Writer prompt | 5 of 6 inputs usable; one leaked an implied place. C4b task and eval case. |
+| Owner decisions | Fork F1/F2, AD-1/AD-2, 640 px cap, M0 tolerance, public privacy sentence, fence recovery as a button: all approved 2026-10-07; moved to "decided" in §10. |
+| Stage table | M0 done; C4a entry satisfied; C4b entry conditions: batch-64 PR merged, quiet-machine B2 rerun, memory-rule tests. |
