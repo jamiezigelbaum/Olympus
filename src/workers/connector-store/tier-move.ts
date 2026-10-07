@@ -36,6 +36,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import {
   appendEmbeddingLedgerEntry,
+  appendEmbeddingLedgerEntryOnce,
   type EmbeddingLedgerApprovedBy,
 } from '../embedding-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
@@ -79,7 +80,16 @@ export interface TierMoveOptions {
   /** Overrides the Secrets policy (secrets-disposition.ts); tests only. */
   secretsDisposition?: SecretsDisposition;
   /** Where to record the move. Omitted: nothing is appended (tests only). */
-  embeddingLedger?: { path: string; approvedBy: EmbeddingLedgerApprovedBy; why?: string };
+  embeddingLedger?: {
+    path: string;
+    approvedBy: EmbeddingLedgerApprovedBy;
+    why?: string;
+    /**
+     * Makes the note idempotent: written once under `${entryKey}:${generation}`
+     * (the flip's generation), so a recovery that replays it never doubles it.
+     */
+    entryKey?: string;
+  };
   /**
    * A destination store keeping a SUPERSEDED copy of this item that an
    * earlier move of the same item superseded (a round trip: Personal, held,
@@ -264,7 +274,8 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   if (options.embeddingLedger) {
     const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
     const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
+    const append = options.embeddingLedger.entryKey ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
+    await append(options.embeddingLedger.path, {
       recorded_at: new Date().toISOString(),
       kind: 'note',
       what: `Tier move of one item (${raise ? 'raise' : 'lateral or lower'}) from ${sources.map((copy) => copy.corpusId).join(', ')} `
@@ -286,6 +297,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
       ...(options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {}),
       approved_by: options.embeddingLedger.approvedBy,
       status: 'complete',
+      ...(options.embeddingLedger.entryKey ? { entry_id: `${options.embeddingLedger.entryKey}:${flipped.generation}` } : {}),
     });
   }
 

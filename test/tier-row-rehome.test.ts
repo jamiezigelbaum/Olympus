@@ -8,6 +8,7 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { join } from 'node:path';
 import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import { createWhatsAppTierLane } from '../src/workers/whatsapp/store-sync.ts';
 import { createDropboxTierLane } from '../src/workers/dropbox-files/tier-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -455,6 +456,188 @@ describe('Private-row re-home', () => {
       expect(fixture.ledger.moveAttempts(identityOf('garden'))).toBe(0);
       expect(fixture.set.rowRehomeReport()?.refused).toBe(1);
       expect(currentCorpora(fixture, 'garden')).toEqual([CORPORA.internal]);
+    });
+
+    function plainSet(dir: string, secureProvider?: ReturnType<typeof localProvider>) {
+      const paths = storePaths(dir);
+      const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local) });
+      const stores = { internal: openLegStore(paths, 'internal', ledger), secure_local: openLegStore(paths, 'secure_local', ledger) };
+      cleanups.push(() => {
+        stores.internal.close();
+        stores.secure_local.close();
+        ledger.close();
+      });
+      const set = new TieredStoreSet({
+        setId: 'fixture.plain',
+        ledger,
+        splitLayers: false,
+        legs: [
+          { trustDomain: 'internal', corpusId: CORPORA.internal, store: stores.internal, legacy: true },
+          { trustDomain: 'secure_local', corpusId: CORPORA.secure_local, store: stores.secure_local, legacy: true, ...(secureProvider ? { embeddingProvider: secureProvider } : {}) },
+        ],
+      });
+      return { set, ledger, stores, paths };
+    }
+
+    test('old built-in vector authority never authorizes a move: an undeclared Private embedder stays unknown', async () => {
+      const { dir, cleanup } = tempDir('olympus-row-rehome-authority-');
+      cleanups.push(cleanup);
+      const { set, stores } = plainSet(dir);
+      // The Private store once embedded with a local model, so it records a local authority.
+      await stores.secure_local.syncFromConnector(fixtureConnector(() => [GARDEN]), {
+        fetchContent: true,
+        placement: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
+      });
+      await stores.secure_local.embedChunks({ provider: localProvider() });
+      expect(stores.secure_local.embeddingAuthorities().some((authority) => authority.backend === 'local')).toBe(true);
+      await stores.internal.syncFromConnector(fixtureConnector(() => [ORCHID]), { fetchContent: true, placement: S4_IN_INTERNAL });
+      expect(set.privateEmbedderBackend()).toBeUndefined();
+      const report = await rehomePrivateTierRows({ set, embeddingLedgerPath: join(dir, 'embedding-ledger.jsonl') });
+      expect(report).toMatchObject({ queued: 1, moved: 0, awaitingMigration: 1 });
+    });
+
+    test('Telegram-shaped and WhatsApp lanes move once the runtime declares a local Private embedder', async () => {
+      const { dir, cleanup } = tempDir('olympus-row-rehome-chat-');
+      cleanups.push(cleanup);
+      // Telegram: the lane's own two-store set, no provider on any leg.
+      const telegramDir = join(dir, 'telegram');
+      require('node:fs').mkdirSync(telegramDir, { recursive: true });
+      const telegram = plainSet(telegramDir);
+      await telegram.stores.internal.syncFromConnector(fixtureConnector(() => [ORCHID]), { fetchContent: true, placement: S4_IN_INTERNAL });
+      const ledgerFile = join(dir, 'embedding-ledger.jsonl');
+      expect(await rehomePrivateTierRows({ set: telegram.set, embeddingLedgerPath: ledgerFile })).toMatchObject({ moved: 0, awaitingMigration: 1 });
+      telegram.set.declarePrivateEmbedder(localProvider());
+      expect(await rehomePrivateTierRows({ set: telegram.set, embeddingLedgerPath: ledgerFile })).toMatchObject({ moved: 1 });
+
+      // WhatsApp: the production lane construction.
+      const secure = new LocalConnectorStore({ dbPath: join(dir, 'wa-secure.sqlite'), corpusId: 'secure_local.whatsapp.live', family: 'chat', trustDomain: 'secure_local' });
+      const lane = createWhatsAppTierLane({
+        store: secure,
+        env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(dir, 'wa-internal.sqlite') },
+      });
+      cleanups.push(() => {
+        lane.newStores.internal?.current()?.close();
+        secure.close();
+        lane.ledger.close();
+      });
+      const internal = lane.newStores.internal!.open();
+      const chatConnector = fixtureConnector(() => [ORCHID]);
+      const chat = {
+        ...chatConnector,
+        family: 'chat' as const,
+        listItems: (...args: Parameters<typeof chatConnector.listItems>) => (async function* () {
+          for await (const page of chatConnector.listItems(...args)) {
+            yield { ...page, items: page.items.map((item) => ({ ...item, identity: { ...item.identity, family: 'chat' as const } })) };
+          }
+        })(),
+      };
+      await internal.syncFromConnector(chat, { fetchContent: true, placement: S4_IN_INTERNAL });
+      internal.bindTierSet(lane.ledger);
+      lane.ledger.adoptLegacyPlacement(
+        identityOf('orchid'),
+        [{ corpusId: lane.newStores.internal!.corpusId, trustDomain: 'internal', layers: 'both' }],
+        { whenMissing: { family: 'file', metadataTier: 'private', contentTier: 'private' } },
+      );
+      expect(await rehomePrivateTierRows({ set: lane.set, embeddingLedgerPath: ledgerFile })).toMatchObject({ moved: 0, awaitingMigration: 1 });
+      lane.set.declarePrivateEmbedder(localProvider());
+      expect(await rehomePrivateTierRows({ set: lane.set, embeddingLedgerPath: ledgerFile })).toMatchObject({ moved: 1 });
+    });
+
+    test('225 refusing rows do not starve a healthy one, and refusals are never evicted', async () => {
+      const fixture = fixtureIn('olympus-row-rehome-refusals-');
+      const specs: FixtureSpec[] = Array.from({ length: 225 }, (_, index) => ({ id: `ref${index}`, name: `ref${index}.txt`, text: `refusing row ${index} body` }));
+      await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      for (const spec of specs) {
+        const identity = { ...identityOf(spec.id), localItemId: localId(spec.id) };
+        await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+        await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
+      }
+      rawDb(fixture.stores.secure_local!).query("UPDATE chunks SET bounded_text = 'older different text'").run();
+      rawDb(fixture.stores.internal!).query("UPDATE items SET trust_tier = 'S4'").run();
+      const wide = { scanWindow: 100_000, candidates: 1_000, embeddingLedgerPath: ledgerPath(fixture) };
+      const first = await rehomePrivateTierRows({ set: fixture.set, ...wide });
+      expect(first).toMatchObject({ queued: 225, moved: 0, failed: 0, refused: 225 });
+
+      // A healthy row appears later; 225 cached refusals must cost it nothing.
+      await fixture.stores.internal!.syncFromConnector(fixtureConnector(() => [ORCHID]), { fetchContent: true, placement: S4_IN_INTERNAL });
+      const second = await rehomePrivateTierRows({ set: fixture.set, ...wide, maxMoves: 25 });
+      expect(second).toMatchObject({ moved: 1, failed: 0, refused: 225 });
+      expect(currentCorpora(fixture, 'orchid')).toEqual([CORPORA.secure_local]);
+      const third = await rehomePrivateTierRows({ set: fixture.set, ...wide, maxMoves: 25 });
+      expect(third.refused).toBe(225);
+    });
+
+    test('the shared queue is not read when moves are not permitted or there is nothing of ours', async () => {
+      const { dir, cleanup } = tempDir('olympus-row-rehome-queue-');
+      cleanups.push(cleanup);
+      const { set, stores } = plainSet(dir);
+      const spy = spyOn(TierLedger.prototype, 'listMoving');
+      try {
+        const none = await rehomePrivateTierRows({ set, embeddingLedgerPath: join(dir, 'l.jsonl') });
+        expect(none.examined).toBe(0);
+        expect(spy).not.toHaveBeenCalled();
+        await stores.internal.syncFromConnector(fixtureConnector(() => [ORCHID]), { fetchContent: true, placement: S4_IN_INTERNAL });
+        await rehomePrivateTierRows({ set, embeddingLedgerPath: join(dir, 'l.jsonl') });
+        expect(spy).not.toHaveBeenCalled(); // queued, but the provider is unknown
+        set.declarePrivateEmbedder(localProvider());
+        await rehomePrivateTierRows({ set, embeddingLedgerPath: join(dir, 'l.jsonl') });
+        expect(spy).toHaveBeenCalled();
+        spy.mockClear();
+        await rehomePrivateTierRows({ set, embeddingLedgerPath: join(dir, 'l.jsonl') });
+        expect(spy).not.toHaveBeenCalled(); // all of ours done, nothing outstanding
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('per-sync overhead with a 5,000-row unrelated queued backlog is bounded', async () => {
+      const { dir, cleanup } = tempDir('olympus-row-rehome-backlog-');
+      cleanups.push(cleanup);
+      const { set, ledger, stores } = plainSet(dir, localProvider());
+      const publicDecision = {
+        metadataTier: 'public', contentTier: 'public', decidedBy: 'default', reasons: ['backlog'], state: 'current',
+        contentRead: true, metadataPending: false, contentPending: false, metadataForced: false, metadataFlagged: false,
+        engineVersion: 'x', mapRevision: 'none', snifferId: 'none',
+      } as const;
+      (ledger as unknown as { db: { transaction(fn: () => void): () => void } }).db.transaction(() => {
+        for (let index = 0; index < 5_000; index += 1) {
+          const identity = { provider: 'backlog', accountScope: 'personal', providerItemId: `b${index}` };
+          ledger.adoptLegacyPlacement(identity, [{ corpusId: CORPORA.internal, trustDomain: 'internal', layers: 'both' }], {
+            whenMissing: { family: 'file', metadataTier: 'private', contentTier: 'private' },
+          });
+          ledger.recordRoutedPlacement(identity, { ...publicDecision, reasons: ['backlog'] }, {
+            copies: [{ corpusId: CORPORA.secure_local, trustDomain: 'secure_local', layers: 'both' }],
+            embedHold: false,
+          }, { queueWithoutHiding: true });
+        }
+      })();
+      expect(ledger.listMoving({ limit: 5_000 })).toHaveLength(5_000);
+      await stores.internal.syncFromConnector(fixtureConnector(() => [ORCHID]), { fetchContent: true, placement: S4_IN_INTERNAL });
+      // Worst case: an earlier call left work waiting, so the shared queue is read.
+      ledger.writeMeta('private_row_rehome_outstanding', '1');
+      const started = performance.now();
+      const report = await rehomePrivateTierRows({ set, embeddingLedgerPath: join(dir, 'l.jsonl') });
+      const elapsed = performance.now() - started;
+      console.log(`row re-home pass with 5000 unrelated queued moves: ${elapsed.toFixed(0)} ms`);
+      expect(report.moved).toBe(1);
+      expect(elapsed).toBeLessThan(5_000);
+    });
+
+    test('a completed move whose note was lost is recorded again, once', async () => {
+      const fixture = fixtureIn();
+      await seedLegacy(fixture, [ORCHID]);
+      const first = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(first.moved).toBe(1);
+      expect(await receipts(fixture)).toBe(1);
+      // The process died between the flip and the note: the file never got it.
+      require('node:fs').rmSync(ledgerPath(fixture));
+      expect(await receipts(fixture)).toBe(0);
+      const replay = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(replay.receiptsReplayed).toBe(1);
+      expect(await receipts(fixture)).toBe(1);
+      const again = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(again.receiptsReplayed).toBe(0);
+      expect(await receipts(fixture)).toBe(1);
     });
 
     for (const boundary of ['decision', 'staging', 'import'] as const) {

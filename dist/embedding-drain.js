@@ -19560,7 +19560,8 @@ async function moveTieredItem(options) {
   if (options.embeddingLedger) {
     const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
     const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
+    const append = options.embeddingLedger.entryKey ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
+    await append(options.embeddingLedger.path, {
       recorded_at: new Date().toISOString(),
       kind: "note",
       what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((destination) => `${destination.corpusId} (${destination.layers})`).join(", ")}: ` + `${chunkCount} chunk(s) at the destination, ${vectorsCopied} vector(s) copied with no provider call, ` + `${toEmbed} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are kept and hidden: ${supersededCorpora.join(", ") || "none"}.` + (Object.keys(replacedSuperseded).length > 0 ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replacedSuperseded).map(([corpusId, chunks]) => `${corpusId} (${chunks} chunk(s) of older text)`).join(", ")}.` : ""),
@@ -19573,7 +19574,8 @@ async function moveTieredItem(options) {
       },
       ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
       approved_by: options.embeddingLedger.approvedBy,
-      status: "complete"
+      status: "complete",
+      ...options.embeddingLedger.entryKey ? { entry_id: `${options.embeddingLedger.entryKey}:${flipped.generation}` } : {}
     });
   }
   return { outcome: "moved", raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };

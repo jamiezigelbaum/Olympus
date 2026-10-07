@@ -366,21 +366,16 @@ export class TieredStoreSet {
   }
 
   /**
-   * Where the Private store embeds: 'local' or 'cloud' when known (declared,
-   * on the leg, or recorded by the store's own embedding authority), otherwise
+   * Where the Private store embeds NOW: 'local' or 'cloud' when the runtime
+   * declared its provider or the secure leg is configured with one, otherwise
    * undefined. Unknown is never treated as local.
    */
   privateEmbedderBackend(): 'local' | 'cloud' | undefined {
     const declared = this.privateEmbedder ?? this.legs.get('secure_local')?.spec.embeddingProvider;
     if (declared) return declared.backend === 'local' ? 'local' : declared.backend === 'cloud' ? 'cloud' : undefined;
-    try {
-      const backends = new Set((this.store('secure_local')?.embeddingAuthorities() ?? []).map((authority) => authority.backend));
-      if (backends.size !== 1) return undefined;
-      const [only] = [...backends];
-      return only === 'local' ? 'local' : only === 'cloud' ? 'cloud' : undefined;
-    } catch {
-      return undefined;
-    }
+    // Never inferred from stored vectors: a historical authority says what the
+    // store once used, not what is configured now.
+    return undefined;
   }
 
   /** Counts from the last Private-row re-home pass this process ran (content-free). */

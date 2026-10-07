@@ -42,7 +42,12 @@ import {
   type TierLedgerIdentity,
   type TierLedgerRecord,
 } from '../classification/tier-ledger.ts';
-import { EMBEDDING_LEDGER_OWNER_APPROVAL, resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
+import {
+  appendEmbeddingLedgerEntryOnce,
+  EMBEDDING_LEDGER_OWNER_APPROVAL,
+  readEmbeddingLedger,
+  resolveEmbeddingLedgerPath,
+} from '../embedding-ledger.ts';
 import { moveTieredItem, TierMoveRefusedError } from './tier-move.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -79,6 +84,8 @@ export interface TierRowRehomeReport {
   awaitingMigration: number;
   /** Moves the destination refuses for good (it keeps different text); recorded once, never retried. */
   refused: number;
+  /** Completed moves whose embedding-ledger note was missing and was written again (idempotent). */
+  receiptsReplayed: number;
 }
 
 export interface TierRowRehomeOptions {
@@ -91,7 +98,7 @@ export interface TierRowRehomeOptions {
 }
 
 export function emptyTierRowRehomeReport(): TierRowRehomeReport {
-  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0, refused: 0 };
+  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0, refused: 0, receiptsReplayed: 0 };
 }
 
 export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Promise<TierRowRehomeReport> {
@@ -102,6 +109,8 @@ export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Prom
   const limit = Math.max(1, options.candidates ?? DEFAULT_ROW_REHOME_CANDIDATES);
   // Moves this pass queued earlier that the scan met again (found in the store, not through the queue).
   const ours: TierLedgerIdentity[] = [];
+  // Completed moves met again through their superseded source row.
+  const completed: CompletedMove[] = [];
 
   for (const domain of NON_SECURE_DOMAINS) {
     try {
@@ -124,7 +133,7 @@ export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Prom
       for (const row of page.rows) {
         report.examined += 1;
         try {
-          considerRow(set, domain, row.identity, report, ours);
+          considerRow(set, domain, row.identity, report, ours, completed);
         } catch {
           // Left where it is; a later call tries again.
           report.skipped += 1;
@@ -136,6 +145,7 @@ export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Prom
   }
 
   await runQueuedMoves(options, report, ours);
+  await replayMissingReceipts(options, report, completed);
   set.recordRowRehomeReport(report);
   return report;
 }
@@ -161,6 +171,7 @@ function considerRow(
   row: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string; family: string },
   report: TierRowRehomeReport,
   ours: TierLedgerIdentity[],
+  completed: CompletedMove[],
 ): void {
   const ledger = set.ledger;
   const store = set.store(domain)!;
@@ -176,6 +187,17 @@ function considerRow(
   // too long to reach it, so the scan hands it to the move step.
   if (record?.routed && record.state === 'moving' && record.reasons.includes(ROW_REHOME_REASON)) {
     ours.push(identity);
+    return void (report.skipped += 1);
+  }
+  // A move this pass completed, met through the source row it left superseded:
+  // its note may be missing (a crash between the flip and the write).
+  if (record?.routed && record.state === 'current' && record.reasons.includes(ROW_REHOME_REASON)) {
+    const generation = record.generation;
+    const copies = ledger.copies(identity);
+    const left = copies.find((copy) => copy.state === 'superseded' && copy.corpusId === store.corpusId
+      && copy.supersededByGeneration === generation);
+    const arrived = copies.find((copy) => copy.state === 'current' && copy.trustDomain === 'secure_local');
+    if (left && arrived) completed.push({ identity, generation, from: left.corpusId, to: arrived.corpusId });
     return void (report.skipped += 1);
   }
   if (record && (openQuestion(record) || record.state === 'moving' || forced(record) || record.contentTier === 'secrets' || record.metadataTier === 'secrets')) {
@@ -227,20 +249,65 @@ function considerRow(
   // Queue WITHOUT hiding: the item stays searchable where it is until the
   // move (which hides its source first) runs, in this same call.
   const recorded = ledger.recordRoutedPlacement(identity, decision, plan, { queueWithoutHiding: true });
-  if (recorded.outcome === 'queued_move') report.queued += 1;
-  else report.skipped += 1;
+  if (recorded.outcome === 'queued_move') {
+    report.queued += 1;
+    ours.push(identity);
+  } else {
+    report.skipped += 1;
+  }
+}
+
+interface CompletedMove {
+  identity: TierLedgerIdentity;
+  generation: number;
+  from: string;
+  to: string;
 }
 
 const REFUSED_META_KEY = 'private_row_rehome_refused';
-const REFUSED_META_LIMIT = 200;
+const OUTSTANDING_META_KEY = 'private_row_rehome_outstanding';
+/** Items considered for a move per call, refused ones included (they cost no move budget). */
+const MAX_CONSIDERED_PER_CALL = 500;
 
-function readRefused(ledger: TieredStoreSet['ledger']): string[] {
+interface RefusedEntry {
+  identity: TierLedgerIdentity;
+  generation: number;
+}
+
+function refusalKey(identity: TierLedgerIdentity, generation: number): string {
+  return `${tierLedgerIdentityKey(identity)}#${generation}`;
+}
+
+/**
+ * Every still-active refusal, never capped: an entry is dropped only when its
+ * item is no longer waiting at that generation (decided again, moved, gone).
+ */
+function readRefused(ledger: TieredStoreSet['ledger']): Map<string, RefusedEntry> {
+  const entries = new Map<string, RefusedEntry>();
+  let changed = false;
   try {
     const parsed = JSON.parse(ledger.readMeta(REFUSED_META_KEY) ?? '[]') as unknown;
-    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+    for (const entry of Array.isArray(parsed) ? parsed as RefusedEntry[] : []) {
+      if (!entry?.identity || typeof entry.generation !== 'number') {
+        changed = true;
+        continue;
+      }
+      const record = ledger.getCurrent(entry.identity);
+      if (record && record.state === 'moving' && record.generation === entry.generation) {
+        entries.set(refusalKey(entry.identity, entry.generation), entry);
+      } else {
+        changed = true;
+      }
+    }
   } catch {
-    return [];
+    return entries;
   }
+  if (changed) writeRefused(ledger, entries);
+  return entries;
+}
+
+function writeRefused(ledger: TieredStoreSet['ledger'], entries: ReadonlyMap<string, RefusedEntry>): void {
+  ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...entries.values()]));
 }
 
 function isOurQueuedRaise(record: TierLedgerRecord): boolean {
@@ -262,15 +329,36 @@ async function runQueuedMoves(
   const { set } = options;
   const ledger = set.ledger;
   let budget = Math.max(0, options.maxMoves ?? DEFAULT_ROW_REHOME_MOVES);
-  if (budget === 0) return;
-  // The ledger's queue has no filter or cursor to export, so the widest page it
-  // allows is read and filtered; anything past it is reached through the scan
+  const outstanding = ledger.readMeta(OUTSTANDING_META_KEY) === '1';
+  // No work of our own: nothing queued this call, none met in a store, none
+  // left over from an earlier call. The shared queue is not even read.
+  if (report.queued === 0 && found.length === 0 && !outstanding) return;
+  // The approval covers the LOCAL Private embedder, as configured now (declared
+  // by the runtime or on the leg; never inferred from stored vectors). Cloud or
+  // unknown keeps the queued moves for the migration, which prices them. The
+  // queue is not read either.
+  if (set.privateEmbedderBackend() !== 'local') {
+    // `found` holds what this call queued and what the scan met again.
+    report.awaitingMigration += found.length;
+    if (found.length > 0) ledger.writeMeta(OUTSTANDING_META_KEY, '1');
+    return;
+  }
+  if (budget === 0) {
+    ledger.writeMeta(OUTSTANDING_META_KEY, '1');
+    return;
+  }
+  // The ledger's queue has no filter or cursor to export, so when it must be
+  // read the widest page it allows is read and filtered; anything past it is reached through the scan
   // (`found`: our queued rows met again in their store), which cycles the whole
   // table over successive calls. Unrelated queued moves cannot starve ours.
   const work = new Map<string, TierLedgerRecord>();
   try {
-    for (const record of ledger.listMoving({ limit: 5_000 })) {
-      if (isOurQueuedRaise(record)) work.set(tierLedgerIdentityKey(identityOfRecord(record)), record);
+    // Only when some of our work was left waiting by an earlier call: what
+    // this call queued or met in a store is already in `found`.
+    if (outstanding) {
+      for (const record of ledger.listMoving({ limit: 5_000 })) {
+        if (isOurQueuedRaise(record)) work.set(tierLedgerIdentityKey(identityOfRecord(record)), record);
+      }
     }
     for (const identity of found) {
       const key = tierLedgerIdentityKey(identity);
@@ -280,25 +368,24 @@ async function runQueuedMoves(
   } catch {
     return;
   }
-  if (work.size === 0) return;
-  // The approval covers the LOCAL Private embedder. Anything not known to be
-  // local (a cloud model, or an embedder this set cannot resolve) keeps its
-  // queued moves for the migration, which prices them.
-  if (set.privateEmbedderBackend() !== 'local') {
-    report.awaitingMigration += work.size;
-    return;
-  }
   const builtInOnly = setEmbedsWithBuiltInOnly(set);
   const embeddingLedgerPath = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
-  const refused = new Set(readRefused(ledger));
+  const refused = readRefused(ledger);
+  let considered = 0;
+  let waiting = 0;
   for (const queued of work.values()) {
-    if (budget === 0) break;
     const identity = identityOfRecord(queued);
-    const refusedKey = `${tierLedgerIdentityKey(identity)}#${queued.generation}`;
+    const refusedKey = refusalKey(identity, queued.generation);
     if (refused.has(refusedKey)) {
+      // A cached refusal costs no budget and no work.
       report.refused += 1;
       continue;
     }
+    if (budget === 0 || considered >= MAX_CONSIDERED_PER_CALL) {
+      waiting += 1;
+      continue;
+    }
+    considered += 1;
     try {
       // Re-check everything against the ledger right now, not the queue-time record.
       const record = ledger.getCurrent(identity);
@@ -312,15 +399,20 @@ async function runQueuedMoves(
         || (copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1));
       // Already (at least partly) in the Private store, or nothing to move from.
       if (sources.length === 0 || sources.every((copy) => copy.trustDomain === 'secure_local')) continue;
-      budget -= 1;
       const source = copyServingLayer(sources, 'content') ?? sources[0]!;
       const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
       if (!exported) throw new Error('no current copy');
+      budget -= 1;
       await moveTieredItem({
         set,
         identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
         target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
-        embeddingLedger: { path: embeddingLedgerPath, approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL, why: MOVE_WHY },
+        embeddingLedger: {
+          path: embeddingLedgerPath,
+          approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL,
+          why: MOVE_WHY,
+          entryKey: receiptKey(identity),
+        },
         expectedGeneration: record.generation,
         ...(builtInOnly ? { replaceOwnSupersededCopy: true } : {}),
       });
@@ -333,10 +425,12 @@ async function runQueuedMoves(
       if (error instanceof TierMoveRefusedError) {
         // The destination keeps different text of this item: a permanent
         // refusal until an approved purge. Recorded once, not retried; the
-        // guard in the move primitive stays.
-        refused.add(refusedKey);
-        ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...refused].slice(-REFUSED_META_LIMIT)));
+        // guard in the move primitive stays. The refusal wrote nothing, so it
+        // gives its budget back.
+        refused.set(refusalKey(identity, queued.generation), { identity, generation: queued.generation });
+        writeRefused(ledger, refused);
         report.refused += 1;
+        budget += 1;
         continue;
       }
       report.failed += 1;
@@ -346,6 +440,50 @@ async function runQueuedMoves(
         // Counting is best effort.
       }
     }
+  }
+  // Remember whether any of our work is still waiting, so the next call knows
+  // whether to read the queue at all.
+  const left = waiting + report.failed;
+  ledger.writeMeta(OUTSTANDING_META_KEY, left > 0 ? '1' : '');
+}
+
+function receiptKey(identity: TierLedgerIdentity): string {
+  return `row-rehome:${tierLedgerIdentityKey(identity)}`;
+}
+
+/**
+ * A completed move (destination current) whose note never reached the
+ * embedding ledger (a crash between the flip and the write) gets it written
+ * again, keyed by item and the flip's generation, so it appears exactly once.
+ */
+async function replayMissingReceipts(
+  options: TierRowRehomeOptions,
+  report: TierRowRehomeReport,
+  completed: readonly CompletedMove[],
+): Promise<void> {
+  if (completed.length === 0) return;
+  const path = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
+  try {
+    const present = new Set((await readEmbeddingLedger(path)).entries.map((entry) => entry.entry_id).filter(Boolean));
+    for (const move of completed.slice(0, DEFAULT_ROW_REHOME_MOVES)) {
+      const entryId = `${receiptKey(move.identity)}:${move.generation}`;
+      if (present.has(entryId)) continue;
+      const written = await appendEmbeddingLedgerEntryOnce(path, {
+        recorded_at: new Date().toISOString(),
+        kind: 'note',
+        what: `Tier move of one item (raise) from ${move.from} to ${move.to} (both): the move completed but its note was missing `
+          + 'and is recorded now. Superseded copies are kept and hidden. Chunk counts are not known after the fact; '
+          + 'the destination embeds with its own local model.',
+        scope: { corpora: [move.from, move.to] },
+        why: MOVE_WHY,
+        approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+        status: 'complete',
+        entry_id: entryId,
+      });
+      if (written) report.receiptsReplayed += 1;
+    }
+  } catch {
+    // The next call tries again.
   }
 }
 

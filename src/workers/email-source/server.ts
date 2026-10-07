@@ -2455,6 +2455,7 @@ export async function main(): Promise<void> {
         ...(whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}),
       })
     : undefined;
+  if (whatsappTierSet && tierSecureEmbeddingProvider) whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
   if (whatsappTierSet && whatsappConnectorStore) {
     reportRehomedChatOverrides('whatsapp', rehomeChatLaneOverrides(whatsappTierSet.ledger, 'whatsapp', [whatsappConnectorStore]));
   }
@@ -2496,6 +2497,7 @@ export async function main(): Promise<void> {
         stores: telegramConnectorStores,
         env: process.env,
         ...(telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {}),
+        ...(tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}),
       })
     : undefined;
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(

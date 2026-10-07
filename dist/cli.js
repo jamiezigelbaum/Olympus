@@ -25431,7 +25431,8 @@ async function moveTieredItem(options) {
   if (options.embeddingLedger) {
     const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
     const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
+    const append = options.embeddingLedger.entryKey ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
+    await append(options.embeddingLedger.path, {
       recorded_at: new Date().toISOString(),
       kind: "note",
       what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((destination) => `${destination.corpusId} (${destination.layers})`).join(", ")}: ` + `${chunkCount} chunk(s) at the destination, ${vectorsCopied} vector(s) copied with no provider call, ` + `${toEmbed} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are kept and hidden: ${supersededCorpora.join(", ") || "none"}.` + (Object.keys(replacedSuperseded).length > 0 ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replacedSuperseded).map(([corpusId, chunks]) => `${corpusId} (${chunks} chunk(s) of older text)`).join(", ")}.` : ""),
@@ -25444,7 +25445,8 @@ async function moveTieredItem(options) {
       },
       ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
       approved_by: options.embeddingLedger.approvedBy,
-      status: "complete"
+      status: "complete",
+      ...options.embeddingLedger.entryKey ? { entry_id: `${options.embeddingLedger.entryKey}:${flipped.generation}` } : {}
     });
   }
   return { outcome: "moved", raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };
@@ -25549,7 +25551,7 @@ var init_tier_move = __esm(() => {
 
 // src/workers/connector-store/tier-row-rehome.ts
 function emptyTierRowRehomeReport() {
-  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0, refused: 0 };
+  return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0, refused: 0, receiptsReplayed: 0 };
 }
 async function rehomePrivateTierRows(options) {
   const report = emptyTierRowRehomeReport();
@@ -25558,6 +25560,7 @@ async function rehomePrivateTierRows(options) {
   const window2 = Math.max(1, options.scanWindow ?? DEFAULT_ROW_REHOME_SCAN_WINDOW);
   const limit = Math.max(1, options.candidates ?? DEFAULT_ROW_REHOME_CANDIDATES);
   const ours = [];
+  const completed = [];
   for (const domain of NON_SECURE_DOMAINS) {
     try {
       const store = set.store(domain);
@@ -25578,7 +25581,7 @@ async function rehomePrivateTierRows(options) {
       for (const row of page.rows) {
         report.examined += 1;
         try {
-          considerRow(set, domain, row.identity, report, ours);
+          considerRow(set, domain, row.identity, report, ours, completed);
         } catch {
           report.skipped += 1;
         }
@@ -25586,6 +25589,7 @@ async function rehomePrivateTierRows(options) {
     } catch {}
   }
   await runQueuedMoves(options, report, ours);
+  await replayMissingReceipts(options, report, completed);
   set.recordRowRehomeReport(report);
   return report;
 }
@@ -25602,7 +25606,7 @@ function domainRestsAtPrivateTier(set, domain) {
   });
   return placement.copies.every((copy) => trustDomainRank(copy.trustDomain) <= trustDomainRank(domain));
 }
-function considerRow(set, domain, row, report, ours) {
+function considerRow(set, domain, row, report, ours, completed) {
   const ledger = set.ledger;
   const store = set.store(domain);
   const identity = {
@@ -25616,6 +25620,15 @@ function considerRow(set, domain, row, report, ours) {
   let record = ledger.getCurrent(identity);
   if (record?.routed && record.state === "moving" && record.reasons.includes(ROW_REHOME_REASON)) {
     ours.push(identity);
+    return void (report.skipped += 1);
+  }
+  if (record?.routed && record.state === "current" && record.reasons.includes(ROW_REHOME_REASON)) {
+    const generation = record.generation;
+    const copies = ledger.copies(identity);
+    const left = copies.find((copy) => copy.state === "superseded" && copy.corpusId === store.corpusId && copy.supersededByGeneration === generation);
+    const arrived = copies.find((copy) => copy.state === "current" && copy.trustDomain === "secure_local");
+    if (left && arrived)
+      completed.push({ identity, generation, from: left.corpusId, to: arrived.corpusId });
     return void (report.skipped += 1);
   }
   if (record && (openQuestion(record) || record.state === "moving" || forced(record) || record.contentTier === "secrets" || record.metadataTier === "secrets")) {
@@ -25658,18 +25671,42 @@ function considerRow(set, domain, row, report, ours) {
     return void (report.skipped += 1);
   }
   const recorded = ledger.recordRoutedPlacement(identity, decision, plan, { queueWithoutHiding: true });
-  if (recorded.outcome === "queued_move")
+  if (recorded.outcome === "queued_move") {
     report.queued += 1;
-  else
+    ours.push(identity);
+  } else {
     report.skipped += 1;
+  }
+}
+function refusalKey(identity, generation) {
+  return `${tierLedgerIdentityKey(identity)}#${generation}`;
 }
 function readRefused(ledger) {
+  const entries = new Map;
+  let changed = false;
   try {
     const parsed = JSON.parse(ledger.readMeta(REFUSED_META_KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : [];
+    for (const entry of Array.isArray(parsed) ? parsed : []) {
+      if (!entry?.identity || typeof entry.generation !== "number") {
+        changed = true;
+        continue;
+      }
+      const record = ledger.getCurrent(entry.identity);
+      if (record && record.state === "moving" && record.generation === entry.generation) {
+        entries.set(refusalKey(entry.identity, entry.generation), entry);
+      } else {
+        changed = true;
+      }
+    }
   } catch {
-    return [];
+    return entries;
   }
+  if (changed)
+    writeRefused(ledger, entries);
+  return entries;
+}
+function writeRefused(ledger, entries) {
+  ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...entries.values()]));
 }
 function isOurQueuedRaise(record) {
   return record.routed && record.state === "moving" && record.targetMetadataTier !== null && record.targetContentTier !== null && record.targetMetadataTier !== "secrets" && record.targetContentTier !== "secrets" && record.reasons.includes(ROW_REHOME_REASON) && (record.targetMetadataTier === "secure" || record.targetContentTier === "secure");
@@ -25678,13 +25715,26 @@ async function runQueuedMoves(options, report, found) {
   const { set } = options;
   const ledger = set.ledger;
   let budget = Math.max(0, options.maxMoves ?? DEFAULT_ROW_REHOME_MOVES);
-  if (budget === 0)
+  const outstanding = ledger.readMeta(OUTSTANDING_META_KEY) === "1";
+  if (report.queued === 0 && found.length === 0 && !outstanding)
     return;
+  if (set.privateEmbedderBackend() !== "local") {
+    report.awaitingMigration += found.length;
+    if (found.length > 0)
+      ledger.writeMeta(OUTSTANDING_META_KEY, "1");
+    return;
+  }
+  if (budget === 0) {
+    ledger.writeMeta(OUTSTANDING_META_KEY, "1");
+    return;
+  }
   const work = new Map;
   try {
-    for (const record of ledger.listMoving({ limit: 5000 })) {
-      if (isOurQueuedRaise(record))
-        work.set(tierLedgerIdentityKey(identityOfRecord(record)), record);
+    if (outstanding) {
+      for (const record of ledger.listMoving({ limit: 5000 })) {
+        if (isOurQueuedRaise(record))
+          work.set(tierLedgerIdentityKey(identityOfRecord(record)), record);
+      }
     }
     for (const identity of found) {
       const key = tierLedgerIdentityKey(identity);
@@ -25695,24 +25745,23 @@ async function runQueuedMoves(options, report, found) {
   } catch {
     return;
   }
-  if (work.size === 0)
-    return;
-  if (set.privateEmbedderBackend() !== "local") {
-    report.awaitingMigration += work.size;
-    return;
-  }
   const builtInOnly = setEmbedsWithBuiltInOnly(set);
   const embeddingLedgerPath = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
-  const refused = new Set(readRefused(ledger));
+  const refused = readRefused(ledger);
+  let considered = 0;
+  let waiting = 0;
   for (const queued of work.values()) {
-    if (budget === 0)
-      break;
     const identity = identityOfRecord(queued);
-    const refusedKey = `${tierLedgerIdentityKey(identity)}#${queued.generation}`;
+    const refusedKey = refusalKey(identity, queued.generation);
     if (refused.has(refusedKey)) {
       report.refused += 1;
       continue;
     }
+    if (budget === 0 || considered >= MAX_CONSIDERED_PER_CALL) {
+      waiting += 1;
+      continue;
+    }
+    considered += 1;
     try {
       const record = ledger.getCurrent(identity);
       if (!record || !isOurQueuedRaise(record) || record.generation !== queued.generation || ledger.getOverride(identity) || ledger.rejudgeQuestion(identity) || record.targetMetadataTier !== queued.targetMetadataTier || record.targetContentTier !== queued.targetContentTier) {
@@ -25722,16 +25771,21 @@ async function runQueuedMoves(options, report, found) {
       const sources = ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1);
       if (sources.length === 0 || sources.every((copy) => copy.trustDomain === "secure_local"))
         continue;
-      budget -= 1;
       const source = copyServingLayer(sources, "content") ?? sources[0];
       const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
       if (!exported)
         throw new Error("no current copy");
+      budget -= 1;
       await moveTieredItem({
         set,
         identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
         target: { metadataTier: record.targetMetadataTier, contentTier: record.targetContentTier },
-        embeddingLedger: { path: embeddingLedgerPath, approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL, why: MOVE_WHY },
+        embeddingLedger: {
+          path: embeddingLedgerPath,
+          approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL,
+          why: MOVE_WHY,
+          entryKey: receiptKey(identity)
+        },
         expectedGeneration: record.generation,
         ...builtInOnly ? { replaceOwnSupersededCopy: true } : {}
       });
@@ -25741,9 +25795,10 @@ async function runQueuedMoves(options, report, found) {
         continue;
       }
       if (error instanceof TierMoveRefusedError) {
-        refused.add(refusedKey);
-        ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...refused].slice(-REFUSED_META_LIMIT)));
+        refused.set(refusalKey(identity, queued.generation), { identity, generation: queued.generation });
+        writeRefused(ledger, refused);
         report.refused += 1;
+        budget += 1;
         continue;
       }
       report.failed += 1;
@@ -25752,6 +25807,36 @@ async function runQueuedMoves(options, report, found) {
       } catch {}
     }
   }
+  const left = waiting + report.failed;
+  ledger.writeMeta(OUTSTANDING_META_KEY, left > 0 ? "1" : "");
+}
+function receiptKey(identity) {
+  return `row-rehome:${tierLedgerIdentityKey(identity)}`;
+}
+async function replayMissingReceipts(options, report, completed) {
+  if (completed.length === 0)
+    return;
+  const path = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
+  try {
+    const present = new Set((await readEmbeddingLedger(path)).entries.map((entry) => entry.entry_id).filter(Boolean));
+    for (const move of completed.slice(0, DEFAULT_ROW_REHOME_MOVES)) {
+      const entryId = `${receiptKey(move.identity)}:${move.generation}`;
+      if (present.has(entryId))
+        continue;
+      const written = await appendEmbeddingLedgerEntryOnce(path, {
+        recorded_at: new Date().toISOString(),
+        kind: "note",
+        what: `Tier move of one item (raise) from ${move.from} to ${move.to} (both): the move completed but its note was missing ` + "and is recorded now. Superseded copies are kept and hidden. Chunk counts are not known after the fact; " + "the destination embeds with its own local model.",
+        scope: { corpora: [move.from, move.to] },
+        why: MOVE_WHY,
+        approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+        status: "complete",
+        entry_id: entryId
+      });
+      if (written)
+        report.receiptsReplayed += 1;
+    }
+  } catch {}
 }
 function identityOfRecord(record) {
   return {
@@ -25774,7 +25859,7 @@ function setEmbedsWithBuiltInOnly(set) {
     return false;
   }
 }
-var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, ROW_REHOME_REASON = "row_tier:private_rehome", CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY, REFUSED_META_KEY = "private_row_rehome_refused", REFUSED_META_LIMIT = 200;
+var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, ROW_REHOME_REASON = "row_tier:private_rehome", CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY, REFUSED_META_KEY = "private_row_rehome_refused", OUTSTANDING_META_KEY = "private_row_rehome_outstanding", MAX_CONSIDERED_PER_CALL = 500;
 var init_tier_row_rehome = __esm(() => {
   init_provider();
   init_types();
@@ -26233,15 +26318,7 @@ class TieredStoreSet {
     const declared = this.privateEmbedder ?? this.legs.get("secure_local")?.spec.embeddingProvider;
     if (declared)
       return declared.backend === "local" ? "local" : declared.backend === "cloud" ? "cloud" : undefined;
-    try {
-      const backends = new Set((this.store("secure_local")?.embeddingAuthorities() ?? []).map((authority) => authority.backend));
-      if (backends.size !== 1)
-        return;
-      const [only] = [...backends];
-      return only === "local" ? "local" : only === "cloud" ? "cloud" : undefined;
-    } catch {
-      return;
-    }
+    return;
   }
   rowRehomeReport() {
     return this.lastRowRehome;
@@ -36809,6 +36886,8 @@ function createTelegramConnectorStoreSyncHandler(options) {
     splitLayers: false,
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {}
   });
+  if (options.privateEmbedder)
+    tierSet.declarePrivateEmbedder(options.privateEmbedder);
   return {
     async pull(request = {}) {
       const maxItems = telegramPullMaxItems(request.max_items ?? options.maxItems);
@@ -120277,6 +120356,8 @@ async function main() {
     store: whatsappConnectorStore,
     ...whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}
   }) : undefined;
+  if (whatsappTierSet && tierSecureEmbeddingProvider)
+    whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
   if (whatsappTierSet && whatsappConnectorStore) {
     reportRehomedChatOverrides("whatsapp", rehomeChatLaneOverrides(whatsappTierSet.ledger, "whatsapp", [whatsappConnectorStore]));
   }
@@ -120296,7 +120377,8 @@ async function main() {
   const telegramConnectorStoreSync = telegramConnectorStores ? createTelegramConnectorStoreSyncHandler({
     stores: telegramConnectorStores,
     env: process.env,
-    ...telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {}
+    ...telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {},
+    ...tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}
   }) : undefined;
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
   const laneConnectorStores = [
