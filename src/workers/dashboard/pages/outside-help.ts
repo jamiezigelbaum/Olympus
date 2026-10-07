@@ -55,5 +55,9 @@ function renderOutsideHelpBody(options: DashboardPageOptions | undefined): strin
   if (!status) {
     return `<div class="privacy outside" data-outside-unavailable>${head}<p class="pnote">${escapeHtml(W.unavailable)}</p></div>`;
   }
-  return renderOutsideHelpCard(status, { csrfToken, ...(options?.basePath === undefined ? {} : { basePath: options.basePath }) });
+  return renderOutsideHelpCard(status, {
+    csrfToken,
+    localSession: options?.outsideHelpLocalSession === true,
+    ...(options?.basePath === undefined ? {} : { basePath: options.basePath }),
+  });
 }

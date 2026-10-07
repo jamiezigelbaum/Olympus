@@ -102,6 +102,12 @@ export interface DashboardPageOptions extends DashboardVocabularyOptions {
    * them (a daemon version call and two port probes) for no other render.
    */
   outsideHelp?: DashboardOutsideHelpStatus;
+  /**
+   * True when the live control session was minted by the local-only mint
+   * (workers/http.ts), the only grade the consult routes accept. False: the
+   * card offers that one-click unlock instead of controls.
+   */
+  outsideHelpLocalSession?: boolean;
   /** One word for Setup's Outside help row; absent, the row is not shown. */
   outsideHelpSummary?: DashboardOutsideHelpSummary;
   /** Private builds retain the append-only embedding decision ledger. */

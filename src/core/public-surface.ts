@@ -207,6 +207,9 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/control/launch' },
   { method: 'POST', path: '/dashboard/control/launch/redeem' },
   { method: 'POST', path: '/dashboard/control/session' },
+  // The local-only mint behind the Outside help card: no bearer accepted,
+  // loopback origin only; its sessions alone reach the consult routes.
+  { method: 'POST', path: '/dashboard/control/session/local' },
   { method: 'GET', path: '/dashboard/dispositions' },
   { method: 'GET', path: '/dashboard/dispositions.json' },
   { method: 'POST', path: '/dashboard/dispositions' },

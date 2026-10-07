@@ -7,7 +7,7 @@
  * §A.10, §A.14 (stage C5). No process is started: readiness and the recovery
  * session are seams.
  */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -33,7 +33,8 @@ import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.t
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardConsultAdapter, DASHBOARD_ZKAPI_PROFILE_ID, type DashboardConsultBackend } from '../src/workers/email-source/dashboard-consult.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { DASHBOARD_CONSULT_CONTROL_PATHS, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { __sovereigntyFileTestHooks } from '../src/core/sovereignty.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 
 const NOW = DASHBOARD_PREVIEW_NOW;
@@ -121,6 +122,7 @@ function configuredRoute(input: { complete?: boolean; ready?: ZkapiConsultReadin
       blockers: ready.blockers,
       daemonFound: ready.daemonExecutable !== undefined,
       ...(ready.daemonVersion ? { daemonVersion: ready.daemonVersion } : {}),
+      torMode: ready.tor,
       torFound: ready.torExecutable !== undefined,
       apiKeyConfigured: ready.apiKeyConfigured,
       expiry: {
@@ -137,7 +139,7 @@ function configuredRoute(input: { complete?: boolean; ready?: ZkapiConsultReadin
 }
 
 function page(value: DashboardOutsideHelpStatus, extra: Record<string, unknown> = {}): string {
-  return renderDashboardOutsideHelpPage(buildDashboardPreviewView('review'), { now: NOW, controlSessionCsrfToken: 'csrf', outsideHelp: value, ...extra });
+  return renderDashboardOutsideHelpPage(buildDashboardPreviewView('review'), { now: NOW, controlSessionCsrfToken: 'csrf', outsideHelpLocalSession: true, outsideHelp: value, ...extra });
 }
 
 /** Every word a reader sees: visible text plus accessible names, scripts and styles removed. */
@@ -273,6 +275,35 @@ describe('the Outside help page: states and copy', () => {
     expect(html).toContain(`data-outside-restart-pending>${W.restartPending}<`);
   });
 
+  test('Tor off: the route is said to be direct with the network address visible, whether or not a tor binary exists', () => {
+    const off = readiness({ tor: 'off', torPort: 'not_used' });
+    const html = page(status({ route: configuredRoute({ ready: off }) }));
+    const text = visibleText(html);
+    expect(text).toContain('Tor off: the route is direct and your network address is visible to the provider');
+    expect(text).not.toContain('Tor found');
+    const { torExecutable: _t, ...noBinary } = readiness({ tor: 'off', torPort: 'not_used' });
+    expect(visibleText(page(status({ route: configuredRoute({ ready: noBinary as ZkapiConsultReadiness }) })))).toContain('Tor off: the route is direct');
+    // Tor on and missing: said as missing.
+    const { torExecutable: _m, ...missing } = readiness({ blockers: ['tor_not_found'] });
+    expect(visibleText(page(status({ route: configuredRoute({ ready: missing as ZkapiConsultReadiness }) })))).toContain('Tor not installed');
+  });
+
+  test('a bearer-grade session reads the card but gets the local unlock instead of controls', () => {
+    const html = page(status(), { outsideHelpLocalSession: false });
+    expect(html).toContain('data-outside-unlock');
+    expect(html).toContain(W.unlock);
+    expect(html).toContain(DASHBOARD_LOCAL_CONTROL_SESSION_PATH);
+    // Every control is rendered disabled; only the unlock submits.
+    expect(html).not.toContain('data-outside-enabled="true">');
+    expect(html).toContain('data-outside-enabled="true" disabled aria-disabled="true">');
+    expect(html).not.toContain(`<button type="submit" class="btn">${W.saveRoute}</button>`);
+    expect(html).toContain(`<button type="submit" class="btn" disabled aria-disabled="true">${W.saveRoute}</button>`);
+    // Still reads every fact and every statement, read-only.
+    expect(html.match(/name="acknowledged"[^>]*disabled/g)?.length).toBe(8);
+    // A local-grade session has no unlock to offer.
+    expect(page(status())).not.toContain('data-outside-unlock');
+  });
+
   test('locked and native readers get one sentence and no controls; the dash_ token reads as locked', () => {
     const view = buildDashboardPreviewView('review');
     const locked = renderDashboardOutsideHelpPage(view, { now: NOW });
@@ -376,8 +407,16 @@ function worker(backend: DashboardConsultBackend | undefined) {
   return withWorkerBearerAuth((request: Request) => created.fetch(request), { authToken: 'worker-secret' });
 }
 
+/** A bearer-minted session: every ordinary control, never the consult routes. */
 async function controlSession(fetcher: (request: Request) => Promise<Response>): Promise<{ cookie: string; csrf: string }> {
   const mint = await fetcher(new Request(`${ORIGIN}/dashboard/control/session`, { method: 'POST', headers: { Authorization: 'Bearer worker-secret', Origin: ORIGIN } }));
+  expect(mint.status).toBe(200);
+  return { cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, csrf: ((await mint.json()) as { csrf_token: string }).csrf_token };
+}
+
+/** The local-only mint: a loopback browser presenting no bearer. */
+async function localSession(fetcher: (request: Request) => Promise<Response>): Promise<{ cookie: string; csrf: string }> {
+  const mint = await fetcher(new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } }));
   expect(mint.status).toBe(200);
   return { cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!, csrf: ((await mint.json()) as { csrf_token: string }).csrf_token };
 }
@@ -388,34 +427,42 @@ function post(path: string, body: unknown, headers: Record<string, string>): Req
 
 describe('the worker serves the card only inside a local control session', () => {
   test('the five routes are the public route list\'s, the HTTP boundary\'s and the page\'s one set', () => {
-    const paths = Object.values(DASHBOARD_OUTSIDE_HELP_PATHS).sort();
+    // The unlock is the session mint, not a consult route.
+    const { unlock, ...consultPaths } = DASHBOARD_OUTSIDE_HELP_PATHS;
+    expect(unlock).toBe(DASHBOARD_LOCAL_CONTROL_SESSION_PATH);
+    const paths = Object.values(consultPaths).sort();
     expect([...DASHBOARD_CONSULT_CONTROL_PATHS].sort()).toEqual(paths);
     expect(V0_4_PUBLIC_DASHBOARD_ROUTES.filter((route) => route.path.startsWith('/dashboard/consult')).map((route) => `${route.method} ${route.path}`).sort())
       .toEqual(paths.map((path) => `POST ${path}`).sort());
   });
 
-  test('the Gateway bearer is refused (403, mac_dashboard_only) and nothing is called; no session 401; wrong CSRF or origin 403', async () => {
+  test('the Gateway bearer, and every session the bearer can mint, are refused (403, mac_dashboard_only) and nothing is called; no session 401; wrong CSRF or origin 403', async () => {
     const calls: string[] = [];
     const fetcher = worker(fakeBackend(calls));
-    const { cookie, csrf } = await controlSession(fetcher);
+    const bearerMinted = await controlSession(fetcher);
+    const { cookie, csrf } = await localSession(fetcher);
     for (const path of DASHBOARD_CONSULT_CONTROL_PATHS) {
       const bearer = await fetcher(post(path, { enabled: true, revision: 0, confirm: true }, { Authorization: 'Bearer worker-secret', Origin: ORIGIN }));
       expect(bearer.status).toBe(403);
       expect(((await bearer.json()) as { error: { code: string } }).error.code).toBe('mac_dashboard_only');
+      // The full bearer → mint → drop Authorization → POST sequence (P1-1).
+      const derived = await fetcher(post(path, { enabled: true, revision: 0, confirm: true }, { Cookie: bearerMinted.cookie, Origin: ORIGIN, 'X-Olympus-CSRF': bearerMinted.csrf }));
+      expect(derived.status).toBe(403);
+      expect(((await derived.json()) as { error: { code: string } }).error.code).toBe('mac_dashboard_only');
       expect((await fetcher(post(path, { enabled: true, revision: 0 }, { Origin: ORIGIN }))).status).toBe(401);
       expect((await fetcher(post(path, { enabled: true, revision: 0 }, { Cookie: cookie, Origin: ORIGIN }))).status).toBe(403);
       expect((await fetcher(post(path, { enabled: true, revision: 0 }, { Cookie: cookie, Origin: 'http://attacker.test', 'X-Olympus-CSRF': csrf }))).status).toBe(403);
       expect((await fetcher(post(path, { enabled: true, revision: 0 }, { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': 'wrong' }))).status).toBe(403);
-      // A forged context header from outside is stripped at the boundary.
-      expect((await fetcher(post(path, { enabled: true, revision: 0 }, { Authorization: 'Bearer worker-secret', Origin: ORIGIN, 'X-Olympus-Control-Session-CSRF': csrf }))).status).toBe(403);
+      // Forged context headers from outside are stripped at the boundary.
+      expect((await fetcher(post(path, { enabled: true, revision: 0 }, { Authorization: 'Bearer worker-secret', Origin: ORIGIN, 'X-Olympus-Control-Session-CSRF': csrf, 'X-Olympus-Control-Session-Grade': 'local' }))).status).toBe(403);
     }
     expect(calls).toEqual([]);
   });
 
-  test('a live control session with CSRF reaches each route; outcomes map to status codes', async () => {
+  test('a live local-grade session with CSRF reaches each route; outcomes map to status codes', async () => {
     const calls: string[] = [];
     const fetcher = worker(fakeBackend(calls));
-    const { cookie, csrf } = await controlSession(fetcher);
+    const { cookie, csrf } = await localSession(fetcher);
     const custody = { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf };
     const on = await fetcher(post(DASHBOARD_OUTSIDE_HELP_PATHS.enable, { enabled: true, revision: 0, languages: ['en'] }, custody));
     expect(on.status).toBe(200);
@@ -431,7 +478,7 @@ describe('the worker serves the card only inside a local control session', () =>
 
   test('without a consult backend the routes answer 501 inside a session, and the page says unavailable', async () => {
     const fetcher = worker(undefined);
-    const { cookie, csrf } = await controlSession(fetcher);
+    const { cookie, csrf } = await localSession(fetcher);
     const response = await fetcher(post(DASHBOARD_OUTSIDE_HELP_PATHS.enable, { enabled: true, revision: 0 }, { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }));
     expect(response.status).toBe(501);
     const html = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
@@ -443,11 +490,21 @@ describe('the worker serves the card only inside a local control session', () =>
     const backend = fakeBackend(calls);
     const counted: DashboardConsultBackend = { ...backend, status: async () => { calls.push('status'); return status(); }, summary: () => { calls.push('summary'); return { state: 'on' }; } };
     const fetcher = worker(counted);
-    const { cookie } = await controlSession(fetcher);
+    const { cookie } = await localSession(fetcher);
     const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(session).toContain('data-outside-help ');
     expect(session).toContain('name="acknowledged"');
+    expect(session).toContain('data-outside-enabled="true"');
+    expect(session).not.toContain('data-outside-unlock');
     expect(calls).toEqual(['status']);
+    // A bearer-minted session reads the same facts but is offered the local unlock, no controls.
+    const bearerMinted = await controlSession(fetcher);
+    const offered = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: bearerMinted.cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
+    expect(offered).toContain('data-outside-unlock');
+    expect(offered).not.toContain('data-outside-enabled="true">');
+    expect(calls).toEqual(['status', 'status']);
+    calls.length = 0;
+    calls.push('status');
     // Setup reads the one-word summary only.
     const setup = await (await fetcher(new Request(`${ORIGIN}/dashboard?setup`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(setup).toContain(`<p class="sline strong">${W.state.on}</p>`);
@@ -498,13 +555,14 @@ function adapter(input: {
   const env = { HOME: input.home, ...(input.secret ? { OLYMPUS_ZKAPI_API_KEY: input.secret } : {}) };
   const backend = createDashboardConsultAdapter({
     sovereignty: { config, source: input.source ?? 'file', path },
-    resolveSecret: (ref) => (ref === 'env:OLYMPUS_ZKAPI_API_KEY' ? env.OLYMPUS_ZKAPI_API_KEY : undefined),
+    // Presence only; the key never reaches the adapter.
+    secretPresent: (ref) => ref === 'env:OLYMPUS_ZKAPI_API_KEY' && env.OLYMPUS_ZKAPI_API_KEY !== undefined,
     requestReload: () => { reloads.push(1); return input.reload ?? true; },
     env,
     statePath: join(input.home, '.olympus', 'zkapi-consult-state.json'),
     now: () => new Date('2026-10-07T12:00:00.000Z'),
     readiness: async (options) => { probes.push(options); return readiness(input.readiness); },
-    recoverSession: async (options) => { recoveries.push(options); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
+    recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
   });
   return { backend, reloads, probes, recoveries, path, env };
 }
@@ -527,6 +585,9 @@ describe('the adapter: status', () => {
     expect(probe.apiKey).toBeUndefined();
     expect(probe.apiKeyPresent).toBe(true);
     expect(JSON.stringify(value)).not.toContain('zk-local-key');
+    // The probe gets the route and the process environment (for PATH), never a resolved key field.
+    const { env: _env, ...probeWithoutEnv } = probe;
+    expect(JSON.stringify(probeWithoutEnv)).not.toContain('zk-local-key');
     // Languages: the shipped packs are installed in this checkout; German and Italian are not.
     expect(value.languages.find((entry) => entry.language === 'en')?.installed).toBe(true);
     expect(value.languages.find((entry) => entry.language === 'de')?.installed).toBe(false);
@@ -555,10 +616,11 @@ describe('the adapter: status', () => {
     writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
     const backend = createDashboardConsultAdapter({
       sovereignty: { config, source: 'file', path },
-      resolveSecret: () => undefined,
+      secretPresent: () => false,
       requestReload: () => true,
       env: { HOME: home },
       readiness: async () => { throw new Error('probe failed'); },
+      recoverSession: async () => { throw new Error('never'); },
     });
     const value = await backend.status();
     expect(value.route).toMatchObject({ state: 'configured', readinessUnavailable: true });
@@ -579,6 +641,21 @@ describe('the adapter: turning outside help on and off', () => {
     const off = await backend.setEnabled({ enabled: false, revision: 1 });
     expect(off).toEqual({ ok: true, status_message: expect.stringContaining('Outside help is off'), revision: 2 });
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 2, enabled: false, languages: ['en', 'pt-BR'] } });
+  });
+
+  test('turning off with the real form payload (no language ticked) keeps the stored languages and is never refused', async () => {
+    const home = tempHome();
+    const { backend, env } = adapter({ home });
+    expect((await backend.setEnabled({ enabled: true, revision: 0, languages: ['en', 'pt-BR'] })).ok).toBe(true);
+    // What the card's form posts when every language box is unticked: languages [] with enabled false.
+    const off = await backend.setEnabled({ enabled: false, revision: 1, languages: [] });
+    expect(off).toMatchObject({ ok: true, revision: 2 });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: false, languages: ['en', 'pt-BR'] } });
+    // Off with an unknown or uninstalled language in the payload: still off, languages kept.
+    expect((await backend.setEnabled({ enabled: false, revision: 2, languages: ['de', 'xx'] })).ok).toBe(true);
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 3, enabled: false, languages: ['en', 'pt-BR'] } });
+    // On with no language is still refused.
+    expect(await backend.setEnabled({ enabled: true, revision: 3, languages: [] })).toMatchObject({ ok: false, code: 'languages_empty' });
   });
 
   test('turning on requires a configured route and complete acknowledgements; off never does', async () => {
@@ -621,11 +698,12 @@ describe('the adapter: turning outside help on and off', () => {
     const config = policyWith(true);
     const backend = createDashboardConsultAdapter({
       sovereignty: { config, source: 'inline_config' },
-      resolveSecret: () => undefined,
+      secretPresent: () => false,
       requestReload: () => true,
       env: {},
       statePath: join(tempHome(), 'state.json'),
       readiness: async () => readiness(),
+      recoverSession: async () => { throw new Error('never'); },
     });
     expect(await backend.setEnabled({ enabled: true, revision: 0 })).toMatchObject({ ok: false, httpStatus: 500, code: 'no_home' });
   });
@@ -691,6 +769,45 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     expect(value.route.state === 'configured' && value.route.acknowledgements.complete).toBe(false);
   });
 
+  test('a policy file changed behind the card is a 409 policy_changed: nothing is written, and the view follows the file', async () => {
+    const home = tempHome();
+    const { backend, path, reloads } = adapter({ home, profileOverrides: { acknowledgements: { version: 0, accepted: [] } } });
+    // Someone else edits the file (a new unrelated profile) after this adapter loaded its policy.
+    const edited = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
+    (edited.modelProfiles as Record<string, unknown>)['local-extra'] = { provider: 'local-openai-compatible', trust: 'local', baseUrl: 'http://127.0.0.1:28099/v1', model: 'extra', purpose: 'analyst' };
+    writeFileSync(path, JSON.stringify(edited), { mode: 0o600 });
+    const refused = await backend.saveRoute({ acknowledged: ALL_IDS });
+    expect(refused).toMatchObject({ ok: false, httpStatus: 409, code: 'policy_changed' });
+    expect(reloads).toEqual([]);
+    const after = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
+    expect(after.modelProfiles['zkapi-consult']?.zkapi?.acknowledgements).toMatchObject({ version: 0, accepted: [] });
+    expect(after.modelProfiles['local-extra']).toBeDefined();
+    // The adapter now holds the file's policy, so the retry writes only its block and keeps the other edit.
+    expect((await backend.saveRoute({ acknowledged: ALL_IDS })).ok).toBe(true);
+    const written = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
+    expect(written.modelProfiles['local-extra']).toBeDefined();
+    expect(written.modelProfiles['zkapi-consult']?.zkapi?.acknowledgements).toMatchObject({ version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION });
+  });
+
+  test('a failure during the policy publish leaves the old policy file intact and asks for no restart', async () => {
+    const home = tempHome();
+    const { backend, path, reloads } = adapter({ home, profileOverrides: { acknowledgements: { version: 0, accepted: [] } } });
+    const before = readFileSync(path, 'utf8');
+    __sovereigntyFileTestHooks.beforePublish = () => { throw new Error('disk full'); };
+    try {
+      const failed = await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-05' });
+      expect(failed.ok).toBe(false);
+    } finally {
+      __sovereigntyFileTestHooks.beforePublish = undefined;
+    }
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(reloads).toEqual([]);
+    expect(readdirSync(join(home, '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json')).toEqual([]);
+    // Once the disk cooperates the same save goes through, atomically.
+    expect((await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-05' })).ok).toBe(true);
+    expect((JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig).modelProfiles['zkapi-consult']?.zkapi?.fundingDate).toBe('2026-10-05');
+  });
+
   test('recover runs the recovery session only for a held fence of this wallet, with confirmation, and reports settlement honestly', async () => {
     const home = tempHome();
     const { backend, recoveries, env } = adapter({ home, secret: 'k', recover: { ok: true, text: 'OK', routeLabel: 'r', networkIdentity: 'hidden', receipt: { fence: 'clear', settlement: 'confirmed' } as never, elapsedMs: 1 } });
@@ -705,7 +822,9 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     writeFileSync(statePath, JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [mine]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });
     expect(await backend.recover({ confirm: true })).toEqual({ ok: true, status_message: expect.stringContaining('Recovered') });
     expect(recoveries).toHaveLength(1);
-    expect((recoveries[0] as { apiKey?: string }).apiKey).toBe('k');
+    // The adapter hands the route without a key and the key reference; the composition root resolves the key.
+    expect((recoveries[0] as { route: { apiKey?: string }; secretRef?: string }).route.apiKey).toBeUndefined();
+    expect((recoveries[0] as { secretRef?: string }).secretRef).toBe('env:OLYMPUS_ZKAPI_API_KEY');
     // Settlement not confirmed: the fence is still held, and the message says so.
     const pending = adapter({ home: tempHome(), secret: 'k', recover: { ok: true, text: 'OK', routeLabel: 'r', networkIdentity: 'hidden', receipt: { fence: 'held', settlement: 'pending' } as never, elapsedMs: 1 } });
     writeFileSync(join(pending.env.HOME, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env: pending.env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/mine' } } }), { mode: 0o600 });

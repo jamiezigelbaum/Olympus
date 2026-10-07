@@ -172,6 +172,7 @@ import { parseMailScopeDraft } from '../../core/mail-source-scope.ts';
 import {
   DASHBOARD_CONSULT_CONTROL_PATHS,
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
+  DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
 } from '../http.ts';
@@ -1395,6 +1396,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const outsideHelp = sourceDashboard.consult && !dashboardUi && dashboardPage === 'outside_help' && controlSessionCsrfToken !== undefined
             ? await sourceDashboard.consult.status().catch(() => undefined)
             : undefined;
+          // Whether this session was minted locally (the only grade the
+          // consult routes take); a bearer-grade session is offered the
+          // local unlock on the card instead of controls that would 403.
+          const outsideHelpLocalSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local';
           const outsideHelpSummary = sourceDashboard.consult && !dashboardUi && dashboardPage === 'setup'
             ? safeOutsideHelpSummary(sourceDashboard.consult)
             : undefined;
@@ -1410,7 +1415,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ? { privacy: privacySummary?.ok ? privacySummary.summary : 'unreadable' as const }
               : {}),
             ...(privacyRead?.ok ? { privacySettings: privacyRead.settings } : {}),
-            ...(outsideHelp ? { outsideHelp } : {}),
+            ...(outsideHelp ? { outsideHelp, outsideHelpLocalSession } : {}),
             ...(outsideHelpSummary ? { outsideHelpSummary } : {}),
             embeddingRuntime,
             backgroundRuntime,
@@ -1861,7 +1866,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // Gateway bearer is refused there. So an agent tool, the relay, the
         // ChatGPT surface and a bare bearer holder can never reach the writer.
         if (request.method === 'POST' && (DASHBOARD_CONSULT_CONTROL_PATHS as readonly string[]).includes(url.pathname)) {
-          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
             return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Outside help can be changed only from the dashboard on this computer, in an unlocked browser.' } }, 403);
           }
           if (!sourceDashboard?.consult) {

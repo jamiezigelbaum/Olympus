@@ -1922,6 +1922,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     versionUnknown: '(version unknown)',
     daemonMissing: 'zkapi-clientd not installed',
     tor: 'Tor found (a fresh Tor client per consult)',
+    torOff: 'Tor off: the route is direct and your network address is visible to the provider',
     torMissing: 'Tor not installed',
     key: 'API key configured',
     keyMissing: 'API key not configured',
@@ -2009,6 +2010,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   saveFailed: 'Olympus could not save this. Try again.',
   restarting: 'Restarting the worker…',
   locked: 'Unlock dashboard controls in Setup to see and change outside help.',
+  unlockIntro: 'Changing outside help needs a session opened from this computer itself, not one an agent or the launch link could open. One click, in this browser, on this Mac.',
+  unlock: 'Unlock outside help on this Mac',
   native: 'Outside help is set up on this computer\'s own dashboard only, never from an agent or ChatGPT.',
   unavailable: 'Outside help is not available from this worker.',
 } as const;

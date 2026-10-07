@@ -35,6 +35,8 @@ export interface DashboardOutsideHelpReadiness {
   readonly blockers: readonly ZkapiConsultErrorCode[];
   readonly daemonFound: boolean;
   readonly daemonVersion?: string;
+  /** Whether Olympus starts a Tor client per consult, or the daemon goes direct. */
+  readonly torMode: 'per_consult' | 'off';
   readonly torFound: boolean;
   readonly apiKeyConfigured: boolean;
   readonly expiry: { readonly state: 'unknown' | 'invalid' | 'active' | 'expired'; readonly daysLeft?: number; readonly expiryDate?: string };
@@ -85,6 +87,8 @@ export const DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = 'outside-help';
 
 /** The worker's four control routes, in one place for the page, the HTTP boundary and the public route list. */
 export const DASHBOARD_OUTSIDE_HELP_PATHS = {
+  /** The local-only session mint (workers/http.ts); not a consult route itself. */
+  unlock: '/dashboard/control/session/local',
   enable: '/dashboard/consult',
   route: '/dashboard/consult/route',
   addRoute: '/dashboard/consult/route/add',
@@ -129,9 +133,14 @@ export function outsideHelpBlockerWords(code: ZkapiConsultErrorCode): string {
  * without it the card is read-only text (the worker also refuses every write
  * without the control session, so this is presentation, not the boundary).
  */
-export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; basePath?: string }): string {
+export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; localSession?: boolean; basePath?: string }): string {
   const summary = summaryOf(status);
-  const canEdit = input.csrfToken !== undefined;
+  // Controls only for a local-grade session: a bearer-grade session (the
+  // launch flow, or a bearer mint) reads the card and is offered the local
+  // unlock, which the worker's HTTP boundary grants to a loopback browser
+  // presenting no bearer.
+  const canEdit = input.csrfToken !== undefined && input.localSession === true;
+  const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
   const parts: string[] = [];
@@ -140,6 +149,11 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   parts.push(`<p class="pintro">${escapeHtml(W.intro)}</p>`);
   parts.push(`<p class="ohstate" data-outside-state="${escapeHtml(summary.state)}">${escapeHtml(outsideHelpStateLine(summary))}</p>`);
   if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
+  if (canUnlock) {
+    parts.push(`<form class="ohform" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml(W.unlockIntro)}</p>`
+      + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button></div>`
+      + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
 
   // 1. The disclosure, always visible (design §A.10: up front).
   parts.push(`<div class="sect">${escapeHtml(W.disclosureTitle)}</div><ul class="ohlist">${W.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`);
@@ -174,7 +188,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   parts.push(renderEnable(status, summary, canEdit));
 
   const config = { csrfToken: input.csrfToken ?? '', paths: DASHBOARD_OUTSIDE_HELP_PATHS, copy: { saving: W.saving, failed: W.saveFailed, restarting: W.restarting } };
-  const script = canEdit ? `<script>${outsideHelpClientScript(config)}</script>` : '';
+  const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config)}</script>` : '';
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}`;
 }
 
@@ -185,7 +199,7 @@ function renderReadiness(route: Extract<DashboardOutsideHelpRoute, { state: 'con
   const ready = route.readiness;
   const facts = [
     ready.daemonFound ? fill(W.facts.daemon, { version: ready.daemonVersion ?? W.facts.versionUnknown }) : W.facts.daemonMissing,
-    ready.torFound ? W.facts.tor : W.facts.torMissing,
+    ready.torMode === 'off' ? W.facts.torOff : ready.torFound ? W.facts.tor : W.facts.torMissing,
     ready.apiKeyConfigured ? W.facts.key : W.facts.keyMissing,
     fill(ready.requestsToday.count === 1 ? W.facts.todayOne : W.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
     ready.expiry.state === 'active' && ready.expiry.expiryDate
@@ -322,9 +336,10 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       };
     }
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
+    if (kind === 'unlock') return {};
     return { confirm: true };
   }
-  var paths = { enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
   root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
@@ -335,11 +350,15 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       buttons.forEach(function (button) { button.disabled = true; });
       message(form, config.copy.saving, false);
       try {
-        var response = await fetch(paths[kind], {
-          method: 'POST', credentials: 'same-origin', cache: 'no-store',
-          headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
-          body: JSON.stringify(bodyFor(form, kind, event.submitter)),
-        });
+        // The local unlock presents no credential at all: the boundary wants a
+        // loopback browser and nothing else. Every other form carries the CSRF token.
+        var response = await fetch(paths[kind], kind === 'unlock'
+          ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+          : {
+            method: 'POST', credentials: 'same-origin', cache: 'no-store',
+            headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify(bodyFor(form, kind, event.submitter)),
+          });
         var result = {};
         try { result = await response.json(); } catch (error) { result = {}; }
         if (!response.ok || !result.ok) {
