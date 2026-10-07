@@ -107472,19 +107472,19 @@ async function answerPrivately(question, evidence, options = {}) {
   const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
   const unanswered = result.unanswered.filter((line) => !echoesEvidenceScaffolding(line));
   const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
-  const frozenPack = deepFreeze(structuredClone(pack));
+  const consult = (noAnswer) => options.consultMetadata ? { consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer }), pack: deepFreeze(structuredClone(pack)) }) } : {};
   if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
     return {
       answer: PRIVATE_ANSWER_NOT_FOUND,
       citations: [],
       unanswered: cleanUnanswered(unanswered, "", { maxChars: gapChars, complete: false }),
       modelId,
-      consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer: true }), pack: frozenPack })
+      ...consult(true)
     };
   }
   return {
     answer: result.answer,
-    consult: Object.freeze({ verdict: Object.freeze({ sufficient: verdict.sufficient, noAnswer: false }), pack: frozenPack }),
+    ...consult(false),
     unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
     citations: result.citations.map((citation) => {
       const id = citation.provenance.sourceItem.providerItemId;
@@ -121018,7 +121018,10 @@ class PrivateAnswerJobs {
           modelCall: (call) => {
             analysis.stats.calls.push(call);
           }
-        }, { detail: analysis.detail });
+        }, {
+          detail: analysis.detail,
+          ...[...analysis.jobs].some((job) => job.policy.outsideHelp) ? { consult: true } : {}
+        });
         return { result, used };
       } catch (error2) {
         if (error2 instanceof NoPrivateEvidenceError)
@@ -121678,6 +121681,7 @@ function createBuiltInPrivateAnswerModel(options) {
           maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
           audit: limits.audit,
           evidenceFormat: "compact",
+          ...request?.consult ? { consultMetadata: true } : {},
           ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
           ...signal ? { signal } : {}
         });
@@ -122104,6 +122108,328 @@ var init_open_target = __esm(() => {
   ]);
 });
 
+// src/core/consult-writer.ts
+var exports_consult_writer = {};
+__export(exports_consult_writer, {
+  runConsultWriter: () => runConsultWriter,
+  parseConsultWriterReply: () => parseConsultWriterReply,
+  defaultConsultMemoryProbe: () => defaultConsultMemoryProbe,
+  createConsultWriterServer: () => createConsultWriterServer,
+  consultWriterMemoryDecision: () => consultWriterMemoryDecision,
+  buildConsultWriterPrompt: () => buildConsultWriterPrompt,
+  boundConsultWriterInput: () => boundConsultWriterInput,
+  CONSULT_WRITER_SYSTEM: () => CONSULT_WRITER_SYSTEM,
+  CONSULT_WRITER_RESPONSE_SCHEMA: () => CONSULT_WRITER_RESPONSE_SCHEMA,
+  CONSULT_WRITER_LIMITS: () => CONSULT_WRITER_LIMITS
+});
+import { execFileSync as execFileSync3 } from "node:child_process";
+import { freemem, platform as osPlatform4, totalmem as totalmem2 } from "node:os";
+function boundConsultWriterInput(input) {
+  const clean = (text3, max) => typeof text3 === "string" ? Array.from(text3.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim()).slice(0, max).join("") : "";
+  return Object.freeze({
+    question: clean(input.question, CONSULT_WRITER_LIMITS.questionChars),
+    answer: clean(input.answer, CONSULT_WRITER_LIMITS.answerChars),
+    gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : []).map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars)).filter(Boolean).slice(0, CONSULT_WRITER_LIMITS.gaps))
+  });
+}
+function buildConsultWriterPrompt(input) {
+  const bounded = boundConsultWriterInput(input);
+  const user = [
+    `Question: ${bounded.question}`,
+    `Answer:
+${bounded.answer}`,
+    bounded.gaps.length > 0 ? `Could not find:
+- ${bounded.gaps.join(`
+- `)}` : "Could not find: (the answer was marked incomplete without listing points)"
+  ].join(`
+
+`);
+  return Object.freeze([
+    Object.freeze({ role: "system", content: CONSULT_WRITER_SYSTEM }),
+    Object.freeze({ role: "user", content: user })
+  ]);
+}
+function parseConsultWriterReply(text3) {
+  const start = text3.indexOf("{");
+  const end = text3.lastIndexOf("}");
+  if (start === -1 || end <= start)
+    return { kind: "invalid", reason: "not_json" };
+  let parsed;
+  try {
+    parsed = JSON.parse(text3.slice(start, end + 1));
+  } catch {
+    return { kind: "invalid", reason: "not_json" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return { kind: "invalid", reason: "shape" };
+  const questions = parsed.questions;
+  if (questions === null)
+    return { kind: "declined" };
+  if (!Array.isArray(questions) || questions.length < 1 || questions.length > CONSULT_WRITER_LIMITS.maxQuestions)
+    return { kind: "invalid", reason: "shape" };
+  if (!questions.every((question) => typeof question === "string"))
+    return { kind: "invalid", reason: "shape" };
+  const cleaned = [];
+  for (const raw of questions) {
+    const question = raw.trim();
+    if (!question || question.length > CONSULT_WRITER_LIMITS.maxQuestionChars)
+      return { kind: "invalid", reason: "form" };
+    if (/[\r\n\t\u0000-\u001F\u007F]/.test(question))
+      return { kind: "invalid", reason: "form" };
+    if (!question.endsWith("?") || question.indexOf("?") !== question.length - 1)
+      return { kind: "invalid", reason: "form" };
+    const words = question.split(/\s+/);
+    if (words.length > CONSULT_WRITER_LIMITS.maxQuestionWords || words.length < CONSULT_WRITER_LIMITS.minQuestionWords)
+      return { kind: "invalid", reason: "form" };
+    cleaned.push(question);
+  }
+  if (new Set(cleaned.map((question) => question.toLowerCase())).size !== cleaned.length)
+    return { kind: "invalid", reason: "form" };
+  return { kind: "questions", questions: Object.freeze(cleaned) };
+}
+function consultWriterMemoryDecision(sample, footprintBytes = CONSULT_WRITER_LIMITS.footprintBytes) {
+  if (!sample || !Number.isFinite(sample.totalBytes) || sample.totalBytes <= 0 || !Number.isFinite(sample.freePercent)) {
+    return { ok: false, reason: "memory_unknown" };
+  }
+  if (sample.pressure === "unknown")
+    return { ok: false, reason: "memory_unknown" };
+  if (sample.pressure === "critical")
+    return { ok: false, reason: "swap_pressure" };
+  const freeAfterPercent = sample.freePercent - footprintBytes / sample.totalBytes * 100;
+  if (freeAfterPercent < CONSULT_WRITER_LIMITS.minFreePercentAfter)
+    return { ok: false, reason: "memory_low" };
+  return { ok: true, freeAfterPercent };
+}
+function defaultConsultMemoryProbe(deps = {}) {
+  const exec = deps.exec ?? ((file, args) => execFileSync3(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
+  const platform2 = deps.platform ?? osPlatform4();
+  return () => {
+    try {
+      const totalBytes = totalmem2();
+      if (platform2 !== "darwin") {
+        return { totalBytes, freePercent: freemem() / totalBytes * 100, pressure: "unknown" };
+      }
+      const free = /free percentage:\s*(\d+(?:\.\d+)?)%/i.exec(exec("/usr/bin/memory_pressure", []))?.[1];
+      const level = Number(exec("/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"]).trim());
+      const pressure = level === 1 ? "normal" : level === 2 ? "warn" : level === 4 ? "critical" : "unknown";
+      return { totalBytes, freePercent: free === undefined ? Number.NaN : Number(free), pressure };
+    } catch {
+      return;
+    }
+  };
+}
+function createConsultWriterServer(launch, options = {}) {
+  const handle = (options.createHandle ?? createLlamaServerHandle)({
+    serverPath: launch.serverPath,
+    modelPath: launch.modelPath,
+    gpu: launch.gpu,
+    contextTokens: CONSULT_WRITER_LIMITS.contextTokens,
+    threads: builtInReasoningThreads(),
+    idleShutdownSeconds: options.warm ? CONSULT_WRITER_LIMITS.warmIdleShutdownSeconds : CONSULT_WRITER_LIMITS.idleShutdownSeconds,
+    startupTimeoutMs: CONSULT_WRITER_LIMITS.startupTimeoutMs
+  }, {
+    ...options.spawnImpl ? { spawnImpl: options.spawnImpl } : {},
+    ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
+    ...options.env ? { env: options.env } : {},
+    immediateKill: true,
+    stopGraceMs: 0
+  });
+  return {
+    ensure: (signal) => handle.ensureRunning(signal),
+    kill: () => handle.stop(),
+    touch: () => handle.touch(),
+    get pid() {
+      return handle.pid;
+    }
+  };
+}
+async function runConsultWriter(input, options) {
+  const now = options.now ?? Date.now;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const startedAt = now();
+  if (!options.server)
+    return { kind: "skipped", reason: "no_runtime" };
+  const server = options.server;
+  const memory = consultWriterMemoryDecision(safeProbe(options.memory));
+  if (!memory.ok)
+    return { kind: "skipped", reason: memory.reason };
+  const messages = buildConsultWriterPrompt(input);
+  const deadline = AbortSignal.timeout(options.deadlineMs ?? CONSULT_WRITER_LIMITS.deadlineMs);
+  const stop = AbortSignal.any([options.kill, deadline]);
+  const killedReason = () => options.kill.aborted ? "fresh_answer" : "deadline";
+  let killing;
+  const killNow = () => {
+    killing ??= server.kill().catch(() => {
+      return;
+    });
+    return killing;
+  };
+  const onStop = () => void killNow();
+  if (stop.aborted)
+    return { kind: "killed", reason: killedReason() };
+  stop.addEventListener("abort", onStop, { once: true });
+  let keep = false;
+  try {
+    let endpoint2;
+    try {
+      endpoint2 = await server.ensure(stop);
+    } catch {
+      if (stop.aborted)
+        return { kind: "killed", reason: killedReason() };
+      return { kind: "failed", reason: "start_failed" };
+    }
+    if (stop.aborted)
+      return { kind: "killed", reason: killedReason() };
+    const promptTokens = await countWriterTokens(fetchImpl, endpoint2, messages, stop);
+    if (stop.aborted)
+      return { kind: "killed", reason: killedReason() };
+    if (promptTokens === undefined) {
+      keep = true;
+      return { kind: "skipped", reason: "prompt_tokens_unavailable" };
+    }
+    if (promptTokens > CONSULT_WRITER_LIMITS.promptTokens) {
+      keep = true;
+      return { kind: "skipped", reason: "prompt_too_long" };
+    }
+    let text3;
+    try {
+      text3 = await writerCompletion(fetchImpl, endpoint2, messages, stop);
+    } catch {
+      if (stop.aborted)
+        return { kind: "killed", reason: killedReason() };
+      keep = true;
+      return { kind: "failed", reason: "request_failed" };
+    }
+    if (stop.aborted)
+      return { kind: "killed", reason: killedReason() };
+    keep = true;
+    const reply2 = parseConsultWriterReply(text3);
+    const ms = now() - startedAt;
+    if (reply2.kind === "invalid")
+      return { kind: "failed", reason: reply2.reason };
+    if (reply2.kind === "declined")
+      return { kind: "declined", promptTokens, ms };
+    return { kind: "questions", questions: reply2.questions, promptTokens, ms };
+  } finally {
+    stop.removeEventListener("abort", onStop);
+    if (options.keepWarm && keep && !stop.aborted)
+      server.touch();
+    else
+      await killNow();
+  }
+}
+function safeProbe(probe) {
+  try {
+    return probe();
+  } catch {
+    return;
+  }
+}
+async function post(fetchImpl, endpoint2, path, body, signal) {
+  return fetchModelEndpoint(fetchImpl, `${endpoint2.baseUrl}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${endpoint2.token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal
+  });
+}
+async function countWriterTokens(fetchImpl, endpoint2, messages, signal) {
+  try {
+    const templated = await post(fetchImpl, endpoint2, "/apply-template", { messages }, signal);
+    if (!templated.ok)
+      return;
+    const { prompt } = await templated.json();
+    if (typeof prompt !== "string")
+      return;
+    const tokenized = await post(fetchImpl, endpoint2, "/tokenize", { content: prompt, add_special: true }, signal);
+    if (!tokenized.ok)
+      return;
+    const { tokens } = await tokenized.json();
+    return Array.isArray(tokens) ? tokens.length : undefined;
+  } catch {
+    return;
+  }
+}
+async function writerCompletion(fetchImpl, endpoint2, messages, signal) {
+  const response = await post(fetchImpl, endpoint2, "/v1/chat/completions", {
+    messages,
+    temperature: 0,
+    max_tokens: CONSULT_WRITER_LIMITS.maxOutputTokens,
+    response_format: { type: "json_schema", json_schema: { name: "consult", schema: CONSULT_WRITER_RESPONSE_SCHEMA } }
+  }, signal);
+  if (!response.ok)
+    throw new Error(`writer HTTP ${response.status}`);
+  const payload = await response.json();
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content !== "string")
+    throw new Error("writer returned no text");
+  return content;
+}
+var CONSULT_WRITER_LIMITS, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_RESPONSE_SCHEMA;
+var init_consult_writer = __esm(() => {
+  init_model_transport();
+  init_server4();
+  CONSULT_WRITER_LIMITS = Object.freeze({
+    questionChars: 1000,
+    answerChars: 2700,
+    gaps: 4,
+    gapChars: 300,
+    promptTokens: 2048,
+    maxOutputTokens: 160,
+    maxQuestions: 3,
+    maxQuestionWords: 25,
+    minQuestionWords: 3,
+    maxQuestionChars: 200,
+    deadlineMs: 60000,
+    footprintBytes: 600 * 1024 * 1024,
+    minFreePercentAfter: 20,
+    contextTokens: 4096,
+    startupTimeoutMs: 60000,
+    idleShutdownSeconds: 120,
+    warmIdleShutdownSeconds: 600
+  });
+  CONSULT_WRITER_SYSTEM = [
+    "You are the local analyst. You have just answered a user's question from their private documents. That answer is final.",
+    "You may now propose a consult: up to three short questions for an outside expert model that knows nothing about this user, asking for general background knowledge that would help with a point the answer could not find.",
+    "What you write is sent as written, unreviewed, to an outside provider, and it costs money. If the answer is already good enough, or no general knowledge would help, propose nothing.",
+    "",
+    "Hard rules:",
+    "- Never relay private content: no names of people, companies, products or projects, no places, employers, dates, amounts, addresses, account or reference numbers, titles, file names, health, legal or relationship details, and nothing quoted from the documents or the answer.",
+    "- Never forward the user's words. Do not paraphrase their sentences; write every question yourself in plain generic language, asking for the information you need, not echoing the conversation.",
+    '- Never name a place, person, organisation, product or event that the answer only implies, even when it is not written anywhere: a destination suggested by an itinerary, a country suggested by a city, a currency or a language, an employer suggested by a job title, a product suggested by its features. Ask about the class of thing instead ("entry rules most countries apply to visitors", not a country).',
+    "- Name a country only when the answer genuinely depends on it, and never a city or region. Prefer the class of place or the mechanism.",
+    "- Use bands and orders of magnitude, never exact figures, years or dates.",
+    "- Ask for rules, thresholds, units, reference values and the traps between them, never for a verdict on this user's situation; the user applies the answer locally.",
+    "- Each question must make sense coming from any stranger. If it carries any fact about the user beyond the topic itself, remove the fact or drop the question.",
+    "",
+    "Form:",
+    "- Each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary letters and spaces only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings, spelled-out letters or encoded strings.",
+    "- Use ordinary dictionary words of the user's language, units, and standard abbreviations. Do not reuse wording between questions.",
+    "- At most three questions, on one subject, and at most 600 bytes and 80 words in all.",
+    "",
+    'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.'
+  ].join(`
+`);
+  CONSULT_WRITER_RESPONSE_SCHEMA = Object.freeze({
+    type: "object",
+    properties: {
+      questions: {
+        anyOf: [
+          { type: "null" },
+          {
+            type: "array",
+            minItems: 1,
+            maxItems: CONSULT_WRITER_LIMITS.maxQuestions,
+            items: { type: "string", maxLength: CONSULT_WRITER_LIMITS.maxQuestionChars }
+          }
+        ]
+      }
+    },
+    required: ["questions"],
+    additionalProperties: false
+  });
+});
+
 // src/workers/chatgpt/consult-orchestrator.ts
 var exports_consult_orchestrator = {};
 __export(exports_consult_orchestrator, {
@@ -122169,26 +122495,56 @@ function createConsultOrchestrator(options) {
       return;
     return candidate;
   };
+  const safe = (read, fallback) => {
+    try {
+      return read ? read() : fallback;
+    } catch {
+      return !fallback;
+    }
+  };
   const run = async (jobId, scheduled) => {
     const startedAt = now();
-    const snapshot = options.jobs.consultSnapshot(jobId);
-    if (!snapshot) {
+    if (!safe(options.transportAvailable, true)) {
+      fail(jobId);
+      record4(jobId, "transport_unavailable", startedAt, "no_route");
+      return;
+    }
+    if (safe(options.answerActivityBusy, false)) {
+      fail(jobId);
+      record4(jobId, "superseded", startedAt, "answer_busy");
+      return;
+    }
+    const kill = fresh2.signal;
+    const first = options.jobs.consultSnapshot(jobId);
+    if (!first) {
       fail(jobId);
       record4(jobId, "error", startedAt, "snapshot_gone");
       return;
     }
-    if (!(await checkPrivateEvidence(options.eligible, snapshot.items)).every(Boolean)) {
+    const items = first.items;
+    if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean)) {
       fail(jobId);
       record4(jobId, "ineligible", startedAt, "e1");
       return;
     }
+    if (kill.aborted) {
+      fail(jobId);
+      record4(jobId, "superseded", startedAt, "fresh_answer");
+      return;
+    }
+    const held = options.jobs.consultSnapshot(jobId);
+    if (held !== first) {
+      fail(jobId);
+      record4(jobId, "error", startedAt, "snapshot_gone");
+      return;
+    }
+    const bounded = boundConsultWriterInput({ question: held.question, answer: held.answer, gaps: held.gaps });
     const sessionAbort = new AbortController;
     const openDeadlineMs = Math.max(1000, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
     const opening = options.openSession({ signal: sessionAbort.signal, deadlineMs: openDeadlineMs });
     opening.catch(() => {
       return;
     });
-    const kill = fresh2.signal;
     const closeSession = async () => {
       sessionAbort.abort();
       const opened2 = await opening.catch(() => {
@@ -122199,7 +122555,7 @@ function createConsultOrchestrator(options) {
     };
     let written;
     try {
-      written = await options.writer({ question: snapshot.question, answer: snapshot.answer, gaps: snapshot.gaps }, { kill, deadlineMs: writerDeadlineMs });
+      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs });
     } catch {
       written = { kind: "failed", reason: "request_failed" };
     }
@@ -122217,7 +122573,14 @@ function createConsultOrchestrator(options) {
       record4(jobId, "authorization_refused", startedAt, policyNow.reason);
       return;
     }
-    const verdict = evaluateConsultRequest(written.questions, consultWriterContextFromPack(snapshot.pack, { writerVisibleTexts: [snapshot.question, snapshot.answer, ...snapshot.gaps] }), {}, { recentApprovedQuestions: [...recent] }, consultGateOptionsFromSettings(settingsAtGate.settings));
+    const current = options.jobs.consultSnapshot(jobId);
+    if (current !== first) {
+      await closeSession();
+      fail(jobId);
+      record4(jobId, "error", startedAt, "snapshot_gone");
+      return;
+    }
+    const verdict = evaluateConsultRequest(written.questions, consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question, bounded.answer, ...bounded.gaps] }), {}, { recentApprovedQuestions: [...recent] }, consultGateOptionsFromSettings(settingsAtGate.settings));
     if (verdict.decision !== "pass") {
       await closeSession();
       fail(jobId);
@@ -122233,26 +122596,34 @@ function createConsultOrchestrator(options) {
       return;
     }
     const session = opened.session;
-    const questionText = written.questions.join(`
+    const questions = written.questions;
+    const questionText = questions.join(`
 `);
     const sendDeadlineMs = Math.max(1, scheduled.firstDeliveredAt + CONSULT_DISPATCH_WINDOW_MS - now());
     let authorized = false;
-    const authorize = async () => {
-      const at = now();
+    const authorize = async (signal) => {
+      if (!(await checkPrivateEvidence(options.eligible, items)).every(Boolean))
+        return false;
+      if (signal.aborted)
+        return false;
       if (!recheckConsultJobPolicy(scheduled.policy, options.settings()).ok)
         return false;
       const seam2 = options.jobs.outsideSeam(jobId);
       if (!seam2 || seam2.state !== "answer" || seam2.outside !== "pending" || seam2.panelCapability !== 2)
         return false;
+      const at = now();
       if (!recentlyActive(seam2.lastCollectedAt, at))
         return false;
       if (!windowOpen(scheduled, at))
         return false;
-      if (!(await checkPrivateEvidence(options.eligible, snapshot.items)).every(Boolean))
-        return false;
       if (!options.jobs.takeConsultLatch(jobId))
         return false;
       authorized = true;
+      for (const question of questions) {
+        recent.push(question);
+        while (recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS)
+          recent.shift();
+      }
       return true;
     };
     const dispatched = session.send(questionText, { authorize, deadlineMs: sendDeadlineMs });
@@ -122286,11 +122657,6 @@ function createConsultOrchestrator(options) {
       fail(jobId);
       record4(jobId, "append_refused", startedAt, appended ? appended.reason : "job_gone");
       return;
-    }
-    for (const question of written.questions) {
-      recent.push(question);
-      while (recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS)
-        recent.shift();
     }
     record4(jobId, "appended", startedAt, `reply_ms=${reply2.elapsedMs}`);
   };
@@ -122355,353 +122721,11 @@ var CONSULT_DISPATCH_WINDOW_MS, CONSULT_RECENT_ACTIVITY_MS = 75000, CONSULT_DELI
 var init_consult_orchestrator = __esm(() => {
   init_consult_gate();
   init_consult_settings();
+  init_consult_writer();
   init_private_answer_contract();
   CONSULT_DISPATCH_WINDOW_MS = 5 * 60000;
   CONSULT_DELIVERY_MARGIN_MS = 2 * 60000;
   CONSULT_DEFAULT_COMPLETION_TIMEOUT_MS = 6 * 60000;
-});
-
-// src/core/consult-writer.ts
-var exports_consult_writer = {};
-__export(exports_consult_writer, {
-  runConsultWriter: () => runConsultWriter,
-  parseConsultWriterReply: () => parseConsultWriterReply,
-  estimateConsultWriterTokens: () => estimateConsultWriterTokens,
-  defaultConsultMemoryProbe: () => defaultConsultMemoryProbe,
-  createConsultWriterServer: () => createConsultWriterServer,
-  consultWriterMemoryDecision: () => consultWriterMemoryDecision,
-  consultQuestionNamesEntity: () => consultQuestionNamesEntity,
-  buildConsultWriterPrompt: () => buildConsultWriterPrompt,
-  boundConsultWriterInput: () => boundConsultWriterInput,
-  CONSULT_WRITER_SYSTEM: () => CONSULT_WRITER_SYSTEM,
-  CONSULT_WRITER_RESPONSE_SCHEMA: () => CONSULT_WRITER_RESPONSE_SCHEMA,
-  CONSULT_WRITER_LIMITS: () => CONSULT_WRITER_LIMITS
-});
-import { execFileSync as execFileSync3 } from "node:child_process";
-import { freemem, platform as osPlatform4, totalmem as totalmem2 } from "node:os";
-function boundConsultWriterInput(input) {
-  const clean = (text3, max) => typeof text3 === "string" ? Array.from(text3.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim()).slice(0, max).join("") : "";
-  return Object.freeze({
-    question: clean(input.question, CONSULT_WRITER_LIMITS.questionChars),
-    answer: clean(input.answer, CONSULT_WRITER_LIMITS.answerChars),
-    gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : []).map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars)).filter(Boolean).slice(0, CONSULT_WRITER_LIMITS.gaps))
-  });
-}
-function buildConsultWriterPrompt(input) {
-  const bounded = boundConsultWriterInput(input);
-  const user = [
-    `Question: ${bounded.question}`,
-    `Answer:
-${bounded.answer}`,
-    bounded.gaps.length > 0 ? `Could not find:
-- ${bounded.gaps.join(`
-- `)}` : "Could not find: (the answer was marked incomplete without listing points)"
-  ].join(`
-
-`);
-  return Object.freeze([
-    Object.freeze({ role: "system", content: CONSULT_WRITER_SYSTEM }),
-    Object.freeze({ role: "user", content: user })
-  ]);
-}
-function estimateConsultWriterTokens(messages) {
-  const bytes = messages.reduce((sum2, message) => sum2 + utf84.encode(message.content).byteLength, 0);
-  return Math.ceil(bytes / CONSULT_WRITER_LIMITS.estimateBytesPerToken) + messages.length * 8 + 8;
-}
-function consultQuestionNamesEntity(question) {
-  const words = question.trim().split(/\s+/).slice(1);
-  for (const raw of words) {
-    const word = raw.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "");
-    if (word.length < 2)
-      continue;
-    if (/^\p{Lu}+$/u.test(word))
-      continue;
-    if (/^\p{Lu}\p{Ll}+$/u.test(word))
-      return true;
-  }
-  return false;
-}
-function parseConsultWriterReply(text3) {
-  const start = text3.indexOf("{");
-  const end = text3.lastIndexOf("}");
-  if (start === -1 || end <= start)
-    return { kind: "invalid", reason: "not_json" };
-  let parsed;
-  try {
-    parsed = JSON.parse(text3.slice(start, end + 1));
-  } catch {
-    return { kind: "invalid", reason: "not_json" };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-    return { kind: "invalid", reason: "shape" };
-  const questions = parsed.questions;
-  if (questions === null)
-    return { kind: "declined" };
-  if (!Array.isArray(questions) || questions.length < 1 || questions.length > CONSULT_WRITER_LIMITS.maxQuestions)
-    return { kind: "invalid", reason: "shape" };
-  if (!questions.every((question) => typeof question === "string"))
-    return { kind: "invalid", reason: "shape" };
-  const cleaned = [];
-  for (const raw of questions) {
-    const question = raw.trim();
-    if (!question || question.length > CONSULT_WRITER_LIMITS.maxQuestionChars)
-      return { kind: "invalid", reason: "form" };
-    if (/[\r\n\t\u0000-\u001F\u007F]/.test(question))
-      return { kind: "invalid", reason: "form" };
-    if (!question.endsWith("?") || question.indexOf("?") !== question.length - 1)
-      return { kind: "invalid", reason: "form" };
-    const words = question.split(/\s+/);
-    if (words.length > CONSULT_WRITER_LIMITS.maxQuestionWords || words.length < CONSULT_WRITER_LIMITS.minQuestionWords)
-      return { kind: "invalid", reason: "form" };
-    if (consultQuestionNamesEntity(question))
-      return { kind: "invalid", reason: "named_entity" };
-    cleaned.push(question);
-  }
-  if (new Set(cleaned.map((question) => question.toLowerCase())).size !== cleaned.length)
-    return { kind: "invalid", reason: "form" };
-  return { kind: "questions", questions: Object.freeze(cleaned) };
-}
-function consultWriterMemoryDecision(sample, footprintBytes = CONSULT_WRITER_LIMITS.footprintBytes) {
-  if (!sample || !Number.isFinite(sample.totalBytes) || sample.totalBytes <= 0 || !Number.isFinite(sample.freePercent)) {
-    return { ok: false, reason: "memory_unknown" };
-  }
-  if (sample.pressure === "unknown")
-    return { ok: false, reason: "memory_unknown" };
-  if (sample.pressure !== "normal")
-    return { ok: false, reason: "swap_pressure" };
-  const freeAfterPercent = sample.freePercent - footprintBytes / sample.totalBytes * 100;
-  if (freeAfterPercent < CONSULT_WRITER_LIMITS.minFreePercentAfter)
-    return { ok: false, reason: "memory_low" };
-  return { ok: true, freeAfterPercent };
-}
-function defaultConsultMemoryProbe(deps = {}) {
-  const exec = deps.exec ?? ((file, args) => execFileSync3(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
-  const platform2 = deps.platform ?? osPlatform4();
-  return () => {
-    try {
-      const totalBytes = totalmem2();
-      if (platform2 !== "darwin") {
-        return { totalBytes, freePercent: freemem() / totalBytes * 100, pressure: "unknown" };
-      }
-      const free = /free percentage:\s*(\d+(?:\.\d+)?)%/i.exec(exec("/usr/bin/memory_pressure", []))?.[1];
-      const level = Number(exec("/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"]).trim());
-      const pressure = level === 1 ? "normal" : level === 2 ? "warn" : level === 4 ? "critical" : "unknown";
-      return { totalBytes, freePercent: free === undefined ? Number.NaN : Number(free), pressure };
-    } catch {
-      return;
-    }
-  };
-}
-function createConsultWriterServer(launch, options = {}) {
-  const handle = (options.createHandle ?? createLlamaServerHandle)({
-    serverPath: launch.serverPath,
-    modelPath: launch.modelPath,
-    gpu: launch.gpu,
-    contextTokens: CONSULT_WRITER_LIMITS.contextTokens,
-    threads: builtInReasoningThreads(),
-    idleShutdownSeconds: options.warm ? CONSULT_WRITER_LIMITS.warmIdleShutdownSeconds : CONSULT_WRITER_LIMITS.idleShutdownSeconds,
-    startupTimeoutMs: CONSULT_WRITER_LIMITS.startupTimeoutMs
-  }, {
-    ...options.spawnImpl ? { spawnImpl: options.spawnImpl } : {},
-    ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
-    ...options.env ? { env: options.env } : {},
-    immediateKill: true,
-    stopGraceMs: 0
-  });
-  return {
-    ensure: (signal) => handle.ensureRunning(signal),
-    kill: () => handle.stop(),
-    touch: () => handle.touch(),
-    get pid() {
-      return handle.pid;
-    }
-  };
-}
-async function runConsultWriter(input, options) {
-  const now = options.now ?? Date.now;
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const startedAt = now();
-  if (!options.server)
-    return { kind: "skipped", reason: "no_runtime" };
-  const server = options.server;
-  const memory = consultWriterMemoryDecision(safeProbe(options.memory));
-  if (!memory.ok)
-    return { kind: "skipped", reason: memory.reason };
-  const messages = buildConsultWriterPrompt(input);
-  const deadline = AbortSignal.timeout(options.deadlineMs ?? CONSULT_WRITER_LIMITS.deadlineMs);
-  const stop = AbortSignal.any([options.kill, deadline]);
-  const killedReason = () => options.kill.aborted ? "fresh_answer" : "deadline";
-  const killNow = async () => {
-    try {
-      await server.kill();
-    } catch {}
-  };
-  let endpoint2;
-  try {
-    endpoint2 = await server.ensure(stop);
-  } catch {
-    if (stop.aborted) {
-      await killNow();
-      return { kind: "killed", reason: killedReason() };
-    }
-    return { kind: "failed", reason: "start_failed" };
-  }
-  if (stop.aborted) {
-    await killNow();
-    return { kind: "killed", reason: killedReason() };
-  }
-  const promptTokens = await countWriterTokens(fetchImpl, endpoint2, messages, stop) ?? estimateConsultWriterTokens(messages);
-  if (stop.aborted) {
-    await killNow();
-    return { kind: "killed", reason: killedReason() };
-  }
-  if (promptTokens > CONSULT_WRITER_LIMITS.promptTokens) {
-    if (options.keepWarm)
-      server.touch();
-    else
-      await killNow();
-    return { kind: "skipped", reason: "prompt_too_long" };
-  }
-  let text3;
-  try {
-    text3 = await writerCompletion(fetchImpl, endpoint2, messages, stop);
-  } catch {
-    if (stop.aborted) {
-      await killNow();
-      return { kind: "killed", reason: killedReason() };
-    }
-    if (options.keepWarm)
-      server.touch();
-    else
-      await killNow();
-    return { kind: "failed", reason: "request_failed" };
-  }
-  if (options.keepWarm)
-    server.touch();
-  else
-    await killNow();
-  const reply2 = parseConsultWriterReply(text3);
-  const ms = now() - startedAt;
-  if (reply2.kind === "invalid")
-    return { kind: "failed", reason: reply2.reason };
-  if (reply2.kind === "declined")
-    return { kind: "declined", promptTokens, ms };
-  return { kind: "questions", questions: reply2.questions, promptTokens, ms };
-}
-function safeProbe(probe) {
-  try {
-    return probe();
-  } catch {
-    return;
-  }
-}
-async function post(fetchImpl, endpoint2, path, body, signal) {
-  return fetchModelEndpoint(fetchImpl, `${endpoint2.baseUrl}${path}`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${endpoint2.token}`, "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal
-  });
-}
-async function countWriterTokens(fetchImpl, endpoint2, messages, signal) {
-  try {
-    const templated = await post(fetchImpl, endpoint2, "/apply-template", { messages }, signal);
-    if (!templated.ok)
-      return;
-    const { prompt } = await templated.json();
-    if (typeof prompt !== "string")
-      return;
-    const tokenized = await post(fetchImpl, endpoint2, "/tokenize", { content: prompt, add_special: true }, signal);
-    if (!tokenized.ok)
-      return;
-    const { tokens } = await tokenized.json();
-    return Array.isArray(tokens) ? tokens.length : undefined;
-  } catch (error2) {
-    if (signal.aborted)
-      throw error2;
-    return;
-  }
-}
-async function writerCompletion(fetchImpl, endpoint2, messages, signal) {
-  const response = await post(fetchImpl, endpoint2, "/v1/chat/completions", {
-    messages,
-    temperature: 0,
-    max_tokens: CONSULT_WRITER_LIMITS.maxOutputTokens,
-    response_format: { type: "json_schema", json_schema: { name: "consult", schema: CONSULT_WRITER_RESPONSE_SCHEMA } }
-  }, signal);
-  if (!response.ok)
-    throw new Error(`writer HTTP ${response.status}`);
-  const payload = await response.json();
-  const content = payload.choices?.[0]?.message?.content;
-  if (typeof content !== "string")
-    throw new Error("writer returned no text");
-  return content;
-}
-var CONSULT_WRITER_LIMITS, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_RESPONSE_SCHEMA, utf84;
-var init_consult_writer = __esm(() => {
-  init_model_transport();
-  init_server4();
-  CONSULT_WRITER_LIMITS = Object.freeze({
-    questionChars: 1000,
-    answerChars: 2700,
-    gaps: 4,
-    gapChars: 300,
-    promptTokens: 2048,
-    maxOutputTokens: 160,
-    maxQuestions: 3,
-    maxQuestionWords: 25,
-    minQuestionWords: 3,
-    maxQuestionChars: 200,
-    deadlineMs: 60000,
-    footprintBytes: 600 * 1024 * 1024,
-    minFreePercentAfter: 20,
-    estimateBytesPerToken: 3,
-    contextTokens: 4096,
-    startupTimeoutMs: 60000,
-    idleShutdownSeconds: 120,
-    warmIdleShutdownSeconds: 600
-  });
-  CONSULT_WRITER_SYSTEM = [
-    "You are the local analyst. You have just answered a user's question from their private documents. That answer is final.",
-    "You may now propose a consult: up to three short questions for an outside expert model that knows nothing about this user, asking for general background knowledge that would help with a point the answer could not find.",
-    "What you write is sent as written, unreviewed, to an outside provider, and it costs money. If the answer is already good enough, or no general knowledge would help, propose nothing.",
-    "",
-    "Hard rules:",
-    "- Never relay private content: no names of people, companies, products or projects, no places, employers, dates, amounts, addresses, account or reference numbers, titles, file names, health, legal or relationship details, and nothing quoted from the documents or the answer.",
-    "- Never forward the user's words. Do not paraphrase their sentences; write every question yourself in plain generic language, asking for the information you need, not echoing the conversation.",
-    '- Never name a place, person, organisation, product or event that the answer only implies, even when it is not written anywhere: a destination suggested by an itinerary, a country suggested by a city, a currency or a language, an employer suggested by a job title, a product suggested by its features. Ask about the class of thing instead ("entry rules most countries apply to visitors", not a country).',
-    "- Name a country only when the answer genuinely depends on it, and never a city or region. Prefer the class of place or the mechanism.",
-    "- Use bands and orders of magnitude, never exact figures, years or dates.",
-    "- Ask for rules, thresholds, units, reference values and the traps between them, never for a verdict on this user's situation; the user applies the answer locally.",
-    "- Each question must make sense coming from any stranger. If it carries any fact about the user beyond the topic itself, remove the fact or drop the question.",
-    "",
-    "Form:",
-    "- Each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary letters and spaces only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings, spelled-out letters or encoded strings.",
-    "- Use ordinary dictionary words of the user's language, units, and standard abbreviations. Do not reuse wording between questions.",
-    "- At most three questions, on one subject, and at most 600 bytes and 80 words in all.",
-    "",
-    'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.'
-  ].join(`
-`);
-  CONSULT_WRITER_RESPONSE_SCHEMA = Object.freeze({
-    type: "object",
-    properties: {
-      questions: {
-        anyOf: [
-          { type: "null" },
-          {
-            type: "array",
-            minItems: 1,
-            maxItems: CONSULT_WRITER_LIMITS.maxQuestions,
-            items: { type: "string", maxLength: CONSULT_WRITER_LIMITS.maxQuestionChars }
-          }
-        ]
-      }
-    },
-    required: ["questions"],
-    additionalProperties: false
-  });
-  utf84 = new TextEncoder;
 });
 
 // src/workers/remote-openapi.ts
@@ -126054,6 +126078,8 @@ async function main() {
         }
         return openZkapiConsultSession2(route, control);
       },
+      transportAvailable: () => transport()?.apiKey !== undefined,
+      answerActivityBusy: () => answerActivity.busy,
       completionTimeoutMs: () => transport()?.settings.timeoutMs ?? 360000
     });
   }
