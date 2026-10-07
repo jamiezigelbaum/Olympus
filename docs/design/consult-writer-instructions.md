@@ -137,9 +137,10 @@ yourself.
   person from a role. In the first measured run (M0, round 2) the writer
   named "Portugal" for a trip whose answer only mentioned Lisbon. Such a
   name is as identifying as a copied one. Ask about the class instead ("the
-  entry rules most countries apply to short visits"). The writer code also
-  refuses any reply with a capitalised word after the first in a question,
-  acronyms excepted.
+  entry rules most countries apply to short visits"). Mechanically, the gate
+  refuses a country name unless the owner enabled country names, so that
+  case is caught; a name that is also a dictionary word, or a place inside a
+  phrase, is yours to avoid.
 - **The place can be the identifier.** A well-known city is unremarkable; a
   rare place combined with one niche attribute (a single employer, one
   specialty school, one hospital, one museum, an airport with two flights a

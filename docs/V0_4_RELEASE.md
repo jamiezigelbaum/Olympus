@@ -117,8 +117,9 @@ waits for a calendar slot.
   stages land behind the internal settings mechanism (no public enable
   path): C1 gate and packs, C2 the transport session, C3 settings, C4a the
   panel collection protocol, C4b the writer scheduling and dispatch
-  orchestration (wired, never triggered until C5 lands an enable path; the
-  quiet-machine B2 rerun of §A.7 is still owed before release).
+  orchestration (wired; inert unless a valid enabled `consult.json` exists,
+  which no product path writes until C5; the quiet-machine B2 rerun of §A.7
+  is the C4b merge gate and is still owed).
 
 ## Outcome (0.4, OpenClaw)
 
