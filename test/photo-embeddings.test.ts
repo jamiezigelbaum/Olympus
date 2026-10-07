@@ -247,6 +247,19 @@ describe('image preparation in the shared text lane', () => {
     expect(extractor.versionFor!('application/pdf')).toBe(extractor.version);
   });
 
+  test('the image-scoped version is a key the real job store accepts', () => {
+    const extractor = createTextExtractor({ imagePreparation: createImagePreparation({ cacheDir: '/unused', commandRunner: fakeSips() }) });
+    const store = new LocalFileExtractionJobStore(join(temporaryDir(), 'jobs.sqlite'));
+    const lane = { corpusId: 'secure_local.fixture.files', provider: 'fixture', accountScope: 'personal', approvedScopeKey: 'fixture.personal:/photos' };
+    const result = store.enqueue({
+      refs: [{ ...lane, providerItemId: 'id:photo-1', localItemId: 'personal:id:photo-1', mimeType: 'image/heic', name: 'photo.heic' }],
+      extractorKind: extractor.kind,
+      extractorVersion: extractor.versionFor!('image/heic'),
+      policyDecision: 'index_allowed',
+    });
+    expect(result.jobsQueued).toBe(1);
+  });
+
   test('the text lane indexes a prepared picture: a descriptor, any OCR text, and the copy as media', async () => {
     const cacheDir = join(temporaryDir(), 'media-cache');
     const extractor = createTextExtractor({

@@ -292,9 +292,11 @@ export const IMAGE_MEDIA_DESCRIPTOR = 'Photo';
 
 /**
  * Appended to the text lane's version for images when pictures are read for
- * media search (2026-10-07).
+ * media search (2026-10-07). The result is a job key part, so it may use only
+ * the job store's safe identifier characters: a `+` here made every plan pass
+ * that met a picture throw, stopping the whole lane.
  */
-export const IMAGE_MEDIA_VERSION_SUFFIX = '+image-media-2026-10-07';
+export const IMAGE_MEDIA_VERSION_SUFFIX = '.image-media-2026-10-07';
 
 /**
  * An image prepared for media search: indexed, with the prepared copy as
