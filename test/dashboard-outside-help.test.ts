@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
+import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { readConsultSettings } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultReadiness, ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
 import { zkapiFenceScope } from '../src/core/consult-transport-zkapi.ts';
@@ -97,7 +98,7 @@ function status(overrides: {
   restartPending?: boolean;
 } = {}): DashboardOutsideHelpStatus {
   return {
-    settings: { state: 'off', revision: 0, languages: ['en'], domains: { units: true, countries: false, medicines: true, medicineBrands: false }, strict: false, ...overrides.settings },
+    settings: { state: 'off', revision: 0, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false, ...overrides.settings },
     route: overrides.route ?? configuredRoute(),
     languages: LANGUAGES,
     restartPending: overrides.restartPending ?? false,
@@ -173,6 +174,10 @@ describe('the Outside help page: states and copy', () => {
     expect(html.match(/name="acknowledged"/g)?.length).toBe(8);
     expect(html.match(/name="acknowledged" value="[a-z_0-9]+" checked/g)?.length).toBe(8);
     for (const entry of ZKAPI_RISK_ACKNOWLEDGEMENTS) expect(html).toContain(entry.statement.replace(/'/g, '&#39;').replace(/"/g, '&quot;'));
+    // The domain packs beside the languages: the current defaults, on and off, in plain words.
+    expect(html).toContain('data-outside-domains="units,countries,places,technical,medicines"');
+    expect(text).toContain('a question may use: units of measure, country names, place names, technical terms, medicine names.');
+    expect(text).toContain('Not admitted: medicine brand names.');
     // Languages: installed packs are choosable, uninstalled ones disabled with the reason.
     expect(html).toContain('name="languages" value="en" checked>');
     expect(html).toContain('name="languages" value="de" disabled aria-disabled="true"><span>German <span class="hint">pack not installed</span>');
@@ -568,7 +573,8 @@ describe('the adapter: turning outside help on and off', () => {
     const on = await backend.setEnabled({ enabled: true, revision: 0, languages: ['en', 'pt-BR'] });
     expect(on).toEqual({ ok: true, status_message: expect.stringContaining('Outside help is on'), revision: 1 });
     const read = readConsultSettings({ env });
-    expect(read).toMatchObject({ state: 'valid', settings: { v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: { units: true, countries: false, medicines: true, medicineBrands: false }, strict: false } });
+    expect(read).toMatchObject({ state: 'valid', settings: { v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false } });
+    expect(read.state === 'valid' && read.settings.domains).toMatchObject({ places: true, technical: true, countries: true, medicineBrands: false });
     expect(backend.summary()).toEqual({ state: 'on' });
     const off = await backend.setEnabled({ enabled: false, revision: 1 });
     expect(off).toEqual({ ok: true, status_message: expect.stringContaining('Outside help is off'), revision: 2 });

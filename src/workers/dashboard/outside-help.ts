@@ -266,7 +266,15 @@ function renderEnable(status: DashboardOutsideHelpStatus, summary: DashboardOuts
       : blockedReason
         ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml(W.turnOn)}</button><span class="hint">${escapeHtml(blockedReason)}</span></span>`
         : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml(W.turnOn)}</button>`;
-  return `<div class="sect">${escapeHtml(W.languagesTitle)}</div><p class="pnote">${escapeHtml(W.languagesIntro)}</p>`
+  // The domain packs the gate admits beside the languages (the defaults, or
+  // the file's own choices): named in plain words, on and off.
+  const domainNames = W.domainNames as Readonly<Record<string, string>>;
+  const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => domainNames[key] ?? key);
+  const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key]) => domainNames[key] ?? key);
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(','))}">`
+    + `${escapeHtml(fill(W.domainsOn, { list: domainsOn.join(', ') || W.domainsNone }))}`
+    + `${domainsOff.length > 0 ? ` ${escapeHtml(fill(W.domainsOff, { list: domainsOff.join(', ') }))}` : ''}</p>`;
+  return `<div class="sect">${escapeHtml(W.languagesTitle)}</div><p class="pnote">${escapeHtml(W.languagesIntro)}</p>${domains}`
     + `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="${invalid ? 'yes' : 'no'}">${languages}`
     + `<div class="pfooter"><p>${escapeHtml(W.automatic)}</p><div class="pbuttons">${button}</div>`
     + `<span class="actmsg" data-action-message role="status"></span></div></form>`

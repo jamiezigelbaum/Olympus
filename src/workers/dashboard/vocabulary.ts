@@ -1985,6 +1985,18 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   languagesTitle: 'Languages',
   languagesIntro: 'The outside question may use these languages. Only languages with a vocabulary pack installed on this computer can be chosen.',
   packMissing: 'pack not installed',
+  /** The gate's domain packs beside the languages: which word lists a question may draw on. */
+  domainsOn: 'Besides everyday words in these languages, a question may use: {list}.',
+  domainsOff: 'Not admitted: {list}.',
+  domainsNone: 'no extra word lists',
+  domainNames: {
+    units: 'units of measure',
+    countries: 'country names',
+    places: 'place names',
+    technical: 'technical terms',
+    medicines: 'medicine names',
+    medicineBrands: 'medicine brand names',
+  },
   automatic: 'While on, consults run automatically when a private answer in ChatGPT is incomplete. Only this computer can change this setting.',
   turnOn: 'Turn on outside help',
   turnOff: 'Turn off outside help',

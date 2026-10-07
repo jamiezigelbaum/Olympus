@@ -20,6 +20,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { withFileLeaseSync } from '../src/core/file-lease.ts';
+import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { DEFAULT_CONSULT_SETTINGS, readConsultSettings } from '../src/core/consult-settings.ts';
 import { writeConsultSettings, type ConsultSettingsWriteInput } from '../src/core/consult-settings-writer.ts';
 
@@ -47,7 +48,7 @@ afterEach(() => {
 const UPDATE: ConsultSettingsWriteInput = {
   enabled: true,
   languages: ['en', 'pt-BR'],
-  domains: { units: true, countries: false, medicines: true, medicineBrands: false },
+  domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS },
   strict: false,
   expectedRevision: 0,
 };
@@ -166,7 +167,7 @@ describe('writeConsultSettings: refusals', () => {
     expect(refused).toMatchObject({ ok: false, reason: 'invalid_current', invalidReason: 'malformed_json', current: { state: 'invalid' } });
     expect(readFileSync(settingsFile(home), 'utf8')).toBe('{"v":1,"revision":4,"enabled":true');
     // The same with every other reader reason: a duplicate key, a wrong shape.
-    writeFileSync(settingsFile(home), '{"v":1,"revision":4,"enabled":false,"enabled":true,"languages":["en"],"domains":{"units":true,"countries":false,"medicines":true,"medicineBrands":false},"strict":false}', { mode: 0o600 });
+    writeFileSync(settingsFile(home), '{"v":1,"revision":4,"enabled":false,"enabled":true,"languages":["en"],"domains":{"units":true,"countries":true,"places":true,"technical":true,"medicines":true,"medicineBrands":false},"strict":false}', { mode: 0o600 });
     expect(writeConsultSettings({ ...UPDATE, expectedRevision: 4 }, { env })).toMatchObject({ ok: false, reason: 'invalid_current', invalidReason: 'duplicate_key' });
     const replaced = writeConsultSettings({ ...UPDATE, expectedRevision: 0, replaceInvalid: true }, { env });
     expect(replaced).toMatchObject({ ok: true, settings: { revision: 1, enabled: true } });

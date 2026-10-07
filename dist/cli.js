@@ -51192,6 +51192,17 @@ var init_vocabulary = __esm(() => {
     languagesTitle: "Languages",
     languagesIntro: "The outside question may use these languages. Only languages with a vocabulary pack installed on this computer can be chosen.",
     packMissing: "pack not installed",
+    domainsOn: "Besides everyday words in these languages, a question may use: {list}.",
+    domainsOff: "Not admitted: {list}.",
+    domainsNone: "no extra word lists",
+    domainNames: {
+      units: "units of measure",
+      countries: "country names",
+      places: "place names",
+      technical: "technical terms",
+      medicines: "medicine names",
+      medicineBrands: "medicine brand names"
+    },
     automatic: "While on, consults run automatically when a private answer in ChatGPT is incomplete. Only this computer can change this setting.",
     turnOn: "Turn on outside help",
     turnOff: "Turn off outside help",
@@ -99590,7 +99601,11 @@ function renderEnable(status, summary, canEdit) {
   const blockedReason = status.settings.state === "invalid" ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
   const invalid2 = status.settings.state === "invalid";
   const button = invalid2 ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
-  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p>` + `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">${languages}` + `<div class="pfooter"><p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.automatic)}</p><div class="pbuttons">${button}</div>` + `<span class="actmsg" data-action-message role="status"></span></div></form>` + (summary.state === "fence_held" ? "" : "");
+  const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
+  const domainsOn = Object.entries(status.settings.domains).filter(([, on2]) => on2).map(([key]) => domainNames[key] ?? key);
+  const domainsOff = Object.entries(status.settings.domains).filter(([, on2]) => !on2).map(([key]) => domainNames[key] ?? key);
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on2]) => on2).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
+  return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p>${domains}` + `<form class="ohform" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">${languages}` + `<div class="pfooter"><p>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.automatic)}</p><div class="pbuttons">${button}</div>` + `<span class="actmsg" data-action-message role="status"></span></div></form>` + (summary.state === "fence_held" ? "" : "");
 }
 function outsideHelpClientScript(config2) {
   return `(function () {
@@ -123975,7 +123990,7 @@ function createDashboardConsultAdapter(options) {
     };
   };
   const languages = () => {
-    const status = consultVocabularyFileStatus({ languages: ALL_LANGUAGES, domains: { units: false, countries: false, medicines: false, medicineBrands: false } }, env);
+    const status = consultVocabularyFileStatus({ languages: ALL_LANGUAGES, domains: Object.fromEntries(Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS).map((key) => [key, false])) }, env);
     return ALL_LANGUAGES.map((language) => {
       const pack = CONSULT_LANGUAGE_PACKS[language];
       const entry = status.find((item) => item.id === pack);

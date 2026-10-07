@@ -29,7 +29,7 @@
  *   - `addRoute`: adds the one zkapi profile when none exists;
  *   - `recover` / `abandon`: the two fence buttons (§A.8), both explicit.
  */
-import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, type ConsultLanguage } from '../../core/consult-gate.ts';
+import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
 import {
   DEFAULT_CONSULT_SETTINGS,
   readConsultSettings,
@@ -189,7 +189,8 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
 
   const languages = (): DashboardOutsideHelpLanguage[] => {
     const status = consultVocabularyFileStatus(
-      { languages: ALL_LANGUAGES, domains: { units: false, countries: false, medicines: false, medicineBrands: false } },
+      // Language packs only: every domain pack off, whatever the current set of domain keys.
+      { languages: ALL_LANGUAGES, domains: Object.fromEntries(Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS).map((key) => [key, false])) as unknown as Partial<ConsultDomainPacks> },
       env as NodeJS.ProcessEnv,
     );
     return ALL_LANGUAGES.map((language) => {
