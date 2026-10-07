@@ -19445,6 +19445,9 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
+function rowRehomeReceiptId(ledger, identity, generation) {
+  return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
+}
 async function moveTieredItem(options) {
   const { set, identity, decision } = options;
   const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
@@ -19454,6 +19457,7 @@ async function moveTieredItem(options) {
   const record = ledger.getCurrent(identity);
   if (!record || !record.routed)
     throw new Error("Only a routed item can move; adopt a legacy placement first.");
+  const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
   if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
     throw new TierLedgerGenerationConflictError;
   }
@@ -19560,7 +19564,7 @@ async function moveTieredItem(options) {
   if (options.embeddingLedger) {
     const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
     const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    const append = options.embeddingLedger.entryKey ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
+    const append = rehomeTagged ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
     await append(options.embeddingLedger.path, {
       recorded_at: new Date().toISOString(),
       kind: "note",
@@ -19575,7 +19579,7 @@ async function moveTieredItem(options) {
       ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
       approved_by: options.embeddingLedger.approvedBy,
       status: "complete",
-      ...options.embeddingLedger.entryKey ? { entry_id: `${options.embeddingLedger.entryKey}:${flipped.generation}` } : {}
+      ...rehomeTagged ? { entry_id: rowRehomeReceiptId(ledger, identity, flipped.generation) } : {}
     });
   }
   return { outcome: "moved", raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };
@@ -19664,7 +19668,7 @@ function fullIdentity(identity) {
     ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
   };
 }
-var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", TierMoveRefusedError;
+var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError;
 var init_tier_move = __esm(() => {
   init_engine();
   init_tier_ledger();

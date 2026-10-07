@@ -31,6 +31,9 @@ import {
   copyServingLayer,
   placementIsRaise,
   TierLedgerGenerationConflictError,
+  tierLedgerIdentityKey,
+  type TierLedger,
+  type TierLedgerIdentity,
   type TierCopy,
   type TierCopyLayers,
 } from '../classification/tier-ledger.ts';
@@ -46,6 +49,19 @@ import { defaultStoreTrustTier } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
+
+/** Reason code the Private-row re-home pass puts on the raises it queues (tier-row-rehome.ts). */
+export const ROW_REHOME_REASON = 'row_tier:private_rehome';
+
+/**
+ * The idempotent embedding-ledger id of a re-home move's note: the durable set
+ * ledger, the item and the flip's generation. Every executor of a re-home
+ * raise (the pass, the sniffer's automatic move) and the pass's replay of a
+ * lost note use this one id, so the note appears exactly once.
+ */
+export function rowRehomeReceiptId(ledger: Pick<TierLedger, 'ledgerId'>, identity: TierLedgerIdentity, generation: number): string {
+  return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
+}
 
 /** A move the primitive refuses before writing anything (the item stays where it is). */
 export class TierMoveRefusedError extends Error {
@@ -84,11 +100,6 @@ export interface TierMoveOptions {
     path: string;
     approvedBy: EmbeddingLedgerApprovedBy;
     why?: string;
-    /**
-     * Makes the note idempotent: written once under `${entryKey}:${generation}`
-     * (the flip's generation), so a recovery that replays it never doubles it.
-     */
-    entryKey?: string;
   };
   /**
    * A destination store keeping a SUPERSEDED copy of this item that an
@@ -145,6 +156,8 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   const ledger = set.ledger;
   const record = ledger.getCurrent(identity);
   if (!record || !record.routed) throw new Error('Only a routed item can move; adopt a legacy placement first.');
+  // A raise the re-home pass queued (whoever carries it out) keeps the one receipt identity.
+  const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
   if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
     throw new TierLedgerGenerationConflictError();
   }
@@ -274,7 +287,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   if (options.embeddingLedger) {
     const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
     const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    const append = options.embeddingLedger.entryKey ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
+    const append = rehomeTagged ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
     await append(options.embeddingLedger.path, {
       recorded_at: new Date().toISOString(),
       kind: 'note',
@@ -297,7 +310,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
       ...(options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {}),
       approved_by: options.embeddingLedger.approvedBy,
       status: 'complete',
-      ...(options.embeddingLedger.entryKey ? { entry_id: `${options.embeddingLedger.entryKey}:${flipped.generation}` } : {}),
+      ...(rehomeTagged ? { entry_id: rowRehomeReceiptId(ledger, identity, flipped.generation) } : {}),
     });
   }
 

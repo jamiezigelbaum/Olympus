@@ -2394,7 +2394,12 @@ export async function main(): Promise<void> {
   // one is chosen here and handed to the scheduler. Tell the set, so the Private
   // row re-home pass knows whether it is local (it moves only when it is).
   if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
-    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider);
+    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
+      // Rows moved into the Private store embed under the current scope binding, as the lane's own pass does.
+      embedWith: () => (dropboxScopeRef && fileSourceScopeAuthority
+        ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef)
+        : undefined),
+    });
   }
   if (dropboxTierLane && dropboxConnectorStore) {
     adoptTierLane({

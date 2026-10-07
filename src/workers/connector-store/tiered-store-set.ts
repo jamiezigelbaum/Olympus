@@ -233,6 +233,7 @@ export class TieredStoreSet {
   private readonly laneFloor: TieredLaneFloor | undefined;
   private readonly contentArrivesLater: boolean;
   private privateEmbedder: SourceEmbeddingProvider | undefined;
+  private privateEmbedWith: (() => SourceEmbeddingProvider | undefined) | undefined;
   private lastRowRehome: TierRowRehomeReport | undefined;
 
   constructor(options: TieredStoreSetOptions) {
@@ -361,8 +362,29 @@ export class TieredStoreSet {
    * declares none (a lane whose embedder is chosen at runtime and handed to a
    * scheduler). The Private-row re-home pass moves only when this is local.
    */
-  declarePrivateEmbedder(provider: SourceEmbeddingProvider): void {
+  declarePrivateEmbedder(
+    provider: SourceEmbeddingProvider,
+    options: { embedWith?: () => SourceEmbeddingProvider | undefined } = {},
+  ): void {
     this.privateEmbedder = provider;
+    this.privateEmbedWith = options.embedWith;
+  }
+
+  /**
+   * The provider that embeds rows moved into the Private store, as the lane
+   * would embed them now: with its scope binding when the lane has one
+   * (`embedWith`; undefined while the binding is not current), else the
+   * declared or configured provider. Undefined: nothing may be queued yet.
+   */
+  privateEmbeddingProvider(): SourceEmbeddingProvider | undefined {
+    if (this.privateEmbedWith) {
+      try {
+        return this.privateEmbedWith();
+      } catch {
+        return undefined;
+      }
+    }
+    return this.privateEmbedder ?? this.legs.get('secure_local')?.spec.embeddingProvider;
   }
 
   /**

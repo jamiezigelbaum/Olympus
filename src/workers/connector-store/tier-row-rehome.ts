@@ -48,7 +48,9 @@ import {
   readEmbeddingLedger,
   resolveEmbeddingLedgerPath,
 } from '../embedding-ledger.ts';
-import { moveTieredItem, TierMoveRefusedError } from './tier-move.ts';
+import { moveTieredItem, ROW_REHOME_REASON, rowRehomeReceiptId, TierMoveRefusedError } from './tier-move.ts';
+
+export { ROW_REHOME_REASON };
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 /** item_pk values scanned per store per call. */
@@ -57,7 +59,8 @@ export const DEFAULT_ROW_REHOME_SCAN_WINDOW = 2_000;
 export const DEFAULT_ROW_REHOME_CANDIDATES = 100;
 /** Moves carried out per call, per set. */
 export const DEFAULT_ROW_REHOME_MOVES = 25;
-export const ROW_REHOME_REASON = 'row_tier:private_rehome';
+/** Queued raises looked at per call. */
+export const DEFAULT_ROW_REHOME_LOOKED = 2_000;
 
 const CURSOR_KEY_PREFIX = 'private_row_rehome_after:';
 const NON_SECURE_DOMAINS: readonly SourceTrustDomain[] = ['public_safe', 'internal'];
@@ -93,6 +96,8 @@ export interface TierRowRehomeOptions {
   scanWindow?: number;
   candidates?: number;
   maxMoves?: number;
+  /** Queued raises looked at per call (cheap checks); the rest wait for the queue cursor. */
+  maxLooked?: number;
   /** Where each move's embedding-ledger note goes. Default: the install's ledger. */
   embeddingLedgerPath?: string;
 }
@@ -144,6 +149,8 @@ export async function rehomePrivateTierRows(options: TierRowRehomeOptions): Prom
     }
   }
 
+  pruneRefused(ledger);
+  resumePendingEmbeddings(set);
   await runQueuedMoves(options, report, ours);
   await replayMissingReceipts(options, report, completed);
   set.recordRowRehomeReport(report);
@@ -266,8 +273,6 @@ interface CompletedMove {
 
 const REFUSED_META_KEY = 'private_row_rehome_refused';
 const OUTSTANDING_META_KEY = 'private_row_rehome_outstanding';
-/** Items considered for a move per call, refused ones included (they cost no move budget). */
-const MAX_CONSIDERED_PER_CALL = 500;
 
 interface RefusedEntry {
   identity: TierLedgerIdentity;
@@ -278,32 +283,46 @@ function refusalKey(identity: TierLedgerIdentity, generation: number): string {
   return `${tierLedgerIdentityKey(identity)}#${generation}`;
 }
 
+/** Entries whose item is checked for staleness per call. */
+const REFUSED_PRUNE_PER_CALL = 200;
+
+function parseRefused(ledger: TieredStoreSet['ledger']): RefusedEntry[] {
+  try {
+    const parsed = JSON.parse(ledger.readMeta(REFUSED_META_KEY) ?? '[]') as unknown;
+    return (Array.isArray(parsed) ? parsed as RefusedEntry[] : [])
+      .filter((entry) => entry?.identity && typeof entry.generation === 'number');
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Every still-active refusal, never capped: an entry is dropped only when its
  * item is no longer waiting at that generation (decided again, moved, gone).
  */
 function readRefused(ledger: TieredStoreSet['ledger']): Map<string, RefusedEntry> {
-  const entries = new Map<string, RefusedEntry>();
-  let changed = false;
+  return new Map(parseRefused(ledger).map((entry) => [refusalKey(entry.identity, entry.generation), entry] as const));
+}
+
+/**
+ * Maintenance independent of move eligibility: check a bounded batch of the
+ * entries each call (rotating through them) and drop the stale ones.
+ */
+function pruneRefused(ledger: TieredStoreSet['ledger']): void {
   try {
-    const parsed = JSON.parse(ledger.readMeta(REFUSED_META_KEY) ?? '[]') as unknown;
-    for (const entry of Array.isArray(parsed) ? parsed as RefusedEntry[] : []) {
-      if (!entry?.identity || typeof entry.generation !== 'number') {
-        changed = true;
-        continue;
-      }
+    const entries = parseRefused(ledger);
+    if (entries.length === 0) return;
+    const checked = entries.slice(0, REFUSED_PRUNE_PER_CALL);
+    const rest = entries.slice(REFUSED_PRUNE_PER_CALL);
+    const kept = checked.filter((entry) => {
       const record = ledger.getCurrent(entry.identity);
-      if (record && record.state === 'moving' && record.generation === entry.generation) {
-        entries.set(refusalKey(entry.identity, entry.generation), entry);
-      } else {
-        changed = true;
-      }
-    }
+      return record !== undefined && record.state === 'moving' && record.generation === entry.generation;
+    });
+    if (kept.length === checked.length && rest.length === 0) return;
+    ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...rest, ...kept]));
   } catch {
-    return entries;
+    // The next call tries again.
   }
-  if (changed) writeRefused(ledger, entries);
-  return entries;
 }
 
 function writeRefused(ledger: TieredStoreSet['ledger'], entries: ReadonlyMap<string, RefusedEntry>): void {
@@ -371,21 +390,34 @@ async function runQueuedMoves(
   const builtInOnly = setEmbedsWithBuiltInOnly(set);
   const embeddingLedgerPath = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
   const refused = readRefused(ledger);
-  let considered = 0;
+  const maxLooked = Math.max(1, options.maxLooked ?? DEFAULT_ROW_REHOME_LOOKED);
+  // A stable order with a persisted cursor: each bounded call advances past the
+  // entries it looked at, so rows that cannot move now (an override, a
+  // refusal) never hold the ones behind them.
+  const ordered = [...work.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  const cursor = ledger.readMeta(QUEUE_CURSOR_META_KEY) ?? '';
+  const start = Math.max(0, ordered.findIndex(([key]) => key > cursor));
+  const rotated = cursor === '' || ordered.every(([key]) => key <= cursor)
+    ? ordered
+    : [...ordered.slice(start), ...ordered.slice(0, start)];
+  let looked = 0;
   let waiting = 0;
-  for (const queued of work.values()) {
+  let lastLooked = '';
+  const moved: string[] = [];
+  for (const [key, queued] of rotated) {
     const identity = identityOfRecord(queued);
+    if (looked >= maxLooked || budget === 0) {
+      waiting += 1;
+      continue;
+    }
+    looked += 1;
+    lastLooked = key;
     const refusedKey = refusalKey(identity, queued.generation);
     if (refused.has(refusedKey)) {
       // A cached refusal costs no budget and no work.
       report.refused += 1;
       continue;
     }
-    if (budget === 0 || considered >= MAX_CONSIDERED_PER_CALL) {
-      waiting += 1;
-      continue;
-    }
-    considered += 1;
     try {
       // Re-check everything against the ledger right now, not the queue-time record.
       const record = ledger.getCurrent(identity);
@@ -407,16 +439,12 @@ async function runQueuedMoves(
         set,
         identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
         target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
-        embeddingLedger: {
-          path: embeddingLedgerPath,
-          approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL,
-          why: MOVE_WHY,
-          entryKey: receiptKey(identity),
-        },
+        embeddingLedger: { path: embeddingLedgerPath, approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL, why: MOVE_WHY },
         expectedGeneration: record.generation,
         ...(builtInOnly ? { replaceOwnSupersededCopy: true } : {}),
       });
       report.moved += 1;
+      moved.push(exported.identity.localItemId);
     } catch (error) {
       if (error instanceof TierLedgerGenerationConflictError) {
         // Decided again, or settled by someone else (the sniffer's automatic move) first.
@@ -441,14 +469,59 @@ async function runQueuedMoves(
       }
     }
   }
+  ledger.writeMeta(QUEUE_CURSOR_META_KEY, waiting > 0 ? lastLooked : '');
+  if (moved.length > 0) handOffToEmbedding(set, moved);
   // Remember whether any of our work is still waiting, so the next call knows
   // whether to read the queue at all.
-  const left = waiting + report.failed;
-  ledger.writeMeta(OUTSTANDING_META_KEY, left > 0 ? '1' : '');
+  ledger.writeMeta(OUTSTANDING_META_KEY, waiting + report.failed > 0 ? '1' : '');
 }
 
-function receiptKey(identity: TierLedgerIdentity): string {
-  return `row-rehome:${tierLedgerIdentityKey(identity)}`;
+const PENDING_EMBED_META_KEY = 'private_row_rehome_pending_embed';
+const QUEUE_CURSOR_META_KEY = 'private_row_rehome_queue_cursor';
+const PENDING_EMBED_LIMIT = 5_000;
+
+/**
+ * Rows moved into the Private store carry chunks but no vectors, and a lane
+ * whose Private store only embeds what its own syncs queued would never pick
+ * them up. Hand them to the store's existing embedding queue with the
+ * provider the lane would use (its scope binding included), and remember them
+ * until they are embedded so a restart does not lose them.
+ */
+function handOffToEmbedding(set: TieredStoreSet, localItemIds: readonly string[]): void {
+  try {
+    const pending = new Set(readPendingEmbed(set));
+    for (const id of localItemIds) pending.add(id);
+    set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify([...pending].slice(-PENDING_EMBED_LIMIT)));
+    resumePendingEmbeddings(set);
+  } catch {
+    // The next call resumes them.
+  }
+}
+
+function readPendingEmbed(set: TieredStoreSet): string[] {
+  try {
+    const parsed = JSON.parse(set.ledger.readMeta(PENDING_EMBED_META_KEY) ?? '[]') as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Re-queue (after a restart) what is still unembedded; forget what is embedded or gone. */
+function resumePendingEmbeddings(set: TieredStoreSet): void {
+  try {
+    const pending = readPendingEmbed(set);
+    if (pending.length === 0) return;
+    const provider = set.privateEmbeddingProvider();
+    const store = set.store('secure_local');
+    if (!provider || !store) return;
+    const missing = new Set(store.missingEmbeddingItemIds(provider, PENDING_EMBED_LIMIT));
+    const still = pending.filter((id) => missing.has(id));
+    if (still.length > 0) store.queueEmbedding(still, provider);
+    if (still.length !== pending.length) set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify(still));
+  } catch {
+    // The next call tries again.
+  }
 }
 
 /**
@@ -465,9 +538,11 @@ async function replayMissingReceipts(
   const path = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
   try {
     const present = new Set((await readEmbeddingLedger(path)).entries.map((entry) => entry.entry_id).filter(Boolean));
-    for (const move of completed.slice(0, DEFAULT_ROW_REHOME_MOVES)) {
-      const entryId = `${receiptKey(move.identity)}:${move.generation}`;
-      if (present.has(entryId)) continue;
+    // Already-noted moves are filtered out BEFORE the per-call limit applies.
+    const missing = completed
+      .map((move) => ({ move, entryId: rowRehomeReceiptId(options.set.ledger, move.identity, move.generation) }))
+      .filter(({ entryId }) => !present.has(entryId));
+    for (const { move, entryId } of missing.slice(0, DEFAULT_ROW_REHOME_MOVES)) {
       const written = await appendEmbeddingLedgerEntryOnce(path, {
         recorded_at: new Date().toISOString(),
         kind: 'note',

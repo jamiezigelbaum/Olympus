@@ -15,8 +15,10 @@ import { createTierVisibilityGate } from '../src/workers/connector-store/tier-vi
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { EMBEDDING_LEDGER_OWNER_APPROVAL, readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { rehomePrivateTierRows } from '../src/workers/connector-store/tier-row-rehome.ts';
+import { rowRehomeReceiptId } from '../src/workers/connector-store/tier-move.ts';
+import { appendEmbeddingLedgerEntryOnce } from '../src/workers/embedding-ledger.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import {
   CORPORA,
@@ -103,8 +105,9 @@ describe('Private-row re-home', () => {
 
     // No provider call in the move; the Private store's own embedder embeds it.
     expect(fixture.cloud.inputs.length).toBe(cloudCalls);
-    const embed = await fixture.stores.secure_local!.embedChunks({ provider: fixture.local });
-    expect(embed.chunksEmbedded).toBeGreaterThan(0);
+    // The real queue-only embedding sweep, as a lane without a store-wide sweep runs it.
+    const [embed] = await embedPendingChunks([{ store: fixture.stores.secure_local!, provider: fixture.local }], { maxItems: 10 });
+    expect(embed!.chunksEmbedded).toBeGreaterThan(0);
     expect(fixture.local.inputs.join('\n')).toContain('Orchid ledger body');
     expect(fixture.cloud.inputs.length).toBe(cloudCalls);
 
@@ -638,6 +641,92 @@ describe('Private-row re-home', () => {
       const again = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
       expect(again.receiptsReplayed).toBe(0);
       expect(await receipts(fixture)).toBe(1);
+    });
+
+    test('queued raises blocked by overrides do not starve the one behind them (501 with 500 overrides)', async () => {
+      const fixture = fixtureIn('olympus-row-rehome-501-');
+      const specs: FixtureSpec[] = Array.from({ length: 501 }, (_, index) => ({ id: `row${index}`, name: `row${index}.txt`, text: `row ${index} body` }));
+      await seedLegacy(fixture, specs);
+      const wide = { scanWindow: 100_000, candidates: 1_000, embeddingLedgerPath: ledgerPath(fixture) };
+      const queued = await rehomePrivateTierRows({ set: fixture.set, ...wide, maxMoves: 0 });
+      expect(queued.queued).toBe(501);
+      for (let index = 0; index < 500; index += 1) fixture.ledger.setOverride(identityOf(`row${index}`), { kind: 'tier', tier: 'private' });
+      let calls = 0;
+      for (; calls < 40 && currentCorpora(fixture, 'row500')[0] !== CORPORA.secure_local; calls += 1) {
+        await rehomePrivateTierRows({ set: fixture.set, ...wide, maxLooked: 50, maxMoves: 25 });
+      }
+      expect(currentCorpora(fixture, 'row500')).toEqual([CORPORA.secure_local]);
+      expect(calls).toBeGreaterThan(1); // bounded calls had to rotate past the blocked ones
+    });
+
+    test('moved rows are handed to the embedding queue with the lane provider and survive a restart', async () => {
+      let fixture = fixtureIn();
+      await seedLegacy(fixture, [ORCHID]);
+      await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([localId('orchid')]);
+      // Restart: the in-memory queue is gone; the pending ids are in the ledger.
+      fixture = reopen(fixture);
+      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([]);
+      await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([localId('orchid')]);
+      const [run] = await embedPendingChunks([{ store: fixture.stores.secure_local!, provider: fixture.local }], { maxItems: 10 });
+      expect(run!.chunksEmbedded).toBeGreaterThan(0);
+      expect(fixture.local.inputs.join('\n')).toContain('Orchid ledger body');
+      // Embedded: the next call forgets it and queues nothing.
+      await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(fixture.stores.secure_local!.queuedEmbeddingItemIds()).toEqual([]);
+      expect(fixture.ledger.readMeta('private_row_rehome_pending_embed')).toBe('[]');
+    });
+
+    test('receipt replay filters already-noted moves before its per-call limit (26 completed, one note missing)', async () => {
+      const fixture = fixtureIn('olympus-row-rehome-26-');
+      const specs: FixtureSpec[] = Array.from({ length: 26 }, (_, index) => ({ id: `row${index}`, name: `row${index}.txt`, text: `row ${index} body` }));
+      await seedLegacy(fixture, specs);
+      const wide = { scanWindow: 100_000, candidates: 1_000, embeddingLedgerPath: ledgerPath(fixture) };
+      expect((await rehomePrivateTierRows({ set: fixture.set, ...wide, maxMoves: 100 })).moved).toBe(26);
+      require('node:fs').rmSync(ledgerPath(fixture));
+      // 25 of the 26 notes are back; the 26th (last in order) is the one missing.
+      const ids = specs.map((spec) => rowRehomeReceiptId(fixture.ledger, identityOf(spec.id), fixture.ledger.getCurrent(identityOf(spec.id))!.generation)).sort();
+      for (const id of ids.slice(0, 25)) {
+        await appendEmbeddingLedgerEntryOnce(ledgerPath(fixture), {
+          recorded_at: new Date().toISOString(), kind: 'note', what: 'Tier move of one item (restored)', approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL, status: 'complete', entry_id: id,
+        });
+      }
+      const replay = await rehomePrivateTierRows({ set: fixture.set, ...wide });
+      expect(replay.receiptsReplayed).toBe(1);
+    });
+
+    test('a re-home raise completed by another executor (no entry key) gets the keyed receipt once, and replay adds no second note', async () => {
+      const fixture = fixtureIn();
+      await seedLegacy(fixture, [ORCHID]);
+      await rehomePrivateTierRows({ set: fixture.set, maxMoves: 0, embeddingLedgerPath: ledgerPath(fixture) });
+      // The sniffer's automatic move calls the primitive exactly like this.
+      await moveTieredItem({
+        set: fixture.set,
+        identity: { ...identityOf('orchid'), localItemId: localId('orchid') },
+        target: { metadataTier: 'secure', contentTier: 'secure' },
+        embeddingLedger: { path: ledgerPath(fixture), approvedBy: 'system-automatic' },
+        replaceOwnSupersededCopy: true,
+      });
+      const generation = fixture.ledger.getCurrent(identityOf('orchid'))!.generation;
+      const id = rowRehomeReceiptId(fixture.ledger, identityOf('orchid'), generation);
+      const entries = (await readEmbeddingLedger(ledgerPath(fixture))).entries;
+      expect(entries.filter((entry) => entry.entry_id === id)).toHaveLength(1);
+      const replay = await rehomePrivateTierRows({ set: fixture.set, embeddingLedgerPath: ledgerPath(fixture) });
+      expect(replay.receiptsReplayed).toBe(0);
+      expect(await receipts(fixture)).toBe(1);
+    });
+
+    test('refusal-map pruning runs on idle calls, independent of move eligibility', async () => {
+      const { dir, cleanup } = tempDir('olympus-row-rehome-prune-');
+      cleanups.push(cleanup);
+      const { set, ledger } = plainSet(dir);
+      ledger.writeMeta('private_row_rehome_refused', JSON.stringify(
+        Array.from({ length: 3 }, (_, index) => ({ identity: { provider: 'gone', accountScope: 'a', providerItemId: `x${index}` }, generation: 1 })),
+      ));
+      // No provider, nothing queued: moves are not even considered.
+      await rehomePrivateTierRows({ set, embeddingLedgerPath: join(dir, 'l.jsonl') });
+      expect(JSON.parse(ledger.readMeta('private_row_rehome_refused') ?? 'x')).toEqual([]);
     });
 
     for (const boundary of ['decision', 'staging', 'import'] as const) {

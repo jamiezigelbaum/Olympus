@@ -25316,6 +25316,9 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
+function rowRehomeReceiptId(ledger, identity, generation) {
+  return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
+}
 async function moveTieredItem(options) {
   const { set, identity, decision } = options;
   const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
@@ -25325,6 +25328,7 @@ async function moveTieredItem(options) {
   const record = ledger.getCurrent(identity);
   if (!record || !record.routed)
     throw new Error("Only a routed item can move; adopt a legacy placement first.");
+  const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
   if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
     throw new TierLedgerGenerationConflictError;
   }
@@ -25431,7 +25435,7 @@ async function moveTieredItem(options) {
   if (options.embeddingLedger) {
     const vectorsCopied = destinations.reduce((total, destination) => total + destination.vectorsCopied, 0);
     const toEmbed = destinations.reduce((total, destination) => total + destination.chunksToEmbed, 0);
-    const append = options.embeddingLedger.entryKey ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
+    const append = rehomeTagged ? appendEmbeddingLedgerEntryOnce : appendEmbeddingLedgerEntry;
     await append(options.embeddingLedger.path, {
       recorded_at: new Date().toISOString(),
       kind: "note",
@@ -25446,7 +25450,7 @@ async function moveTieredItem(options) {
       ...options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {},
       approved_by: options.embeddingLedger.approvedBy,
       status: "complete",
-      ...options.embeddingLedger.entryKey ? { entry_id: `${options.embeddingLedger.entryKey}:${flipped.generation}` } : {}
+      ...rehomeTagged ? { entry_id: rowRehomeReceiptId(ledger, identity, flipped.generation) } : {}
     });
   }
   return { outcome: "moved", raise, generation: flipped.generation, destinations, supersededCorpora, chunkCount };
@@ -25535,7 +25539,7 @@ function fullIdentity(identity) {
     ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
   };
 }
-var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", TierMoveRefusedError;
+var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError;
 var init_tier_move = __esm(() => {
   init_engine();
   init_tier_ledger();
@@ -25588,6 +25592,8 @@ async function rehomePrivateTierRows(options) {
       }
     } catch {}
   }
+  pruneRefused(ledger);
+  resumePendingEmbeddings(set);
   await runQueuedMoves(options, report, ours);
   await replayMissingReceipts(options, report, completed);
   set.recordRowRehomeReport(report);
@@ -25681,29 +25687,32 @@ function considerRow(set, domain, row, report, ours, completed) {
 function refusalKey(identity, generation) {
   return `${tierLedgerIdentityKey(identity)}#${generation}`;
 }
-function readRefused(ledger) {
-  const entries = new Map;
-  let changed = false;
+function parseRefused(ledger) {
   try {
     const parsed = JSON.parse(ledger.readMeta(REFUSED_META_KEY) ?? "[]");
-    for (const entry of Array.isArray(parsed) ? parsed : []) {
-      if (!entry?.identity || typeof entry.generation !== "number") {
-        changed = true;
-        continue;
-      }
-      const record = ledger.getCurrent(entry.identity);
-      if (record && record.state === "moving" && record.generation === entry.generation) {
-        entries.set(refusalKey(entry.identity, entry.generation), entry);
-      } else {
-        changed = true;
-      }
-    }
+    return (Array.isArray(parsed) ? parsed : []).filter((entry) => entry?.identity && typeof entry.generation === "number");
   } catch {
-    return entries;
+    return [];
   }
-  if (changed)
-    writeRefused(ledger, entries);
-  return entries;
+}
+function readRefused(ledger) {
+  return new Map(parseRefused(ledger).map((entry) => [refusalKey(entry.identity, entry.generation), entry]));
+}
+function pruneRefused(ledger) {
+  try {
+    const entries = parseRefused(ledger);
+    if (entries.length === 0)
+      return;
+    const checked = entries.slice(0, REFUSED_PRUNE_PER_CALL);
+    const rest = entries.slice(REFUSED_PRUNE_PER_CALL);
+    const kept = checked.filter((entry) => {
+      const record = ledger.getCurrent(entry.identity);
+      return record !== undefined && record.state === "moving" && record.generation === entry.generation;
+    });
+    if (kept.length === checked.length && rest.length === 0)
+      return;
+    ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...rest, ...kept]));
+  } catch {}
 }
 function writeRefused(ledger, entries) {
   ledger.writeMeta(REFUSED_META_KEY, JSON.stringify([...entries.values()]));
@@ -25748,20 +25757,28 @@ async function runQueuedMoves(options, report, found) {
   const builtInOnly = setEmbedsWithBuiltInOnly(set);
   const embeddingLedgerPath = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
   const refused = readRefused(ledger);
-  let considered = 0;
+  const maxLooked = Math.max(1, options.maxLooked ?? DEFAULT_ROW_REHOME_LOOKED);
+  const ordered = [...work.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  const cursor = ledger.readMeta(QUEUE_CURSOR_META_KEY) ?? "";
+  const start = Math.max(0, ordered.findIndex(([key]) => key > cursor));
+  const rotated = cursor === "" || ordered.every(([key]) => key <= cursor) ? ordered : [...ordered.slice(start), ...ordered.slice(0, start)];
+  let looked = 0;
   let waiting = 0;
-  for (const queued of work.values()) {
+  let lastLooked = "";
+  const moved = [];
+  for (const [key, queued] of rotated) {
     const identity = identityOfRecord(queued);
+    if (looked >= maxLooked || budget === 0) {
+      waiting += 1;
+      continue;
+    }
+    looked += 1;
+    lastLooked = key;
     const refusedKey = refusalKey(identity, queued.generation);
     if (refused.has(refusedKey)) {
       report.refused += 1;
       continue;
     }
-    if (budget === 0 || considered >= MAX_CONSIDERED_PER_CALL) {
-      waiting += 1;
-      continue;
-    }
-    considered += 1;
     try {
       const record = ledger.getCurrent(identity);
       if (!record || !isOurQueuedRaise(record) || record.generation !== queued.generation || ledger.getOverride(identity) || ledger.rejudgeQuestion(identity) || record.targetMetadataTier !== queued.targetMetadataTier || record.targetContentTier !== queued.targetContentTier) {
@@ -25780,16 +25797,12 @@ async function runQueuedMoves(options, report, found) {
         set,
         identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
         target: { metadataTier: record.targetMetadataTier, contentTier: record.targetContentTier },
-        embeddingLedger: {
-          path: embeddingLedgerPath,
-          approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL,
-          why: MOVE_WHY,
-          entryKey: receiptKey(identity)
-        },
+        embeddingLedger: { path: embeddingLedgerPath, approvedBy: EMBEDDING_LEDGER_OWNER_APPROVAL, why: MOVE_WHY },
         expectedGeneration: record.generation,
         ...builtInOnly ? { replaceOwnSupersededCopy: true } : {}
       });
       report.moved += 1;
+      moved.push(exported.identity.localItemId);
     } catch (error) {
       if (error instanceof TierLedgerGenerationConflictError) {
         continue;
@@ -25807,11 +25820,44 @@ async function runQueuedMoves(options, report, found) {
       } catch {}
     }
   }
-  const left = waiting + report.failed;
-  ledger.writeMeta(OUTSTANDING_META_KEY, left > 0 ? "1" : "");
+  ledger.writeMeta(QUEUE_CURSOR_META_KEY, waiting > 0 ? lastLooked : "");
+  if (moved.length > 0)
+    handOffToEmbedding(set, moved);
+  ledger.writeMeta(OUTSTANDING_META_KEY, waiting + report.failed > 0 ? "1" : "");
 }
-function receiptKey(identity) {
-  return `row-rehome:${tierLedgerIdentityKey(identity)}`;
+function handOffToEmbedding(set, localItemIds) {
+  try {
+    const pending = new Set(readPendingEmbed(set));
+    for (const id of localItemIds)
+      pending.add(id);
+    set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify([...pending].slice(-PENDING_EMBED_LIMIT)));
+    resumePendingEmbeddings(set);
+  } catch {}
+}
+function readPendingEmbed(set) {
+  try {
+    const parsed = JSON.parse(set.ledger.readMeta(PENDING_EMBED_META_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function resumePendingEmbeddings(set) {
+  try {
+    const pending = readPendingEmbed(set);
+    if (pending.length === 0)
+      return;
+    const provider = set.privateEmbeddingProvider();
+    const store = set.store("secure_local");
+    if (!provider || !store)
+      return;
+    const missing = new Set(store.missingEmbeddingItemIds(provider, PENDING_EMBED_LIMIT));
+    const still = pending.filter((id) => missing.has(id));
+    if (still.length > 0)
+      store.queueEmbedding(still, provider);
+    if (still.length !== pending.length)
+      set.ledger.writeMeta(PENDING_EMBED_META_KEY, JSON.stringify(still));
+  } catch {}
 }
 async function replayMissingReceipts(options, report, completed) {
   if (completed.length === 0)
@@ -25819,10 +25865,8 @@ async function replayMissingReceipts(options, report, completed) {
   const path = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
   try {
     const present = new Set((await readEmbeddingLedger(path)).entries.map((entry) => entry.entry_id).filter(Boolean));
-    for (const move of completed.slice(0, DEFAULT_ROW_REHOME_MOVES)) {
-      const entryId = `${receiptKey(move.identity)}:${move.generation}`;
-      if (present.has(entryId))
-        continue;
+    const missing = completed.map((move) => ({ move, entryId: rowRehomeReceiptId(options.set.ledger, move.identity, move.generation) })).filter(({ entryId }) => !present.has(entryId));
+    for (const { move, entryId } of missing.slice(0, DEFAULT_ROW_REHOME_MOVES)) {
       const written = await appendEmbeddingLedgerEntryOnce(path, {
         recorded_at: new Date().toISOString(),
         kind: "note",
@@ -25859,7 +25903,7 @@ function setEmbedsWithBuiltInOnly(set) {
     return false;
   }
 }
-var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, ROW_REHOME_REASON = "row_tier:private_rehome", CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY, REFUSED_META_KEY = "private_row_rehome_refused", OUTSTANDING_META_KEY = "private_row_rehome_outstanding", MAX_CONSIDERED_PER_CALL = 500;
+var DEFAULT_ROW_REHOME_SCAN_WINDOW = 2000, DEFAULT_ROW_REHOME_CANDIDATES = 100, DEFAULT_ROW_REHOME_MOVES = 25, DEFAULT_ROW_REHOME_LOOKED = 2000, CURSOR_KEY_PREFIX = "private_row_rehome_after:", NON_SECURE_DOMAINS, MOVE_WHY, REFUSED_META_KEY = "private_row_rehome_refused", OUTSTANDING_META_KEY = "private_row_rehome_outstanding", REFUSED_PRUNE_PER_CALL = 200, PENDING_EMBED_META_KEY = "private_row_rehome_pending_embed", QUEUE_CURSOR_META_KEY = "private_row_rehome_queue_cursor", PENDING_EMBED_LIMIT = 5000;
 var init_tier_row_rehome = __esm(() => {
   init_provider();
   init_types();
@@ -26218,6 +26262,7 @@ class TieredStoreSet {
   laneFloor;
   contentArrivesLater;
   privateEmbedder;
+  privateEmbedWith;
   lastRowRehome;
   constructor(options) {
     if (!options.setId.trim())
@@ -26311,8 +26356,19 @@ class TieredStoreSet {
       stored: { trustDomain: contentDomain, trustTier: this.restingTierFor(contentDomain) }
     };
   }
-  declarePrivateEmbedder(provider) {
+  declarePrivateEmbedder(provider, options = {}) {
     this.privateEmbedder = provider;
+    this.privateEmbedWith = options.embedWith;
+  }
+  privateEmbeddingProvider() {
+    if (this.privateEmbedWith) {
+      try {
+        return this.privateEmbedWith();
+      } catch {
+        return;
+      }
+    }
+    return this.privateEmbedder ?? this.legs.get("secure_local")?.spec.embeddingProvider;
   }
   privateEmbedderBackend() {
     const declared = this.privateEmbedder ?? this.legs.get("secure_local")?.spec.embeddingProvider;
@@ -120321,7 +120377,9 @@ async function main() {
     onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
   }) : undefined;
   if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
-    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider);
+    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
+      embedWith: () => dropboxScopeRef && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) : undefined
+    });
   }
   if (dropboxTierLane && dropboxConnectorStore) {
     adoptTierLane({
