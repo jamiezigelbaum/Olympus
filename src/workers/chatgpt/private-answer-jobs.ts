@@ -78,9 +78,20 @@
  *    delivery (20 minutes, capped by expiry) and a remount never extends it.
  *    The content is sealed; that outside help ran on a question may be
  *    inferred from timing, sizes and polling (accepted for version one).
- *    No consult is written or sent by this engine (stage C4b wires the writer
- *    through the `outside*` seams below). Every other job keeps the behavior
- *    above exactly: stored sealed bytes, bucket padding, plaintext `failed`.
+ *    Every other job keeps the behavior above exactly: stored sealed bytes,
+ *    bucket padding, plaintext `failed`.
+ * 6. The consult handoff (design §A.2–A.3, stage C4b). The analysis keeps,
+ *    beside its answer, the model's own verdict and the exact fitted pack its
+ *    main call received (a reused precompute brings its search-time pack). At
+ *    first delivery a follow-up job holds an immutable consult snapshot of
+ *    that pack, the question, the answer and the gaps as retained, and the
+ *    identities of the items read, for at most PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS;
+ *    `onFirstDelivered` hands the job id to the consult orchestrator
+ *    (consult-orchestrator.ts), which reads the snapshot through
+ *    `consultSnapshot`, drops it at its dispatch decision, and writes the
+ *    outside block through the `outside*` seams. `onAnswerActivity` tells it
+ *    a fresh answer is starting (any analysis or claim), so a writer in
+ *    flight is killed. Nothing in the snapshot ever enters an envelope.
  *
  * Pending polls by the claiming key are rate limited per job (429), never
  * destructive. Unknown, expired (ten minutes from creation; thirty with
@@ -108,6 +119,7 @@ import {
   PRIVATE_ANSWER_PANEL_CAPABILITY,
   PRIVATE_MATCH_COUNT_CAP,
   type PrivateAnswerCitation,
+  type PrivateAnswerConsultSnapshotInput,
   type PrivateAnswerDetail,
   type PrivateAnswerEnvelopeV1,
   type PrivateAnswerModel,
@@ -215,6 +227,21 @@ export interface PrivateAnswerJobsOptions {
   outsideHelpTtlMs?: number;
   /** The follow-up window from first delivery (default PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS), capped by the job's expiry. */
   followUpWindowMs?: number;
+  /**
+   * First delivery of a follow-up job (the first `ready` actually returned to
+   * the claiming key): the consult orchestrator's trigger. Called once per
+   * job, synchronously, after the clocks are published. A throw never fails
+   * the response.
+   */
+  onFirstDelivered?: (jobId: string) => void;
+  /**
+   * A fresh private answer is starting (an analysis runs, or a job is
+   * claimed): the signal that kills a consult writer in flight (design §A.7).
+   * Called beside `activity.begin`.
+   */
+  onAnswerActivity?: () => void;
+  /** How long a consult snapshot is kept after first delivery (default PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS). */
+  consultSnapshotMs?: number;
 }
 
 /** One claim's stage costs, logged once it settles. No id, question, evidence or answer. */
@@ -306,6 +333,8 @@ interface Analysis {
     usedKeys: readonly string[] | undefined;
     /** The evidence items the answer read, checked against the live guard before it is sealed. */
     usedItems: readonly PrivateEvidenceItem[];
+    /** The model's verdict and the fitted pack it read (C4b); undefined from a model that supplies none. */
+    consult: PrivateAnswerConsultSnapshotInput | undefined;
   } | undefined;
   failReason: AnalysisTiming['reason'] | undefined;
   startedAt: number | undefined;
@@ -364,6 +393,18 @@ interface Job {
   /** The last collection by the claiming key (the recent-activity input of final authorization, C4b). */
   lastCollectedAt?: number;
   /**
+   * The consult handoff (C4b): the immutable snapshot the gate compares
+   * against, kept from first delivery for at most consultSnapshotMs; the
+   * send-once latch; and whether the consult for this job is over (sent,
+   * refused, skipped or failed), so it is never triggered twice.
+   */
+  consult: {
+    snapshot: PrivateAnswerConsultSnapshot | undefined;
+    snapshotExpiresAt: number | undefined;
+    latch: boolean;
+    settled: boolean;
+  };
+  /**
    * The evidence items the sealed answer read, identities only (no text):
    * every later hand-out of the sealed bytes, and every source open, asks
    * the live guard about them first.
@@ -413,6 +454,8 @@ export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
 export const PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS = 2 * 60_000;
 /** How long the claiming POST holds for a ready answer (refresh and seal) before it answers 202. */
 export const PRIVATE_ANSWER_CLAIM_HOLD_MS = 1_500;
+/** A consult snapshot lives this long after first delivery (design §A.3: until the dispatch decision, at most 5 minutes). */
+export const PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS = 5 * 60_000;
 /** A job that binds no reader binds this: outside help off, so no follow-up collection. */
 const OUTSIDE_HELP_OFF: ConsultJobPolicy = bindConsultJobPolicy({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
 
@@ -492,6 +535,7 @@ export class PrivateAnswerJobs {
   private readonly openRateGlobal: { capacity: number; refillPerSecond: number };
   private readonly outsideHelpTtlMs: number;
   private readonly followUpWindowMs: number;
+  private readonly consultSnapshotMs: number;
   /** A deadline's background reset, bounded by resetTimeoutMs; the next analysis waits for it. */
   private resetting: Promise<void> | undefined;
   private readonly options: PrivateAnswerJobsOptions;
@@ -522,6 +566,7 @@ export class PrivateAnswerJobs {
     this.openRefilledAt = this.now();
     this.outsideHelpTtlMs = options.outsideHelpTtlMs ?? PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS;
     this.followUpWindowMs = options.followUpWindowMs ?? PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS;
+    this.consultSnapshotMs = options.consultSnapshotMs ?? PRIVATE_ANSWER_CONSULT_SNAPSHOT_MS;
   }
 
   get size(): number {
@@ -593,6 +638,7 @@ export class PrivateAnswerJobs {
       pollRefilledAt: at,
       rev: 0,
       outside: { state: 'idle' },
+      consult: { snapshot: undefined, snapshotExpiresAt: undefined, latch: false, settled: false },
       openTokens: this.openRate.capacity,
       openRefilledAt: at,
     };
@@ -698,14 +744,24 @@ export class PrivateAnswerJobs {
       if (this.jobs.get(job.id) !== job) return gone();
       if (job.rev !== rev || job.outcome?.kind !== kind) continue;
       if (job.followUntil !== undefined && job.followUntil !== followUntil) continue;
-      if (job.firstDeliveredAt === undefined) {
+      const first = job.firstDeliveredAt === undefined;
+      if (first) {
         // First delivery: the transition into phase 2, and the one moment the
         // follow-up window is fixed. A remount later never moves it.
         job.firstDeliveredAt = at;
         job.followUntil = followUntil;
+        // The consult snapshot's clock starts here (design §A.3 retention).
+        if (job.consult.snapshot) job.consult.snapshotExpiresAt = at + this.consultSnapshotMs;
       }
       // The most recent collection by the claiming key; never earlier than one already recorded.
       job.lastCollectedAt = Math.max(job.lastCollectedAt ?? 0, at);
+      if (first) {
+        try {
+          this.options.onFirstDelivered?.(job.id);
+        } catch {
+          // The orchestrator never fails a response.
+        }
+      }
       return { status: 200, body: { status: 'ready', v: 1, ...sealed } };
     }
   }
@@ -753,7 +809,7 @@ export class PrivateAnswerJobs {
     }
   }
 
-  /** Terminal: the answer, the outside block, the question, the items and the tokens are gone; the revision moves once more. */
+  /** Terminal: the answer, the outside block, the question, the items, the tokens and the consult snapshot are gone; the revision moves once more. */
   private withdraw(job: Job): void {
     if (job.outcome?.kind === 'withdrawn') return;
     job.outcome = { kind: 'withdrawn' };
@@ -761,7 +817,61 @@ export class PrivateAnswerJobs {
     job.question = undefined;
     job.sealedItems = undefined;
     job.opens = undefined;
+    this.forgetConsultSnapshot(job);
+    job.consult.settled = true;
     job.rev += 1;
+  }
+
+  /* -------------------------------------------------------------- */
+  /* The consult handoff (C4b)                                        */
+  /* -------------------------------------------------------------- */
+
+  /**
+   * The job's consult snapshot (design §A.3): the fitted pack the first
+   * answer's model call read, the question, the answer and the gaps as
+   * retained, the verdict and the identities of the items read. Frozen, and
+   * the same object on every read. Undefined for a job that is unknown, not
+   * in follow-up collection, not yet delivered, withdrawn, past the snapshot's
+   * retention, or whose consult is over.
+   */
+  consultSnapshot(jobId: string): PrivateAnswerConsultSnapshot | undefined {
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || !job.followUp || job.outcome?.kind !== 'retained' || job.firstDeliveredAt === undefined) return undefined;
+    if (job.consult.settled) return undefined;
+    this.expireConsultSnapshot(job, this.now());
+    return job.consult.snapshot;
+  }
+
+  /** Drops the job's consult snapshot now (the orchestrator's dispatch decision, or its refusal). */
+  dropConsultSnapshot(jobId: string): void {
+    const job = this.jobs.get(jobId);
+    if (job) this.forgetConsultSnapshot(job);
+  }
+
+  /**
+   * The send-once latch (design §A.5.6), set inside final authorization:
+   * true exactly once per job, for a delivered follow-up job in state
+   * `answer` whose block is `pending` and whose follow-up window is open.
+   * Synchronous, so two authorizations cannot both take it.
+   */
+  takeConsultLatch(jobId: string): boolean {
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || !job.followUp || job.outcome?.kind !== 'retained' || job.firstDeliveredAt === undefined || job.followUntil === undefined) return false;
+    if (job.consult.latch || job.consult.settled || job.outside.state !== 'pending') return false;
+    if (this.now() > job.followUntil) return false;
+    job.consult.latch = true;
+    return true;
+  }
+
+  private forgetConsultSnapshot(job: Job): void {
+    job.consult.snapshot = undefined;
+    job.consult.snapshotExpiresAt = undefined;
+  }
+
+  private expireConsultSnapshot(job: Job, at: number): void {
+    if (job.consult.snapshotExpiresAt !== undefined && at >= job.consult.snapshotExpiresAt) this.forgetConsultSnapshot(job);
   }
 
   /**
@@ -792,12 +902,32 @@ export class PrivateAnswerJobs {
    * Moves the outside block to `pending` or `paused`, or back to `idle`, by a
    * compare-and-set on the revision (C4b seam). Only a delivered follow-up
    * job in state `answer`, inside its follow-up window, whose block is not
-   * yet appended accepts it.
+   * yet appended accepts it. `failed` ends the job's consult for good (the
+   * block reads `idle`, the snapshot is dropped, and nothing triggers it
+   * again): the panel shows nothing more. `pending` is the schedule mark; it
+   * is refused once the consult is over.
    */
-  markOutside(jobId: string, expectedRev: number, state: 'idle' | 'pending' | 'paused'): OutsideSeamResult {
+  markOutside(jobId: string, expectedRev: number, state: 'idle' | 'pending' | 'paused' | 'failed'): OutsideSeamResult {
+    if (state === 'failed') {
+      // Ending a consult is allowed after the window too, so a block never
+      // stays `pending` once its consult is over; the revision rule holds.
+      this.sweep();
+      const job = this.jobs.get(jobId);
+      if (!job || !job.followUp) return { ok: false, reason: 'unknown' };
+      if (job.outcome?.kind === 'withdrawn') return { ok: false, reason: 'withdrawn' };
+      if (job.outside.state === 'appended') return { ok: false, reason: 'already_appended' };
+      if (job.rev !== expectedRev) return { ok: false, reason: 'stale_rev' };
+      job.consult.settled = true;
+      this.forgetConsultSnapshot(job);
+      if (job.outside.state === 'idle') return { ok: true, rev: job.rev };
+      job.outside = { state: 'idle' };
+      job.rev += 1;
+      return { ok: true, rev: job.rev };
+    }
     const check = this.outsideWritable(jobId, expectedRev);
     if (!check.ok) return check;
     const job = check.job;
+    if (state === 'pending' && job.consult.settled) return { ok: false, reason: 'already_appended' };
     // Idempotent: writing the state the block already has moves nothing, so
     // a writer repeating itself cannot drive the re-seal loop.
     if (job.outside.state === state) return { ok: true, rev: job.rev };
@@ -825,6 +955,8 @@ export class PrivateAnswerJobs {
       ...(typeof block.question === 'string' ? { question: block.question } : {}),
       ...(typeof block.route === 'string' ? { route: block.route } : {}),
     });
+    job.consult.settled = true;
+    this.forgetConsultSnapshot(job);
     job.rev += 1;
     return { ok: true, rev: job.rev };
   }
@@ -901,7 +1033,10 @@ export class PrivateAnswerJobs {
 
   /** Drops expired jobs (cancelling analyses no live job needs) and forgets shared answers past the dedupe window. */
   sweep(at = this.now()): void {
-    for (const [id, job] of this.jobs) if (job.expiresAt <= at) this.drop(id);
+    for (const [id, job] of this.jobs) {
+      if (job.expiresAt <= at) this.drop(id);
+      else this.expireConsultSnapshot(job, at);
+    }
     for (const [key, analysis] of this.shared) {
       if (analysis.createdAt + this.dedupeMs <= at || analysis.state === 'failed') this.shared.delete(key);
     }
@@ -919,6 +1054,7 @@ export class PrivateAnswerJobs {
     job.outside = { state: 'idle' };
     job.opens = undefined;
     job.sealedItems = undefined;
+    this.forgetConsultSnapshot(job);
     this.jobs.delete(id);
   }
 
@@ -1183,6 +1319,7 @@ export class PrivateAnswerJobs {
         ...preparedAnswer(done.result),
         usedKeys: usedKeys(evidence, done.used),
         usedItems: usedItems(evidence, done.used).map(privateEvidenceIdentity),
+        consult: consultSnapshotInput(done.result.consult),
       };
       this.finish(analysis, 'done');
     } catch (error) {
@@ -1346,7 +1483,16 @@ export class PrivateAnswerJobs {
             timing.precomputed = precomputed;
             timing.waitAtClaimMs = this.now() - claimedAt;
             job.sealedItems = result.usedItems;
-            if (outcome.kind === 'retained') job.rev = 1;
+            if (outcome.kind === 'retained') {
+              job.rev = 1;
+              // The consult snapshot (C4b): exactly what the gate compares
+              // against, built from the analysis that produced the answer (a
+              // reused precompute brings its search-time pack). Frozen; its
+              // retention clock starts at first delivery.
+              job.consult.snapshot = result.consult
+                ? consultSnapshot(question, outcome.answer, result.consult, result.usedItems)
+                : undefined;
+            }
             settle(outcome);
             return;
           }
@@ -1379,6 +1525,12 @@ export class PrivateAnswerJobs {
 
   /** Begins one answer activity; the returned function ends exactly that one, once. */
   private beginActivity(): () => void {
+    // A fresh answer is starting: a consult writer in flight is killed (C4b).
+    try {
+      this.options.onAnswerActivity?.();
+    } catch {
+      // A hook never fails a job.
+    }
     let release: (() => void) | void;
     try {
       release = this.options.activity?.begin();
@@ -1584,6 +1736,45 @@ function preparedAnswer(result: { answer: unknown; citations?: unknown; unanswer
   };
 }
 
+/** The model's consult metadata as the analysis keeps it: frozen, or undefined when the model supplied none or a malformed one. */
+function consultSnapshotInput(value: unknown): PrivateAnswerConsultSnapshotInput | undefined {
+  const record = asRecord(value);
+  const verdict = asRecord(record?.verdict);
+  const pack = asRecord(record?.pack);
+  if (!record || !verdict || !pack || typeof verdict.noAnswer !== 'boolean') return undefined;
+  if (verdict.sufficient !== undefined && typeof verdict.sufficient !== 'boolean') return undefined;
+  if (typeof pack.question !== 'string' || !Array.isArray(pack.candidates)) return undefined;
+  return deepFreeze({
+    verdict: { sufficient: verdict.sufficient as boolean | undefined, noAnswer: verdict.noAnswer },
+    pack: structuredClone(pack) as unknown as PrivateAnswerConsultSnapshotInput['pack'],
+  });
+}
+
+/** The job's consult snapshot: the analysis's pack and verdict, the question, and the answer and gaps exactly as retained. Deep-frozen. */
+function consultSnapshot(
+  question: string,
+  retained: RetainedAnswer,
+  input: PrivateAnswerConsultSnapshotInput,
+  items: readonly PrivateEvidenceItem[],
+): PrivateAnswerConsultSnapshot {
+  return deepFreeze({
+    question,
+    answer: retained.answer,
+    gaps: [...(retained.unanswered ?? [])],
+    verdict: { sufficient: input.verdict.sufficient, noAnswer: input.verdict.noAnswer },
+    pack: input.pack,
+    items: items.map((item) => structuredClone(item)),
+  });
+}
+
+/** Freezes a plain-data value and everything reachable from it. */
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const entry of Object.values(value as Record<string, unknown>)) deepFreeze(entry);
+  return value;
+}
+
 /** The first answer a follow-up job retains: the plaintext's fields in their budgeted form, frozen. */
 function retainedAnswer(plaintext: PrivateAnswerPlaintextV1): RetainedAnswer {
   const fitted = fitFirstAnswer(plaintext);
@@ -1607,6 +1798,21 @@ export interface PrivateAnswerFollowUpState {
   firstDeliveredAt: number | undefined;
   followUntil: number | undefined;
   lastCollectedAt: number | undefined;
+}
+
+/**
+ * The consult snapshot (design §A.3), as the orchestrator reads it: the
+ * evidence as the pack, plus the question, answer and gaps exactly as the
+ * writer will see them, the verdict, and the identities (no text) of the
+ * items the answer read, for the eligibility checks E1 and E2. Deep-frozen.
+ */
+export interface PrivateAnswerConsultSnapshot {
+  readonly question: string;
+  readonly answer: string;
+  readonly gaps: readonly string[];
+  readonly verdict: { readonly sufficient: boolean | undefined; readonly noAnswer: boolean };
+  readonly pack: PrivateAnswerConsultSnapshotInput['pack'];
+  readonly items: readonly PrivateEvidenceItem[];
 }
 
 export type OutsideSeamResult =
