@@ -4,7 +4,7 @@
 // One small file, `~/.olympus/consult.json`:
 //
 //   {"v": 1, "revision": N, "enabled": bool, "languages": [...],
-//    "domains": {"units", "countries", "medicines", "medicineBrands"},
+//    "domains": {"units", "countries", "places", "technical", "medicines", "medicineBrands"},
 //    "strict": bool}
 //
 // - Read at every use, never cached, so a change needs no worker restart.
@@ -77,6 +77,7 @@ export const DEFAULT_CONSULT_SETTINGS: ConsultSettings = Object.freeze({
 
 const TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'strict'] as const;
 const DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS) as Array<keyof ConsultDomainPacks>;
+const OPTIONAL_DOMAIN_KEYS: readonly string[] = ['places', 'technical'];
 const LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS) as ConsultLanguage[];
 
 export interface ConsultSettingsLocation {
@@ -127,14 +128,18 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
   if (!languages.every((language): language is ConsultLanguage =>
     typeof language === 'string' && (LANGUAGES as string[]).includes(language))) return undefined;
   if (new Set(languages).size !== languages.length) return undefined;
-  if (!isPlainObject(domains) || !hasExactKeys(domains, DOMAIN_KEYS)) return undefined;
-  if (!DOMAIN_KEYS.every((key) => typeof domains[key] === 'boolean')) return undefined;
+  // Keys added after the first schema are optional and default on, so a file
+  // written before them stays valid; every other key is required, and an
+  // unknown key is still rejected.
+  if (!isPlainObject(domains)) return undefined;
+  if (!Object.keys(domains).every((key) => (DOMAIN_KEYS as string[]).includes(key))) return undefined;
+  if (!DOMAIN_KEYS.every((key) => key in domains ? typeof domains[key] === 'boolean' : OPTIONAL_DOMAIN_KEYS.includes(key))) return undefined;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
     enabled,
     languages: Object.freeze([...languages]),
-    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, domains[key] as boolean])) as unknown as ConsultDomainPacks),
+    domains: Object.freeze(Object.fromEntries(DOMAIN_KEYS.map((key) => [key, key in domains ? domains[key] as boolean : true])) as unknown as ConsultDomainPacks),
     strict,
   });
 }

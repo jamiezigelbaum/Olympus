@@ -1,0 +1,4 @@
+Pack: olympus-terms.txt.gz
+Source: Olympus-authored. The word list is scripts/data/consult-olympus-terms.txt in the public Olympus source repository: general units, file formats, protocols, device and network terms, supranational and physical regions, and a few stable general proper terms. It contains no third-party data and is not derived from any dictionary or database.
+Generator: scripts/build-consult-vocabulary.ts (pack olympus-terms), in the same repository.
+Licence: Olympus-authored; distributed under the same licence as the Olympus plugin (see the LICENSE file in the package). No third-party notice applies.

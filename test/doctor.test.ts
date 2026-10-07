@@ -264,7 +264,7 @@ describe('runDoctor', () => {
         revision: 1,
         enabled: true,
         languages: ['en', 'pt-BR'],
-        domains: { units: true, countries: false, medicines: true, medicineBrands: false },
+        domains: { units: true, countries: false, places: true, technical: true, medicines: true, medicineBrands: false },
         strict: false,
       }), { mode: 0o600 });
       checks = await run();
@@ -335,7 +335,7 @@ describe('runDoctor', () => {
     expect(checkByName(result.checks, 'consult_vocabulary')).toEqual({
       name: 'consult_vocabulary',
       ok: true,
-      detail: 'Consult vocabulary (no consult is sent until the consult lane lands): languages en (default); cldr-units verified, en-esdb verified, rx-ingredients verified.',
+      detail: 'Consult vocabulary (no consult is sent until the consult lane lands): languages en (default); cldr-countries verified, cldr-units verified, en-esdb verified, olympus-terms verified, places verified, rx-ingredients verified.',
     });
     expect(checkByName(result.checks, 'argus_model_pool').detail).toContain('no sovereignty posture configured yet');
     expect(checkByName(result.checks, 'email_worker').detail).toContain('no worker health or credential failures');

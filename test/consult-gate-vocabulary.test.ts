@@ -123,7 +123,7 @@ describe('user-installed language packs', () => {
 describe('packaged layout', () => {
   const REPO = join(import.meta.dir, '..');
   const VOCABULARY = 'assets/consult/vocabulary';
-  const ALL = { languages: ['en', 'nl', 'fr', 'es', 'pt-PT', 'pt-BR'], domains: { units: true, countries: true, medicines: true, medicineBrands: true } } as const satisfies ConsultGateOptions;
+  const ALL = { languages: ['en', 'nl', 'fr', 'es', 'pt-PT', 'pt-BR'], domains: { units: true, countries: true, places: true, technical: true, medicines: true, medicineBrands: true } } as const satisfies ConsultGateOptions;
   const PACKAGE_FILES: readonly string[] = V0_4_PUBLIC_PACKAGE_FILES;
 
   test('every shipped pack and its licence is a public package file, one by one, with the notices document', () => {
@@ -177,7 +177,7 @@ describe('packaged layout', () => {
 
   test('the doctor status hashes files only and matches the loader', () => {
     expect(consultVocabularyFileStatus(ALL).map((entry) => entry.state)).toEqual(Object.keys(CONSULT_VOCABULARY_PACKS).map(() => 'verified'));
-    expect(consultVocabularyFileStatus({}).map((entry) => entry.id)).toEqual(['cldr-units', 'en-esdb', 'rx-ingredients']);
+    expect(consultVocabularyFileStatus({}).map((entry) => entry.id)).toEqual(['cldr-countries', 'cldr-units', 'en-esdb', 'olympus-terms', 'places', 'rx-ingredients']);
   });
 });
 

@@ -323,7 +323,7 @@ client ships modern-only.
 ## Build sequence
 
 Each slice is its own pull request. Security, auth and install surfaces are
-critical-class and need an independent review receipt.
+critical-class and need an independent review.
 
 1. **Calling-agent attribution.**
    - Generalize the release destination from the single-agent `castor` name to

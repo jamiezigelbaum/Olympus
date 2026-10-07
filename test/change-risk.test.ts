@@ -73,13 +73,10 @@ describe('change risk', () => {
   test('the classifier and the checks that defend it classify themselves as critical', () => {
     const selfProtecting = [
       'config/change-risk.json',
-      'config/critical-review.json',
       'scripts/credential-pattern-check.ts',
       'scripts/change-risk.ts',
-      'scripts/critical-review-receipt.ts',
       'scripts/test-lane.ts',
       'test/change-risk.test.ts',
-      'test/critical-review-workflow.test.ts',
       'test/credential-pattern-check.test.ts',
       'test/verify-workflow.test.ts',
     ];

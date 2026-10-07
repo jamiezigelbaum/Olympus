@@ -57,7 +57,7 @@ describe('consult gate leak eval (dry run)', () => {
     expect(report.leakCategoryPasses).toEqual([]);
     expect(report.canaryLeaks).toEqual([]);
     const admissions = packAdmissions();
-    expect(Object.keys(admissions).sort()).toEqual(['cldr-countries', 'cldr-units', 'es-hunspell', 'fr-grammalecte', 'nl-opentaal', 'pt-br-hunspell', 'pt-pt-hunspell', 'rx-brands', 'rx-ingredients']);
+    expect(Object.keys(admissions).sort()).toEqual(['cldr-countries', 'cldr-units', 'es-hunspell', 'fr-grammalecte', 'nl-opentaal', 'olympus-terms', 'places', 'pt-br-hunspell', 'pt-pt-hunspell', 'rx-brands', 'rx-ingredients']);
   });
 
   test('known gap: paraphrased rare combinations pass the gate, and are reported, not hidden', () => {

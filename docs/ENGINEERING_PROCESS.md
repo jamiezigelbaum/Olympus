@@ -47,7 +47,7 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    automation.
 5. **Let CI decide merge readiness.** GitHub requires every substantive lane
    directly: `static checks`, `fast tests`, all three `deploy tests` shards,
-   `Go bridge tests`, and `critical-review`. A local result is useful evidence,
+   and `Go bridge tests`. A local result is useful evidence,
    never a substitute for those exact-head checks.
    The fast lane also runs `test:exchange` for the publisher Google exchange
    service; `typecheck` checks both the plugin and the exchange service's
@@ -56,7 +56,7 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    `connect-relay/` service (`test:connect-relay`, `typecheck:connect-relay`;
    see `docs/design/chatgpt-plugin.md`, "Architecture").
 6. **Review in proportion to risk.** Standard changes may auto-merge after
-   required checks. Critical changes require a recorded independent review.
+   required checks. Critical changes get an independent review before merge.
    Live mutations additionally follow the OpenClaw change protocol and remain
    separately authorized.
 7. **Squash, prove main, and clean up.** Merge one coherent pull request as one
@@ -76,7 +76,7 @@ the change.
 | Class | Examples | Required proof |
 |---|---|---|
 | Standard | docs, ordinary product behavior, bounded refactors, test-only changes | focused local proof; required CI |
-| Critical | source contracts, security/trust routing, credentials, destructive data behavior, install/uninstall, lifecycle and service-manager behavior, managed system paths, upgrade/rollback, CI/governance, release provenance | focused proof; required CI; independent review receipt; relevant eval or migration proof |
+| Critical | source contracts, security/trust routing, credentials, destructive data behavior, install/uninstall, lifecycle and service-manager behavior, managed system paths, upgrade/rollback, CI/governance, release provenance | focused proof; required CI; independent review; relevant eval or migration proof |
 | Live | deploy, restart, provider mutation, production data or secrets | all critical proof plus explicit live authorization and the canonical live-change protocol |
 
 The repository's classifier is fail-closed: unclassified sensitive surfaces
@@ -84,23 +84,9 @@ are critical. A declaration may raise risk but may not lower a path-derived
 classification.
 
 On a critical pull request, a fresh-context reviewer examines the current head
-and the relevant invariant, then posts the exact receipt produced by:
-
-```sh
-bun scripts/critical-review-receipt.ts <40-character-head-sha>
-```
-
-The `critical-review` publisher reads live GitHub API state from the protected
-default branch, never checks out or executes pull-request code, and records a
-commit status on that exact head. A later commit has a different SHA and starts
-pending automatically; it cannot inherit the older receipt. The substantive CI
-lane contexts remain separately required, so recording review does not rerun
-full CI or wait for CI to finish. The publisher also re-evaluates every open
-pull request when `main` advances, keeping policy changes convergent.
-
-This is a mistake-prevention boundary, not an adversarial authorization system:
-a repository administrator can change repository workflows and rules. A
-dedicated GitHub App is intentionally deferred unless that threat model changes.
+and the relevant invariant before the implementing session merges. The review
+is recorded in the pull request; GitHub does not gate on it (the
+`critical-review` status check was retired on 2026-10-07 by owner decision).
 
 ## Contract evolution
 

@@ -138,9 +138,21 @@ yourself.
   named "Portugal" for a trip whose answer only mentioned Lisbon. Such a
   name is as identifying as a copied one. Ask about the class instead ("the
   entry rules most countries apply to short visits"). Mechanically, the gate
-  refuses a country name unless the owner enabled country names, so that
-  case is caught; a name that is also a dictionary word, or a place inside a
-  phrase, is yours to avoid.
+  admits country names by default (owner decision 2026-10-07) and still
+  refuses any name the documents hold, so an implied country can pass; a name
+  that is also a dictionary word, or a place inside a phrase, is yours to
+  avoid.
+- **Prefer class words; expect refusals for proper nouns.** The gate admits
+  only words from its vocabulary: ordinary words, units, common file formats,
+  protocols and device terms, medicine ingredient names, country names and
+  place names (cities of 15,000 or more, regions). Other proper nouns, brands
+  and product names are not in it and are refused as unknown words; a place
+  the owner's documents hold is refused by the name check. Write "a mid-size European city", "a
+  Roth-style retirement account", "a popular lossless audio format" rather
+  than the name, and do not rephrase a refused question word by word until it
+  passes: write a different, more general question or propose nothing. If a
+  language the owner asked for has no installed pack, its questions are refused
+  with an "unavailable" reason; do not retry in that language.
 - **The place can be the identifier.** A well-known city is unremarkable; a
   rare place combined with one niche attribute (a single employer, one
   specialty school, one hospital, one museum, an airport with two flights a

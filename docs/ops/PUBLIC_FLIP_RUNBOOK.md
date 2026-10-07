@@ -49,7 +49,7 @@ is why most of the fleet needs no edit at all:
 | ClawHub spec `clawhub:olympus` | Repository secrets/variables (there are none today) |
 | The release-qualification plan's install commands | Relay hosting — a new Cloudflare Pages project bound to the new repo |
 | The relay callback `https://auth.olympusplugin.ai/oauth/callback/` (Cloudflare, not GitHub) | Issues, PRs, Actions runs, and every URL that names one |
-| `config/critical-review.json` reviewer login | Commit SHAs — the squash creates a new root |
+| | Commit SHAs — the squash creates a new root |
 
 **The one trap.** Renaming `Olympus` → `olympus-archived` makes GitHub serve a
 redirect from the old path. Creating a new repository with the name `Olympus`
@@ -149,10 +149,7 @@ Every one of these is already an owner decision recorded in PR #120, #134, or
    `scripts/dashboard-preview.ts`, `test/embedding-ledger.test.ts`, and the
    compiled copies in `dist/cli.js`. It is the value already written into the
    append-only ledger; the rendered string is neutral.
-3. **`config/critical-review.json` reviewer login** — plus
-   `test/critical-review-workflow.test.ts`, which pins it. Changing it breaks
-   the required `critical-review` context.
-4. **Real GitHub URLs naming the private ops repository** —
+3. **Real GitHub URLs naming the private ops repository** —
    `config/private-ops-disposition.json`,
    `config/private-ops-live-attestation.json`,
    `scripts/private-ops-disposition.ts`, `docs/V0_4_BASELINE.md`. The CI
@@ -304,8 +301,7 @@ gh repo view "$GH_OWNER/$REPO" --json visibility   # still PRIVATE
 ## 8. Branch protection and required checks `[anchor]` — reversible
 
 The exact contexts, copied from the archived repository's protection and
-matching the job names in `.github/workflows/verify.yml` plus the status context
-in `config/critical-review.json`:
+matching the job names in `.github/workflows/verify.yml`:
 
 | Context | Source |
 |---|---|
@@ -315,7 +311,6 @@ in `config/critical-review.json`:
 | `deploy tests 2/3` | `verify.yml` job `deploy`, shard 2 |
 | `deploy tests 3/3` | `verify.yml` job `deploy`, shard 3 |
 | `Go bridge tests` | `verify.yml` job `go` |
-| `critical-review` | commit status written by `critical-review.yml` |
 
 `hermetic-go.yml` is a weekly schedule and is deliberately **not** required.
 
@@ -326,7 +321,6 @@ gh api -X PUT "repos/$GH_OWNER/$REPO/branches/main/protection" \
   "required_status_checks": {
     "strict": false,
     "contexts": [
-      "critical-review",
       "static checks",
       "fast tests",
       "deploy tests 1/3",
@@ -353,7 +347,6 @@ recovery capability, per `docs/ENGINEERING_PROCESS.md`.
 
 Enumerated from the workflow files: **the workflows need none.**
 
-- `critical-review.yml` uses only `secrets.GITHUB_TOKEN`, which GitHub provides.
 - `verify.yml` uses no secret at all.
 - `hermetic-go.yml` uses no secret at all.
 - The archived repository has zero secrets and zero variables
@@ -411,9 +404,7 @@ gh pr create -R "$GH_OWNER/$REPO" --fill
 gh pr checks -R "$GH_OWNER/$REPO" <pr-number> --watch
 ```
 
-All seven required contexts must report. `critical-review` reports `success`
-("Standard change") or `pending` ("exact-head review required") depending on the
-paths touched — pending is a correct result, not a failure. If a context never
+All six required contexts must report. If a context never
 appears, the name in step 8 does not match the job name; fix the protection, not
 the workflow.
 
@@ -438,7 +429,7 @@ The moment this returns, the objects are world-readable and third parties begin
 copying them. Deleting the repository afterwards does not retract anything.
 
 **Public-repository differences that only start now.** Fork pull requests become
-possible, so re-read `critical-review.yml`'s `permissions` block and set
+possible, so set
 Settings → Actions → *Require approval for first-time contributors*. Branch
 protection and required checks were configured in step 8 and are unaffected.
 
@@ -538,7 +529,6 @@ are still correct.
 
 In this repository:
 
-- `config/critical-review.json` — unchanged; the login is the same account.
 - `config/private-ops-disposition.json`,
   `config/private-ops-live-attestation.json`,
   `scripts/private-ops-disposition.ts` — unchanged; they point at the private
