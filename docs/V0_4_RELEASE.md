@@ -142,6 +142,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-07 — Photos are searchable by content.** Owner decision: photos
+  first (video stays names-only), Mac first, and a photo's content rests
+  Private until a media judge exists. Still images are extracted by default;
+  on macOS the shared text lane prepares a 1,024-pixel JPEG in an owner-only
+  media cache, and the built-in EmbeddingGemma 2 embeds the picture with the
+  photo's title and descriptor (vision encoder on, 140 tokens per image; its
+  identity unchanged because text vectors are). Relevance bar 0.73 kept
+  (matching photos 0.73 to 0.78, non-matching queries at most 0.695 on 116 of
+  the owner's photos). Design: `docs/design/photo-embeddings.md`.
+
 - **2026-10-03 (superseding the entry below) — 1.0 ships the beta.11 Google
   Desktop client as the source default.** An independent review found that
   installs which connected Gmail or Drive through the Desktop client that
