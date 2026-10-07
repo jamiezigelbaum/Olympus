@@ -110,6 +110,10 @@ function fakeIndexedDb(mode: 'ok' | 'throw' | 'error' | 'hang' = 'ok'): FakeIdb 
                 const req: any = {};
                 return step(req, () => { map.set(key, structuredClone(value)); req.result = key; });
               },
+              delete: (key: string) => {
+                const req: any = {};
+                return step(req, () => { map.delete(key); });
+              },
               openCursor: () => {
                 const req: any = {};
                 const keys = [...map.keys()];
@@ -470,8 +474,10 @@ describe('collecting the private answer', () => {
       expect(call.init.method).toBe('POST');
       expect(call.init.credentials).toBe('omit');
       expect(call.init.headers).toEqual({ 'content-type': 'application/json' });
-      expect(Object.keys(call.body).sort()).toEqual(['publicKey', 'v']);
+      // The capability handshake rides every request, phase 1 included.
+      expect(Object.keys(call.body).sort()).toEqual(['cap', 'publicKey', 'v']);
       expect(call.body.v).toBe(1);
+      expect((call.body as { cap?: number }).cap).toBe(2);
       expect(call.body.publicKey).toMatch(/^[A-Za-z0-9_-]{87}$/);
     }
 

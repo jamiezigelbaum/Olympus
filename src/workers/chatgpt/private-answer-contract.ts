@@ -13,18 +13,84 @@
  *   note in `structuredContent` or the text. The model cannot learn whether
  *   Private items match (an existence oracle otherwise).
  * - Endpoint: `POST <relayOrigin>/private/<jobId>` with
- *   `{"v":1,"publicKey":"<base64url raw P-256 point>"}`; responses carry
- *   `status` (connect-relay/shared/private-answer.ts PrivateAnswerWireStatus).
- * - Plaintext of a `ready` response, after decryption: PrivateAnswerPlaintextV1.
+ *   `{"v":1,"publicKey":"<base64url raw P-256 point>","cap":2}`; responses
+ *   carry `status` (connect-relay/shared/private-answer.ts PrivateAnswerWireStatus).
+ * - Plaintext of a `ready` response, after decryption: PrivateAnswerPlaintextV1,
+ *   or (follow-up collection, below) PrivateAnswerEnvelopeV1.
  * - Open a source on the Mac: `POST <relayOrigin>/private/<jobId>/open` with
  *   `{"v":1,"open":"<token from a citation>"}` → 204 (opened), 410 `gone`
  *   (unknown/expired job or token), 429 `rate_limited`, 403 `forbidden`.
+ *
+ * AD-2 (design docs/design/frontier-consult-lane.md §A.11, owner-accepted
+ * 2026-10-07): the panel protocol's compatibility record, stage C4a.
+ *
+ * What changed:
+ * - Every request body carries the panel's capability, `"cap": 2`,
+ *   unconditionally: in both collection phases, whether outside help is on
+ *   or off, whatever any consult did. The engine records it at the claim.
+ * - The jobs boundary limits tightened on every install
+ *   (private-answer-payload.ts): answer 65,536 → 2,700 UTF-16 units,
+ *   citations 20 → 4, gaps 10 → 4. Nothing the model layer produces today
+ *   is cut (it writes at most 2,700 units, cites at most 4 items and lists
+ *   at most 3 gaps plus one unreadable note).
+ * - Two collection phases. Phase 1, initial acquisition, is unchanged:
+ *   `202 pending` with Retry-After 2, `429`, plaintext `200 failed`, `409`,
+ *   `410`, until the first `ready` (first delivery, recorded by the engine).
+ *   Phase 2, follow-up, applies to a job whose policy had outside help on
+ *   when it was created AND whose claiming panel declared `cap: 2`: from
+ *   first delivery, every request by the claiming key gets `200 ready` with
+ *   a freshly sealed envelope of exactly 36,864 padded plaintext bytes
+ *   (PrivateAnswerEnvelopeV1) carrying the answer, the outside block's
+ *   state and, once withdrawn, the withdrawal (never a plaintext `failed`).
+ *   The other responses are 400, 409, 410 after the job's policy-bound
+ *   expiry or eviction, 429 and 503.
+ * - A job with outside help on lives PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS
+ *   (30 minutes) instead of PRIVATE_ANSWER_JOB_TTL_MS (10); its follow-up
+ *   window is min(first delivery + PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS, expiry),
+ *   fixed at first delivery and never extended by a remount.
+ * - Jobs with outside help off, and jobs claimed by a panel without `cap`,
+ *   keep today's behavior exactly: bucket-padded PrivateAnswerPlaintextV1,
+ *   stored sealed bytes handed out again, plaintext `failed` on withdrawal.
+ *
+ * Mixed versions (the engine serves the panel HTML, so a mismatch arises
+ * only when the host caches an older widget):
+ * - Old panel (no `cap`), new engine: today's behavior, including bucket
+ *   padding and plaintext `failed`. No consult is dispatched.
+ * - New panel (`cap: 2`), old engine: the old engine reads only `v` and
+ *   `publicKey`; its plaintext has no `outside` and no `followSeconds`, which
+ *   the panel treats as today's answer: no follow-up polling, no reserved
+ *   strip, no errors.
+ * The relay is unchanged: it forwards request and response bodies unread
+ * (512-byte request cap, 8 MiB response cap).
+ *
+ * What is and is not hidden (owner ruling 2026-10-07, version one): the
+ * content is sealed to the panel's key, so, under the trust assumptions in
+ * docs/design/chatgpt-plugin.md "Who can read the answer" (a relay that does
+ * not swap keys; the panel's HTML served unaltered), ChatGPT and the relay
+ * do not see what was asked outside or what came back. They may infer that outside
+ * help ran on a question (response timing, the panel's size changes, how
+ * long it keeps polling). That inference is accepted for version one.
  */
 
 export const PRIVATE_ANSWER_RESOURCE_URI = 'ui://olympus/private-answer';
 export const PRIVATE_ANSWER_META_KEY = 'olympus/privateAnswer';
 /** A job lives this long from the search that created it, collected or not. */
 export const PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60_000;
+/**
+ * A job whose policy had outside help on when it was created lives this long
+ * instead (design §A.5.4): the lifetime comes from the policy at creation,
+ * never from what a consult did.
+ */
+export const PRIVATE_ANSWER_OUTSIDE_HELP_JOB_TTL_MS = 30 * 60_000;
+/**
+ * The follow-up window (design §A.5.6): `followUntil = min(firstDeliveredAt +
+ * this, job expiry)`, fixed at first delivery. The server computes the
+ * seconds left into every envelope; a remount never extends it.
+ */
+export const PRIVATE_ANSWER_FOLLOW_UP_WINDOW_MS = 20 * 60_000;
+/** The capability a panel declares in every request body (`cap`); a request without it is capability 1. */
+export const PRIVATE_ANSWER_PANEL_CAPABILITY = 2;
+export type PrivateAnswerPanelCapability = 1 | 2;
 /** The count is "N private items match", capped: beyond this the panel says "N+". */
 export const PRIVATE_MATCH_COUNT_CAP = 50;
 
@@ -106,6 +172,38 @@ export interface PrivateAnswerPlaintextV1 {
   citations: PrivateAnswerCitation[];
   /** What the private items could not answer: complete sentences, none when the answer is complete. */
   unanswered?: string[];
+}
+
+/**
+ * The outside block inside a follow-up envelope (design §A.5.2, §A.6). `idle`
+ * covers nothing triggered, refused, skipped and failed alike: the panel
+ * shows nothing for any of them. Text, question and route are present only
+ * when `appended`; `cut` says the text was shortened.
+ */
+export interface PrivateAnswerOutsideBlockV1 {
+  state: 'idle' | 'pending' | 'appended' | 'paused';
+  text?: string;
+  cut?: boolean;
+  question?: string;
+  route?: string;
+}
+
+/**
+ * Plaintext version 1, extended: what a capability-2 panel decrypts from a
+ * follow-up (phase 2) response. `rev` only increases. The first answer and
+ * its citations are absent when `state` is `withdrawn`. `followSeconds` is
+ * the server-computed time left in the follow-up window (0 once it ends).
+ * Every envelope is padded to exactly 36,864 bytes before sealing.
+ */
+export interface PrivateAnswerEnvelopeV1 {
+  v: 1;
+  rev: number;
+  state: 'answer' | 'withdrawn';
+  answer?: string;
+  citations?: PrivateAnswerCitation[];
+  unanswered?: string[];
+  followSeconds: number;
+  outside: PrivateAnswerOutsideBlockV1;
 }
 
 /** One Private search hit as the worker returned it. Opaque here: only the private model reads it. */

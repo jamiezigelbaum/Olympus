@@ -726,6 +726,105 @@ Wire statuses (`connect-relay/shared/private-answer.ts`): `ready`, `failed`,
 `forbidden` (403), `rate_limited` (429), `mac_offline` (503, from the
 relay), `busy` (503), and `opened` (204, no body, `/open` only).
 
+### Follow-up collection (added 2026-10-07, stage C4a; AD-2)
+
+The panel protocol's compatibility record, AD-2 of the design
+`docs/design/frontier-consult-lane.md` §A.11 (revision 8, on its proposal
+branch until the lane ships; owner-accepted 2026-10-07). The authoritative text is the header of
+`src/workers/chatgpt/private-answer-contract.ts`; this is the narrative.
+**No consult is written or sent yet** (that is stage C4b); this stage lands
+the protocol the consult will ride on, and the limits it needs.
+
+- **One payload contract, every install** (`private-answer-payload.ts`,
+  design §A.5.1). The jobs boundary now enforces, before first delivery:
+  answer ≤ 2,700 UTF-16 units (was 65,536), ≤ 4 citations (was 20),
+  ≤ 4 gaps of 300 units (was 10), title/source ≤ 300, date ≤ 32, a
+  normalized https URL ≤ 2,048 characters, a 43-character Mac token.
+  Nothing shown today is cut: the production model is built without a
+  limits override and writes at most 2,700 units, cites at most 4 items
+  and lists at most 3 gaps plus one unreadable note. A total serializer
+  replaces lone surrogates with U+FFFD, strips control and bidirectional
+  characters, normalizes URLs, and cuts any field over its serialized byte
+  budget (answer 8,192 B; 4 × 4,096 B citations; 4 × 1,024 B gaps; 6,144 B
+  outside block; 512 B scalars; 35,328 B in all) at a code-point boundary
+  with "…" inside the budget.
+- **Capability handshake.** Every request body is
+  `{"v":1,"publicKey":…,"cap":2}`, unconditionally; the engine records the
+  capability at the claim. A body without `cap` is capability 1.
+- **Phase 1, initial acquisition: unchanged** (steps 4–6 above): `202
+  pending` with `Retry-After: 2`, `429`, plaintext `200 failed`, `409`,
+  `410`, the 2-second poll. The first answer is never slowed.
+- **The transition is first delivery:** the first `ready` to the claiming
+  key; the engine records `firstDeliveredAt` and fixes
+  `followUntil = min(firstDeliveredAt + 20 min, expiry)`. A remount never
+  extends it.
+- **Phase 2, follow-up,** for a job whose policy had outside help
+  on when it was created (`~/.olympus/consult.json`, bound at creation;
+  later changes never alter it) and whose claiming panel declared `cap: 2`:
+  every request from the claiming key gets `200 ready` with a freshly sealed
+  envelope of exactly **36,864 padded plaintext bytes** (36 KiB; 36,880
+  bytes of ciphertext, about 49 KB on the wire; the fixed size is a simple
+  bound, not a hiding measure). The plaintext is version 1, extended:
+  `{v:1, rev, state: "answer"|"withdrawn", answer?, citations?, unanswered?,
+  followSeconds, outside: {state: "idle"|"pending"|"appended"|"paused",
+  text?, cut?, question?, route?}}`. `rev` only increases; `idle` covers
+  nothing triggered, refused, skipped and failed alike; a withdrawal (an
+  item the answer read is no longer eligible, checked on every hand-out and
+  every source open) is terminal and lives inside the envelope, never as a
+  plaintext `failed`. The other responses are `400`, `409`, `410` after
+  expiry or eviction, `429` and `503`. The job keeps its bounded
+  first-answer plaintext and its open tokens in memory for its lifetime
+  (at most about 7 MB across the 200-job cap); the tokens are minted once
+  and identical in every envelope.
+- **Lifetimes are policy-bound:** 30 minutes with outside help on, 10 off;
+  eviction at the cap is oldest-first. A reply for an expired or evicted
+  job is discarded.
+- **Mixed versions.** Old panel (no `cap`) on a new engine: today's
+  behavior exactly, bucket padding and plaintext `failed` included; no
+  consult can be dispatched for it. New panel on an old engine: the old
+  engine reads only `v` and `publicKey`; its plaintext has no `outside`
+  and no `followSeconds`, which the panel treats as today's answer: no
+  follow-up polling, no reserved strip, no error.
+- **The relay is unchanged:** it forwards both bodies unread (512-byte
+  request cap; 8 MiB response cap).
+- **Panel:** after first reveal of a follow-up envelope it polls the same
+  request every 30 s until `followSeconds` runs out, the job is gone
+  (`410`) or the answer is withdrawn. The first answer and its sources
+  never change. The outside block has its own container under the
+  "Private answer from your Mac" card, shown while a reply is pending,
+  paused or appended (nothing while idle), with the application-owned
+  attribution "Outside background — not from your documents. General
+  information from an outside model. It did not read your documents and
+  has not been checked." pinned while the body scrolls, a collapsed "What
+  Olympus asked", and "Shortened by Olympus." when cut; the text is set
+  with `textContent` only (markdown literal, links not clickable), control
+  and bidirectional characters stripped, blank runs collapsed, at most 40
+  lines of 240 characters and 4,096 bytes. A withdrawal clears the answer,
+  its sources, gaps and outside text at once and ends the polling; hidden
+  stays hidden, and Show then says the answer was withdrawn. The frame is
+  as tall as its content, as today.
+- **What is and is not hidden (owner ruling 2026-10-07, version one).** The
+  content is sealed to the panel's key: under the assumptions already
+  stated below ("Who can read the answer": an uncompromised relay that does
+  not swap keys, and the panel's HTML served unaltered), ChatGPT and the
+  relay do not see the first answer, what was asked outside or what came
+  back. They may infer
+  that outside help ran on a question, from response timing, from the
+  panel's size changes and from how long it keeps polling, never what was
+  asked or answered. This is accepted for version one; no response-time
+  floor, reserved geometry or polling parity is attempted.
+- **C4b seams** on `PrivateAnswerJobs`: `outsideSeam(jobId)` (clocks and
+  states, no text), `markOutside(jobId, rev, state)` and
+  `appendOutsideBlock(jobId, rev, block)`. Both share one condition: a
+  delivered follow-up job in state `answer`, inside its follow-up window,
+  not yet appended, at the expected revision (compare-and-set); append at
+  most once. The block is normalized and budgeted before it is retained
+  (fitted fields and `cut` only), as is the retained first answer, so a job
+  holds at most the envelope's bytes whatever it was given. Delivery
+  clocks (`firstDeliveredAt`, `followUntil`, `lastCollectedAt`) are
+  published only with a `ready` actually returned: a seal that fails
+  leaves no window and no writable state.
+
 ### Relay
 
 - `/private/<id>` and `/private/<id>/open` are routed by the install prefix

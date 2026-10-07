@@ -37,6 +37,19 @@
  * private key non-extractable), HKDF-SHA256 with an empty salt and
  * info = UTF-8(job id), AES-256-GCM with aad = UTF-8(job id); the plaintext
  * JSON is padded with trailing spaces.
+ *
+ * Follow-up collection (private-answer-contract.ts, AD-2; design
+ * docs/design/frontier-consult-lane.md §A.5–A.6, stage C4a). Every request
+ * body carries `cap: 2`, unconditionally. A decrypted plaintext that carries
+ * an `outside` block is a follow-up envelope: the panel keeps the first
+ * answer exactly as revealed, shows the outside block in its own container
+ * under the card once there is something to show (application-owned
+ * attribution pinned while the text scrolls, plain text only, bounded), and
+ * polls the same request every 30 s until the server-computed
+ * `followSeconds` runs out, the job is gone, or the answer is withdrawn (a
+ * `withdrawn` state replaces the answer and ends the polling). The frame is
+ * as tall as its content, as always. A plaintext without `outside` (an
+ * older engine) is today's answer: no polling, no container, no error.
  */
 import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY } from '../vocabulary.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../../chatgpt/private-answer-contract.ts';
@@ -63,6 +76,14 @@ export interface ChatGptPrivateAnswerConfig {
   initFallbackMs: number;
   /** Where the key pair per job id is kept across re-mounts. */
   keyStore: { database: string; store: string; maxAgeMs: number; timeoutMs: number };
+  /** The capability declared in every request body (`cap`). */
+  capability: number;
+  /** Follow-up collection: the cadence of the same request after first reveal. */
+  followPollMs: number;
+  /** The outside text's line policy. */
+  outsideLines: number;
+  outsideLineChars: number;
+  outsideBytes: number;
 }
 
 export interface ChatGptPrivateAnswerPageOptions {
@@ -76,6 +97,7 @@ export interface ChatGptPrivateAnswerPageOptions {
   initFallbackMs?: number;
   /** Tests shorten the store's timeout. */
   keyStore?: Partial<ChatGptPrivateAnswerConfig['keyStore']>;
+  followPollMs?: number;
 }
 
 export const CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60_000;
@@ -94,6 +116,14 @@ export const CHATGPT_PRIVATE_ANSWER_KEY_STORE = {
 } as const;
 /** The job ids the panel will put in a URL: exactly the relay's routable shape. */
 export const CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
+/** The capability every request declares (`cap`): follow-up collection (private-answer-contract.ts PRIVATE_ANSWER_PANEL_CAPABILITY). */
+export const CHATGPT_PRIVATE_ANSWER_CAPABILITY = 2;
+/** Follow-up polling cadence: far below the engine's and relay's rate limits. */
+export const CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS = 30_000;
+/** The outside text's line policy (design §A.6), mirrored from the engine's payload contract. */
+export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES = 40;
+export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS = 240;
+export const CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES = 4_096;
 
 // Loose shapes: the page validates what it reads instead of trusting a type.
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -108,8 +138,8 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   // What the tool result said; null renders nothing.
   let info: { count: number; state: string; jobId: string; percent: number; full: boolean } | null = null;
-  // idle | working | slow | revealed | hidden | error. A ready job starts
-  // collecting as soon as it arrives; idle lasts only until then.
+  // idle | working | slow | revealed | hidden | withdrawn | error. A ready
+  // job starts collecting as soon as it arrives; idle lasts only until then.
   let phase = 'idle';
   let errorText = '';
   let canRetry = false;
@@ -118,6 +148,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   // The Sources disclosure (closed by default) and each source's brief open
   // result, by index. Memory only; a new answer resets both.
   let sourcesOpen = false;
+  let askedOpen = false;
   let notes: Record<number, { text: string; warn: boolean }> = {};
   // The key pair this job is claimed with: retries, polls and re-mounts reuse it.
   let pair: { jobId: string; privateKey: CryptoKey; publicKey: string } | null = null;
@@ -126,7 +157,17 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   let focusAfter = '';
   type Open = { kind: 'mac'; token: string } | { kind: 'web'; url: string };
   type Source = { name: string; open: Open | null };
-  type Answer = { text: string; sources: Source[]; unanswered: string[] };
+  type Outside = { state: string; text: string; cut: boolean; question: string };
+  // `follow`: a follow-up envelope (the plaintext carried an outside block):
+  // the outside container and the follow-up polling apply.
+  type Answer = { text: string; sources: Source[]; unanswered: string[]; follow: boolean; rev: number; followSeconds: number; outside: Outside };
+  type Opened = { kind: 'answer'; answer: Answer } | { kind: 'withdrawn'; rev: number; followSeconds: number };
+  // Follow-up collection for the current job: the polling deadline and the
+  // last revision seen, independent of whether the answer is shown or hidden.
+  let follow: { rev: number; until: number } | null = null;
+  // The answer was withdrawn on the Mac: its payload is gone; what is shown
+  // (revealed or hidden) is a separate matter, so Hide and Show keep working.
+  let gone = false;
 
   // ---- host bridge -------------------------------------------------------
   let nextId = 1;
@@ -218,7 +259,10 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       errorText = '';
       canRetry = false;
       answer = null;
+      follow = null;
+      gone = false;
       sourcesOpen = false;
+      askedOpen = false;
       notes = {};
       pair = null;
     }
@@ -324,7 +368,16 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
 
   async function keptKey(jobId: string): Promise<{ privateKey: CryptoKey; publicKey: string } | null> {
     try {
-      const value = await inStore('readonly', (store) => store.get(jobId));
+      // One transaction: read the record and, when it has expired, delete it
+      // there and then (the day-old sweep below is only opportunistic).
+      const value = await inStore('readwrite', (store) => {
+        const read = store.get(jobId);
+        read.onsuccess = () => {
+          const found = read.result;
+          if (found && (typeof found.createdAt !== 'number' || Date.now() - found.createdAt >= KS.maxAgeMs)) store.delete(jobId);
+        };
+        return read;
+      });
       if (!value || typeof value !== 'object') return null;
       const privateKey = value.privateKey;
       const fresh = typeof value.createdAt === 'number' && Date.now() - value.createdAt < KS.maxAgeMs;
@@ -403,9 +456,82 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     return null;
   }
 
-  /** The decrypted plaintext, checked and reduced to what the panel shows. */
-  function readAnswer(value: Any): Answer | null {
-    if (!value || typeof value !== 'object' || value.v !== 1 || typeof value.answer !== 'string') return null;
+  /**
+   * The outside text under the line policy, mirrored from the engine
+   * (private-answer-payload.ts boundOutsideText): line endings normalized,
+   * control, bidirectional and zero-width characters stripped, runs of blank
+   * lines collapsed, at most 40 lines of 240 characters, at most 4,096 bytes
+   * with "…" inside. The text is only ever set with textContent.
+   */
+  function boundOutside(value: Any): { text: string; cut: boolean } {
+    if (typeof value !== 'string') return { text: '', cut: false };
+    let text: string = value;
+    if (typeof (text as Any).toWellFormed === 'function') text = (text as Any).toWellFormed();
+    text = text.replace(/\r\n?/g, '\n')
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
+      .replace(/\t/g, ' ');
+    let cut = false;
+    const lines: string[] = [];
+    let blank = false;
+    const parts = text.split('\n');
+    for (let i = 0; i < parts.length; i++) {
+      const line = parts[i]!.replace(/\s+$/, '');
+      if (line === '') {
+        if (blank || lines.length === 0) continue;
+        blank = true;
+        lines.push('');
+        continue;
+      }
+      blank = false;
+      const points = Array.from(line);
+      if (points.length > config.outsideLineChars) {
+        cut = true;
+        lines.push(points.slice(0, config.outsideLineChars - 1).join('') + '…');
+      } else {
+        lines.push(line);
+      }
+    }
+    while (lines.length && lines[lines.length - 1] === '') lines.pop();
+    if (lines.length > config.outsideLines) {
+      cut = true;
+      lines.length = config.outsideLines;
+    }
+    let joined = lines.join('\n');
+    const encoder = new TextEncoder();
+    if (encoder.encode(joined).length + 2 > config.outsideBytes) {
+      cut = true;
+      const all = Array.from(joined);
+      let kept = '';
+      let room = config.outsideBytes - 2 - 3;
+      for (let i = 0; i < all.length; i++) {
+        const bytes = encoder.encode(all[i]!).length;
+        if (bytes > room) break;
+        room -= bytes;
+        kept += all[i];
+      }
+      joined = kept + '…';
+    }
+    return { text: joined, cut };
+  }
+
+  function readOutside(value: Any): Outside | null {
+    if (!value || typeof value !== 'object') return null;
+    const state = value.state === 'pending' || value.state === 'appended' || value.state === 'paused' ? value.state : 'idle';
+    if (state !== 'appended') return { state, text: '', cut: false, question: '' };
+    const bounded = boundOutside(value.text);
+    const question = typeof value.question === 'string' ? boundOutside(value.question).text : '';
+    return { state, text: bounded.text, cut: bounded.cut || value.cut === true, question };
+  }
+
+  /** The decrypted plaintext, checked and reduced to what the panel shows: an answer, or a withdrawal. */
+  function readAnswer(value: Any): Opened | null {
+    if (!value || typeof value !== 'object' || value.v !== 1) return null;
+    const rev = typeof value.rev === 'number' && isFinite(value.rev) && value.rev >= 0 ? Math.floor(value.rev) : 0;
+    if (value.state === 'withdrawn') {
+      const left = typeof value.followSeconds === 'number' && isFinite(value.followSeconds) && value.followSeconds > 0 ? Math.floor(value.followSeconds) : 0;
+      return { kind: 'withdrawn', rev, followSeconds: left };
+    }
+    if (typeof value.answer !== 'string') return null;
     const sources: Source[] = [];
     const seen: Record<string, boolean> = {};
     const citations = Array.isArray(value.citations) ? value.citations : [];
@@ -422,7 +548,21 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : [])
       .filter((item: Any) => typeof item === 'string' && item.trim())
       .map((item: string) => item.trim());
-    return { text: value.answer, sources, unanswered };
+    const outside = readOutside(value.outside);
+    // No outside block: an older engine's plaintext, treated exactly as before.
+    const followSeconds = typeof value.followSeconds === 'number' && isFinite(value.followSeconds) && value.followSeconds > 0 ? Math.floor(value.followSeconds) : 0;
+    return {
+      kind: 'answer',
+      answer: {
+        text: value.answer,
+        sources,
+        unanswered,
+        follow: outside !== null,
+        rev,
+        followSeconds: outside ? followSeconds : 0,
+        outside: outside || { state: 'idle', text: '', cut: false, question: '' },
+      },
+    };
   }
 
   // ---- collecting --------------------------------------------------------
@@ -461,8 +601,14 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     render();
   }
 
-  /** Shows the answer kept in memory again; never a new request. */
+  /** Shows the answer kept in memory again (or, once withdrawn, says so); never a new request. */
   function show(): void {
+    if (gone) {
+      phase = 'withdrawn';
+      focusAfter = 'status';
+      render();
+      return;
+    }
     if (!answer) return void collect(true);
     phase = 'revealed';
     focusAfter = 'answer';
@@ -514,7 +660,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
           response = await bounded<Response>((window as Any).fetch(config.relayOrigin + '/private/' + jobId, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
+            body: JSON.stringify(requestBody(keys.publicKey)),
             credentials: 'omit',
             cache: 'no-store',
             referrerPolicy: 'no-referrer',
@@ -556,12 +702,18 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
             fail(T.generic, false, byUser);
             return;
           }
-          answer = opened;
+          if (opened.kind === 'withdrawn') return withdrawn(byUser);
+          answer = opened.answer;
           sourcesOpen = false;
+          askedOpen = false;
           notes = {};
           phase = 'revealed';
           focusAfter = byUser ? 'answer' : '';
           render();
+          if (answer.follow) {
+            follow = { rev: answer.rev, until: Date.now() + answer.followSeconds * config.secondMs };
+            void followUp(mine, jobId, keys);
+          }
           return;
         }
         if (code === 200 && status === 'failed') return fail(T.failed, false, byUser);
@@ -584,6 +736,102 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   function hide(): void {
     phase = 'hidden';
     focusAfter = 'show';
+    render();
+  }
+
+  /** The one request body, in both phases: the key and the capability, nothing that depends on an outcome. */
+  function requestBody(publicKey: string): Any {
+    return { v: 1, publicKey, cap: config.capability };
+  }
+
+  /**
+   * The answer was withdrawn on the Mac (an item is no longer eligible): its
+   * text, sources, gaps and outside block are gone from here at once, and the
+   * follow-up polling ends. Hidden stays hidden (Show then says so).
+   */
+  function withdrawn(byUser: boolean): void {
+    answer = null;
+    gone = true;
+    follow = null;
+    sourcesOpen = false;
+    askedOpen = false;
+    notes = {};
+    errorText = T.withdrawn;
+    canRetry = false;
+    // Hidden stays hidden (Show then says it was withdrawn); shown turns into the withdrawn presentation.
+    if (phase !== 'hidden') {
+      phase = 'withdrawn';
+      focusAfter = byUser ? 'status' : '';
+    }
+    render();
+  }
+
+  /**
+   * Follow-up collection: the same request, at the same cadence, until the
+   * server says the window has ended (followSeconds 0), the job is gone, or
+   * the answer is withdrawn. Whatever comes back is one of two things to
+   * show: a newer revision's outside block, or a withdrawal. Anything else
+   * (a transport failure, a rate limit, a busy Mac) changes nothing and the
+   * cadence continues. The first answer and its sources are never replaced.
+   */
+  async function followUp(mine: number, jobId: string, keys: { publicKey: string; privateKey: CryptoKey }): Promise<void> {
+    for (;;) {
+      if (mine !== run || !follow) return;
+      const left = follow.until - Date.now();
+      if (left <= 0) return;
+      await wait(Math.min(config.followPollMs, left));
+      if (mine !== run || !follow) return;
+      const controller = typeof (window as Any).AbortController === 'function' ? new (window as Any).AbortController() as AbortController : null;
+      let response: Response;
+      let body: Any = null;
+      try {
+        response = await bounded<Response>((window as Any).fetch(config.relayOrigin + '/private/' + jobId, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(requestBody(keys.publicKey)),
+          credentials: 'omit',
+          cache: 'no-store',
+          referrerPolicy: 'no-referrer',
+          mode: 'cors',
+          signal: controller ? controller.signal : undefined,
+        }), config.requestTimeoutMs, controller);
+        if (mine !== run) return;
+        try {
+          body = await bounded<Any>(response.json(), config.requestTimeoutMs, controller);
+        } catch {
+          body = null;
+        }
+      } catch {
+        continue;
+      }
+      if (mine !== run || !follow) return;
+      const code = response.status;
+      // The job is gone (expired or evicted), or claimed by another key: nothing more will come.
+      if (code === 410 || code === 404 || code === 409) return;
+      if (code !== 200 || !body || body.status !== 'ready') continue;
+      let opened: Opened | null = null;
+      try {
+        opened = readAnswer(await open(jobId, keys.privateKey, body));
+      } catch {
+        opened = null;
+      }
+      if (mine !== run || !follow || !opened) continue;
+      if (opened.kind === 'withdrawn') return withdrawn(false);
+      if (!opened.answer.follow) continue;
+      follow.until = Date.now() + opened.answer.followSeconds * config.secondMs;
+      if (answer && opened.answer.rev >= follow.rev) {
+        follow.rev = opened.answer.rev;
+        answer.rev = opened.answer.rev;
+        answer.followSeconds = opened.answer.followSeconds;
+        answer.outside = opened.answer.outside;
+        if (phase === 'revealed') render();
+      }
+    }
+  }
+
+  function toggleAsked(): void {
+    askedOpen = !askedOpen;
+    focusAfter = 'asked';
     render();
   }
 
@@ -792,13 +1040,13 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       }
       return view.card;
     }
-    if (phase === 'error' || phase === 'slow') {
+    if (phase === 'error' || phase === 'slow' || phase === 'withdrawn') {
       line.className = 'sub warn';
       line.textContent = errorText;
       if (canRetry) view.row.appendChild(button(T.tryAgain, 'retry', () => void collect(true)));
       return view.card;
     }
-    if (phase === 'hidden' && answer) {
+    if (phase === 'hidden' && (answer || gone)) {
       line.textContent = T.hidden;
       view.row.appendChild(button(T.show, 'show', show, T.showLabel));
       return view.card;
@@ -808,6 +1056,57 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     line.appendChild(el('span', 'spinner'));
     line.appendChild(doc.createTextNode(info && info.full ? T.preparingFull : T.preparing));
     return view.card;
+  }
+
+  /**
+   * The outside block's own container, below and outside the first-answer
+   * card (design §A.6), shown while a reply is pending, paused or appended
+   * (nothing for `idle`): its attribution header application-owned and
+   * pinned while the body scrolls. The body is one text node; nothing in it
+   * is markup, a link or a heading, whatever the text says.
+   */
+  function outsideView(shown: Answer): HTMLElement {
+    const box = el('section', 'outside');
+    box.setAttribute('aria-label', T.outsideTitle);
+    const head = el('div', 'out-head');
+    head.appendChild(el('h3', 'out-title', T.outsideTitle));
+    head.appendChild(el('p', 'out-note', T.outsideNote));
+    box.appendChild(head);
+    const body = el('div', 'out-body');
+    const state = shown.outside.state;
+    if (state === 'appended') {
+      const text = el('div', 'out-text');
+      text.setAttribute('data-key', 'outside');
+      text.textContent = shown.outside.text;
+      body.appendChild(text);
+      if (shown.outside.question) {
+        const asked = el('div', 'asked');
+        const toggle = el('button', 'src-toggle') as HTMLButtonElement;
+        toggle.type = 'button';
+        toggle.setAttribute('data-key', 'asked');
+        toggle.setAttribute('aria-expanded', askedOpen ? 'true' : 'false');
+        toggle.appendChild(doc.createTextNode(T.outsideAsked));
+        toggle.appendChild(chevron());
+        onActivate(toggle, toggleAsked);
+        asked.appendChild(toggle);
+        if (askedOpen) {
+          const question = el('p', 'asked-text');
+          question.textContent = shown.outside.question;
+          asked.appendChild(question);
+        }
+        body.appendChild(asked);
+      }
+      if (shown.outside.cut) body.appendChild(el('p', 'out-foot', T.outsideShortened));
+    } else if (state === 'pending') {
+      const line = el('p', 'out-sub working');
+      line.appendChild(el('span', 'spinner'));
+      line.appendChild(doc.createTextNode(T.outsidePending));
+      body.appendChild(line);
+    } else {
+      body.appendChild(el('p', 'out-sub', T.outsidePaused));
+    }
+    box.appendChild(body);
+    return box;
   }
 
   function revealedView(shown: Answer): HTMLElement {
@@ -834,7 +1133,11 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const active = doc.activeElement as HTMLElement | null;
     const had = active && root.contains(active) ? active.getAttribute('data-key') || '' : '';
     root.textContent = '';
-    if (info) root.appendChild(phase === 'revealed' && answer ? revealedView(answer) : cardView(info));
+    if (info) {
+      const revealed = phase === 'revealed' && answer;
+      root.appendChild(revealed ? revealedView(answer!) : cardView(info));
+      if (revealed && answer!.follow && answer!.outside.state !== 'idle') root.appendChild(outsideView(answer!));
+    }
     if (!focusAfter && had) focusAfter = had;
     if (focusAfter) {
       const key = focusAfter;
@@ -847,18 +1150,27 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   }
 
   // ---- height --------------------------------------------------------------
-  // The frame is exactly the card: its border box plus its margins. Never the
-  // document's or viewport's height, which are at least the frame's current
-  // size and would hold it open at whatever height the host started it.
+  // The frame is exactly its content: the card (and, when shown, the outside
+  // container), each its border box plus its margins. Never the document's
+  // or viewport's height, which are at least the frame's current size and
+  // would hold it open at whatever height the host started it.
   function cardHeight(): number {
-    const node = info ? root.firstChild as HTMLElement | null : null;
-    if (!node) return 0;
-    let margins = 0;
-    if (typeof (window as Any).getComputedStyle === 'function') {
-      const style = (window as Any).getComputedStyle(node);
-      margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+    if (!info) return 0;
+    let total = 0;
+    for (let i = 0; i < root.children.length; i++) {
+      const node = root.children[i] as HTMLElement;
+      let margins = 0;
+      if (typeof (window as Any).getComputedStyle === 'function') {
+        const style = (window as Any).getComputedStyle(node);
+        margins = (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+      }
+      total += (node.offsetHeight || 0) + margins;
     }
-    return Math.ceil((node.offsetHeight || 0) + margins);
+    return Math.ceil(total);
+  }
+
+  function cardWidth(): number {
+    return info && root.firstChild ? Math.ceil((root.firstChild as HTMLElement).offsetWidth || 0) : 0;
   }
 
   // One report per real change, at most once a frame: repeated reports of the
@@ -879,7 +1191,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     lastHeight = height;
     const host = openai();
     if (host && typeof host.notifyIntrinsicHeight === 'function') host.notifyIntrinsicHeight(height);
-    const width = info && root.firstChild ? Math.ceil((root.firstChild as HTMLElement).offsetWidth || 0) : 0;
+    const width = cardWidth();
     notify('ui/notifications/size-changed', width > 0 ? { width, height } : { height });
   }
 
@@ -900,7 +1212,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     if (!observer && typeof (window as Any).ResizeObserver === 'function') {
       observer = new (window as Any).ResizeObserver(() => afterLayout());
     }
-    const node = info ? root.firstChild as Element | null : null;
+    const node = info ? root : null;
     if (!observer || node === observed) return;
     if (observed) observer.unobserve(observed);
     observed = node;
@@ -964,6 +1276,16 @@ html:root>body #panel{display:block!important;height:auto!important;min-height:0
 #panel:empty{display:none!important}
 html:root>body #panel>.card{display:block!important;height:auto!important;min-height:0!important;max-height:none!important;flex:none!important;align-self:flex-start!important}
 .card{margin:0;padding:0.75rem 0.875rem;border-radius:14px;background:var(--tint)}
+.outside{display:block;box-sizing:border-box;margin:0.5rem 0 0;padding:0;border-radius:14px;background:var(--tint);border:1px solid var(--hair);max-height:20rem;overflow:auto;overflow-wrap:anywhere}
+.out-head{position:sticky;top:0;z-index:1;padding:0.625rem 0.875rem 0.375rem;background:var(--tint);border-bottom:1px solid var(--hair)}
+.out-title{margin:0;font-size:0.8125rem;font-weight:600;line-height:1.35}
+.out-note{margin:0.0625rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
+.out-body{padding:0.5rem 0.875rem 0.75rem}
+.out-text{font-size:0.875rem;line-height:1.5;white-space:pre-wrap}
+.out-sub{margin:0;font-size:0.8125rem;line-height:1.4;color:var(--muted)}
+.out-foot{margin:0.375rem 0 0;font-size:0.75rem;line-height:1.4;color:var(--muted)}
+.asked{margin-top:0.375rem}
+.asked-text{margin:0.25rem 0 0;font-size:0.8125rem;line-height:1.45;color:var(--muted);white-space:pre-wrap}
 .row{display:flex;align-items:center;gap:0.75rem}
 .icon{flex:none;display:flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:50%;background:var(--raise);border:1px solid var(--hair)}
 .lock{width:1rem;height:1rem;fill:none;stroke:var(--text);stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
@@ -1017,6 +1339,11 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     heightResendMs: options.heightResendMs ?? 400,
     initFallbackMs: options.initFallbackMs ?? 500,
     keyStore: { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, ...options.keyStore },
+    capability: CHATGPT_PRIVATE_ANSWER_CAPABILITY,
+    followPollMs: options.followPollMs ?? CHATGPT_PRIVATE_ANSWER_FOLLOW_POLL_MS,
+    outsideLines: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINES,
+    outsideLineChars: CHATGPT_PRIVATE_ANSWER_OUTSIDE_LINE_CHARS,
+    outsideBytes: CHATGPT_PRIVATE_ANSWER_OUTSIDE_BYTES,
   };
   return [
     '<!doctype html>',
