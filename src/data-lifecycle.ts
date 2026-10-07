@@ -872,6 +872,7 @@ function releaseSourceMedia(storePaths: readonly string[], context: LifecyclePat
     let db: Database;
     try {
       db = new Database(storePath, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000;');
     } catch {
       continue;
     }
