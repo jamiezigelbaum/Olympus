@@ -228,22 +228,29 @@ export const CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5;
  *     addresses, handles, hosts, secrets, identifier values and their parts,
  *     street addresses, exact dates and years, amounts and other figures,
  *     and digits read jointly;
- *   - inside the copied words the name rule drops the unnamed level's
- *     ordinary-word exemption: a snapshot name or place that is also a
- *     dictionary word ("Mason", "Bath"), however the request writes it
- *     ("mason"), is refused as `snapshot_name` where the general level's name
- *     rule would refuse it.
+ *   - inside the copied words every word the snapshot writes capitalized in
+ *     running text (a function word aside) is a name candidate, with no
+ *     ordinary-word, sentence-start or mostly-lower-case exemption: a
+ *     snapshot name or place that is also a dictionary word ("Mason",
+ *     "Bath"), however the request writes it ("mason"), is refused as
+ *     `snapshot_name`, also when the documents write it only at sentence
+ *     starts and in lower case elsewhere ("Mason signed the inspection
+ *     report." beside "The mason repaired the wall."). A word of the question
+ *     ChatGPT sent keeps its exemption.
  *
  * Still refused at this level as `shared_token_run`: a copy of the owner's
  * question as the evidence pack holds it (`user_question`); and, at both
  * levels, `owner_question_copy` (CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS).
  * The general level is unchanged: every copy refuses.
  *
- * Accepted residuals (measured in eval/consult-leak, reported as counts):
- * copied phrasing that names something only in lower-case or dictionary
- * words ("the blue lantern clause"), and a dictionary-word name the snapshot
- * capitalizes only at the start of sentences while also writing it in lower
- * case elsewhere, can go out inside a copy.
+ * Accepted residuals (owner ruling; measured in eval/consult-leak, reported
+ * as counts): a codename or name the documents write only in lower case
+ * ("under the blue lantern clause", "signed by mason" where the documents
+ * never capitalize it) can go out inside a copy; and a recognised name pair
+ * split across sub-questions into words read as function words ("Will May"
+ * sent as "...with will?" and "Could may attend?") is not matched as a pair.
+ * Both need the writer to work against its own rules; the writer is the
+ * owner's local model.
  */
 export const CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS = true;
 
@@ -2469,6 +2476,14 @@ function compareWithSnapshot(
     if (askedToken(token)) continue;
     const stat = statOf(token);
     const dominatedByLower = stat.lower >= 3 && stat.lower >= 3 * stat.capitalized;
+    // Inside copied document wording a capitalized snapshot word is a name
+    // even at a sentence start and even when the snapshot also writes it in
+    // lower case: the copy carries the document's casing evidence with it
+    // ("Mason signed the inspection report." beside "The mason repaired").
+    if (copiedWords?.has(token)) {
+      nameHit(single.source);
+      continue;
+    }
     if (single.labelled || (single.initialOnly ? stat.lower === 0 && stat.lowerAnywhere === 0 : !dominatedByLower)) nameHit(single.source);
   }
   // Identifier and path components written capitalized (or as a label value),

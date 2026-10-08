@@ -61586,6 +61586,10 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
       continue;
     const stat3 = statOf(token);
     const dominatedByLower = stat3.lower >= 3 && stat3.lower >= 3 * stat3.capitalized;
+    if (copiedWords?.has(token)) {
+      nameHit(single.source);
+      continue;
+    }
     if (single.labelled || (single.initialOnly ? stat3.lower === 0 && stat3.lowerAnywhere === 0 : !dominatedByLower))
       nameHit(single.source);
   }

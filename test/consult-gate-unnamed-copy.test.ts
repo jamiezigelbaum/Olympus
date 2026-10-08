@@ -59,6 +59,16 @@ describe('copied document wording at the unnamed level', () => {
     expect(verdict(['The boiler repair was signed off after the inspection. Is that valid?'], 'unnamed', documents)).toEqual(PASS);
   });
 
+  test('review round 1 (P1-1): a copied capitalized word is a name even at a sentence start beside a lower-case use', () => {
+    const documents = ['Mason signed the inspection report. The mason repaired the wall.'];
+    const copied = verdict(['Mason signed the inspection report. Is it valid?'], 'unnamed', documents);
+    expect(copied.decision).toBe('refuse');
+    expect(copied.reasons).toContain('snapshot_name');
+    expect(verdict(['mason signed the inspection report. Is it valid?'], 'unnamed', documents).reasons).toContain('snapshot_name');
+    // Without the name the copy goes out.
+    expect(verdict(['Someone signed the inspection report. Is it valid?'], 'unnamed', documents)).toEqual(PASS);
+  });
+
   test('a copied run holding a place the documents name is refused', () => {
     const documents = ['The tenant moved to Bath after the lease ended and the landlord kept the deposit. A bath was replaced.'];
     const copied = verdict(['The tenant moved to bath after the lease ended. Can the deposit be kept?'], 'unnamed', documents);

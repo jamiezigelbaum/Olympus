@@ -174,8 +174,9 @@ not unknown names, behind most of this level's refusals. Owner ruling: a copy
 of the documents may go out at the unnamed level unless it carries a hard
 identifier (rule: `CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS` in
 `src/core/consult-gate.ts`). Every other rule still reads every copied word,
-and inside a copy a document name or place that is also a dictionary word
-counts as a name however it is written. Copies of the owner's question stay
+and inside a copy every word the documents capitalize counts as a name
+however it is written, even at a sentence start beside a lower-case use
+(review round 1; the counts below did not move). Copies of the owner's question stay
 refused at both levels. The general level is unchanged: every
 general-level verdict over these fixtures is pinned by digest
 (`test/consult-gate-unnamed-copy.test.ts`).

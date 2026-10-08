@@ -70,13 +70,24 @@ At Standard, answerability comes first: a request that copies wording from
 the private documents may go out unless it carries a hard identifier. The
 gate still reads every copied word with its other rules (names, places
 below a country, exact dates and years, amounts, account, phone and ID
-numbers, addresses, mail addresses and handles), and inside a copy a
-document name that is also a dictionary word still counts as a name. Copying
+numbers, addresses, mail addresses and handles), and inside a copy every
+word the documents capitalize counts as a name, even at a sentence start
+("Mason signed the inspection report." stays refused beside "the mason").
+Copying
 the question ChatGPT sent stays refused at both levels, and Strict refuses
 every copy as before. Measured: Standard refuses 9 of 30 legitimate
 situation questions instead of 14, with no hard-identifier leak on any eval
 set. Rule: `CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS` in
 `src/core/consult-gate.ts`.
+
+Accepted residuals of this ruling (2026-10-08 review): a codename or name
+the documents write only in lower case can go out inside a copy ("Under the
+blue lantern clause may the landlord hold the deposit?", or a person's name
+the documents never capitalize); and a recognised name pair split across
+sub-questions into words the gate reads as function words ("Will May" sent
+as "...with will?" and "Could may attend?") is not matched as a pair. Both
+need a writer working against its own rules, and the writer is the owner's
+own local model.
 
 Accepted residual (2026-10-08 review): the question is ChatGPT's tool
 argument (`question` in `src/workers/chatgpt/mcp-surface.ts`), not a
