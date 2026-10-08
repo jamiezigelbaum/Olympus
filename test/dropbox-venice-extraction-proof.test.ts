@@ -291,6 +291,7 @@ function plan(options: {
     jobs_forced: 0,
     jobs_skipped_too_large: 0,
     jobs_unroutable: 0,
+    jobs_refused: 0,
     extractor_kinds: ['venice_e2ee_document'],
     done: true,
     policy: {

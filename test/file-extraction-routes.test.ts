@@ -258,6 +258,7 @@ describe('file-extraction routes: the generic surface', () => {
     });
     const body = await response.json() as Record<string, unknown>;
     expect(body.jobs_queued).toBe(2);
+    expect(body.jobs_refused).toBe(0);
     expect(body.extractor_kinds).toEqual(['local_text']);
   });
 
