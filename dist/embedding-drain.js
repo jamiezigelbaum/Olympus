@@ -1452,6 +1452,7 @@ import {
   existsSync as existsSync2,
   mkdirSync as mkdirSync3,
   lstatSync as lstatSync2,
+  readFileSync as readFileSync3,
   readdirSync,
   realpathSync,
   renameSync as renameSync2,
@@ -1518,6 +1519,9 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
   try {
     const refs = refsDir(path);
     rmSync2(join2(refs, holderName(holder)), { force: true });
+    const legacy = legacyHolderName(holder);
+    if (legacy)
+      rmSync2(join2(refs, legacy), { force: true });
     const remaining = existsSync2(refs) ? readdirSync(refs) : [];
     if (remaining.length > 0)
       return false;
@@ -1559,8 +1563,10 @@ function sweepMediaCache(dir, options = {}) {
       const refs = refsDir(path);
       if (existsSync2(refs)) {
         for (const marker of readdirSync(refs)) {
-          if (marker.startsWith("staging-") && old(join2(refs, marker)))
-            rmSync2(join2(refs, marker), { force: true });
+          const markerPath = join2(refs, marker);
+          if (marker.startsWith("staging-") ? old(markerPath) : holderGone(markerPath, marker)) {
+            rmSync2(markerPath, { force: true });
+          }
         }
         if (readdirSync(refs).length > 0)
           continue;
@@ -1577,14 +1583,42 @@ function sweepMediaCache(dir, options = {}) {
 function addMarker(path, holder) {
   const refs = refsDir(path);
   ensureOwnerOnlyDir(refs);
-  writeFileSync3(join2(refs, holderName(holder)), "", { mode: 384 });
+  const marker = join2(refs, holderName(holder));
+  const name = mediaHolderName(holder);
+  if (readMarker(marker) !== name)
+    writeFileSync3(marker, name, { mode: 384 });
+  const legacy = legacyHolderName(holder);
+  if (legacy)
+    rmSync2(join2(refs, legacy), { force: true });
+}
+function readMarker(marker) {
+  try {
+    return readFileSync3(marker, "utf8");
+  } catch {
+    return;
+  }
+}
+function holderGone(marker, markerName) {
+  const name = readMarker(marker);
+  if (!name || !isAbsolute2(name) || holderDigest(name) !== markerName)
+    return false;
+  return !existsSync2(name) && existsSync2(dirname3(name));
 }
 function refsDir(path) {
   return join2(dirname3(path), `${basename(path)}.refs`);
 }
+function holderDigest(name) {
+  return createHash("sha256").update(name).digest("hex").slice(0, 32);
+}
 function holderName(holder) {
-  const digest = createHash("sha256").update(mediaHolderName(holder)).digest("hex").slice(0, 32);
+  const digest = holderDigest(mediaHolderName(holder));
   return holder.startsWith("staging:") ? `staging-${digest}` : digest;
+}
+function legacyHolderName(holder) {
+  if (holder.startsWith("staging:") || holder.startsWith("memory:"))
+    return;
+  const legacy = holderDigest(holder);
+  return legacy === holderName(holder) ? undefined : legacy;
 }
 function ensureOwnerOnlyDir(dir) {
   mkdirSync3(dir, { recursive: true, mode: 448 });
@@ -2193,7 +2227,7 @@ var init_source_ingestion_exclusions = __esm(() => {
 // src/core/secret-store.ts
 import { spawnSync } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4 } from "node:fs";
 import { homedir as homedir2, platform } from "node:os";
 import { dirname as dirname4, join as join3 } from "node:path";
 function defaultOlympusConfigDir() {
@@ -2294,7 +2328,7 @@ class EncryptedFileSecretStore {
   readStore() {
     if (!existsSync3(this.encryptedFilePath))
       return { version: STORE_VERSION, secrets: {} };
-    const encrypted = JSON.parse(readFileSync3(this.encryptedFilePath, "utf8"));
+    const encrypted = JSON.parse(readFileSync4(this.encryptedFilePath, "utf8"));
     if (encrypted.version !== STORE_VERSION || encrypted.algorithm !== "aes-256-gcm") {
       throw new Error("Olympus secret store format is unsupported.");
     }
@@ -2367,7 +2401,7 @@ class EncryptedFileSecretStore {
     if (!existsSync3(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString("base64"));
     }
-    const key = Buffer.from(readFileSync3(this.keyFilePath, "utf8").trim(), "base64");
+    const key = Buffer.from(readFileSync4(this.keyFilePath, "utf8").trim(), "base64");
     if (key.length !== 32)
       throw new Error("Olympus secret store key is invalid.");
     return key;
@@ -2499,7 +2533,7 @@ var init_secret_store = __esm(() => {
 });
 
 // src/core/config.ts
-import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { isAbsolute as isAbsolutePath, join as join4, resolve as resolve3 } from "node:path";
 function defaultConfig() {
@@ -2516,7 +2550,7 @@ function loadConfig(env = process.env) {
   const config = defaultConfig();
   const configPath = env.OLYMPUS_CONFIG ?? join4(env.HOME?.trim() || homedir3(), ".olympus", "config.json");
   if (existsSync4(configPath)) {
-    const raw = JSON.parse(readFileSync4(configPath, "utf8"));
+    const raw = JSON.parse(readFileSync5(configPath, "utf8"));
     mergeConfig(config, raw);
   }
   applyEnvironmentOverrides(config, env);
@@ -2533,7 +2567,7 @@ function installedEngineConfig(env) {
     return;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync4(enginePath, "utf8"));
+    parsed = JSON.parse(readFileSync5(enginePath, "utf8"));
   } catch {
     throw new OperationError("config_error", `${enginePath} is not valid JSON.`, "Fix or remove it, then run olympus engine install again.");
   }
@@ -2634,7 +2668,7 @@ function applyEnvironmentOverrides(config, env) {
     config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
   }
   if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
-    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync4(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
+    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync5(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
   }
   if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
     config.sourceIndex.ingestionExclusionsPath = env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV].trim();
@@ -3817,7 +3851,7 @@ var init_manifest = __esm(() => {
 });
 
 // src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync5, statSync as statSync4 } from "node:fs";
+import { readFileSync as readFileSync6, statSync as statSync4 } from "node:fs";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { homedir as homedir4 } from "node:os";
@@ -3922,7 +3956,7 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   if (policyFile.seen === stamp && policyFile.unreadable === undefined)
     return;
   try {
-    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync5(path, "utf8")));
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync6(path, "utf8")));
     for (const port of ports)
       zkapiDaemonPorts.add(port);
     policyFile.seen = stamp;
@@ -4156,7 +4190,7 @@ var init_zkapi_consult_settings = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync as chmodSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync7 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname5, join as join6 } from "node:path";
 function defaultSovereigntyConfigPath() {
@@ -4172,7 +4206,7 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
   if (existsSync5(configPath)) {
-    const parsed = JSON.parse(readFileSync6(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync7(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -5080,7 +5114,7 @@ var init_publisher_oauth_client = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync7 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync8 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname6, join as join7 } from "node:path";
 function defaultHandleRegistryPath() {
@@ -5093,7 +5127,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   if (!existsSync6(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync7(path, "utf8"));
+  const parsed = JSON.parse(readFileSync8(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
@@ -13823,7 +13857,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_media_cache();
@@ -15635,6 +15669,24 @@ var init_local_index = __esm(() => {
       this.releaseUnreferencedChunkMedia();
       return summary;
     }
+    reassertChunkMediaHolds() {
+      if (!this.chunkMediaColumnsPresent)
+        return;
+      reassertedMediaHolders ??= new Set;
+      if (reassertedMediaHolders.has(this.mediaHolder))
+        return;
+      try {
+        const rows = this.db.query(`
+        SELECT DISTINCT media_path, media_sha256 FROM chunks
+        WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+      `).all();
+        for (const row of rows) {
+          if (existsSync8(row.media_path))
+            retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
+        }
+        reassertedMediaHolders.add(this.mediaHolder);
+      } catch {}
+    }
     releaseUnreferencedChunkMedia() {
       if (!this.chunkMediaColumnsPresent)
         return;
@@ -17354,6 +17406,7 @@ var init_local_index = __esm(() => {
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
       await options.assertAuthorized?.();
       this.releaseUnreferencedChunkMedia();
+      this.reassertChunkMediaHolds();
       sweepMediaCacheThrottled();
       const limit = normalizeEmbedLimit(options.limit);
       const journalId = normalizeMaintenanceJournalId(options.journalId);
@@ -18919,7 +18972,7 @@ import {
   existsSync as existsSync9,
   mkdirSync as mkdirSync9,
   openSync as openSync4,
-  readFileSync as readFileSync8,
+  readFileSync as readFileSync9,
   renameSync as renameSync3,
   rmSync as rmSync3,
   statSync as statSync6,
@@ -18965,7 +19018,7 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync8(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync9(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -19071,7 +19124,7 @@ async function installLiteRt(options, model, paths, platform2, reporter, install
 }
 function readLiteRtMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync8(join8(runtimeDir, RUNTIME_MARKER), "utf8"));
+    return JSON.parse(readFileSync9(join8(runtimeDir, RUNTIME_MARKER), "utf8"));
   } catch {
     return;
   }
@@ -19094,7 +19147,7 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
       expected: wheel.sha256
     }, reporter, "Downloading the search runtime", stallMs);
     reporter.set("verifying", "Unpacking the search runtime");
-    const library = readZipEntry(readFileSync8(archivePath), wheel.library);
+    const library = readZipEntry(readFileSync9(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
     writeFileSync4(join8(staging, basename2(wheel.library)), library, { mode: 493 });
@@ -19147,7 +19200,7 @@ async function verifyModelFiles(dir, files, reporter) {
 }
 function runtimeInstalled(runtimeDir, packages) {
   try {
-    const marker = JSON.parse(readFileSync8(join8(runtimeDir, RUNTIME_MARKER), "utf8"));
+    const marker = JSON.parse(readFileSync9(join8(runtimeDir, RUNTIME_MARKER), "utf8"));
     return packages.every((pack) => marker.packages.some((entry) => entry.name === pack.name && entry.integrity === pack.integrity));
   } catch {
     return false;
@@ -19164,7 +19217,7 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform2, report
         expected: pack.integrity
       }, reporter, "Downloading the search runtime", stallMs);
       reporter.set("verifying", "Unpacking the search runtime");
-      const archive = readFileSync8(archivePath);
+      const archive = readFileSync9(archivePath);
       const files = readTarGz(archive, (path) => runtimeEntryWanted(pack.name, path, platform2));
       if (files.length === 0) {
         throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${pack.name} had no files for ${platform2}.`);
@@ -19346,7 +19399,7 @@ function tryAcquireLock(lockPath) {
 }
 function lockIsStale(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync8(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync9(lockPath, "utf8"));
     if (typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS)
       return true;
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
@@ -19609,7 +19662,7 @@ class HelperProcess {
       return;
     }
     if (message.error || !message.vectors || !message.dimension) {
-      pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
+      pending.reject(message.error && message.pictures ? new LiteRtPictureEngineFaultError(message.error) : new Error(message.error ?? "The built-in search model returned no vectors."));
       if (message.native) {
         this.exited = true;
         this.child.kill("SIGKILL");
@@ -19702,7 +19755,7 @@ function resolveBun() {
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
-var LiteRtImagesUnavailableError, REQUEST_TIMEOUT_MS;
+var LiteRtImagesUnavailableError, LiteRtPictureEngineFaultError, REQUEST_TIMEOUT_MS;
 var init_litert_runtime = __esm(() => {
   LiteRtImagesUnavailableError = class LiteRtImagesUnavailableError extends Error {
     indexes;
@@ -19710,6 +19763,12 @@ var init_litert_runtime = __esm(() => {
       super("The built-in search model is running without its image encoder.");
       this.name = "LiteRtImagesUnavailableError";
       this.indexes = indexes;
+    }
+  };
+  LiteRtPictureEngineFaultError = class LiteRtPictureEngineFaultError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "LiteRtPictureEngineFaultError";
     }
   };
   REQUEST_TIMEOUT_MS = 3 * 60000;
@@ -19904,7 +19963,7 @@ var init_wordpiece = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/provider.ts
 import { createHash as createHash7 } from "node:crypto";
-import { readFileSync as readFileSync9 } from "node:fs";
+import { readFileSync as readFileSync10 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname12, join as join11 } from "node:path";
 
@@ -19929,6 +19988,7 @@ class BuiltInSourceEmbeddingProvider {
   lastFailure;
   slotBusy = false;
   imageSupportWarned = false;
+  pictureFaults;
   waiting = { query: [], document: [] };
   constructor(options = {}) {
     this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
@@ -19980,6 +20040,8 @@ class BuiltInSourceEmbeddingProvider {
   }
   async imageSupport() {
     if (this.spec.runtime !== "litert" || !this.spec.vision)
+      return false;
+    if (this.picturesHeld())
       return false;
     const model = this.loaded ?? await this.load();
     const supported = model.kind === "litert" && model.embedder.vision;
@@ -20126,14 +20188,32 @@ class BuiltInSourceEmbeddingProvider {
         refused.add(index);
       return { text, image: input.image.path };
     });
+    const pictures = prompts.flatMap((prompt, index) => typeof prompt !== "string" && !refused.has(index) ? [index] : []);
+    if (pictures.length > 0 && this.picturesHeld()) {
+      throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
+    }
     const out = [];
     const failed = [...refused];
     for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
       const batch = prompts.slice(offset, offset + LITERT_BATCH).map((prompt, row) => refused.has(offset + row) && typeof prompt !== "string" ? prompt.text : prompt);
+      const batchPictures = batch.flatMap((prompt, row) => typeof prompt !== "string" ? [offset + row] : []);
       let vectors;
       try {
         vectors = await this.withSlot(taskType, () => embedder.embed(batch));
+        if (batchPictures.length > 0)
+          this.pictureFaults = undefined;
       } catch (error) {
+        if (error instanceof LiteRtPictureEngineFaultError) {
+          const count = (this.pictureFaults?.count ?? 0) + 1;
+          if (count < PICTURE_ENGINE_FAULT_LIMIT) {
+            this.pictureFaults = { count };
+            offset -= LITERT_BATCH;
+            continue;
+          }
+          this.pictureFaults = { count: 0, heldUntilMs: this.now() + PICTURE_HOLD_MS };
+          console.warn(`[built-in embedding] the image encoder keeps failing a known-good picture; photos wait ${PICTURE_HOLD_MS / 60000} minutes while text keeps embedding.`);
+          throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
+        }
         if (error instanceof LiteRtImagesUnavailableError) {
           throw new SourceEmbeddingInputsFailedError(error.indexes.map((index) => offset + index), "image_encoder_unavailable", "held");
         }
@@ -20155,6 +20235,10 @@ class BuiltInSourceEmbeddingProvider {
       throw new SourceEmbeddingInputsFailedError([...new Set(failed)].sort((left, right) => left - right), "image_unreadable");
     }
     return out;
+  }
+  picturesHeld() {
+    const heldUntilMs = this.pictureFaults?.heldUntilMs;
+    return heldUntilMs !== undefined && this.now() < heldUntilMs;
   }
   async forward(model, batch) {
     const rows = batch.length;
@@ -20201,7 +20285,7 @@ class BuiltInSourceEmbeddingProvider {
   }
 }
 function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync9(path, "utf8"));
+  const tokenizer = new WordPieceTokenizer(readFileSync10(path, "utf8"));
   return {
     tokenize: (text) => tokenizer.tokenize(text),
     startId: tokenizer.clsId,
@@ -20288,7 +20372,7 @@ function sharedBuiltInSourceEmbeddingProvider(options) {
   }
   return provider;
 }
-var BUILT_IN_EMBEDDING_PROVIDER = "built-in", BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS", BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE", MAX_WINDOWS_PER_DOCUMENT = 8, MAX_BATCH_TOKENS = 2048, MAX_BATCH_ROWS = 32, LITERT_BATCH = 8, RETRY_AFTER_FAILURE_MS, BuiltInEmbeddingNotReadyError, sharedProviders;
+var BUILT_IN_EMBEDDING_PROVIDER = "built-in", BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS", BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE", MAX_WINDOWS_PER_DOCUMENT = 8, MAX_BATCH_TOKENS = 2048, MAX_BATCH_ROWS = 32, LITERT_BATCH = 8, RETRY_AFTER_FAILURE_MS, PICTURE_ENGINE_FAULT_LIMIT = 2, PICTURE_HOLD_MS, BuiltInEmbeddingNotReadyError, sharedProviders;
 var init_provider = __esm(() => {
   init_operation_error();
   init_embedding_identity();
@@ -20300,6 +20384,7 @@ var init_provider = __esm(() => {
   init_runtime();
   init_wordpiece();
   RETRY_AFTER_FAILURE_MS = 2 * 60000;
+  PICTURE_HOLD_MS = 60 * 60000;
   BuiltInEmbeddingNotReadyError = class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
     status;
     constructor(status) {
@@ -25199,6 +25284,7 @@ var init_drive_live_control = __esm(() => {
 // src/workers/google-connectors/drive-live-sync.ts
 var init_drive_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_classifier();
   init_embeddings();
   init_drive();
   init_drive_live_control();
@@ -25472,7 +25558,7 @@ var init_credential_degradation = __esm(() => {
 });
 
 // src/core/owner-config-read.ts
-import { readFileSync as readFileSync11, statSync as statSync8 } from "node:fs";
+import { readFileSync as readFileSync12, statSync as statSync8 } from "node:fs";
 function ownerConfigStamp(path) {
   try {
     return stampOf(statSync8(path));
@@ -25493,7 +25579,7 @@ function readOwnerConfigFile(path) {
   }
   let text;
   try {
-    text = readFileSync11(path, "utf8");
+    text = readFileSync12(path, "utf8");
   } catch {
     return { status: "refused", reason: "unreadable", stamp };
   }
@@ -26353,6 +26439,7 @@ init_operation_error();
 init_model_transport();
 init_types();
 init_command_runner();
+init_tier_classifier();
 
 // src/workers/file-extraction/store-sink.ts
 init_tier_classifier();
@@ -26406,7 +26493,7 @@ init_venice_models();
 import {
   existsSync as existsSync11,
   mkdirSync as mkdirSync10,
-  readFileSync as readFileSync10,
+  readFileSync as readFileSync11,
   renameSync as renameSync4,
   rmSync as rmSync4,
   writeFileSync as writeFileSync5
@@ -26598,7 +26685,7 @@ function readCatalogCache(path, type) {
     return;
   let payload;
   try {
-    payload = JSON.parse(readFileSync10(path, "utf8"));
+    payload = JSON.parse(readFileSync11(path, "utf8"));
   } catch {
     return;
   }
@@ -29674,7 +29761,7 @@ init_provider();
 
 // src/workers/classification/sniffer-resolver.ts
 init_atomic_file();
-import { mkdirSync as mkdirSync12, readFileSync as readFileSync12 } from "node:fs";
+import { mkdirSync as mkdirSync12, readFileSync as readFileSync13 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
 var DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS = 30;
@@ -29697,7 +29784,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync12(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync13(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
