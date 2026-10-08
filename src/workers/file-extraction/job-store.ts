@@ -2081,16 +2081,27 @@ function requireLaneKey(lane: ExtractionLaneKey): ExtractionLaneKey {
   };
 }
 
+// A refused field of an extraction job request, named so a caller can tell which part was wrong.
+export class ExtractionJobFieldError extends TypeError {
+  readonly field: string;
+
+  constructor(field: string, message: string) {
+    super(message);
+    this.name = 'ExtractionJobFieldError';
+    this.field = field;
+  }
+}
+
 function requireKeyPart(value: string, field: string): string {
   if (typeof value !== 'string' || !SAFE_KEY_PART.test(value)) {
-    throw new TypeError(`Extraction job ${field} must be a safe identifier.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe identifier.`);
   }
   return value;
 }
 
 function requireToken(value: string, field: string): string {
   if (typeof value !== 'string' || !SAFE_TOKEN.test(value)) {
-    throw new TypeError(`Extraction job ${field} must be a safe categorical token.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe categorical token.`);
   }
   return value;
 }

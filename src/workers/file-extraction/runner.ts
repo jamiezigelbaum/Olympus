@@ -65,6 +65,7 @@ import type {
   LocalFileExtractionJobStore,
   RecycleExtractionLeasesResult,
 } from './job-store.ts';
+import { ExtractionJobFieldError } from './job-store.ts';
 import type { ExtractionReclassificationRule, ExtractionHealthProbeMap } from './registry.ts';
 import {
   EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
@@ -286,6 +287,12 @@ export interface ExtractionPlanResult {
   jobsForced: number;
   jobsSkippedTooLarge: number;
   jobsUnroutable: number;
+  /**
+   * Candidates whose bucket the job store refused (an extractor kind or
+   * version it does not accept). Counted, never thrown: one bad bucket must
+   * not keep every other candidate of the lane from being queued.
+   */
+  jobsRefused: number;
   extractorKinds: readonly string[];
   nextCursor?: string;
   done: boolean;
@@ -621,19 +628,36 @@ export function createFileExtractionRunner(
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
+      let jobsRefused = 0;
       for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
-        const result = jobs.enqueue({
-          refs,
-          extractorKind,
-          extractorVersion,
-          // Omitted means "this pass has nothing to say about policy", which the
-          // store keeps distinct from asserting the permissive value: a re-plan
-          // that names no decision must not rewrite a stored needs_review.
-          ...(request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {}),
-          ...(request.priority !== undefined ? { priority: request.priority } : {}),
-          ...(request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {}),
-          ...(request.force !== undefined ? { force: request.force } : {}),
-        });
+        let result: ReturnType<typeof jobs.enqueue>;
+        try {
+          result = jobs.enqueue({
+            refs,
+            extractorKind,
+            extractorVersion,
+            // Omitted means "this pass has nothing to say about policy", which the
+            // store keeps distinct from asserting the permissive value: a re-plan
+            // that names no decision must not rewrite a stored needs_review.
+            ...(request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {}),
+            ...(request.priority !== undefined ? { priority: request.priority } : {}),
+            ...(request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {}),
+            ...(request.force !== undefined ? { force: request.force } : {}),
+          });
+        } catch (error) {
+          // A bucket refused for its own extractor kind or version is counted
+          // and reported, and the rest of the pass goes on. Anything else (a
+          // request-wide value such as priority, or a database fault) is not one
+          // bucket's fault: it still fails the plan.
+          if (!(error instanceof ExtractionJobFieldError)
+            || (error.field !== 'extractorKind' && error.field !== 'extractorVersion')) throw error;
+          jobsRefused += refs.length;
+          console.error(
+            `[olympus:file-extraction] plan_bucket_refused corpus_id=${request.corpusId} extractor_kind=${extractorKind} `
+            + `candidates=${refs.length} reason=${boundedErrorMessage(error)}`,
+          );
+          continue;
+        }
         jobsQueued += result.jobsQueued;
         // Newly catalogued items for a lane whose reader is not installed
         // yet (for example the first audio file in the owner's chosen
@@ -653,6 +677,7 @@ export function createFileExtractionRunner(
         jobsForced,
         jobsSkippedTooLarge,
         jobsUnroutable,
+        jobsRefused,
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
         done: page.done,
@@ -1305,6 +1330,15 @@ function summarizeEgressDestinations(
   if (destinations.length === 0) return {};
   if (destinations.length === 1) return { egressDestination: destinations[0]! };
   return { egressDestination: 'venice_mixed_approved' };
+}
+
+/**
+ * An error's message for an operator log line: one line, at most 200
+ * characters.
+ */
+function boundedErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return JSON.stringify(message.split('\n').join(' ').slice(0, 200));
 }
 
 function hashToken(value: string): string {

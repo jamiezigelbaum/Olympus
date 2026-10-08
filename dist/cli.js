@@ -87196,13 +87196,13 @@ function requireLaneKey(lane) {
 }
 function requireKeyPart2(value, field) {
   if (typeof value !== "string" || !SAFE_KEY_PART2.test(value)) {
-    throw new TypeError(`Extraction job ${field} must be a safe identifier.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe identifier.`);
   }
   return value;
 }
 function requireToken3(value, field) {
   if (typeof value !== "string" || !SAFE_TOKEN2.test(value)) {
-    throw new TypeError(`Extraction job ${field} must be a safe categorical token.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe categorical token.`);
   }
   return value;
 }
@@ -87263,7 +87263,7 @@ function hashString5(value) {
 function nowIso4() {
   return new Date().toISOString();
 }
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3, FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES;
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3, FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
   NETWORK_ERROR_KINDS = new Set([
@@ -87289,6 +87289,14 @@ var init_job_store = __esm(() => {
     "failed_retryable",
     "failed_terminal"
   ]);
+  ExtractionJobFieldError = class ExtractionJobFieldError extends TypeError {
+    field;
+    constructor(field, message) {
+      super(message);
+      this.name = "ExtractionJobFieldError";
+      this.field = field;
+    }
+  };
 });
 
 // src/workers/file-extraction/extractors/bounded-text.ts
@@ -92276,16 +92284,26 @@ function createFileExtractionRunner(options) {
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
+      let jobsRefused = 0;
       for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
-        const result = jobs.enqueue({
-          refs,
-          extractorKind,
-          extractorVersion,
-          ...request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {},
-          ...request.priority !== undefined ? { priority: request.priority } : {},
-          ...request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {},
-          ...request.force !== undefined ? { force: request.force } : {}
-        });
+        let result;
+        try {
+          result = jobs.enqueue({
+            refs,
+            extractorKind,
+            extractorVersion,
+            ...request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {},
+            ...request.priority !== undefined ? { priority: request.priority } : {},
+            ...request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {},
+            ...request.force !== undefined ? { force: request.force } : {}
+          });
+        } catch (error2) {
+          if (!(error2 instanceof ExtractionJobFieldError) || error2.field !== "extractorKind" && error2.field !== "extractorVersion")
+            throw error2;
+          jobsRefused += refs.length;
+          console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${request.corpusId} extractor_kind=${extractorKind} ` + `candidates=${refs.length} reason=${boundedErrorMessage(error2)}`);
+          continue;
+        }
         jobsQueued += result.jobsQueued;
         if (result.jobsQueued > 0)
           prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
@@ -92302,6 +92320,7 @@ function createFileExtractionRunner(options) {
         jobsForced,
         jobsSkippedTooLarge,
         jobsUnroutable,
+        jobsRefused,
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {},
         done: page.done,
@@ -92761,6 +92780,11 @@ function summarizeEgressDestinations(values) {
     return { egressDestination: destinations[0] };
   return { egressDestination: "venice_mixed_approved" };
 }
+function boundedErrorMessage(error2) {
+  const message = error2 instanceof Error ? error2.message : String(error2);
+  return JSON.stringify(message.split(`
+`).join(" ").slice(0, 200));
+}
 function hashToken(value) {
   return createHash52("sha256").update(value).digest("hex");
 }
@@ -92859,6 +92883,7 @@ var init_runner = __esm(() => {
   init_file_extraction_source();
   init_command_runner();
   init_bounded_text();
+  init_job_store();
   init_store_sink();
   SINK_SKIP_SETTLEMENTS = Object.freeze({
     [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
@@ -110484,6 +110509,7 @@ function fileExtractionPlanBody(result) {
     jobs_forced: result.jobsForced,
     jobs_skipped_too_large: result.jobsSkippedTooLarge,
     jobs_unroutable: result.jobsUnroutable,
+    jobs_refused: result.jobsRefused,
     extractor_kinds: result.extractorKinds,
     ...result.nextCursor !== undefined ? { next_cursor: result.nextCursor } : {},
     done: result.done,
@@ -113314,6 +113340,7 @@ function fileExtractionSchedulerTask(input) {
       let jobsQueued = 0;
       let jobsExisting = 0;
       let jobsUnroutable = 0;
+      let jobsRefused = 0;
       const extractorKinds = new Set;
       for (let page = 0;page < maxPages; page += 1) {
         const plan = await input.runner.plan({
@@ -113327,6 +113354,7 @@ function fileExtractionSchedulerTask(input) {
         jobsQueued += plan.jobsQueued;
         jobsExisting += plan.jobsExisting;
         jobsUnroutable += plan.jobsUnroutable;
+        jobsRefused += plan.jobsRefused;
         for (const kind of plan.extractorKinds)
           extractorKinds.add(kind);
         if (plan.done) {
@@ -113350,6 +113378,7 @@ function fileExtractionSchedulerTask(input) {
         jobs_queued: jobsQueued,
         jobs_existing: jobsExisting,
         jobs_unroutable: jobsUnroutable,
+        jobs_refused: jobsRefused,
         jobs_processed: run.processedJobs,
         jobs_indexed: run.counts.indexed,
         jobs_metadata_only: run.counts.metadata_only,
@@ -113545,6 +113574,7 @@ function createWhatsAppSchedulerSource(input) {
             jobs_queued: plan.jobsQueued,
             jobs_existing: plan.jobsExisting,
             jobs_unroutable: plan.jobsUnroutable,
+            jobs_refused: plan.jobsRefused,
             jobs_processed: run.processedJobs,
             jobs_indexed: run.counts.indexed,
             jobs_metadata_only: run.counts.metadata_only,

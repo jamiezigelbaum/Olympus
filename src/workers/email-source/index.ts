@@ -4832,6 +4832,7 @@ function fileExtractionPlanBody(result: ExtractionPlanResult): Record<string, un
     jobs_forced: result.jobsForced,
     jobs_skipped_too_large: result.jobsSkippedTooLarge,
     jobs_unroutable: result.jobsUnroutable,
+    jobs_refused: result.jobsRefused,
     extractor_kinds: result.extractorKinds,
     ...(result.nextCursor !== undefined ? { next_cursor: result.nextCursor } : {}),
     done: result.done,

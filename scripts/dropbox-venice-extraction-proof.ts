@@ -164,6 +164,7 @@ export interface DropboxVeniceExtractionScopeReport {
     jobs_existing: number;
     jobs_skipped_too_large: number;
     jobs_unroutable: number;
+    jobs_refused: number;
     extractor_kinds: readonly string[];
   };
   batch?: {
@@ -285,6 +286,11 @@ export async function runDropboxVeniceExtractionProof(
       const planEgressDestination = assertVenicePlanPolicy(plan);
       scopeReport.egress_destination = planEgressDestination;
       scopeReport.plan = safePlanSummary(plan);
+      // A refused bucket is a configuration fault to look at, not an empty scope.
+      if ((plan.jobs_refused ?? 0) > 0 && plan.jobs_queued + plan.jobs_existing === 0) {
+        scopeReport.status = 'attention';
+        continue;
+      }
       if (plan.jobs_queued + plan.jobs_existing === 0) {
         scopeReport.status = 'no_candidate';
         continue;
@@ -549,6 +555,7 @@ function emptyScopeReport(scope: string): DropboxVeniceExtractionScopeReport {
       jobs_existing: 0,
       jobs_skipped_too_large: 0,
       jobs_unroutable: 0,
+      jobs_refused: 0,
       extractor_kinds: [],
     },
   };
@@ -561,6 +568,7 @@ function safePlanSummary(plan: DropboxContentExtractionEnqueueResult): DropboxVe
     jobs_existing: plan.jobs_existing,
     jobs_skipped_too_large: plan.jobs_skipped_too_large,
     jobs_unroutable: plan.jobs_unroutable,
+    jobs_refused: plan.jobs_refused ?? 0,
     extractor_kinds: plan.extractor_kinds,
   };
 }
