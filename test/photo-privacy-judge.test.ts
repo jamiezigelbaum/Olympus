@@ -493,6 +493,15 @@ describe('the judge in the embed pass', () => {
       await store.embedChunks({ provider });
       expect(provider.calls.imagesAlone).toBe(before + 1);
       expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'sensitive', category: 'bank_card', tier_applied: 0 })]);
+      // Still sensitive, but another category: applied again too.
+      const recategorized = new Database(dbPath);
+      try {
+        recategorized.query("UPDATE media_judgments SET judge_id = 'photo-judge-older', category = 'id_document', tier_applied = 1").run();
+      } finally {
+        recategorized.close();
+      }
+      await store.embedChunks({ provider });
+      expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'sensitive', category: 'bank_card', tier_applied: 0 })]);
     } finally {
       store.close();
     }

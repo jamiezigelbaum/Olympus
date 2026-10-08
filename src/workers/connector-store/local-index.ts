@@ -5182,7 +5182,9 @@ export class LocalConnectorStore {
         scores_json = excluded.scores_json, judge_id = excluded.judge_id, reason = excluded.reason,
         judged_at = excluded.judged_at,
         tier_applied = CASE
-          WHEN media_judgments.verdict = excluded.verdict THEN MAX(media_judgments.tier_applied, excluded.tier_applied)
+          -- Kept applied only when nothing a tier decision reads has changed.
+          WHEN media_judgments.verdict = excluded.verdict
+            AND media_judgments.category IS excluded.category THEN MAX(media_judgments.tier_applied, excluded.tier_applied)
           ELSE excluded.tier_applied
         END
     `).run(
