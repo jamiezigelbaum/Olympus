@@ -14,6 +14,7 @@ import { isMediaCachePath } from '../../../core/media-cache.ts';
 import {
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
+  type SourceEmbeddingImageInput,
   type SourceEmbeddingInput,
   type SourceEmbeddingProvider,
   type SourceEmbeddingTaskType,
@@ -362,6 +363,75 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   }
 
   /**
+   * The documents' vectors, plus each picture's image-only vector from the
+   * same LiteRT call: one more item per picture in the batch, so the photo
+   * judge (media-judge.ts) costs no extra round trip.
+   */
+  async embedWithImageVectors(inputs: SourceEmbeddingInput[]): Promise<{ vectors: number[][]; imageVectors: Array<number[] | undefined> }> {
+    if (inputs.length === 0) return { vectors: [], imageVectors: [] };
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== 'litert' || !this.spec.vision) {
+      return { vectors: await this.embedLoaded(model, inputs, 'RETRIEVAL_DOCUMENT'), imageVectors: inputs.map(() => undefined) };
+    }
+    const extra = inputs.flatMap((input, index) => (input.image && isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []));
+    const { vectors, failed } = await this.liteRtVectors(
+      model.embedder,
+      [...this.liteRtItems(inputs, 'RETRIEVAL_DOCUMENT'), ...extra.map((index) => ({ text: '', image: inputs[index]!.image!.path }))],
+      'RETRIEVAL_DOCUMENT',
+      new Set(this.refusedPictures(inputs)),
+    );
+    const documentFailures = failed.filter((index) => index < inputs.length);
+    if (documentFailures.length > 0) throw new SourceEmbeddingInputsFailedError(documentFailures, 'image_unreadable');
+    const imageVectors: Array<number[] | undefined> = inputs.map(() => undefined);
+    extra.forEach((input, row) => {
+      imageVectors[input] = vectors[inputs.length + row];
+    });
+    return { vectors: vectors.slice(0, inputs.length) as number[][], imageVectors };
+  }
+
+  /** Each picture's image-only vector (undefined for one the encoder could not read). */
+  async embedImageVectors(images: SourceEmbeddingImageInput[]): Promise<Array<number[] | undefined>> {
+    if (images.length === 0) return [];
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== 'litert' || !this.spec.vision) {
+      throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), 'image_encoder_unavailable', 'held');
+    }
+    const refused = new Set(images.flatMap((image, index) => (isMediaCachePath(image.path, image.sha256) ? [] : [index])));
+    const live = images.flatMap((image, index) => (refused.has(index) ? [] : [{ index, image }]));
+    const out: Array<number[] | undefined> = images.map(() => undefined);
+    if (live.length === 0) return out;
+    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: '', image: image.path })), 'RETRIEVAL_DOCUMENT', new Set());
+    live.forEach(({ index }, row) => {
+      out[index] = vectors[row];
+    });
+    return out;
+  }
+
+  /** Text embedded exactly as given, with no task prefix (the photo judge's descriptions). */
+  async embedPromptTexts(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== 'litert') throw new Error('The photo judge needs the LiteRT model.');
+    const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, 'RETRIEVAL_DOCUMENT', new Set());
+    if (failed.length > 0) throw new Error('The photo judge\'s descriptions could not be embedded.');
+    return vectors as number[][];
+  }
+
+  /** Inputs whose picture is not the media cache's own file: they fail on their own, never read. */
+  private refusedPictures(inputs: readonly SourceEmbeddingInput[]): number[] {
+    if (!this.spec.vision) return [];
+    return inputs.flatMap((input, index) => (input.image && !isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []));
+  }
+
+  private liteRtItems(inputs: readonly SourceEmbeddingInput[], taskType: SourceEmbeddingTaskType): LiteRtEmbedItem[] {
+    return inputs.map((input) => {
+      const text = promptText(this.spec, input, taskType);
+      if (taskType !== 'RETRIEVAL_DOCUMENT' || !this.spec.vision || !input.image) return text;
+      return { text, image: input.image.path };
+    });
+  }
+
+  /**
    * LiteRT tokenizes, windows and pools itself; this only frames the prompts
    * and keeps the pass order. A document with a picture, on a model that reads
    * images, is its usual prompt plus the picture, embedded together.
@@ -371,20 +441,34 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     inputs: SourceEmbeddingInput[],
     taskType: SourceEmbeddingTaskType,
   ): Promise<number[][]> {
-    // A picture is sent only from inside the media cache, named for its
-    // digest; any other path fails its own input rather than being read.
-    const refused = new Set<number>();
-    const prompts: LiteRtEmbedItem[] = inputs.map((input, index) => {
-      const text = promptText(this.spec, input, taskType);
-      if (taskType !== 'RETRIEVAL_DOCUMENT' || !this.spec.vision || !input.image) return text;
-      if (!isMediaCachePath(input.image.path, input.image.sha256)) refused.add(index);
-      return { text, image: input.image.path };
-    });
+    const { vectors, failed } = await this.liteRtVectors(
+      embedder,
+      this.liteRtItems(inputs, taskType),
+      taskType,
+      new Set(taskType === 'RETRIEVAL_DOCUMENT' ? this.refusedPictures(inputs) : []),
+    );
+    if (failed.length > 0) throw new SourceEmbeddingInputsFailedError(failed, 'image_unreadable');
+    return vectors as number[][];
+  }
+
+  /**
+   * Runs items through the helper in batches. A picture is sent only from
+   * inside the media cache, named for its digest: a `refused` item is sent as
+   * its text alone and reported failed. An item whose picture could not be
+   * read is reported failed (its vector undefined); the encoder not running
+   * holds every picture (SourceEmbeddingInputsFailedError, held).
+   */
+  private async liteRtVectors(
+    embedder: LiteRtEmbedder,
+    prompts: readonly LiteRtEmbedItem[],
+    taskType: SourceEmbeddingTaskType,
+    refused: ReadonlySet<number>,
+  ): Promise<{ vectors: Array<number[] | undefined>; failed: number[] }> {
+    const out: Array<number[] | undefined> = [];
     const pictures = prompts.flatMap((prompt, index) => (typeof prompt !== 'string' && !refused.has(index) ? [index] : []));
     if (pictures.length > 0 && this.picturesHeld()) {
       throw new SourceEmbeddingInputsFailedError(pictures, 'image_encoder_failing', 'held');
     }
-    const out: number[][] = [];
     const failed: number[] = [...refused];
     for (let offset = 0; offset < prompts.length; offset += LITERT_BATCH) {
       const batch = prompts.slice(offset, offset + LITERT_BATCH)
@@ -428,19 +512,16 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
         if (vector.length === 0) {
           // This input's picture could not be read; the rest of the batch is fine.
           failed.push(offset + row);
-          out.push([]);
+          out.push(undefined);
           continue;
         }
         if (vector.length !== this.dimension) {
           throw new OperationError('source_index_error', `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
         }
-        out.push(normalize(vector));
+        out.push(refused.has(offset + row) ? undefined : normalize(vector));
       }
     }
-    if (failed.length > 0) {
-      throw new SourceEmbeddingInputsFailedError([...new Set(failed)].sort((left, right) => left - right), 'image_unreadable');
-    }
-    return out;
+    return { vectors: out, failed: [...new Set(failed)].sort((left, right) => left - right) };
   }
 
 

@@ -33,7 +33,7 @@ describe('LocalConnectorStore conversation-scoped identity migration', () => {
       store.close();
 
       const firstOpen = inspectFixture(dbPath);
-      expect(firstOpen.version).toBe(13);
+      expect(firstOpen.version).toBe(14);
       expect(firstOpen.data).toEqual(before);
       expect(firstOpen.foreignKeyErrors).toEqual([]);
       // The reactions column arrives empty on an upgraded store, so an item

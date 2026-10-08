@@ -705,12 +705,15 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
           }
           const override = ledger.getOverride(item.identity);
           const sniffer = laneSniffer;
+          // A photo's picture judgment, when the photo judge made one here.
+          const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const decision = classifyItemTiers(
             {
               signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
               provider: item.identity.provider,
               text: item.chunks.map((chunk) => chunk.text).join(''),
               ...(item.mimeType ? { mimeType: item.mimeType } : {}),
+              ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
               subject: item.identity,
             },
             {

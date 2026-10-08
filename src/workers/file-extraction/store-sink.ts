@@ -28,6 +28,7 @@
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { RawItem } from '../../core/contracts.ts';
 import { isImageMediaType } from '../classification/tier-classifier.ts';
+import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
   SourceItemIdentity,
@@ -89,9 +90,10 @@ export const EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = 'store_item_tier_move_qu
 export const EXTRACTION_SINK_SKIPPED_SECRETS = 'store_item_secrets';
 /**
  * A still image's content (its picture, and any text read off it) rests only
- * in a Private store (docs/design/photo-embeddings.md). A store of any other
- * trust domain refuses it, whatever lane wrote to it; the item keeps its
- * names. A tiered store set routes image content to its Private store
+ * in a Private store unless the photo judge found the picture ordinary
+ * (docs/design/photo-embeddings.md). A store of any other trust domain refuses
+ * an unjudged or sensitive picture, whatever lane wrote to it; the item keeps
+ * its names. A tiered store set routes such content to its Private store
  * instead, so this is the backstop for a lane that has no such set.
  */
 export const EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = 'store_image_content_private_only';
@@ -161,6 +163,13 @@ export interface ConnectorStoreExtractionSinkOptions {
    * content copy, so it turns this off.
    */
   recordContentTier?: boolean;
+  /**
+   * The photo judge's verdict on a picture, by its digest. Default: this
+   * store's own record. A tiered store set looks in every store of the set,
+   * since a picture is judged where it was first embedded (its Private
+   * store) and may land in another.
+   */
+  mediaJudgment?: (mediaSha256: string) => MediaJudgment | undefined;
 }
 
 /**
@@ -171,9 +180,10 @@ export interface ExtractionSinkPlan {
   item: RawItem;
   expectation: ConnectorStoreItemRepresentationExpectation;
   /**
-   * The prepared media copy, attached by the store to the item's first chunk.
+   * The prepared media copy, attached by the store to the item's first chunk,
+   * with the photo judge's verdict on it when there is one.
    */
-  media?: { path: string; sha256: string };
+  media?: { path: string; sha256: string; judgment?: MediaJudgment };
 }
 
 /**
@@ -300,7 +310,13 @@ export function createConnectorStoreExtractionSink(
       // complete short-circuits before classification, so relying on the throw
       // would let an ineligible item report success purely because a previous
       // pass had already stored its text.
-      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== 'secure_local') {
+      // The judge's verdict on the picture travels with it to the store; only
+      // an ordinary verdict lets a picture (and the text read off it) rest
+      // outside a Private store. No verdict is never taken for ordinary.
+      const judgment = plan.media ? (options.mediaJudgment ?? ((sha: string) => store.mediaJudgment(sha)))(plan.media.sha256) : undefined;
+      if (plan.media && judgment) plan.media = { ...plan.media, judgment };
+      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== 'secure_local'
+        && !(plan.media && judgment?.verdict === 'ordinary')) {
         return {
           accepted: false,
           chunksIndexed: 0,

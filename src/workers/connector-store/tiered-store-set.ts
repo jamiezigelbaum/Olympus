@@ -98,6 +98,7 @@ import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 import { sweepImageContentToPrivate } from './tier-image-content-sweep.ts';
+import { applyMediaJudgments } from './tier-media-judgment-sweep.ts';
 
 
 /** Legs run in this order, least private first. */
@@ -570,6 +571,13 @@ export class TieredStoreSet {
       // Picture content stored in a Personal or Public store before pictures
       // were Private-only moves to the Private store (once).
       sweepImageContentToPrivate({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      // The photo judge's verdicts: ordinary photos are queued to leave the
+      // Private store; the moves run where moves run (never here).
+      applyMediaJudgments({ set: this });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }

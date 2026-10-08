@@ -33,6 +33,7 @@ import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } 
 import type { TierCopy, TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
+import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
 import {
   TIER_DOMAIN_ORDER,
@@ -93,6 +94,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ...(options.claims ? { claims: options.claims } : {}),
       ...(tierClassification ? { tierClassification } : {}),
       ...(recordContentTier ? {} : { recordContentTier: false }),
+      mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256),
     });
 
   return {
@@ -128,6 +130,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       const override = ledger.getOverride(identity);
       const itemTitle = stringMetadata(plan.item, ['title', 'name', 'subject']);
       const itemPath = stringMetadata(plan.item, ['locatorUri', 'pathDisplay']);
+      // The photo judge's verdict on this exact picture, wherever in the set
+      // it was judged. None: the picture is unjudged and its content Private.
+      const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
       const content = classifyContentTier(
         {
           text: request.text,
@@ -138,6 +143,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ...(itemTitle ? { title: itemTitle } : {}),
           ...(itemPath ? { path: itemPath } : {}),
           mimeType: plan.item.mimeType,
+          ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
           subject: identity,
         },
         {
@@ -257,6 +263,23 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       return result;
     },
   };
+}
+
+/**
+ * The photo judge's verdict on a picture across the set. Stores can disagree
+ * (a superseded copy keeps the judgment it was made under, and a newer judge
+ * may since have re-judged the current copy), so ordinary holds only when no
+ * store's judgment says otherwise: any sensitive or unjudged verdict wins.
+ */
+function setMediaJudgment(set: TieredStoreSet, mediaSha256: string): MediaJudgment | undefined {
+  let ordinary: MediaJudgment | undefined;
+  for (const domain of [...TIER_DOMAIN_ORDER].reverse()) {
+    const judgment = set.store(domain)?.mediaJudgment(mediaSha256);
+    if (!judgment) continue;
+    if (judgment.verdict !== 'ordinary') return judgment;
+    ordinary ??= judgment;
+  }
+  return ordinary;
 }
 
 function skipped(skippedReason: string): ExtractionSinkResult {

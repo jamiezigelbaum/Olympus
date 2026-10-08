@@ -970,7 +970,8 @@ describe('a prepared picture through runner, sink and store', () => {
       encoderBroken = false;
       expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(1);
       expect(pictureTries()).toBe(3);
-      expect(sent.at(-1)?.find((item) => typeof item !== 'string')).toMatchObject({ image: media.path });
+      // The photo judge's description batch (text only) may follow the photo's own.
+      expect(sent.filter((batch) => batch.some((item) => typeof item !== 'string')).at(-1)?.find((item) => typeof item !== 'string')).toMatchObject({ image: media.path });
     } finally {
       store.close();
     }
@@ -1062,6 +1063,8 @@ describe('a prepared picture through runner, sink and store', () => {
       DROP INDEX idx_connector_store_chunks_media;
       ALTER TABLE chunks DROP COLUMN media_path;
       ALTER TABLE chunks DROP COLUMN media_sha256;
+      DROP INDEX idx_connector_store_media_judgments_unapplied;
+      DROP TABLE media_judgments;
       UPDATE schema_version SET version = 12 WHERE store_id = 'connector-store';
     `);
     db.close();
@@ -1070,7 +1073,7 @@ describe('a prepared picture through runner, sink and store', () => {
     const check = new Database(dbPath, { readonly: true });
     try {
       const version = check.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get() as { version: number };
-      expect(version.version).toBe(13);
+      expect(version.version).toBe(14);
       const columns = (check.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
       expect(columns).toContain('media_path');
       expect(columns).toContain('media_sha256');
