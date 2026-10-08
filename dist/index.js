@@ -12146,20 +12146,42 @@ function createNativeProcessService(options) {
       launch(lifetime).catch(async (error) => {
         if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime))
           return;
-        let stuck = false;
-        try {
-          stuck = await stopChild(lifetime) === "unconfirmed";
-        } catch {
-          stuck = true;
-        }
-        if (stuck) {
-          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
-        }
+        if (!await stopFailedStart(lifetime))
+          return;
         reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
         scheduleRestart(lifetime);
       });
     }, delay);
     lifetime.restartTimer.unref?.();
+  };
+  const stopFailedStart = async (lifetime) => {
+    let waitingReported = false;
+    for (let attempt = 0;; attempt += 1) {
+      const child = lifetime.child;
+      try {
+        if (await stopChild(lifetime) === "unconfirmed") {
+          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
+        }
+        return isCurrent(lifetime);
+      } catch {}
+      if (!isCurrent(lifetime))
+        return false;
+      if (!child || childExited(child)) {
+        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
+        return true;
+      }
+      if (!waitingReported) {
+        waitingReported = true;
+        reportStuckDescendants(lifetime, `Olympus ${options.label} could not be stopped after a failed start; waiting for it to exit before starting another.`);
+      }
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      const index = Math.min(attempt, Math.max(restartDelaysMs.length - 1, 0));
+      await waitForChildExit(child, restartDelaysMs[index] ?? 30000);
+      if (!isCurrent(lifetime))
+        return false;
+    }
   };
   const completeCleanExit = (lifetime, child) => {
     return stopChild(lifetime, child).then((result) => {
@@ -12393,8 +12415,7 @@ async function terminateChild(lifetime, graceMs, settleMs, expectedChild) {
   lifetime.cleanupPromise = cleanup;
   try {
     const result = await cleanup;
-    if (result === "stopped")
-      notifyChildObserver("stopped", lifetime.serviceId, child.pid);
+    notifyChildObserver("stopped", lifetime.serviceId, child.pid);
     if (lifetime.child === child)
       lifetime.child = undefined;
     return result;
@@ -14580,6 +14601,7 @@ var SERVICE_LABEL = "worker";
 var READINESS_PROBE_TIMEOUT_MS = 1000;
 var ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250;
 var DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4;
+var DEFAULT_WORKER_STABLE_UPTIME_MS = 30000;
 var NATIVE_CAPTURE_OWNER_ENV_NAMES = {
   telegram: "OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER",
   whatsapp: "OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER"
@@ -14611,6 +14633,7 @@ function createNativeWorkerService(options) {
     ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
     ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
     defaultStartupTimeoutMs: DEFAULT_WORKER_STARTUP_TIMEOUT_MS,
+    stableUptimeMs: options.stableUptimeMs ?? DEFAULT_WORKER_STABLE_UPTIME_MS,
     prepareStart: async (input) => {
       invalidate();
       const generation = proofGeneration;

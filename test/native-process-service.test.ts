@@ -11,6 +11,7 @@
  * treated as a cleanup failure that skipped the restart.
  */
 import { afterEach, expect, test } from 'bun:test';
+import { EventEmitter } from 'node:events';
 import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -237,8 +238,9 @@ test('a group that truly cannot be stopped gets the forced kill, a loud report, 
       'Olympus fixture is starting.',
       'clear',
     ]);
-    // An unconfirmed group stays in the host's record for its next sweep.
-    expect(stopped).not.toContain(run.spawned[0]!.pid!);
+    // The record is retired either way: the host's next-start sweep cannot
+    // act on a group whose leader is gone, so keeping it would promise nothing.
+    expect(stopped).toContain(run.spawned[0]!.pid!);
   } finally {
     kill.restore();
     await run.service.stop();
@@ -261,12 +263,15 @@ test('EPERM while the child itself is alive still fails the stop and keeps custo
 }, 15_000);
 
 /**
- * The real kernel, no interposer: the leader exits 75 and leaves only a zombie
- * in its group (its parent moved to another group and has not reaped it yet).
- * macOS answers EPERM for that group; the supervisor must still replace the
- * child. Elsewhere the kernel signals zombies and this passes trivially.
+ * The real kernel, no stubbed answers: the leader exits 75 and leaves only a
+ * zombie in its group (its parent moved to another group and has not reaped
+ * it yet). macOS answers EPERM for that group, which is the incident; the
+ * supervisor must still replace the child. Linux signals zombies, so it never
+ * produces that EPERM and this test is skipped there rather than passing
+ * without covering anything.
  */
-test.if(Bun.which('perl') !== null)('a self-restart that leaves only a zombie in its group is replaced (real kernel)', async () => {
+const darwinWithPerl = process.platform === 'darwin' && Bun.which('perl') !== null;
+test.skipIf(!darwinWithPerl)('macOS only (Linux never answers EPERM for a zombie group): a self-restart that leaves only a zombie in its group is replaced (real kernel)', async () => {
   const zombieLeader = `
 my $c = fork();
 if ($c == 0) {
@@ -281,9 +286,27 @@ select(undef, undef, undef, 0.4);
 exit 75;
 `;
   const run = harness((launch) => (launch === 0 ? { command: 'perl', args: ['-e', zombieLeader] } : STAY_ALIVE));
+  // Pass every call through to the real kernel; only record what it answered.
+  const realKill = process.kill;
+  const answers: string[] = [];
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    const first = run.spawned[0];
+    if (!first?.pid || pid !== -first.pid) return realKill(pid, signal);
+    try {
+      const result = realKill(pid, signal);
+      answers.push('ok');
+      return result;
+    } catch (error) {
+      answers.push(String((error as NodeJS.ErrnoException).code));
+      throw error;
+    }
+  }) as typeof process.kill;
+  cleanups.push(() => { process.kill = realKill; });
   try {
     await run.service.start(run.context);
     await waitUntil(() => readyCount(run) === 2, 'the replacement child to become ready');
+    // The kernel really answered EPERM: this is the incident, not a stub.
+    expect(answers).toContain('EPERM');
     expect(run.spawned).toHaveLength(2);
     expect(run.health.slice(0, 3)).toEqual([
       'Olympus fixture is starting.',
@@ -292,6 +315,103 @@ exit 75;
     ]);
     expect(run.health.slice(-2)).toEqual(['Olympus fixture is starting.', 'clear']);
   } finally {
+    process.kill = realKill;
     await run.service.stop();
+  }
+}, 15_000);
+
+interface SyntheticChild extends EventEmitter {
+  pid: number;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+  directKills: string[];
+  kill(signal?: NodeJS.Signals): boolean;
+  exitNow(signal: NodeJS.Signals): void;
+}
+
+test('a failed relaunch whose child is alive, unready and refuses group signals is never spawned over: the next start waits for its exit', async () => {
+  const children: SyntheticChild[] = [];
+  const health: string[] = [];
+  const warnings: string[] = [];
+  let launches = 0;
+  const makeChild = (): SyntheticChild => {
+    const child: SyntheticChild = Object.assign(new EventEmitter(), {
+      pid: 980_000 + children.length,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      directKills: [] as string[],
+      kill(signal?: NodeJS.Signals) { child.directKills.push(signal ?? 'SIGTERM'); return true; },
+      exitNow(signal: NodeJS.Signals) {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        child.signalCode = signal;
+        child.emit('exit', null, signal);
+      },
+    }) as SyntheticChild;
+    children.push(child);
+    return child;
+  };
+  // Child 0 starts ready and then crashes, so the relaunch path runs. Child 1
+  // (the failed relaunch) never becomes ready and its group answers EPERM
+  // while it lives; its direct SIGKILL is recorded but does nothing until the
+  // test lets it exit. Later children behave.
+  const realKill = process.kill;
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    const child = children.find((entry) => entry.pid === -pid);
+    if (!child) return realKill(pid, signal);
+    const index = children.indexOf(child);
+    if (index === 1 && child.exitCode === null && child.signalCode === null) {
+      throw Object.assign(new Error('synthetic EPERM'), { code: 'EPERM' });
+    }
+    if (child.exitCode !== null || child.signalCode !== null) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    if (signal !== 0) setTimeout(() => child.exitNow(signal as NodeJS.Signals), 0);
+    return true;
+  }) as typeof process.kill;
+  cleanups.push(() => { process.kill = realKill; });
+  const service = createNativeProcessService({
+    id: 'fixture',
+    label: 'fixture',
+    initialConfig: {},
+    reload: { configPrefixes: [] },
+    readinessPollMs: 10,
+    stopGraceMs: 50,
+    restartDelaysMs: [20, 40],
+    spawn: (() => makeChild()) as unknown as typeof spawnProcess,
+    async prepareStart() {
+      const launch = launches;
+      launches += 1;
+      return {
+        command: '/synthetic/unused',
+        args: [],
+        env: {},
+        startupTimeoutMs: launch === 1 ? 150 : 2_000,
+        endpointOccupied: false,
+        readinessProbe: async () => launch !== 1,
+      };
+    },
+  });
+  try {
+    await service.start({
+      logger: { warn: (message) => { warnings.push(message); } },
+      serviceHealth: { reportFailure: (error) => { health.push(error.message); }, clearFailure: () => { health.push('clear'); } },
+    });
+    expect(children).toHaveLength(1);
+    children[0]!.exitNow('SIGSEGV');
+    await waitUntil(() => children.length === 2, 'the relaunch');
+    const waiting = 'Olympus fixture could not be stopped after a failed start; waiting for it to exit before starting another.';
+    await waitUntil(() => warnings.includes(waiting), 'the failed relaunch to be reported');
+    // Well past several backoff rounds: still exactly one live child, killed
+    // directly, and no second spawn over it.
+    await Bun.sleep(400);
+    expect(children).toHaveLength(2);
+    expect(children[1]!.directKills.filter((signal) => signal === 'SIGKILL').length).toBeGreaterThan(1);
+    expect(warnings.filter((message) => message === waiting)).toHaveLength(1);
+    // Once it exits, the next start follows.
+    children[1]!.exitNow('SIGKILL');
+    await waitUntil(() => children.length === 3 && health.at(-1) === 'clear', 'the replacement after the exit');
+    expect(health).toContain('Olympus fixture failed to become ready.');
+  } finally {
+    for (const child of children) child.exitNow('SIGKILL');
+    await service.stop();
+    process.kill = realKill;
   }
 }, 15_000);

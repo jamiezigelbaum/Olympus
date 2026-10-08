@@ -238,7 +238,13 @@ class NativeProcessReportedStartError extends Error {}
  *   self-restart exit such as 75) is always replaced unless completion
  *   semantics apply. Descendant cleanup that fails or stays unconfirmed is
  *   reported, and the replacement is still scheduled: the supervisor never
- *   stays alive with no child;
+ *   stays alive with no child. "Restart anyway" needs the previous direct
+ *   child's exit confirmed: a failed start whose child is alive and refuses
+ *   group signals is killed directly and retried on the backoff ladder, and
+ *   no second child is spawned until it has exited;
+ * - an unconfirmed group is not swept later: the engine host's next-start
+ *   sweep needs the recorded leader, which is gone. A member we may not
+ *   signal can outlive the group until it exits or the machine restarts;
  * - failure reporting is categorical and never forwards raw stderr or spawn
  *   errors, which can carry arguments and environment detail.
  */
@@ -311,21 +317,56 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       if (!isCurrent(lifetime)) return;
       void launch(lifetime).catch(async (error) => {
         if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime)) return;
-        let stuck = false;
-        try {
-          stuck = await stopChild(lifetime) === 'unconfirmed';
-        } catch {
-          stuck = true;
-        }
-        if (stuck) {
-          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
-        }
+        // Never spawn over a failed start's child that is still alive: wait
+        // until its exit is confirmed, however long the cleanup takes.
+        if (!await stopFailedStart(lifetime)) return;
         reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
-        // Retrying is mandatory: a cleanup problem never ends supervision.
         scheduleRestart(lifetime);
       });
     }, delay);
     lifetime.restartTimer.unref?.();
+  };
+
+  /**
+   * Clean up after a failed restart before another launch. Resolves `true`
+   * once the failed child's own exit is confirmed (its group then either
+   * stopped or reported as unconfirmed), and `false` if the lifetime was
+   * retired meanwhile; stop() then keeps custody of the child. While the
+   * child is alive and its group refuses signals, the child itself is killed
+   * directly and cleanup is retried on the restart backoff ladder. A second
+   * child is never spawned over a live one.
+   */
+  const stopFailedStart = async (lifetime: ServiceLifetime<TSettings>): Promise<boolean> => {
+    let waitingReported = false;
+    for (let attempt = 0; ; attempt += 1) {
+      const child = lifetime.child;
+      try {
+        if (await stopChild(lifetime) === 'unconfirmed') {
+          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
+        }
+        return isCurrent(lifetime);
+      } catch {
+        // Only a live child whose group refused the signal gets here.
+      }
+      if (!isCurrent(lifetime)) return false;
+      if (!child || childExited(child)) {
+        // The failed child is gone; only an unexpected signal error remains.
+        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
+        return true;
+      }
+      if (!waitingReported) {
+        waitingReported = true;
+        reportStuckDescendants(lifetime, `Olympus ${options.label} could not be stopped after a failed start; waiting for it to exit before starting another.`);
+      }
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // The group retry below is still bounded.
+      }
+      const index = Math.min(attempt, Math.max(restartDelaysMs.length - 1, 0));
+      await waitForChildExit(child, restartDelaysMs[index] ?? 30_000);
+      if (!isCurrent(lifetime)) return false;
+    }
   };
 
   /**
@@ -600,9 +641,12 @@ async function terminateChild<TSettings extends NativeProcessStartSettings>(
   lifetime.cleanupPromise = cleanup;
   try {
     const result = await cleanup;
-    // An unconfirmed group stays in the engine host's children record, so the
-    // next host start still sweeps it.
-    if (result === 'stopped') notifyChildObserver('stopped', lifetime.serviceId, child.pid);
+    // Both results retire the record. An unconfirmed group has lost its
+    // leader, and the host's next-start sweep only kills a group whose
+    // recorded leader is still running, so keeping the record would promise a
+    // cleanup that cannot happen. Residual: a member we may not signal can
+    // outlive the group until it exits by itself or the machine restarts.
+    notifyChildObserver('stopped', lifetime.serviceId, child.pid);
     if (lifetime.child === child) lifetime.child = undefined;
     return result;
   } finally {
