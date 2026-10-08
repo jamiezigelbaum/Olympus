@@ -380,7 +380,7 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
   }
   if (action === 'retry_model') {
     const record = exactRecord(outer, ['action', 'model']);
-    return { action, model: enumValue(record.model, ['embedding', 'answers'] as const, 'model') };
+    return { action, model: enumValue(record.model, ['embedding', 'answers', 'transcription'] as const, 'model') };
   }
   if (action === 'browse_folder_scope') {
     const record = exactRecord(outer, ['action', 'source_id', 'parent_key', 'cursor']);

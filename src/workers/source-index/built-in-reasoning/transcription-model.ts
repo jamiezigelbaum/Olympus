@@ -5,7 +5,9 @@
 // llama.cpp runtime the reasoning model uses, installed once. Nothing here
 // sends audio anywhere; this module only fetches the pinned model files.
 
+import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
 import {
   currentPlatform,
   installPinnedModel,
@@ -96,6 +98,35 @@ export function readBuiltInTranscriptionStatus(
   }
 }
 
+/**
+ * The status file and how it read: `missing` (never written: no install was
+ * ever started here), `current` (this model's file), or `unreadable` (not
+ * JSON, or written for another model, such as an older pinned version).
+ */
+export interface BuiltInTranscriptionStatusRead {
+  file: 'missing' | 'current' | 'unreadable';
+  status: BuiltInReasoningStatus;
+}
+
+export function readBuiltInTranscriptionStatusFile(
+  env: Record<string, string | undefined> = process.env,
+  model: Pick<BuiltInTranscriptionModelSpec, 'modelId'> = QWEN3_ASR_06B,
+): BuiltInTranscriptionStatusRead {
+  const status = readBuiltInTranscriptionStatus(env, model);
+  let raw: string;
+  try {
+    raw = readFileSync(builtInTranscriptionLayout(model, env).statusPath, 'utf8');
+  } catch (error) {
+    return { file: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable', status };
+  }
+  try {
+    const parsed = JSON.parse(raw) as { modelId?: unknown };
+    return { file: parsed && typeof parsed === 'object' && parsed.modelId === model.modelId ? 'current' : 'unreadable', status };
+  } catch {
+    return { file: 'unreadable', status };
+  }
+}
+
 /** Marks the transcription model loading, ready or failed as its server starts. */
 export function reportBuiltInTranscriptionState(
   env: Record<string, string | undefined>,
@@ -129,4 +160,48 @@ export function builtInTranscriptionEnabled(
   if (!runtimeArchiveFor(platform)) return false;
   if (raw === 'on' || raw === 'true' || raw === '1' || raw === 'yes') return true;
   return platform === 'darwin-arm64';
+}
+
+/**
+ * What the dashboard shows for the built-in transcription model. Its install
+ * starts only when the owner's chosen sources contain audio, so:
+ *
+ * - `not_needed`: no install was ever started here (no status file);
+ * - `not_downloaded`: the status file cannot be read, or belongs to another
+ *   (older) model, so nothing says this model is on disk;
+ * - `interrupted`: the file says downloading or checking but this process is
+ *   not installing (a crash or restart mid-download);
+ * - `downloading` / `verifying`: this process is installing it now;
+ * - `failed`: its download failed (with the reason);
+ * - `load_failed`: it is downloaded but its server would not start;
+ * - `ready`: downloaded (a server that is starting counts as ready).
+ */
+export interface BuiltInTranscriptionDashboardState {
+  state: 'not_needed' | 'not_downloaded' | 'interrupted' | 'downloading' | 'verifying' | 'ready' | 'failed' | 'load_failed';
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  failedReason?: ModelInstallFailedReason;
+}
+
+export function builtInTranscriptionDashboardState(
+  read: BuiltInTranscriptionStatusRead,
+  live: { installing: boolean } = { installing: false },
+): BuiltInTranscriptionDashboardState {
+  if (read.file === 'missing') return { state: 'not_needed' };
+  if (read.file === 'unreadable') return { state: 'not_downloaded' };
+  const status = read.status;
+  if (status.state === 'not_started') return { state: 'not_downloaded' };
+  if (status.state === 'ready' || status.state === 'loading') return { state: 'ready' };
+  if (status.state === 'failed') {
+    return status.failure?.reason === 'runtime_load_failed'
+      ? { state: 'load_failed' }
+      : { state: 'failed', failedReason: modelInstallFailedReason(status.failure) };
+  }
+  if (!live.installing) return { state: 'interrupted' };
+  return {
+    state: status.state === 'verifying' ? 'verifying' : 'downloading',
+    percent: status.percent,
+    ...(status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {}),
+  };
 }

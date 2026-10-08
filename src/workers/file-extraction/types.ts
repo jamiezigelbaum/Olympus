@@ -538,6 +538,18 @@ export interface BuiltInTranscriptionEngine {
    * ready, so the wiring layer can wake the work that waited for it.
    */
   onReady?(listener: () => void): void;
+  /**
+   * The owner asked for the model now (the dashboard's Download now): start
+   * the install whether or not any audio waits for it. The memory and disk
+   * gates still apply; a failed install's backoff is skipped once per failure.
+   */
+  downloadNow?(): 'ready' | 'pending' | 'loading' | 'unavailable';
+  /**
+   * Whether this process is downloading or checking the model right now. A
+   * status file that says "downloading" while this is false was left by a
+   * process that stopped mid-download.
+   */
+  installing?(): boolean;
 }
 
 // --- Seam 3: the sink ------------------------------------------------------

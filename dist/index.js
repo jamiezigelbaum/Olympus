@@ -7737,7 +7737,13 @@ var init_vocabulary = __esm(() => {
     modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
     modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
     modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
-    modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+    modelNames: { ...DASHBOARD_CHATGPT_PAGE_COPY.modelNames, transcription: "the transcription model" },
+    modelTranscription: "Transcription",
+    modelNotNeededNoAudio: "Not needed: no audio in your chosen folders",
+    modelDownloadNow: "Download now",
+    modelNotDownloaded: "Not downloaded",
+    modelDownloadInterrupted: "Download stopped before it finished",
+    modelCouldNotStart: "Couldn't start {model}",
     modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
     modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
     modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
@@ -21402,7 +21408,7 @@ function parseDashboardControlParams(value) {
   }
   if (action === "retry_model") {
     const record = exactRecord(outer, ["action", "model"]);
-    return { action, model: enumValue(record.model, ["embedding", "answers"], "model") };
+    return { action, model: enumValue(record.model, ["embedding", "answers", "transcription"], "model") };
   }
   if (action === "browse_folder_scope") {
     const record = exactRecord(outer, ["action", "source_id", "parent_key", "cursor"]);
