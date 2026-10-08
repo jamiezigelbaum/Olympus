@@ -70,7 +70,7 @@ card.
       question usually costs a few cents with up to $6 held while it runs;
       adding and taking out money each have a network fee; unused money can
       be claimed by the operator after about 30 days (the card shows the
-      date); zkAPI is new, so add only what you are comfortable losing.
+      estimated date when Olympus knows it); zkAPI is new, so add only what you are comfortable losing.
 3. **Everyday panel behaviour.** The private answer panel shows "Asking
    anonymously…", then "Anonymous answer · zkAPI" with "Sent without names:
    <the exact question>", shown every time, for trust.

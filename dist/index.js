@@ -3763,7 +3763,7 @@ var init_zkapi_consult_settings = __esm(() => {
     },
     {
       id: "expiry",
-      statement: "Money left unused for about 30 days can be claimed by the zkAPI operator. Olympus shows the date on this page."
+      statement: "Money left unused for about 30 days can be claimed by the zkAPI operator. The estimated date is shown on this page when Olympus knows it."
     },
     {
       id: "new_service",

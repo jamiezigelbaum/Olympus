@@ -65,9 +65,9 @@ export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
  * set changes, which voids every earlier acknowledgement; the transport sends
  * nothing until the current set is accepted (zkapiMoneyStatus).
  *
- * `expiry` says "Olympus shows the date on this page": Olympus computes the
- * estimated date and shows it on the card (and in doctor), but sends no
- * reminder of its own, so the statement does not promise one.
+ * `expiry` says the estimated date is shown on this page when Olympus knows
+ * it (from the confirmed funding date; otherwise unknown or past). Olympus
+ * sends no reminder of its own, so the statement does not promise one.
  */
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 5;
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
@@ -89,7 +89,7 @@ export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   },
   {
     id: 'expiry',
-    statement: 'Money left unused for about 30 days can be claimed by the zkAPI operator. Olympus shows the date on this page.',
+    statement: 'Money left unused for about 30 days can be claimed by the zkAPI operator. The estimated date is shown on this page when Olympus knows it.',
   },
   {
     id: 'new_service',

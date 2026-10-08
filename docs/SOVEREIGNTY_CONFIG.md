@@ -573,7 +573,7 @@ earlier acknowledgement must be given again, and nothing is sent until it is):
 - Adding money and taking it out are Ethereum transactions, each with its own
   network fee.
 - Money left unused for about 30 days can be claimed by the zkAPI operator.
-  Olympus shows the date on this page.
+  The estimated date is shown on this page when Olympus knows it.
 - zkAPI is new. Your balance is kept in files on this Mac, and its operator
   can pause deposits and withdrawals. Only add what you're comfortable losing.
 
