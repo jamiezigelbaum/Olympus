@@ -22260,10 +22260,11 @@ var init_local_index = __esm(() => {
           -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
             AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
-          -- An ordinary verdict that no longer holds: the items it let out of
-          -- Private are re-decided, whatever the writer thought.
-          WHEN media_judgments.verdict = 'ordinary' THEN 0
-          ELSE excluded.tier_applied
+          -- A changed judgment (an ordinary verdict that no longer holds, or
+          -- a sensitive one a newer judge could not make) is re-decided by the
+          -- sweep, whatever the writer thought, so every item's tier and its
+          -- reason follow the judgment the store now holds.
+          ELSE 0
         END
     `).run(mediaSha256, judgment.verdict, judgment.category ?? null, judgment.margin ?? null, judgment.scores ? JSON.stringify(judgment.scores) : null, judgment.judgeId, judgment.reason ?? null, this.now().toISOString(), applied ? 1 : 0, judgment.verdict === "unjudged" ? 1 : 0);
     }
@@ -24147,6 +24148,7 @@ var init_local_index = __esm(() => {
       let embedded = priorCounts?.chunksEmbedded ?? 0;
       let staleSkipped = heldPictures;
       const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
+      const judgedThisPass = new Set;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
@@ -24191,13 +24193,13 @@ var init_local_index = __esm(() => {
             const returned = await judging.embedWithImageVectors(inputsFor(batch));
             vectors = returned.vectors;
             judgedBatch = new Map;
-            const wanted = batch.flatMap((row, index) => row.media_sha256 && returned.imageVectors[index] ? [index] : []);
+            const currentJudge = mediaJudgeId(judging);
+            const wanted = batch.flatMap((row, index) => row.media_sha256 && returned.imageVectors[index] && !this.mediaJudgmentSettled(row.media_sha256, currentJudge) ? [index] : []);
             if (wanted.length > 0) {
               try {
                 const judgments = await judgeReturnedImageVectors(judging, wanted.map((index) => returned.imageVectors[index]));
                 wanted.forEach((index, row) => {
-                  if (judgments[row].verdict !== "unjudged")
-                    judgedBatch.set(batch[index].chunk_pk, judgments[row]);
+                  judgedBatch.set(batch[index].chunk_pk, judgments[row]);
                 });
               } catch {}
             }
@@ -24259,8 +24261,10 @@ var init_local_index = __esm(() => {
             if (write.changes > 0) {
               written += 1;
               const judgment = judgedBatch?.get(row.chunk_pk);
-              if (judgment && row.media_sha256)
-                this.writeMediaJudgment(row.media_sha256, judgment, false);
+              if (judgment && row.media_sha256 && !judgedThisPass.has(row.media_sha256)) {
+                judgedThisPass.add(row.media_sha256);
+                this.writeMediaJudgment(row.media_sha256, judgment, judgment.verdict === "unjudged");
+              }
             }
           }
           if (journalId) {

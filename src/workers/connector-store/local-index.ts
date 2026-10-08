@@ -5203,8 +5203,9 @@ export class LocalConnectorStore {
    * re-decide for it (a judgment that travelled with a copy, or one recorded
    * where the decision was already made with it). An unjudged result counts
    * one more try by the same judge (the first by a new one); a verdict clears
-   * the count. A changed verdict goes to the front of the sweep's queue, and
-   * one that replaces an ordinary verdict is always left for the sweep.
+   * the count. A changed verdict goes to the front of the sweep's queue and
+   * is always left for the sweep; a first judgment is left for it unless
+   * `applied`.
    */
   private writeMediaJudgment(mediaSha256: string, judgment: MediaJudgment, applied: boolean): void {
     if (!this.mediaJudgmentsPresent) return;
@@ -5228,10 +5229,11 @@ export class LocalConnectorStore {
           -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
             AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
-          -- An ordinary verdict that no longer holds: the items it let out of
-          -- Private are re-decided, whatever the writer thought.
-          WHEN media_judgments.verdict = 'ordinary' THEN 0
-          ELSE excluded.tier_applied
+          -- A changed judgment (an ordinary verdict that no longer holds, or
+          -- a sensitive one a newer judge could not make) is re-decided by the
+          -- sweep, whatever the writer thought, so every item's tier and its
+          -- reason follow the judgment the store now holds.
+          ELSE 0
         END
     `).run(
       mediaSha256,
@@ -8475,6 +8477,9 @@ export class LocalConnectorStore {
     // pictures can judge them; with any other, every picture stays unjudged
     // (and its item Private).
     const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
+    // One judgment per picture per pass: several items carrying the same
+    // picture are one try, not several.
+    const judgedThisPass = new Set<string>();
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
@@ -8542,13 +8547,18 @@ export class LocalConnectorStore {
           const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
           vectors = returned.vectors;
           judgedBatch = new Map();
-          const wanted = batch.flatMap((row, index) => (row.media_sha256 && returned.imageVectors[index] ? [index] : []));
+          // Only pictures that need judging now: a settled verdict, or an
+          // unjudged one waiting out its back-off, is left as it is.
+          const currentJudge = mediaJudgeId(judging!);
+          const wanted = batch.flatMap((row, index) => (row.media_sha256 && returned.imageVectors[index]
+            && !this.mediaJudgmentSettled(row.media_sha256, currentJudge) ? [index] : []));
           if (wanted.length > 0) {
             try {
               const judgments = await judgeReturnedImageVectors(judging!, wanted.map((index) => returned.imageVectors[index]));
               wanted.forEach((index, row) => {
-                // An unjudged picture here is judged again on its own below.
-                if (judgments[row]!.verdict !== 'unjudged') judgedBatch!.set(batch[index]!.chunk_pk, judgments[row]!);
+                // Recorded whatever the verdict: an unjudged one is the
+                // picture's first try, and waits out its back-off.
+                judgedBatch!.set(batch[index]!.chunk_pk, judgments[row]!);
               });
             } catch {
               // The descriptions could not be embedded: judged on a later pass.
@@ -8626,7 +8636,12 @@ export class LocalConnectorStore {
           if (write.changes > 0) {
             written += 1;
             const judgment = judgedBatch?.get(row.chunk_pk);
-            if (judgment && row.media_sha256) this.writeMediaJudgment(row.media_sha256, judgment, false);
+            // Unjudged: nothing for the tier set to change unless it replaces
+            // another verdict (the upsert leaves that for the sweep).
+            if (judgment && row.media_sha256 && !judgedThisPass.has(row.media_sha256)) {
+              judgedThisPass.add(row.media_sha256);
+              this.writeMediaJudgment(row.media_sha256, judgment, judgment.verdict === 'unjudged');
+            }
           }
         }
         if (journalId) {
