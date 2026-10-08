@@ -425,7 +425,7 @@ describe('rule 6: the Privacy row', () => {
   test('Setup shows the description and rule count with Edit, or the one ask to set it up', () => {
     const configured = page('review', 'setup');
     const row = configured.slice(configured.indexOf('data-privacy-row'));
-    expect(row).toContain('Your description · 3 always-private rules');
+    expect(row).toContain('Uses your description and 3 always-private rules.');
     expect(row).toContain('12 items waiting to be checked');
     expect(row).toContain('<a class="btn" href="/dashboard?privacy">Edit</a>');
     const unset = page('review-unconfigured', 'setup');
