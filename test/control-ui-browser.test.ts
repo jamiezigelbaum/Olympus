@@ -85,6 +85,43 @@ function oauthResult(url: string): OlympusDashboardControlResult {
   return { status: 200, body: { ok: true, authorization_url: url } };
 }
 
+describe('Download now for the transcription model', () => {
+  test('sends the transcription model, says Starting… while it waits, then the server\'s words or a model-aware fallback', async () => {
+    for (const body of [{ ok: true, status_message: 'Already downloaded.' }, { ok: true }] as const) {
+      const root = document.createElement('div');
+      root.innerHTML = '<form data-model-retry="transcription"><button type="submit">Download now</button>'
+        + '<span data-action-message></span></form>';
+      document.body.append(root);
+      const sent: unknown[] = [];
+      let pending = '';
+      const controller = mountDashboardController({
+        root,
+        transport: {
+          control: async (params) => {
+            sent.push(params);
+            pending = root.querySelector('[data-action-message]')?.textContent ?? '';
+            return { status: 200, body };
+          },
+        },
+        navigate() {},
+        async refresh() { return undefined; },
+        returnUrl: 'https://gateway.test/?view=setup',
+        canWrite: true,
+        signal: new AbortController().signal,
+        pollIntervalMs: 0,
+      });
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await happyWindow.happyDOM.waitUntilComplete();
+      expect(sent).toEqual([{ action: 'retry_model', model: 'transcription' }]);
+      expect(pending).toBe('Starting…');
+      expect(root.querySelector('[data-action-message]')?.textContent)
+        .toBe(body.status_message ?? 'Started. This row updates as it goes.');
+      controller.dispose();
+      root.remove();
+    }
+  });
+});
+
 describe('OAuth browser handoff', () => {
   for (const mode of ['publisher', 'byo', 'pending', 'read-only'] as const) {
     test(`Setup Connect opens ${mode} sheet and starts only ready publisher OAuth`, async () => {

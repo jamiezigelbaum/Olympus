@@ -543,7 +543,13 @@ export interface BuiltInTranscriptionEngine {
    * the install whether or not any audio waits for it. The memory and disk
    * gates still apply; a failed install's backoff is skipped once per failure.
    */
-  downloadNow?(): 'ready' | 'pending' | 'unavailable';
+  downloadNow?(): 'ready' | 'pending' | 'loading' | 'unavailable';
+  /**
+   * Whether this process is downloading or checking the model right now. A
+   * status file that says "downloading" while this is false was left by a
+   * process that stopped mid-download.
+   */
+  installing?(): boolean;
 }
 
 // --- Seam 3: the sink ------------------------------------------------------

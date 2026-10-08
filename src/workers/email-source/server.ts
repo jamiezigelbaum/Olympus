@@ -73,7 +73,7 @@ import { createAnalyst } from '../../core/analyst.ts';
 import {
   builtInTranscriptionDashboardState,
   builtInTranscriptionEnabled,
-  readBuiltInTranscriptionStatus,
+  readBuiltInTranscriptionStatusFile,
 } from '../source-index/built-in-reasoning/transcription-model.ts';
 import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscriptionAtBoot } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
@@ -4713,7 +4713,10 @@ export async function main(): Promise<void> {
   const dashboardTranscriptionState = () => {
     if (process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || !builtInTranscriptionEnabled(process.env)) return undefined;
     try {
-      return builtInTranscriptionDashboardState(readBuiltInTranscriptionStatus(process.env));
+      const engine = sharedBuiltInTranscriber(process.env);
+      return builtInTranscriptionDashboardState(readBuiltInTranscriptionStatusFile(process.env), {
+        installing: engine?.installing?.() === true,
+      });
     } catch {
       return undefined;
     }

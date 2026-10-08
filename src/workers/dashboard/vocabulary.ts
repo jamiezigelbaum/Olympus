@@ -1787,6 +1787,12 @@ export const DASHBOARD_LOCAL_COPY = {
   modelNotNeededNoAudio: 'Not needed: no audio in your chosen folders',
   /** Starts the transcription model's download ahead of any audio, or again after a failure. */
   modelDownloadNow: 'Download now',
+  /** No readable record that this model is on disk (an unreadable or older status file). */
+  modelNotDownloaded: 'Not downloaded',
+  /** A download that stopped part way (the engine restarted mid-download). */
+  modelDownloadInterrupted: 'Download stopped before it finished',
+  /** Downloaded, but it would not start. */
+  modelCouldNotStart: 'Couldn\'t start {model}',
   modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
   modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
   modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,

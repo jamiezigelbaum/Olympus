@@ -14,7 +14,12 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createBuiltInTranscriber } from '../src/workers/file-extraction/extractors/built-in-transcriber.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { BuiltInReasoningInstallError } from '../src/workers/source-index/built-in-reasoning/install.ts';
-import type { BuiltInTranscriptionDashboardState } from '../src/workers/source-index/built-in-reasoning/transcription-model.ts';
+import {
+  readBuiltInTranscriptionStatus,
+  reportBuiltInTranscriptionState,
+  type BuiltInTranscriptionDashboardState,
+} from '../src/workers/source-index/built-in-reasoning/transcription-model.ts';
+import { QWEN3_ASR_06B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 
 function models(transcription: BuiltInTranscriptionDashboardState, controls = true): string {
   const view = buildDashboardPreviewView('review');
@@ -51,7 +56,7 @@ describe('the Models row offers Download now', () => {
 describe('the Download now route', () => {
   test('authorized: starts it, or answers a no-op when already downloaded; unauthorized: refused; not built in: 409', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-asr-download-route-'));
-    const outcomes: Array<'started' | 'ready' | 'unavailable'> = ['started', 'ready', 'unavailable'];
+    const outcomes: Array<'started' | 'loading' | 'ready' | 'unavailable'> = ['started', 'ready', 'loading', 'unavailable'];
     let calls = 0;
     const worker = createEmailSourceWorker({ sourceDashboard: {
       sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only')),
@@ -69,13 +74,16 @@ describe('the Download now route', () => {
       expect(calls).toBe(0);
       const started = await post();
       expect(started.status).toBe(200);
-      expect(await started.json()).toEqual({ ok: true, status_message: 'Downloading. This row updates as it goes.' });
+      expect(await started.json()).toEqual({ ok: true, status_message: 'Downloading the transcription model. This row updates as it goes.' });
       const ready = await post();
       expect(ready.status).toBe(200);
       expect(await ready.json()).toEqual({ ok: true, status_message: 'Already downloaded.' });
+      const loading = await post();
+      expect(loading.status).toBe(200);
+      expect(await loading.json()).toEqual({ ok: true, status_message: 'Starting the transcription model again. This row updates as it goes.' });
       const unavailable = await post();
       expect(unavailable.status).toBe(409);
-      expect(calls).toBe(3);
+      expect(calls).toBe(4);
     } finally {
       worker.close();
       rmSync(dir, { recursive: true, force: true });
@@ -103,6 +111,46 @@ describe('the engine\'s owner-requested download', () => {
     expect(attempts).toBe(1);
     const small = createBuiltInTranscriber({ env: env(), totalMemoryBytes: 4 * 1024 ** 3, install: async () => installed });
     expect(small.downloadNow?.()).toBe('unavailable');
+  });
+
+  test('installing() is true only while this process downloads or checks', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const engine = createBuiltInTranscriber({
+      env: env(), platform: 'darwin-arm64', totalMemoryBytes: 16 * 1024 ** 3,
+      install: async () => { await gate; return installed; },
+    });
+    expect(engine.installing?.()).toBe(false);
+    engine.downloadNow?.();
+    expect(engine.installing?.()).toBe(true);
+    finish();
+    await gate;
+    await settle();
+    expect(engine.installing?.()).toBe(false);
+  });
+
+  test('a model whose server would not start is started again by the click, not reported as downloaded', async () => {
+    const dirs = env();
+    let starts = 0;
+    const engine = createBuiltInTranscriber({
+      env: dirs, platform: 'darwin-arm64', totalMemoryBytes: 16 * 1024 ** 3,
+      install: async () => installed,
+      createServer: () => ({
+        pid: undefined,
+        async ensureRunning() { starts += 1; return { baseUrl: 'http://127.0.0.1:1', token: 't' }; },
+        touch() {},
+        async stop() {},
+      }),
+    });
+    engine.prepare();
+    await settle();
+    expect(engine.downloadNow?.()).toBe('ready');
+    expect(starts).toBe(0);
+    reportBuiltInTranscriptionState(dirs, QWEN3_ASR_06B, 'failed', { reason: 'runtime_load_failed', message: 'x' });
+    expect(engine.downloadNow?.()).toBe('loading');
+    await settle();
+    expect(starts).toBe(1);
+    expect(readBuiltInTranscriptionStatus(dirs).state).toBe('ready');
   });
 
   test('a click skips a failed install\'s backoff with one immediate attempt', async () => {

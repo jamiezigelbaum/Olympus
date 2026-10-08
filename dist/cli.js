@@ -52296,6 +52296,9 @@ var init_vocabulary = __esm(() => {
     modelTranscription: "Transcription",
     modelNotNeededNoAudio: "Not needed: no audio in your chosen folders",
     modelDownloadNow: "Download now",
+    modelNotDownloaded: "Not downloaded",
+    modelDownloadInterrupted: "Download stopped before it finished",
+    modelCouldNotStart: "Couldn't start {model}",
     modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
     modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
     modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
@@ -90672,6 +90675,7 @@ var init_server4 = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
+import { readFileSync as readFileSync44 } from "node:fs";
 import { isAbsolute as isAbsolute17, join as join75 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join75(olympusModelsDir(env), "built-in-transcription");
@@ -90710,6 +90714,21 @@ function readBuiltInTranscriptionStatus(env = process.env, model = QWEN3_ASR_06B
     return readPinnedModelStatus("", model.modelId, BUILT_IN_TRANSCRIPTION_NOUN);
   }
 }
+function readBuiltInTranscriptionStatusFile(env = process.env, model = QWEN3_ASR_06B) {
+  const status = readBuiltInTranscriptionStatus(env, model);
+  let raw;
+  try {
+    raw = readFileSync44(builtInTranscriptionLayout(model, env).statusPath, "utf8");
+  } catch (error2) {
+    return { file: error2.code === "ENOENT" ? "missing" : "unreadable", status };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return { file: parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? "current" : "unreadable", status };
+  } catch {
+    return { file: "unreadable", status };
+  }
+}
 function reportBuiltInTranscriptionState(env, model, state, failure2) {
   try {
     reportPinnedModelState({
@@ -90729,13 +90748,21 @@ function builtInTranscriptionEnabled(env = process.env, platform2 = currentPlatf
     return true;
   return platform2 === "darwin-arm64";
 }
-function builtInTranscriptionDashboardState(status) {
-  if (status.state === "not_started")
+function builtInTranscriptionDashboardState(read, live = { installing: false }) {
+  if (read.file === "missing")
     return { state: "not_needed" };
+  if (read.file === "unreadable")
+    return { state: "not_downloaded" };
+  const status = read.status;
+  if (status.state === "not_started")
+    return { state: "not_downloaded" };
   if (status.state === "ready" || status.state === "loading")
     return { state: "ready" };
-  if (status.state === "failed")
-    return { state: "failed", failedReason: modelInstallFailedReason(status.failure) };
+  if (status.state === "failed") {
+    return status.failure?.reason === "runtime_load_failed" ? { state: "load_failed" } : { state: "failed", failedReason: modelInstallFailedReason(status.failure) };
+  }
+  if (!live.installing)
+    return { state: "interrupted" };
   return {
     state: status.state === "verifying" ? "verifying" : "downloading",
     percent: status.percent,
@@ -91014,7 +91041,17 @@ function createBuiltInTranscriber(options = {}) {
         manualSkipFor = failedAt;
         failedAt = undefined;
       }
+      if (installed && readBuiltInTranscriptionStatus(env, model).failure?.reason === "runtime_load_failed") {
+        const paths = installed;
+        startServer(paths).then(({ handle }) => handle.touch(), () => {
+          return;
+        });
+        return "loading";
+      }
       return prepare();
+    },
+    installing() {
+      return installing !== undefined;
     },
     onReady(listener) {
       readyListeners.push(listener);
@@ -93830,7 +93867,7 @@ var init_analyst_openai = __esm(() => {
 import {
   existsSync as existsSync48,
   mkdirSync as mkdirSync40,
-  readFileSync as readFileSync44,
+  readFileSync as readFileSync45,
   renameSync as renameSync15,
   rmSync as rmSync16,
   writeFileSync as writeFileSync17
@@ -94015,7 +94052,7 @@ function readCatalogCache(path, type) {
     return;
   let payload;
   try {
-    payload = JSON.parse(readFileSync44(path, "utf8"));
+    payload = JSON.parse(readFileSync45(path, "utf8"));
   } catch {
     return;
   }
@@ -95036,7 +95073,7 @@ var init_answer_latency_log = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash53 } from "node:crypto";
-import { readFileSync as readFileSync45 } from "node:fs";
+import { readFileSync as readFileSync46 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir54 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
@@ -95203,7 +95240,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync45(trustPath, "utf8");
+        this.caPem = readFileSync46(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -95306,7 +95343,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url, init, timeoutMs, readFileSync45(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync46(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
 }
@@ -96321,7 +96358,10 @@ function mountDashboardController(options) {
     }
     applyWriteCapability();
   }
-  function pendingMessage(action) {
+  function pendingMessage(params) {
+    const action = params.action;
+    if (params.action === "retry_model" && params.model === "transcription")
+      return "Starting…";
     switch (action) {
       case "start_oauth":
         return "Connecting…";
@@ -96339,7 +96379,10 @@ function mountDashboardController(options) {
         return "Working…";
     }
   }
-  function successMessage(action) {
+  function successMessage(params) {
+    const action = params.action;
+    if (params.action === "retry_model" && params.model === "transcription")
+      return "Started. This row updates as it goes.";
     switch (action) {
       case "connect_api_key":
         return "Key accepted. This card updates when Olympus confirms the connection.";
@@ -96577,7 +96620,7 @@ function mountDashboardController(options) {
     }
     if (params.action === "start_oauth")
       clearAuthorizationFallback(form);
-    setFormPending(form, true, pendingMessage(params.action));
+    setFormPending(form, true, pendingMessage(params));
     let result;
     try {
       result = await options.transport.control(params);
@@ -96641,7 +96684,7 @@ function mountDashboardController(options) {
     }
     if (params.action === "cancel_oauth")
       awaitingAuthorizationReturn = false;
-    say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params.action) : unreleasedMessage(params.action));
+    say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params) : unreleasedMessage(params.action));
     await refreshNow(false, released);
   }
   function agentParams(form) {
@@ -103059,9 +103102,24 @@ function modelStateWord2(state) {
 }
 function transcriptionDownloadNow(states, options) {
   const state = states.transcription?.state;
-  if (state !== "not_needed" && state !== "failed")
+  const label = state === "load_failed" ? DASHBOARD_LOCAL_COPY.modelTryAgain : state === "not_needed" || state === "not_downloaded" || state === "interrupted" || state === "failed" ? DASHBOARD_LOCAL_COPY.modelDownloadNow : undefined;
+  if (!label)
     return "";
-  return ` ${actionButton(dashboardControlsAvailable(options) ? { label: DASHBOARD_LOCAL_COPY.modelDownloadNow, kind: "model_retry", source: "transcription" } : lockedAction(DASHBOARD_LOCAL_COPY.modelDownloadNow, options?.basePath))}`;
+  return ` ${actionButton(dashboardControlsAvailable(options) ? { label, kind: "model_retry", source: "transcription" } : lockedAction(label, options?.basePath))}`;
+}
+function transcriptionWords(transcription) {
+  switch (transcription.state) {
+    case "not_needed":
+      return DASHBOARD_LOCAL_COPY.modelNotNeededNoAudio;
+    case "not_downloaded":
+      return DASHBOARD_LOCAL_COPY.modelNotDownloaded;
+    case "interrupted":
+      return DASHBOARD_LOCAL_COPY.modelDownloadInterrupted;
+    case "load_failed":
+      return fill(DASHBOARD_LOCAL_COPY.modelCouldNotStart, { model: DASHBOARD_LOCAL_COPY.modelNames.transcription });
+    default:
+      return `${DASHBOARD_LOCAL_COPY.modelBuiltIn} · ${modelStateWord2(transcription.state)}`;
+  }
 }
 function modelInstallLines(states) {
   return [
@@ -103075,7 +103133,7 @@ function dashboardModelsSummary(states, view) {
   const kind = models.embedding.kind === "built_in" ? DASHBOARD_LOCAL_COPY.modelBuiltIn : DASHBOARD_LOCAL_COPY.modelCustom;
   const installs = modelInstallLines(states);
   let overall = DASHBOARD_LOCAL_COPY.modelReady;
-  if (installs.some((line) => line.state === "failed") || view.model_setup !== undefined && !view.model_setup.ready || models.embedding.state === "failed") {
+  if (installs.some((line) => line.state === "failed") || states.transcription?.state === "load_failed" || view.model_setup !== undefined && !view.model_setup.ready || models.embedding.state === "failed") {
     overall = DASHBOARD_LOCAL_COPY.modelNeedsYou;
   } else if (installs.length > 0) {
     overall = DASHBOARD_LOCAL_COPY.modelGettingReady;
@@ -103089,7 +103147,7 @@ function dashboardModelsSection(states, view, options) {
   const open7 = view.model_setup !== undefined && !view.model_setup.ready;
   const search = `${models.embedding.kind === "built_in" ? DASHBOARD_LOCAL_COPY.modelBuiltIn : DASHBOARD_LOCAL_COPY.modelCustom} · ${modelStateWord2(models.embedding.state)}`;
   const answers = models.answers ? `${models.answers.label} · ${models.answers.ready ? DASHBOARD_LOCAL_COPY.modelReady : models.answers.install ? modelStateWord2(models.answers.install.state) : DASHBOARD_LOCAL_COPY.modelNotReady}` : "";
-  const transcription = states.transcription ? states.transcription.state === "not_needed" ? DASHBOARD_LOCAL_COPY.modelNotNeededNoAudio : `${DASHBOARD_LOCAL_COPY.modelBuiltIn} · ${modelStateWord2(states.transcription.state)}` : "";
+  const transcription = states.transcription ? transcriptionWords(states.transcription) : "";
   const body = `<ul class="mlist"><li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelSearch}: ${search}`)}</li>` + (answers ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelAnswers}: ${answers}`)}</li>` : "") + (transcription ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelTranscription}: ${transcription}`)}${transcriptionDownloadNow(states, options)}</li>` : "") + `</ul>${renderModelSetup(view.model_setup, { heading: false })}`;
   return `<section class="modelsrow" id="models" aria-label="${escapeHtml2(DASHBOARD_LOCAL_COPY.models)}">` + `<details class="models" data-poll-key="models"${open7 ? " open" : ""}><summary>${escapeHtml2(summary)}</summary>` + `<div class="modelsbody">${body}</div></details>` + (installs.length > 0 ? `<div class="minstalls">${installs.map(installHtml).join("")}</div>` : "") + `</section>`;
 }
@@ -106403,7 +106461,7 @@ var init_embedding_ledger2 = __esm(() => {
 });
 
 // src/workers/dashboard/background-runtime.ts
-import { readFileSync as readFileSync46 } from "node:fs";
+import { readFileSync as readFileSync47 } from "node:fs";
 import { join as join80 } from "node:path";
 function resolveLaneReportDir(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim();
@@ -106422,7 +106480,7 @@ function asRecord15(value) {
 }
 function readJsonFile2(path) {
   try {
-    return asRecord15(JSON.parse(readFileSync46(path, "utf8")));
+    return asRecord15(JSON.parse(readFileSync47(path, "utf8")));
   } catch {
     return;
   }
@@ -107041,7 +107099,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync24, copyFileSync, existsSync as existsSync49, lstatSync as lstatSync21, mkdirSync as mkdirSync41, readFileSync as readFileSync47 } from "node:fs";
+import { chmodSync as chmodSync24, copyFileSync, existsSync as existsSync49, lstatSync as lstatSync21, mkdirSync as mkdirSync41, readFileSync as readFileSync48 } from "node:fs";
 import { dirname as dirname57 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
@@ -107107,7 +107165,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text = readFileSync47(path, "utf8");
+  const text = readFileSync48(path, "utf8");
   const raw = JSON.parse(text);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -107853,7 +107911,7 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash56, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { readFileSync as readFileSync48, statSync as statSync23 } from "node:fs";
+import { readFileSync as readFileSync49, statSync as statSync23 } from "node:fs";
 import { homedir as homedir55 } from "node:os";
 import { join as join81, resolve as resolve10 } from "node:path";
 
@@ -108621,7 +108679,7 @@ function createEmailSourceWorker(options = {}) {
             }
             return json({
               ok: true,
-              status_message: outcome === "ready" ? "Already downloaded." : "Downloading. This row updates as it goes."
+              status_message: outcome === "ready" ? "Already downloaded." : outcome === "loading" ? "Starting the transcription model again. This row updates as it goes." : "Downloading the transcription model. This row updates as it goes."
             });
           }
           const model = record3.model === "embedding" || record3.model === "answers" ? record3.model : undefined;
@@ -111176,7 +111234,7 @@ function readDashboardRegistryOutcome(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync48(join81(homedir55(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync49(join81(homedir55(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -115250,7 +115308,7 @@ var init_privacy_profile = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync43, readFileSync as readFileSync49 } from "node:fs";
+import { mkdirSync as mkdirSync43, readFileSync as readFileSync50 } from "node:fs";
 import { dirname as dirname60 } from "node:path";
 function defaultSnifferMaxCallsPerPass(kind) {
   return kind === "venice" ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
@@ -115268,7 +115326,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync49(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync50(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -126542,7 +126600,7 @@ __export(exports_open_target, {
   createDropboxOpenTargets: () => createDropboxOpenTargets,
   OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
 });
-import { existsSync as existsSync52, lstatSync as lstatSync23, readFileSync as readFileSync50, readdirSync as readdirSync10, realpathSync as realpathSync5, statSync as statSync24 } from "node:fs";
+import { existsSync as existsSync52, lstatSync as lstatSync23, readFileSync as readFileSync51, readdirSync as readdirSync10, realpathSync as realpathSync5, statSync as statSync24 } from "node:fs";
 import { homedir as homedir57 } from "node:os";
 import { extname as extname2, join as join84, sep as sep8 } from "node:path";
 function dropboxPreviewUrl(displayPath) {
@@ -126569,7 +126627,7 @@ function localDropboxRoots(options = {}) {
     }
   } catch {}
   try {
-    const info = JSON.parse(readFileSync50(join84(home, ".dropbox", "info.json"), "utf8"));
+    const info = JSON.parse(readFileSync51(join84(home, ".dropbox", "info.json"), "utf8"));
     if (info && typeof info === "object") {
       for (const account of Object.values(info)) {
         const path = account && typeof account === "object" ? account.path : undefined;
@@ -131452,7 +131510,10 @@ async function main() {
     if (process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || !builtInTranscriptionEnabled(process.env))
       return;
     try {
-      return builtInTranscriptionDashboardState(readBuiltInTranscriptionStatus(process.env));
+      const engine = sharedBuiltInTranscriber(process.env);
+      return builtInTranscriptionDashboardState(readBuiltInTranscriptionStatusFile(process.env), {
+        installing: engine?.installing?.() === true
+      });
     } catch {
       return;
     }
@@ -132498,7 +132559,7 @@ init_messaging_capture();
 init_config();
 init_dashboard_launch();
 import { randomBytes as randomBytes19 } from "node:crypto";
-import { readFileSync as readFileSync51, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
+import { readFileSync as readFileSync52, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve11 } from "node:path";
@@ -136079,7 +136140,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync51("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync52("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -136424,7 +136485,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync51(resolve11(input2), "utf8");
+    raw = readFileSync52(resolve11(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }

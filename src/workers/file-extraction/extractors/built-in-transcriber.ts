@@ -52,6 +52,7 @@ import {
   builtInTranscriptionEnabled,
   builtInTranscriptionLayout,
   installBuiltInTranscription,
+  readBuiltInTranscriptionStatus,
   reportBuiltInTranscriptionState,
   type BuiltInTranscriptionInstallerOptions,
   type InstalledBuiltInTranscription,
@@ -330,7 +331,17 @@ export function createBuiltInTranscriber(options: BuiltInTranscriberOptions = {}
         manualSkipFor = failedAt;
         failedAt = undefined;
       }
+      // Downloaded, but its server would not start: try starting it again
+      // now (the status file then reads loading, then ready or failed).
+      if (installed && readBuiltInTranscriptionStatus(env, model).failure?.reason === 'runtime_load_failed') {
+        const paths = installed;
+        void startServer(paths).then(({ handle }) => handle.touch(), () => undefined);
+        return 'loading';
+      }
       return prepare();
+    },
+    installing() {
+      return installing !== undefined;
     },
     onReady(listener) {
       readyListeners.push(listener);

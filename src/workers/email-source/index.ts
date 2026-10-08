@@ -520,7 +520,7 @@ export interface EmailSourceWorkerOptions {
      * `started`, `ready` (already downloaded: nothing to do), or
      * `unavailable` (not this machine's transcriber, or it cannot run here).
      */
-    downloadTranscriptionModel?: () => 'started' | 'ready' | 'unavailable';
+    downloadTranscriptionModel?: () => 'started' | 'loading' | 'ready' | 'unavailable';
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
@@ -1909,7 +1909,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }
             return json({
               ok: true,
-              status_message: outcome === 'ready' ? 'Already downloaded.' : 'Downloading. This row updates as it goes.',
+              status_message: outcome === 'ready'
+                ? 'Already downloaded.'
+                : outcome === 'loading'
+                  ? 'Starting the transcription model again. This row updates as it goes.'
+                  : 'Downloading the transcription model. This row updates as it goes.',
             });
           }
           const model = record.model === 'embedding' || record.model === 'answers' ? record.model : undefined;

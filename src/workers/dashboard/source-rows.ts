@@ -806,10 +806,26 @@ function modelStateWord(state: ModelInstall['state']): string {
  */
 function transcriptionDownloadNow(states: DashboardSourceStates, options: DashboardRowOptions | undefined): string {
   const state = states.transcription?.state;
-  if (state !== 'not_needed' && state !== 'failed') return '';
+  const label = state === 'load_failed'
+    ? C.modelTryAgain
+    : state === 'not_needed' || state === 'not_downloaded' || state === 'interrupted' || state === 'failed'
+      ? C.modelDownloadNow
+      : undefined;
+  if (!label) return '';
   return ` ${actionButton(dashboardControlsAvailable(options)
-    ? { label: C.modelDownloadNow, kind: 'model_retry', source: 'transcription' }
-    : lockedAction(C.modelDownloadNow, options?.basePath))}`;
+    ? { label, kind: 'model_retry', source: 'transcription' }
+    : lockedAction(label, options?.basePath))}`;
+}
+
+/** The transcription line's words after "Transcription:". */
+function transcriptionWords(transcription: BuiltInTranscriptionDashboardState): string {
+  switch (transcription.state) {
+    case 'not_needed': return C.modelNotNeededNoAudio;
+    case 'not_downloaded': return C.modelNotDownloaded;
+    case 'interrupted': return C.modelDownloadInterrupted;
+    case 'load_failed': return fill(C.modelCouldNotStart, { model: C.modelNames.transcription });
+    default: return `${C.modelBuiltIn} · ${modelStateWord(transcription.state)}`;
+  }
 }
 
 /** The install lines under Models: search, answers, then transcription. */
@@ -827,7 +843,8 @@ export function dashboardModelsSummary(states: DashboardSourceStates, view: Sour
   const kind = models.embedding.kind === 'built_in' ? C.modelBuiltIn : C.modelCustom;
   const installs = modelInstallLines(states);
   let overall: string = C.modelReady;
-  if (installs.some((line) => line.state === 'failed') || (view.model_setup !== undefined && !view.model_setup.ready)
+  if (installs.some((line) => line.state === 'failed') || states.transcription?.state === 'load_failed'
+    || (view.model_setup !== undefined && !view.model_setup.ready)
     || models.embedding.state === 'failed') {
     overall = C.modelNeedsYou;
   } else if (installs.length > 0) {
@@ -855,11 +872,7 @@ export function dashboardModelsSection(
   const answers = models.answers
     ? `${models.answers.label} · ${models.answers.ready ? C.modelReady : models.answers.install ? modelStateWord(models.answers.install.state) : C.modelNotReady}`
     : '';
-  const transcription = states.transcription
-    ? states.transcription.state === 'not_needed'
-      ? C.modelNotNeededNoAudio
-      : `${C.modelBuiltIn} · ${modelStateWord(states.transcription.state)}`
-    : '';
+  const transcription = states.transcription ? transcriptionWords(states.transcription) : '';
   const body = `<ul class="mlist"><li>${escapeHtml(`${C.modelSearch}: ${search}`)}</li>`
     + (answers ? `<li>${escapeHtml(`${C.modelAnswers}: ${answers}`)}</li>` : '')
     + (transcription ? `<li>${escapeHtml(`${C.modelTranscription}: ${transcription}`)}${transcriptionDownloadNow(states, options)}</li>` : '')
