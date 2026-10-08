@@ -61234,7 +61234,7 @@ function numberWordsToDigits(input) {
   }
   return out;
 }
-function runMatcher(question, minLength, minContent) {
+function runMatcher(question, minLength, minContent, onHit) {
   const positions = new Map;
   question.forEach((token, index) => {
     const list = positions.get(token) ?? [];
@@ -61262,8 +61262,10 @@ function runMatcher(question, minLength, minContent) {
         const contentCount = (position > 0 ? previousContent[position - 1] : 0) + content;
         currentLength[position] = length;
         currentContent[position] = contentCount;
-        if (length >= minLength && contentCount >= minContent)
+        if (length >= minLength && contentCount >= minContent) {
           hit = true;
+          onHit?.(position - length + 1, position);
+        }
       }
       clear();
       [previousLength, currentLength] = [currentLength, previousLength];
@@ -61281,9 +61283,19 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
   const reasons = new Set;
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const contentTokens = model.tokens.filter(isContent);
-  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
-  const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
-  const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS);
+  const copiedWords = unnamed ? new Set : undefined;
+  let copyFromQuestion = false;
+  const copyHit = (words) => {
+    if (!copiedWords || copyFromQuestion) {
+      reasons.add("shared_token_run");
+      return;
+    }
+    for (const word of words)
+      copiedWords.add(word);
+  };
+  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS, (start, end) => copyHit(model.tokens.slice(start, end + 1)));
+  const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0, (start, end) => copyHit(contentTokens.slice(start, end + 1)));
+  const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, copyHit);
   const requestTokens = new Set(model.tokens);
   const askedToken = (token) => asked !== undefined && asked.tokens.has(token) && requestTokens.has(token);
   const askedFigures = new Set;
@@ -61311,7 +61323,7 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
   let sentenceTokens = 0;
   const closeOverlap = () => {
     if (sentenceContent.size >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS)
-      overlapCandidates.push([...sentenceContent]);
+      overlapCandidates.push({ words: [...sentenceContent], fromQuestion: copyFromQuestion });
     sentenceContent = new Set;
     sentenceTokens = 0;
   };
@@ -61439,11 +61451,12 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
     let sentence = [];
     const closeSentence = () => {
       if (sentence.length >= CONSULT_GATE_SHARED_RUN_TOKENS - 1 && sentence.length < runTokens && sentence.filter(isContent).length >= CONSULT_GATE_RUN_MIN_CONTENT_TOKENS && model.tokenKeys[0].includes(`${SEP}${sentence.join(SEP)}${SEP}`)) {
-        reasons.add("shared_token_run");
+        copyHit(sentence);
       }
       sentence = [];
     };
     const wordingExempt = unnamed && entry.path === WRITER_ANSWER_PATH;
+    copyFromQuestion = entry.kind === "user_question";
     if (wordingExempt) {
       closeOverlap();
       fullRun.reset();
@@ -61466,10 +61479,9 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
         }
         if (sentence.length < runTokens)
           sentence.push(token.norm);
-        if (fullRun.feed(token.norm))
-          reasons.add("shared_token_run");
-        if (isContent(token.norm) && (contentRun.feed(token.norm) || contentSpan.feed(token.norm)))
-          reasons.add("shared_token_run");
+        fullRun.feed(token.norm);
+        if (isContent(token.norm) && !contentRun.feed(token.norm))
+          contentSpan.feed(token.norm);
       }
       if (entry.kind === "vocabulary") {
         previous = token;
@@ -61533,11 +61545,13 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
       return reasons;
     }
   }
-  for (const words of overlapCandidates) {
+  for (const { words, fromQuestion } of overlapCandidates) {
     const rare = words.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES);
     if (rare.length >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) {
-      reasons.add("shared_token_run");
-      return reasons;
+      copyFromQuestion = fromQuestion;
+      copyHit(rare);
+      if (reasons.size > 0)
+        return reasons;
     }
   }
   const statOf = (token) => stats.get(token) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
@@ -61566,7 +61580,7 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
     }
   }
   for (const [token, single] of singleCandidates) {
-    if (!single.strongLabel && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0)
+    if (!single.strongLabel && !copiedWords?.has(token) && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0)
       continue;
     if (askedToken(token))
       continue;
@@ -61637,7 +61651,7 @@ function askedPair(asked, model, left, right) {
   const written = (a, b) => model.tokenKeys[0].includes(`${SEP}${a}${SEP}${b}${SEP}`);
   return asked.pairs.has(`${left}${SEP}${right}`) && written(left, right) || asked.pairs.has(`${right}${SEP}${left}`) && written(right, left);
 }
-function spanMatcher(question, size) {
+function spanMatcher(question, size, onHit) {
   const key = (tokens) => [...tokens].sort().join(" ");
   const wanted = new Set;
   for (let start = 0;start + size <= question.length; start += 1)
@@ -61654,7 +61668,10 @@ function spanMatcher(question, size) {
         inQuestion += 1;
       if (window2.length > size && vocabulary.has(window2.shift()))
         inQuestion -= 1;
-      return window2.length === size && inQuestion === size && wanted.has(key(window2));
+      const hit = window2.length === size && inQuestion === size && wanted.has(key(window2));
+      if (hit)
+        onHit?.(window2);
+      return hit;
     },
     reset() {
       window2 = [];

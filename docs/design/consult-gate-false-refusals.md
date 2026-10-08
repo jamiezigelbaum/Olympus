@@ -168,5 +168,39 @@ every number below unchanged.
 
 The general level and the false-refusal set (general level) are unchanged.
 
+**Copied document wording (2026-10-08, unnamed level only).** The PII
+bake-off (`docs/design/consult-pii-bakeoff.md`, PR #197) found the copy rule,
+not unknown names, behind most of this level's refusals. Owner ruling: a copy
+of the documents may go out at the unnamed level unless it carries a hard
+identifier (rule: `CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS` in
+`src/core/consult-gate.ts`). Every other rule still reads every copied word,
+and inside a copy a document name or place that is also a dictionary word
+counts as a name however it is written. Copies of the owner's question stay
+refused at both levels. The general level is unchanged: every
+general-level verdict over these fixtures is pinned by digest
+(`test/consult-gate-unnamed-copy.test.ts`).
+
+| unnamed level | before | after |
+|---|---|---|
+| legitimate refused (this set) | 14 / 30 | 9 / 30 |
+| leak variants passed | 0 / 67 | 0 / 67 |
+| leak corpus: canary leaks, identifier/figure/date/encoded cases passed | 0, 0 | 0, 0 |
+| leak corpus: copied document wording passed (`verbatim`, soft residual) | 0 / 12 | 6 / 12 (none carries a canary) |
+| leak corpus: copies of the owner's question passed | 0 / 3 | 0 / 3 |
+| leak corpus clean set refused | 19.4% | 12.9% |
+| real-writer recording passed (unnamed / general) | 18 / 6 | 20 / 6 |
+| re-identification set: pass the gate / narrow / figure / canary | 4 / 0 / 0 / 0 | 4 / 0 / 0 / 0 |
+| bake-off harness, gate only: situation / recorded 40 / leak corpus legitimate refused | 16 / 17 / 14 | 12 / 15 / 12 |
+| bake-off harness, gate only: name probes / identifier probes passed | 1 / 500, 0 / 32 | 1 / 500, 0 / 32 |
+| held-out sets, false-refusal set, sentence-initial name residual | unchanged | unchanged |
+
+(The bake-off harness does not pass the question ChatGPT sent to the gate,
+so its situation count is higher than this eval's.) The 9 left: 3 figures
+(two year counts, a bare 180), 2 snapshot identifiers ("Fit note", "St
+Aldhelm Primary"), 2 unknown words (INR, timesheets), and 2 names written
+only capitalized: a country in a heading ("Canada"), and "Three", which
+its documents write only at the start of sentences (an older name-rule
+false positive the copy refusal used to hide).
+
 The unnamed false-refusal rate is held by a regression ceiling at the
-measured 14 of 30 (`UNNAMED_LEVEL_GATES`), not a usability target.
+measured 9 of 30 (`UNNAMED_LEVEL_GATES`), not a usability target.

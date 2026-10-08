@@ -65,6 +65,19 @@ zkAPI, not even dressed as an amount. Strict has no exemption. Rule:
 `docs/design/consult-writer-instructions.md`, "Level: your situation,
 without names".
 
+Copied document wording (owner ruling, 2026-10-08, after the PII bake-off).
+At Standard, answerability comes first: a request that copies wording from
+the private documents may go out unless it carries a hard identifier. The
+gate still reads every copied word with its other rules (names, places
+below a country, exact dates and years, amounts, account, phone and ID
+numbers, addresses, mail addresses and handles), and inside a copy a
+document name that is also a dictionary word still counts as a name. Copying
+the question ChatGPT sent stays refused at both levels, and Strict refuses
+every copy as before. Measured: Standard refuses 9 of 30 legitimate
+situation questions instead of 14, with no hard-identifier leak on any eval
+set. Rule: `CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS` in
+`src/core/consult-gate.ts`.
+
 Accepted residual (2026-10-08 review): the question is ChatGPT's tool
 argument (`question` in `src/workers/chatgpt/mcp-surface.ts`), not a
 verified copy of what the owner typed, and an MCP server cannot read the raw
