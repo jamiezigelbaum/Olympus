@@ -266,15 +266,20 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
 }
 
 /**
- * The photo judge's verdict on a picture in any store of the set, the
- * Private store's first.
+ * The photo judge's verdict on a picture across the set. Stores can disagree
+ * (a superseded copy keeps the judgment it was made under, and a newer judge
+ * may since have re-judged the current copy), so ordinary holds only when no
+ * store's judgment says otherwise: any sensitive or unjudged verdict wins.
  */
 function setMediaJudgment(set: TieredStoreSet, mediaSha256: string): MediaJudgment | undefined {
+  let ordinary: MediaJudgment | undefined;
   for (const domain of [...TIER_DOMAIN_ORDER].reverse()) {
     const judgment = set.store(domain)?.mediaJudgment(mediaSha256);
-    if (judgment) return judgment;
+    if (!judgment) continue;
+    if (judgment.verdict !== 'ordinary') return judgment;
+    ordinary ??= judgment;
   }
-  return undefined;
+  return ordinary;
 }
 
 function skipped(skippedReason: string): ExtractionSinkResult {

@@ -971,7 +971,7 @@ describe('a prepared picture through runner, sink and store', () => {
       expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(1);
       expect(pictureTries()).toBe(3);
       // The photo judge's description batch (text only) may follow the photo's own.
-      expect(sent.findLast((batch) => batch.some((item) => typeof item !== 'string'))?.find((item) => typeof item !== 'string')).toMatchObject({ image: media.path });
+      expect(sent.filter((batch) => batch.some((item) => typeof item !== 'string')).at(-1)?.find((item) => typeof item !== 'string')).toMatchObject({ image: media.path });
     } finally {
       store.close();
     }

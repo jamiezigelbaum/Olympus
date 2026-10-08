@@ -658,6 +658,20 @@ describe('the judge decides a photo\'s tier through the tier set', () => {
       expect(relanded.accepted).toBe(true);
       expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ contentTier: 'private', state: 'current' });
       expect(lane.stores.internal!.searchItems('FRIDGE', 5).map((row) => row.sourceItem.providerItemId)).toEqual(['kitchen']);
+
+      // A newer judge finds the current Personal copy sensitive; the superseded
+      // Private copy still holds its old ordinary verdict. The sensitive one wins.
+      const personalDb = new Database(lane.paths.internal);
+      try {
+        personalDb.query("UPDATE media_judgments SET verdict = 'sensitive', category = 'id_document', judge_id = 'photo-judge-newer'").run();
+      } finally {
+        personalDb.close();
+      }
+      const third = writeMediaCacheFile(cache(), sameBytes, 'image/jpeg');
+      const rejudged = await lane.sink.accept(request('kitchen', { ...third, mimeType: 'image/jpeg' }, `${IMAGE_MEDIA_DESCRIPTOR}\nFRIDGE`));
+      releaseMediaCacheFile(third.path, third.sha256, third.stagingHolder);
+      expect(rejudged.accepted).toBe(false);
+      expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
     } finally {
       lane.close();
     }

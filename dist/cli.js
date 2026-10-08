@@ -93840,12 +93840,16 @@ function createTieredStoreExtractionSink(options) {
   };
 }
 function setMediaJudgment(set2, mediaSha256) {
+  let ordinary;
   for (const domain of [...TIER_DOMAIN_ORDER].reverse()) {
     const judgment = set2.store(domain)?.mediaJudgment(mediaSha256);
-    if (judgment)
+    if (!judgment)
+      continue;
+    if (judgment.verdict !== "ordinary")
       return judgment;
+    ordinary ??= judgment;
   }
-  return;
+  return ordinary;
 }
 function skipped(skippedReason) {
   return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
