@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseSchedulerSourceIds, type OlympusConfig } from '../core/config.ts';
+import { boundedLogErrorMessage } from '../core/log-redaction.ts';
 import { OperationError } from '../core/operation-error.ts';
 import type { SourceIngestionPolicy } from '../core/source-ingestion-policy.ts';
 import {
@@ -937,7 +938,7 @@ export class SourceScheduler {
       }
       state.nextRunAt = Date.parse(notBeforeAt);
       console.error(
-        `[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? 'none'} error_hash=${errorHash}`,
+        `[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? 'none'} error_hash=${errorHash}${untypedFailureMessage(errorKind, error)}`,
       );
     }
   }
@@ -1418,13 +1419,15 @@ export function fileExtractionSchedulerTask(input: {
       if (run.paused) {
         throw new SourceSchedulerTaskFailure('File extraction paused at the extractor health gate.', {
           errorKind: run.preflightErrorKind ?? run.pauseReason ?? 'extractor_health_probe_failed',
-          ...(run.pauseReason ? { warnings: [run.pauseReason] } : {}),
+          ...extractionWarnings(jobsRefused, run.pauseReason),
           counts,
         });
       }
       return {
         status: jobsQueued > 0 || run.processedJobs > 0 ? 'progress' : 'idle',
         counts,
+        // Refused candidates never fail the pass; they ride as a warning.
+        ...extractionWarnings(jobsRefused, undefined),
         checkpoint: done ? null : cursor ?? null,
         // Continue while the scan moved and is unfinished, or a full batch ran
         // (more queued jobs are likely waiting). A scan stuck on one page
@@ -1718,7 +1721,7 @@ export function createWhatsAppSchedulerSource(input: {
             jobs_failed_retryable: run.counts.failed_retryable,
             jobs_failed_terminal: run.counts.failed_terminal,
           },
-          ...(run.paused && run.pauseReason ? { warnings: [run.pauseReason] } : {}),
+          ...extractionWarnings(plan.jobsRefused, run.paused ? run.pauseReason : undefined),
           checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null,
           ...(run.nextRetryAt !== undefined ? { wakeAt: run.nextRetryAt } : {}),
         };
@@ -2571,8 +2574,35 @@ function safeBackendUnavailableWarnings(warnings: readonly string[] | undefined)
   return ['vlm_backend_unavailable'];
 }
 
+/**
+ * An extraction pass that queued around refused candidates (an extractor kind
+ * or version the job store would not take, a bad item field, a routing throw)
+ * still succeeds; this token says some of the lane was not queued.
+ */
+export const EXTRACTION_JOBS_REFUSED_WARNING = 'extraction_jobs_refused';
+
+const VERBATIM_SCHEDULER_WARNINGS: ReadonlySet<string> = new Set([EXTRACTION_JOBS_REFUSED_WARNING]);
+
+function extractionWarnings(jobsRefused: number, pauseReason: string | undefined): { warnings?: string[] } {
+  const warnings = [
+    ...(pauseReason ? [pauseReason] : []),
+    ...(jobsRefused > 0 ? [EXTRACTION_JOBS_REFUSED_WARNING] : []),
+  ];
+  return warnings.length > 0 ? { warnings } : {};
+}
+
+/**
+ * An untyped failure's message for the `task_failed` log line, beside its
+ * hash: one line, bounded, token-shaped values redacted. Only the log line
+ * carries it; the state store keeps the hash alone.
+ */
+function untypedFailureMessage(errorKind: string, error: unknown): string {
+  return errorKind === 'task_failed' ? ` error_message=${boundedLogErrorMessage(error)}` : '';
+}
+
 function sanitizeSchedulerWarnings(warnings: readonly string[]): string[] {
   return [...new Set(warnings.map((warning) => {
+    if (VERBATIM_SCHEDULER_WARNINGS.has(warning)) return warning;
     if (/^x_(?:head|reconcile)_[a-z0-9_]+$/.test(warning)) return warning;
     if (/vlm_backend_unavailable/i.test(warning)) return 'vlm_backend_unavailable';
     if (/timeout/i.test(warning)) return 'timeout';

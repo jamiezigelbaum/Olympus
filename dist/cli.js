@@ -49918,6 +49918,17 @@ var init_engine_children = __esm(() => {
   PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", TZ: "UTC" };
 });
 
+// src/core/log-redaction.ts
+function redactLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function boundedLogErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const oneLine = message.replace(/\s+/g, " ").trim();
+  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
+
 // src/core/engine-service.ts
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { createHash as createHash35, randomBytes as randomBytes8 } from "node:crypto";
@@ -50725,9 +50736,6 @@ function tailLines(path, lines) {
   } catch {
     return [];
   }
-}
-function redactLogLine(line) {
-  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
 }
 function engineConflictWarnings(homeDir) {
   const warnings = [];
@@ -87325,7 +87333,7 @@ function requireHash3(value) {
 }
 function requireBoundedString(value, field) {
   if (typeof value !== "string" || value.length === 0 || value.length > 1024) {
-    throw new TypeError(`Extraction job ${field} must be a bounded non-empty string.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a bounded non-empty string.`);
   }
   return value;
 }
@@ -87349,13 +87357,13 @@ function requireTerminalStatus(value) {
 }
 function requireSafeInteger(value, field) {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new TypeError(`Extraction job ${field} must be a non-negative safe integer.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a non-negative safe integer.`);
   }
   return value;
 }
 function requirePositiveSafeInteger2(value, field) {
   if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new TypeError(`Extraction job ${field} must be a positive safe integer.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a positive safe integer.`);
   }
   return value;
 }
@@ -92378,17 +92386,29 @@ function createFileExtractionRunner(options) {
       const byKind = new Map;
       let jobsUnroutable = 0;
       let jobsSkippedImageNotPrivate = 0;
+      const refused = new Map;
+      const refuse3 = (reason, count) => {
+        refused.set(reason, (refused.get(reason) ?? 0) + count);
+      };
       for (const ref of page.candidates) {
-        if (isImageMediaType(ref.mimeType) && corpus.refusesImageContent?.(ref) === true) {
+        if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
           jobsSkippedImageNotPrivate += 1;
           continue;
         }
-        const extractor = registry2.select(ref, request.extractorKind);
-        if (!extractor) {
-          jobsUnroutable += 1;
+        let extractor;
+        let version2;
+        try {
+          extractor = registry2.select(ref, request.extractorKind);
+          if (!extractor) {
+            jobsUnroutable += 1;
+            continue;
+          }
+          version2 = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
+        } catch (error2) {
+          refuse3(PLAN_REFUSED_ROUTING_FAILED, 1);
+          logPlanRefusal(request.corpusId, extractor?.kind ?? "unrouted", PLAN_REFUSED_ROUTING_FAILED, 1, error2);
           continue;
         }
-        const version2 = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
         const key = `${extractor.kind}\x00${version2}`;
         const bucket = byKind.get(key);
         if (bucket)
@@ -92400,33 +92420,56 @@ function createFileExtractionRunner(options) {
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
-      let jobsRefused = 0;
       for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
-        let result;
+        const enqueue = (bucketRefs) => jobs.enqueue({
+          refs: bucketRefs,
+          extractorKind,
+          extractorVersion,
+          ...request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {},
+          ...request.priority !== undefined ? { priority: request.priority } : {},
+          ...request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {},
+          ...request.force !== undefined ? { force: request.force } : {}
+        });
+        const results = [];
         try {
-          result = jobs.enqueue({
-            refs,
-            extractorKind,
-            extractorVersion,
-            ...request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {},
-            ...request.priority !== undefined ? { priority: request.priority } : {},
-            ...request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {},
-            ...request.force !== undefined ? { force: request.force } : {}
-          });
+          results.push(enqueue(refs));
         } catch (error2) {
-          if (!(error2 instanceof ExtractionJobFieldError) || error2.field !== "extractorKind" && error2.field !== "extractorVersion")
+          const reason = planRefusalReason(error2);
+          if (reason === undefined)
             throw error2;
-          jobsRefused += refs.length;
-          console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${request.corpusId} extractor_kind=${extractorKind} ` + `candidates=${refs.length} reason=${boundedErrorMessage(error2)}`);
-          continue;
+          if (reason !== PLAN_REFUSED_ITEM_FIELD) {
+            refuse3(reason, refs.length);
+            logPlanRefusal(request.corpusId, extractorKind, reason, refs.length, error2);
+            continue;
+          }
+          let refusedRefs = 0;
+          let firstRefusal;
+          for (const ref of refs) {
+            try {
+              results.push(enqueue([ref]));
+            } catch (refError) {
+              if (planRefusalReason(refError) !== PLAN_REFUSED_ITEM_FIELD)
+                throw refError;
+              refusedRefs += 1;
+              firstRefusal ??= refError;
+            }
+          }
+          if (refusedRefs > 0) {
+            refuse3(PLAN_REFUSED_ITEM_FIELD, refusedRefs);
+            logPlanRefusal(request.corpusId, extractorKind, PLAN_REFUSED_ITEM_FIELD, refusedRefs, firstRefusal);
+          }
         }
-        jobsQueued += result.jobsQueued;
-        if (result.jobsQueued > 0)
+        for (const result of results) {
+          jobsQueued += result.jobsQueued;
+          jobsExisting += result.jobsExisting;
+          jobsForced += result.jobsForced;
+          jobsSkippedTooLarge += result.jobsSkippedTooLarge;
+        }
+        if (results.some((result) => result.jobsQueued > 0)) {
           prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
-        jobsExisting += result.jobsExisting;
-        jobsForced += result.jobsForced;
-        jobsSkippedTooLarge += result.jobsSkippedTooLarge;
+        }
       }
+      const jobsRefused = [...refused.values()].reduce((total, count) => total + count, 0);
       return {
         kind: "file_extraction_plan",
         corpusId: request.corpusId,
@@ -92437,6 +92480,7 @@ function createFileExtractionRunner(options) {
         jobsSkippedTooLarge,
         jobsUnroutable,
         jobsRefused,
+        ...refused.size > 0 ? { jobsRefusedByReason: Object.fromEntries(refused) } : {},
         ...jobsSkippedImageNotPrivate > 0 ? { jobsSkippedImageNotPrivate } : {},
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {},
@@ -92553,13 +92597,21 @@ function createFileExtractionRunner(options) {
 }
 async function settleOneJob(input) {
   const staged = {};
+  let outcome;
   try {
-    return await settleOneJobHeld(input, staged);
-  } finally {
+    outcome = await settleOneJobHeld(input, staged);
+  } catch (error2) {
+    console.error(`[olympus:file-extraction] job_internal_error job_id=${input.job.jobId} extractor_kind=${input.job.extractorKind} ` + `reason=${boundedLogErrorMessage(error2)}`);
+    outcome = retryable(EXTRACTION_ERROR_KIND_INTERNAL_ERROR, error2);
+  }
+  try {
     const media = staged.media;
     if (media?.stagingHolder)
       releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname54(media.path));
+  } catch (error2) {
+    console.error(`[olympus:file-extraction] media_release_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error2)}`);
   }
+  return outcome;
 }
 async function settleOneJobHeld(input, staged) {
   const { job, extractor, corpus } = input;
@@ -92767,16 +92819,42 @@ async function recordOutcome(jobs, job, workerId, outcome) {
       ...outcome.leaseExpired ? { leaseLost: true } : {}
     };
   } catch (error2) {
-    if (!isLostLeaseRecordError(error2))
-      throw error2;
-    return {
-      ...base,
-      status: "failed_retryable",
-      attempts: job.attempts,
-      errorKind: EXTRACTION_ERROR_KIND_LEASE_LOST,
-      leaseLost: true
-    };
+    if (isLostLeaseRecordError(error2))
+      return lostLeaseRecord(base, job);
+    console.error(`[olympus:file-extraction] record_refused job_id=${job.jobId} extractor_kind=${job.extractorKind} ` + `status=${outcome.status} reason=${boundedLogErrorMessage(error2)}`);
+    try {
+      const result = jobs.record({
+        jobId: job.jobId,
+        workerId,
+        leaseToken: job.leaseToken,
+        status: "failed_retryable",
+        errorKind: EXTRACTION_ERROR_KIND_RECORD_REFUSED,
+        errorHash: hashError(error2),
+        tempBytesCleaned: true
+      });
+      return {
+        ...base,
+        status: result.status,
+        attempts: result.attempts,
+        errorKind: EXTRACTION_ERROR_KIND_RECORD_REFUSED,
+        ...result.nextRetryAt !== undefined ? { nextRetryAt: result.nextRetryAt } : {},
+        artifactsRecorded: result.artifactsRecorded
+      };
+    } catch (fallbackError) {
+      if (isLostLeaseRecordError(fallbackError))
+        return lostLeaseRecord(base, job);
+      throw fallbackError;
+    }
   }
+}
+function lostLeaseRecord(base, job) {
+  return {
+    ...base,
+    status: "failed_retryable",
+    attempts: job.attempts,
+    errorKind: EXTRACTION_ERROR_KIND_LEASE_LOST,
+    leaseLost: true
+  };
 }
 function retryable(errorKind, error2) {
   return { status: "failed_retryable", errorKind, errorHash: hashError(error2) };
@@ -92897,10 +92975,20 @@ function summarizeEgressDestinations(values) {
     return { egressDestination: destinations[0] };
   return { egressDestination: "venice_mixed_approved" };
 }
-function boundedErrorMessage(error2) {
-  const message = error2 instanceof Error ? error2.message : String(error2);
-  return JSON.stringify(message.split(`
-`).join(" ").slice(0, 200));
+function planRefusalReason(error2) {
+  if (!(error2 instanceof ExtractionJobFieldError))
+    return;
+  if (error2.field === "extractorKind")
+    return PLAN_REFUSED_EXTRACTOR_KIND;
+  if (error2.field === "extractorVersion")
+    return PLAN_REFUSED_EXTRACTOR_VERSION;
+  if (ITEM_REF_FIELDS.has(error2.field))
+    return PLAN_REFUSED_ITEM_FIELD;
+  return;
+}
+function logPlanRefusal(corpusId, extractorKind, reason, count, error2) {
+  const field = error2 instanceof ExtractionJobFieldError ? ` field=${error2.field}` : "";
+  console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} ` + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error2)}`);
 }
 function hashToken(value) {
   return createHash52("sha256").update(value).digest("hex");
@@ -92991,7 +93079,14 @@ async function drainPdfExtraction(input) {
   }
   return results;
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+function refusesImageContent(corpus, ref) {
+  try {
+    return corpus.refusesImageContent?.(ref) === true;
+  } catch {
+    return false;
+  }
+}
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_media_cache();
   init_operation_error();
@@ -93014,6 +93109,19 @@ var init_runner = __esm(() => {
     [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only",
     [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: "metadata_only"
   });
+  ITEM_REF_FIELDS = new Set([
+    "corpusId",
+    "provider",
+    "accountScope",
+    "approvedScopeKey",
+    "providerItemId",
+    "localItemId",
+    "sourceVersion",
+    "contentHash",
+    "name",
+    "mimeType",
+    "sizeBytes"
+  ]);
   PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 });
 
@@ -113156,7 +113264,7 @@ class SourceScheduler {
         this.applyInMemoryFailure(state, completedAt, errorKind, errorHash, warnings, retryAt, failureCounts);
       }
       state.nextRunAt = Date.parse(notBeforeAt);
-      console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}`);
+      console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind, error2)}`);
     }
   }
   applyPendingUnparks(dueAt) {
@@ -113533,13 +113641,14 @@ function fileExtractionSchedulerTask(input) {
       if (run.paused) {
         throw new SourceSchedulerTaskFailure("File extraction paused at the extractor health gate.", {
           errorKind: run.preflightErrorKind ?? run.pauseReason ?? "extractor_health_probe_failed",
-          ...run.pauseReason ? { warnings: [run.pauseReason] } : {},
+          ...extractionWarnings(jobsRefused, run.pauseReason),
           counts
         });
       }
       return {
         status: jobsQueued > 0 || run.processedJobs > 0 ? "progress" : "idle",
         counts,
+        ...extractionWarnings(jobsRefused, undefined),
         checkpoint: done ? null : cursor ?? null,
         continueSoon: !done && cursor !== startCursor || run.processedJobs >= input.batchSize,
         ...run.nextRetryAt !== undefined ? { wakeAt: run.nextRetryAt } : {}
@@ -113726,7 +113835,7 @@ function createWhatsAppSchedulerSource(input) {
             jobs_failed_retryable: run.counts.failed_retryable,
             jobs_failed_terminal: run.counts.failed_terminal
           },
-          ...run.paused && run.pauseReason ? { warnings: [run.pauseReason] } : {},
+          ...extractionWarnings(plan.jobsRefused, run.paused ? run.pauseReason : undefined),
           checkpoint: plan.done ? null : plan.nextCursor ?? context?.checkpoint ?? null,
           ...run.nextRetryAt !== undefined ? { wakeAt: run.nextRetryAt } : {}
         };
@@ -114298,8 +114407,20 @@ function safeNormalizeFailureRetryAt(error2, completedAt, fallbackRetryAfterMs) 
     return;
   }
 }
+function extractionWarnings(jobsRefused, pauseReason) {
+  const warnings = [
+    ...pauseReason ? [pauseReason] : [],
+    ...jobsRefused > 0 ? [EXTRACTION_JOBS_REFUSED_WARNING] : []
+  ];
+  return warnings.length > 0 ? { warnings } : {};
+}
+function untypedFailureMessage(errorKind, error2) {
+  return errorKind === "task_failed" ? ` error_message=${boundedLogErrorMessage(error2)}` : "";
+}
 function sanitizeSchedulerWarnings(warnings) {
   return [...new Set(warnings.map((warning) => {
+    if (VERBATIM_SCHEDULER_WARNINGS.has(warning))
+      return warning;
     if (/^x_(?:head|reconcile)_[a-z0-9_]+$/.test(warning))
       return warning;
     if (/vlm_backend_unavailable/i.test(warning))
@@ -114325,7 +114446,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true, WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true, WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_operation_error();
@@ -114403,6 +114524,7 @@ var init_source_scheduler = __esm(() => {
     GMAIL_DAILY_REQUEST_GUARD_REASON,
     GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON
   ]);
+  VERBATIM_SCHEDULER_WARNINGS = new Set([EXTRACTION_JOBS_REFUSED_WARNING]);
 });
 
 // src/workers/source-scope-runtime.ts

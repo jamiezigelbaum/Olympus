@@ -5,6 +5,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  EXTRACTION_JOBS_REFUSED_WARNING,
   SourceScheduler,
   fileExtractionSchedulerTask,
   type SourceSchedulerSource,
@@ -262,5 +263,92 @@ describe('extraction pass over a shared candidate store', () => {
     expect(plans).toEqual([undefined, 'p1', 'p2']);
     expect(result.checkpoint).toBe('p3');
     expect(result.continueSoon).toBe(true);
+  });
+});
+
+describe('a refused extraction candidate never fails the pass', () => {
+  // 2026-10-07: one refused photo-job version failed every Dropbox extraction
+  // pass for 77 minutes, and the log carried only an error hash.
+  const lane = { corpusId: 'c', provider: 'fixture', accountScope: 'personal', approvedScopeKey: 'fixture.personal:/x' };
+
+  async function capturingErrors(work: () => Promise<unknown>): Promise<string[]> {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+    try {
+      await work();
+    } finally {
+      console.error = original;
+    }
+    return errors;
+  }
+
+  test('refused candidates ride as jobs_refused and a warning token, and the pass still runs', async () => {
+    let ran = false;
+    const fake = {
+      async plan() {
+        return {
+          candidates: 3, jobsQueued: 2, jobsExisting: 0, jobsForced: 0, jobsSkippedTooLarge: 0,
+          jobsUnroutable: 0, jobsRefused: 1, extractorKinds: ['local_text'], done: true,
+        };
+      },
+      async run() {
+        ran = true;
+        return {
+          processedJobs: 2,
+          paused: false,
+          counts: {
+            indexed: 2, metadata_only: 0, skipped_unsupported: 0, skipped_too_large: 0,
+            blocked_policy: 0, failed_retryable: 0, failed_terminal: 0,
+          },
+        };
+      },
+    } as unknown as FileExtractionRunner;
+    const result = await fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 5, batchSize: 4 }).run();
+    expect(ran).toBe(true);
+    expect(result.status).toBe('progress');
+    expect(result.counts).toMatchObject({ jobs_refused: 1, jobs_indexed: 2 });
+    expect(result.warnings).toEqual([EXTRACTION_JOBS_REFUSED_WARNING]);
+
+    // The scheduler keeps the token as itself rather than collapsing it.
+    const clock = { now: T0 };
+    const sched = scheduler([source([
+      fileExtractionSchedulerTask({ id: 'extract', runner: fake, lane, planLimit: 5, batchSize: 4 }),
+    ])], clock);
+    const status = await sched.runDueTasks(new Date(clock.now));
+    const taskStatus = status.sources[0]?.tasks[0];
+    expect(taskStatus?.last_result?.warnings).toEqual([EXTRACTION_JOBS_REFUSED_WARNING]);
+    expect(taskStatus?.last_result?.counts?.jobs_refused).toBe(1);
+  });
+
+  test('an untyped task failure logs a bounded, single-line, redacted message beside its hash', async () => {
+    const clock = { now: T0 };
+    const sched = scheduler([source([
+      task('extract', 'extract', async () => {
+        throw new Error(`Extraction job extractorVersion must be a safe identifier.\nBearer abc123 ${'x'.repeat(400)}`);
+      }),
+    ])], clock);
+    const errors = await capturingErrors(() => sched.runDueTasks(new Date(clock.now)));
+    const line = errors.find((entry) => entry.includes('task_failed'));
+    expect(line).toBeDefined();
+    expect(line).toContain('error_kind=task_failed');
+    expect(line).toMatch(
+      /error_hash=[0-9a-f]{16} error_message="Extraction job extractorVersion must be a safe identifier\. Bearer \[redacted\]/,
+    );
+    expect(line).not.toContain('\n');
+    expect(line).not.toContain('abc123');
+    const quoted = /error_message=(".*")$/.exec(line!)![1]!;
+    expect((JSON.parse(quoted) as string).length).toBeLessThanOrEqual(200);
+  });
+
+  test('a typed failure keeps the hash-only line', async () => {
+    const clock = { now: T0 };
+    const sched = scheduler([source([
+      task('extract', 'extract', async () => { throw new Error('connection reset by peer'); }),
+    ])], clock);
+    const errors = await capturingErrors(() => sched.runDueTasks(new Date(clock.now)));
+    const line = errors.find((entry) => entry.includes('task_failed'));
+    expect(line).toContain('error_kind=network');
+    expect(line).not.toContain('error_message=');
   });
 });
