@@ -5224,9 +5224,10 @@ export class LocalConnectorStore {
         scores_json = excluded.scores_json, judge_id = excluded.judge_id, reason = excluded.reason,
         judged_at = excluded.judged_at,
         tier_applied = CASE
-          -- Kept applied only when nothing a tier decision reads has changed.
+          -- The same judgment again leaves a pending re-decision pending: only
+          -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
-            AND media_judgments.category IS excluded.category THEN MAX(media_judgments.tier_applied, excluded.tier_applied)
+            AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
           -- An ordinary verdict that no longer holds: the items it let out of
           -- Private are re-decided, whatever the writer thought.
           WHEN media_judgments.verdict = 'ordinary' THEN 0

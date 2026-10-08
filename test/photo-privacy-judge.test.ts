@@ -1186,6 +1186,10 @@ describe('review of #189: the judge never lets a picture out of Private without 
       setJudgment(lane.paths.internal, photo.sha256, "judge_id = 'photo-judge-older'");
       await lane.stores.internal!.embedChunks({ provider: new JudgingProvider(new Map(), new Set([photo.sha256])) });
       expect(judgmentState(lane.paths.internal, photo.sha256)).toEqual({ verdict: 'unjudged', attempts: 1, tier_applied: 0 });
+      // The sweep has not run when the picture is tried again (and fails again): the re-decision stays pending.
+      setJudgment(lane.paths.internal, photo.sha256, "judged_at = '2000-01-01T00:00:00.000Z'");
+      await lane.stores.internal!.embedChunks({ provider: new JudgingProvider(new Map(), new Set([photo.sha256])) });
+      expect(judgmentState(lane.paths.internal, photo.sha256)).toEqual({ verdict: 'unjudged', attempts: 2, tier_applied: 0 });
       const report = applyMediaJudgments({ set: lane.set });
       expect(report.applied).toBeGreaterThanOrEqual(1);
       expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
