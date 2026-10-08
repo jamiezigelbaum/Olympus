@@ -8547,7 +8547,11 @@ export class LocalConnectorStore {
           const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
           vectors = returned.vectors;
           judgedBatch = new Map();
-          const wanted = batch.flatMap((row, index) => (row.media_sha256 && returned.imageVectors[index] ? [index] : []));
+          // Only pictures that need judging now: a settled verdict, or an
+          // unjudged one waiting out its back-off, is left as it is.
+          const currentJudge = mediaJudgeId(judging!);
+          const wanted = batch.flatMap((row, index) => (row.media_sha256 && returned.imageVectors[index]
+            && !this.mediaJudgmentSettled(row.media_sha256, currentJudge) ? [index] : []));
           if (wanted.length > 0) {
             try {
               const judgments = await judgeReturnedImageVectors(judging!, wanted.map((index) => returned.imageVectors[index]));

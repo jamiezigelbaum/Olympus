@@ -1223,6 +1223,19 @@ describe('review of #189 (Codex on GitHub): retry accounting and changed verdict
       provider.images.set(shared.sha256, scores(0, {}, 0));
       await store.embedChunks({ provider });
       expect(judgmentState(dbPath, shared.sha256)).toEqual({ verdict: 'unjudged', attempts: 1, tier_applied: 1 });
+      // A later combined call for another photo leaves the settled ones alone:
+      // no try counted inside the back-off.
+      const fresh = picture();
+      await store.syncFromConnector(connectorFor(['a', 'b', 'c', 'd', 'e', 'f']), { fetchContent: false });
+      await plainSink(store).accept(request('e', fresh));
+      await plainSink(store).accept(request('f', shared));
+      releaseMediaCacheFile(fresh.path, fresh.sha256, fresh.stagingHolder);
+      const combined = provider.calls.combined;
+      await store.embedChunks({ provider });
+      expect(provider.calls.combined).toBe(combined + 1);
+      expect(judgmentState(dbPath, fresh.sha256)).toMatchObject({ verdict: 'ordinary' });
+      expect(judgmentState(dbPath, shared.sha256)).toEqual({ verdict: 'unjudged', attempts: 1, tier_applied: 1 });
+      expect(judgmentState(dbPath, blank.sha256)).toEqual({ verdict: 'unjudged', attempts: 1, tier_applied: 1 });
     } finally {
       store.close();
     }

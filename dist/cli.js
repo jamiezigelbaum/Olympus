@@ -24193,7 +24193,8 @@ var init_local_index = __esm(() => {
             const returned = await judging.embedWithImageVectors(inputsFor(batch));
             vectors = returned.vectors;
             judgedBatch = new Map;
-            const wanted = batch.flatMap((row, index) => row.media_sha256 && returned.imageVectors[index] ? [index] : []);
+            const currentJudge = mediaJudgeId(judging);
+            const wanted = batch.flatMap((row, index) => row.media_sha256 && returned.imageVectors[index] && !this.mediaJudgmentSettled(row.media_sha256, currentJudge) ? [index] : []);
             if (wanted.length > 0) {
               try {
                 const judgments = await judgeReturnedImageVectors(judging, wanted.map((index) => returned.imageVectors[index]));
