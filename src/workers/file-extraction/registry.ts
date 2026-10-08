@@ -26,6 +26,7 @@ import type {
   ExtractorRegistryConfig,
   VlmProbeRequest,
 } from './types.ts';
+import type { ExtractionTerminalRetryPath } from './job-store.ts';
 import {
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS,
   OCR_EXTRACTOR_KIND,
@@ -309,4 +310,28 @@ export function defaultTerminalReclassificationRules(
     toExtractorVersion: target.version,
     reason: `deterministic ${lastErrorKind} reroute to ${toExtractorKind}`,
   }));
+}
+
+/**
+ * Every terminal failure the runner will still try once more, for the
+ * readiness counts: a lane's own once-ever reread, and each escalation rule.
+ * An item holding one is not yet "can't be read" (PR #191 review).
+ */
+export function terminalRetryPaths(
+  registry: ExtractorRegistry,
+  rules: readonly ExtractionReclassificationRule[],
+): ExtractionTerminalRetryPath[] {
+  const paths: ExtractionTerminalRetryPath[] = [];
+  for (const extractor of registry.list()) {
+    const kinds = extractor.reread?.unreadTerminalErrorKinds ?? [];
+    if (kinds.length > 0) paths.push({ extractorKind: extractor.kind, lastErrorKinds: [...kinds] });
+  }
+  for (const rule of rules) {
+    paths.push({
+      extractorKind: rule.fromExtractorKind,
+      lastErrorKinds: [rule.lastErrorKind],
+      escalateToExtractorKind: rule.toExtractorKind,
+    });
+  }
+  return paths;
 }
