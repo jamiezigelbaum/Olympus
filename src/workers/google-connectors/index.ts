@@ -95,6 +95,7 @@ export {
   GOOGLE_DRIVE_STORE_PULL_RECEIPT_KIND,
   GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND,
   createGoogleDriveConnectorStoreSyncHandler,
+  createGoogleDriveLaneTierSet,
   googleDriveReceiptDigest,
   type GoogleDriveConnectorStoreReceipt,
   type GoogleDriveConnectorStoreSyncHandler,

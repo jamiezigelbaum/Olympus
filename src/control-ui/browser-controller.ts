@@ -171,7 +171,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    * What the owner watches while the request is outstanding, chosen per action
    * so the pending state names the actual work instead of a generic wait.
    */
-  function pendingMessage(action: OlympusDashboardControlParams['action']): string {
+  function pendingMessage(params: OlympusDashboardControlParams): string {
+    const action = params.action;
+    if (params.action === 'retry_model' && params.model === 'transcription') return 'Starting…';
     switch (action) {
       case 'start_oauth': return 'Connecting…';
       case 'connect_api_key': return 'Validating the key…';
@@ -188,7 +190,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    * It says what just happened and what the owner should expect next; it never
    * claims the connection is live, which only the server's card may report.
    */
-  function successMessage(action: OlympusDashboardControlParams['action']): string {
+  function successMessage(params: OlympusDashboardControlParams): string {
+    const action = params.action;
+    if (params.action === 'retry_model' && params.model === 'transcription') return 'Started. This row updates as it goes.';
     switch (action) {
       case 'connect_api_key': return 'Key accepted. This card updates when Olympus confirms the connection.';
       case 'start_oauth': return 'Waiting for authorization. This card updates when the connection completes.';
@@ -357,7 +361,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (form.hasAttribute('data-model-retry')) {
       const model = form.dataset.modelRetry;
-      return model === 'embedding' || model === 'answers' ? { action: 'retry_model', model } : undefined;
+      return model === 'embedding' || model === 'answers' || model === 'transcription'
+        ? { action: 'retry_model', model }
+        : undefined;
     }
     if (form.hasAttribute('data-disconnect-kind')) {
       return {
@@ -445,7 +451,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
     }
     if (params.action === 'start_oauth') clearAuthorizationFallback(form);
-    setFormPending(form, true, pendingMessage(params.action));
+    setFormPending(form, true, pendingMessage(params));
     let result: OlympusDashboardControlResult;
     try {
       result = await options.transport.control(params);
@@ -511,7 +517,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     say(form, typeof statusMessage === 'string'
       ? statusMessage
       : released
-        ? successMessage(params.action)
+        ? successMessage(params)
         : unreleasedMessage(params.action));
     // The submitted form released its focus and dirty state above, so this
     // read is not deferred by the owner's own finished form. Unrelated unsaved

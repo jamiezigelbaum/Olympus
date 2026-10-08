@@ -184,6 +184,24 @@ export interface TieredStoreSetOptions {
    * whose text was not read keeps the lane's own placement (phase P1b).
    */
   contentArrivesLater?: boolean;
+  /**
+   * The same, for only some of a lane's items: those the lane's listing does
+   * not read and a later reader does (a still image, read by the extraction
+   * factory, in a lane whose listing reads documents itself). Such an item is
+   * routed exactly as in a `contentArrivesLater` lane; every other item keeps
+   * the lane's own rules. Where only a decision is at hand (a re-judgment), an
+   * item whose text has not landed is placed as one whose text arrives later,
+   * and one whose text has landed as the lane places read items: the two
+   * differ only for a pending decision, and then the latter is more private.
+   */
+  contentArrivesLaterFor?: (item: RawItem) => boolean;
+  /**
+   * False for a second set over a lane's stores and ledger that only reads
+   * and lands extracted text (it must route exactly as the lane's own set
+   * does): the lane's own set stays the one its ledger's background passes
+   * (the sniffer, moves) find. Default true.
+   */
+  registerWithLedger?: boolean;
 }
 
 export interface TieredStoreLegRun {
@@ -234,6 +252,7 @@ export class TieredStoreSet {
   private readonly onLegOpened: TieredStoreSetOptions['onLegOpened'];
   private readonly laneFloor: TieredLaneFloor | undefined;
   private readonly contentArrivesLater: boolean;
+  private readonly contentArrivesLaterFor: ((item: RawItem) => boolean) | undefined;
   private privateEmbedder: SourceEmbeddingProvider | undefined;
   private privateEmbedWith: (() => SourceEmbeddingProvider | undefined) | undefined;
   private lastRowRehome: TierRowRehomeReport | undefined;
@@ -248,6 +267,7 @@ export class TieredStoreSet {
     this.onLegOpened = options.onLegOpened;
     this.laneFloor = options.laneFloor;
     this.contentArrivesLater = options.contentArrivesLater === true;
+    this.contentArrivesLaterFor = options.contentArrivesLater === true ? undefined : options.contentArrivesLaterFor;
     this.legs = new Map();
     for (const spec of options.legs) {
       if (this.legs.has(spec.trustDomain)) throw new Error(`A tiered store set has one leg per trust domain (${spec.trustDomain}).`);
@@ -262,8 +282,10 @@ export class TieredStoreSet {
     if (!this.legs.has('secure_local')) throw new Error('A tiered store set needs a secure_local leg.');
     // The sniffer's background pass settles this set's routed items through
     // this planner, so a verdict queues a move rather than rewriting placement.
-    registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
-    registerTierSetForLedger(this.ledger.dbPath, this);
+    if (options.registerWithLedger !== false) {
+      registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
+      registerTierSetForLedger(this.ledger.dbPath, this);
+    }
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */
@@ -311,15 +333,23 @@ export class TieredStoreSet {
    * There, only an open NAME question (the sniffer) makes the whole item
    * pending (Private); an open CONTENT question holds just the content copy
    * in the Private store, held back from embedding.
+   *
+   * `contentArrivesLater` says whether this item's text arrives after listing
+   * (`contentArrivesLaterFor`); a caller that knows the item says so. Omitted,
+   * the lane's own option decides (see `contentArrivesLaterFor`).
    */
   placementFor(
     decision: Pick<TierDecision, 'metadataTier' | 'contentTier' | 'state' | 'metadataPending' | 'contentPending'>
       & Partial<Pick<TierDecision, 'contentRead' | 'decidedBy' | 'metadataOwnerRule'>>,
+    options: { contentArrivesLater?: boolean } = {},
   ): TierPlacementPlan {
     if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
       return { copies: [], embedHold: false };
     }
-    const wholePending = this.contentArrivesLater
+    const deferred = this.contentArrivesLater
+      || (this.contentArrivesLaterFor !== undefined
+        && (options.contentArrivesLater ?? decision.contentRead !== true));
+    const wholePending = deferred
       ? decision.metadataPending
       : decision.state === 'pending' || decision.metadataPending || decision.contentPending;
     if (wholePending) {
@@ -332,14 +362,14 @@ export class TieredStoreSet {
     }
     const floor = this.floorFor(decision);
     const metadataDomain = this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[decision.metadataTier], floor));
-    if (this.contentArrivesLater && decision.contentRead !== true) {
+    if (deferred && decision.contentRead !== true) {
       return {
         copies: [{ corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: 'metadata' }],
         embedHold: false,
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) },
       };
     }
-    const contentHeld = this.contentArrivesLater && decision.contentPending;
+    const contentHeld = deferred && decision.contentPending;
     const contentDomain = contentHeld
       ? this.domainAtLeast('secure_local')
       : this.domainAtLeast(atLeastDomain(
@@ -412,9 +442,14 @@ export class TieredStoreSet {
     this.lastRowRehome = report;
   }
 
-  /** @internal Whether this lane's content arrives after listing (see the option). */
-  readsContentLater(): boolean {
-    return this.contentArrivesLater;
+  /**
+   * @internal Whether this item's content arrives after listing (see the
+   * options). Without an item: whether any of the lane's items' does.
+   */
+  readsContentLater(item?: RawItem): boolean {
+    if (this.contentArrivesLater) return true;
+    if (!this.contentArrivesLaterFor) return false;
+    return item === undefined || this.contentArrivesLaterFor(item);
   }
 
   /** @internal The tier a routed copy in this domain's leg is stored at. */
@@ -659,6 +694,10 @@ export interface LaneTieredStoreSetOptions {
   /** Default: the secure store's own co-located ledger (tieredStoreSetLedgerPath). */
   ledger?: TierLedger;
   onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
+  /** See TieredStoreSetOptions.contentArrivesLaterFor. */
+  contentArrivesLaterFor?: (item: RawItem) => boolean;
+  /** See TieredStoreSetOptions.registerWithLedger. */
+  registerWithLedger?: boolean;
 }
 
 /**
@@ -678,6 +717,8 @@ export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): Ti
     ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
+    ...(options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}),
+    ...(options.registerWithLedger === false ? { registerWithLedger: false } : {}),
     legs: [
       ...(options.publicLeg
         ? [{
@@ -1117,7 +1158,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
 
     // A lane whose text arrives later reads none at listing; an owner
     // metadata-only disposition means none ever arrives.
-    const deferred = this.set.readsContentLater();
+    const deferred = this.set.readsContentLater(item);
     const text = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
@@ -1155,7 +1196,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       decision = withRecordedContent(decision, ledger.getCurrent(identity));
     }
 
-    const placement = this.set.placementFor(decision);
+    const placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
     const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),
       ...(deferred ? { stagedLandingAllowed: true } : {}),

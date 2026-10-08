@@ -52,6 +52,7 @@ import {
   builtInTranscriptionEnabled,
   builtInTranscriptionLayout,
   installBuiltInTranscription,
+  readBuiltInTranscriptionStatus,
   reportBuiltInTranscriptionState,
   type BuiltInTranscriptionInstallerOptions,
   type InstalledBuiltInTranscription,
@@ -249,6 +250,8 @@ export function createBuiltInTranscriber(options: BuiltInTranscriberOptions = {}
   let installing: Promise<void> | undefined;
   let failedAt: number | undefined;
   let consecutiveFailures = 0;
+  // The failure whose backoff an owner's click already skipped.
+  let manualSkipFor: number | undefined;
   const readyListeners: Array<() => void> = [];
   let server: LlamaServerHandle | undefined;
 
@@ -323,6 +326,23 @@ export function createBuiltInTranscriber(options: BuiltInTranscriberOptions = {}
 
   return {
     prepare,
+    downloadNow() {
+      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing && !installed && !unavailable) {
+        manualSkipFor = failedAt;
+        failedAt = undefined;
+      }
+      // Downloaded, but its server would not start: try starting it again
+      // now (the status file then reads loading, then ready or failed).
+      if (installed && readBuiltInTranscriptionStatus(env, model).failure?.reason === 'runtime_load_failed') {
+        const paths = installed;
+        void startServer(paths).then(({ handle }) => handle.touch(), () => undefined);
+        return 'loading';
+      }
+      return prepare();
+    },
+    installing() {
+      return installing !== undefined;
+    },
     onReady(listener) {
       readyListeners.push(listener);
     },

@@ -13,12 +13,20 @@ export const KNOWN_GOOD_JPEG_BASE64 = '/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAAT
 export class EngineFaultError extends Error {}
 
 /**
+ * The engine failed the known-good picture: it cannot read pictures right
+ * now, though it may still read text. The parent counts these, and holds
+ * pictures for a while when they keep coming, so text keeps embedding.
+ */
+export class PictureEngineFaultError extends EngineFaultError {}
+
+/**
  * Embeds `indexes` with `run`, isolating pictures that fail. A batch that
  * fails because of a picture is retried as text alone, then each picture
  * alone. If any picture fails alone, the known-good picture is embedded: if
- * it fails too, the engine is at fault and that is thrown (the parent replaces
- * the helper, and no picture is blamed). Otherwise the failing pictures are
- * returned, and everything else was embedded.
+ * it fails too, the engine is at fault and a PictureEngineFaultError is
+ * thrown (the parent replaces the helper, and no picture is blamed).
+ * Otherwise the failing pictures are returned, and everything else was
+ * embedded.
  */
 export function embedIsolatingPictures(
   indexes: readonly number[],
@@ -44,6 +52,13 @@ export function embedIsolatingPictures(
       failed.push(index);
     }
   }
-  if (failed.length > 0) probeKnownGoodPicture();
+  if (failed.length > 0) {
+    try {
+      probeKnownGoodPicture();
+    } catch (error) {
+      if (!(error instanceof EngineFaultError)) throw error;
+      throw new PictureEngineFaultError(`The image encoder could not read a known-good picture: ${error.message}`);
+    }
+  }
   return failed;
 }

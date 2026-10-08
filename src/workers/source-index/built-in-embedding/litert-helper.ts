@@ -19,7 +19,7 @@
 
 import { dlopen, FFIType, ptr, toArrayBuffer, type Pointer } from 'bun:ffi';
 import { closeSync, fstatSync, mkdirSync, openSync, readSync } from 'node:fs';
-import { EngineFaultError, KNOWN_GOOD_JPEG_BASE64, embedIsolatingPictures } from './litert-isolation.ts';
+import { EngineFaultError, KNOWN_GOOD_JPEG_BASE64, PictureEngineFaultError, embedIsolatingPictures } from './litert-isolation.ts';
 import { isAbsolute } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -315,7 +315,12 @@ function main(): void {
         ...(unsupported.length > 0 ? { unsupported } : {}),
       });
     } catch (error) {
-      send({ id, error: error instanceof Error ? error.message : String(error), ...(error instanceof NativeError ? { native: true } : {}) });
+      send({
+        id,
+        error: error instanceof Error ? error.message : String(error),
+        ...(error instanceof EngineFaultError ? { native: true } : {}),
+        ...(error instanceof PictureEngineFaultError ? { pictures: true } : {}),
+      });
     }
   });
   // The parent closed our input: it is gone or done with us.

@@ -34,6 +34,19 @@ export class LiteRtImagesUnavailableError extends Error {
   }
 }
 
+/**
+ * The helper's image encoder failed even the known-good picture
+ * (litert-isolation.ts): pictures cannot be read now, though text may be.
+ * The helper is replaced, as for any engine fault; the caller decides whether
+ * to try the pictures again or hold them for a while.
+ */
+export class LiteRtPictureEngineFaultError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LiteRtPictureEngineFaultError';
+  }
+}
+
 export interface LiteRtEmbedder {
   /** Where the helper runs the model now. */
   readonly device: LiteRtDevice;
@@ -159,7 +172,7 @@ class HelperProcess {
         helper.stderr = (helper.stderr + chunk.toString('utf8')).slice(-4_000);
       });
       createInterface({ input: child.stdout }).on('line', (line) => {
-        let message: { ready?: boolean; device?: LiteRtDevice; vision?: boolean; fatal?: string; id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] };
+        let message: { ready?: boolean; device?: LiteRtDevice; vision?: boolean; fatal?: string; id?: number; error?: string; native?: boolean; pictures?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] };
         try {
           message = JSON.parse(line);
         } catch {
@@ -226,7 +239,7 @@ class HelperProcess {
     });
   }
 
-  private settle(message: { id?: number; error?: string; native?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] }): void {
+  private settle(message: { id?: number; error?: string; native?: boolean; pictures?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] }): void {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
     if (!pending || message.id === undefined) return;
     this.pending.delete(message.id);
@@ -242,7 +255,9 @@ class HelperProcess {
       return;
     }
     if (message.error || !message.vectors || !message.dimension) {
-      pending.reject(new Error(message.error ?? 'The built-in search model returned no vectors.'));
+      pending.reject(message.error && message.pictures
+        ? new LiteRtPictureEngineFaultError(message.error)
+        : new Error(message.error ?? 'The built-in search model returned no vectors.'));
       // LiteRT-LM itself failed (a GPU dispatch failure, say): the helper is
       // replaced on the next batch, on the CPU if it was on the GPU, instead of
       // sending every later batch to the same failing engine. A bad request

@@ -132,7 +132,7 @@ export function renderDashboardSetupPage(
     // The Mac-only Outside help row: never on the native surfaces, whose
     // readers cannot reach the card (design §A.9).
     options?.controlMode === 'native' ? '' : renderOutsideHelpSection(options?.outsideHelpSummary, basePath),
-    dashboardModelsSection(states, view),
+    dashboardModelsSection(states, view, rowOptions),
     ...(options?.agents
       ? [renderDashboardAgentsSection({ view: options.agents, now: new Date(view.generated_at) })]
       : []),

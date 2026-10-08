@@ -13,7 +13,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { solidPng } from './helpers/solid-png.ts';
@@ -37,7 +38,7 @@ import {
   writeMediaCacheFile,
 } from '../src/core/media-cache.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
-import { defaultDropboxConnectorStoreDbPath } from '../src/workers/dropbox-files/connector-store.ts';
+import { defaultDropboxConnectorStoreDbPath, dropboxTierConnectorStoreDbPaths } from '../src/workers/dropbox-files/connector-store.ts';
 import { DEFAULT_STILL_IMAGE_EXTENSIONS, defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
@@ -69,6 +70,9 @@ import type {
   Extractor,
   ExtractorInput,
 } from '../src/workers/file-extraction/types.ts';
+import { BuiltInSourceEmbeddingProvider, PICTURE_HOLD_MS } from '../src/workers/source-index/built-in-embedding/provider.ts';
+import { EMBEDDINGGEMMA_2 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
+import { LiteRtPictureEngineFaultError, type LiteRtEmbedItem } from '../src/workers/source-index/built-in-embedding/litert-runtime.ts';
 import {
   DeterministicSourceEmbeddingProvider,
   SourceEmbeddingInputsFailedError,
@@ -352,7 +356,9 @@ describe('image preparation in the shared text lane', () => {
     const orphan = writeMediaCacheFile(dir, jpegBytes(101), 'image/jpeg');
     const held = writeMediaCacheFile(dir, jpegBytes(102), 'image/jpeg');
     const fresh = writeMediaCacheFile(dir, jpegBytes(103), 'image/jpeg');
-    retainMediaCacheFile(held.path, held.sha256, 'store', dir);
+    const store = join(temporaryDir(), 'store.sqlite');
+    writeFileSync(store, '');
+    retainMediaCacheFile(held.path, held.sha256, store, dir);
     // Every staging hold is from an extraction that died two days ago.
     const old = (Date.now() - 2 * 24 * 60 * 60_000) / 1000;
     for (const media of [orphan, held]) {
@@ -363,6 +369,82 @@ describe('image preparation in the shared text lane', () => {
     expect(existsSync(orphan.path)).toBe(false);
     expect(existsSync(held.path)).toBe(true);
     expect(existsSync(fresh.path)).toBe(true);
+  });
+
+  test('the sweep drops the marker of a store that is gone, never one still there however it is reached', () => {
+    const dir = join(temporaryDir(), 'media-cache');
+    const base = temporaryDir();
+    const stores = join(base, 'stores');
+    mkdirSync(stores);
+    symlinkSync(stores, join(base, 'linked'));
+    const relocated = join(temporaryDir(), 'elsewhere');
+    mkdirSync(relocated);
+    const holders = {
+      linked: join(base, 'linked', 'a.sqlite'),
+      relocated: join(relocated, 'b.sqlite'),
+      deleted: join(stores, 'c.sqlite'),
+      // A store on a volume that is not mounted now.
+      unmounted: join(base, 'not-mounted', 'd.sqlite'),
+    };
+    for (const holder of [join(stores, 'a.sqlite'), holders.relocated, holders.deleted]) writeFileSync(holder, '');
+    const files = Object.fromEntries(Object.entries(holders).map(([key, holder], index) => {
+      const written = writeMediaCacheFile(dir, jpegBytes(300 + index), 'image/jpeg');
+      retainMediaCacheFile(written.path, written.sha256, holder, dir);
+      releaseMediaCacheFile(written.path, written.sha256, written.stagingHolder, dir);
+      const old = (Date.now() - 2 * 24 * 60 * 60_000) / 1000;
+      utimesSync(written.path, old, old);
+      return [key, written.path];
+    })) as Record<keyof typeof holders, string>;
+    // Each marker names its store by its real path.
+    expect(readdirSync(`${files.linked}.refs`).map((marker) => readFileSync(join(`${files.linked}.refs`, marker), 'utf8')))
+      .toEqual([realpathSync(holders.linked)]);
+    rmSync(holders.deleted);
+    expect(sweepMediaCache(dir)).toBe(1);
+    expect(existsSync(files.deleted)).toBe(false);
+    expect(existsSync(files.linked)).toBe(true);
+    expect(existsSync(files.relocated)).toBe(true);
+    expect(existsSync(files.unmounted)).toBe(true);
+  });
+
+  test('an earlier build\'s marker (named by the path as spelled) is replaced when its store holds again, and released with it', async () => {
+    const base = temporaryDir();
+    mkdirSync(join(base, 'real'));
+    symlinkSync(join(base, 'real'), join(base, 'linked'));
+    const spelled = join(base, 'linked', 'store.sqlite');
+    const legacyName = createHash('sha256').update(spelled).digest('hex').slice(0, 32);
+    const legacyOnly = (media: { path: string }) => {
+      const refs = `${media.path}.refs`;
+      for (const marker of readdirSync(refs)) rmSync(join(refs, marker));
+      writeFileSync(join(refs, legacyName), '');
+    };
+    const store = await photoStore(spelled);
+    try {
+      // A store that holds its picture again (each process, before an embed
+      // pass) replaces the old marker with a named one.
+      const { media } = await landPicture(store);
+      legacyOnly(media);
+      await store.embedChunks({ provider: new PictureProvider() });
+      const refs = readdirSync(`${media.path}.refs`);
+      expect(refs).not.toContain(legacyName);
+      expect(refs.map((marker) => readFileSync(join(`${media.path}.refs`, marker), 'utf8'))).toEqual([realpathSync(spelled)]);
+    } finally {
+      store.close();
+    }
+    // A store released by its spelled path also drops the old marker, so the
+    // file goes.
+    const other = writeMediaCacheFile(cache(), jpegBytes(400), 'image/jpeg');
+    legacyOnly(other);
+    expect(releaseMediaCacheFile(other.path, other.sha256, spelled)).toBe(true);
+    expect(existsSync(other.path)).toBe(false);
+    // An empty marker whose store cannot be told is kept, however old.
+    const unknown = writeMediaCacheFile(cache(), jpegBytes(401), 'image/jpeg');
+    for (const marker of readdirSync(`${unknown.path}.refs`)) rmSync(join(`${unknown.path}.refs`, marker));
+    writeFileSync(join(`${unknown.path}.refs`, 'f'.repeat(32)), '');
+    const old = (Date.now() - 400 * 24 * 60 * 60_000) / 1000;
+    utimesSync(unknown.path, old, old);
+    utimesSync(join(`${unknown.path}.refs`, 'f'.repeat(32)), old, old);
+    sweepMediaCache(cache());
+    expect(existsSync(unknown.path)).toBe(true);
   });
 
   const realSips = process.platform === 'darwin' && process.env.OLYMPUS_MEDIA_REAL_SIPS_TEST === '1' ? test : test.skip;
@@ -752,6 +834,22 @@ describe('a prepared picture through runner, sink and store', () => {
     }
   });
 
+  test('in a limited pass, held photos take no place in the window, so text behind them embeds', async () => {
+    const dbPath = join(temporaryDir(), 'store.sqlite');
+    const store = await photoStore(dbPath, ['photo-1', 'photo-2']);
+    try {
+      await landPicture(store);
+      await sinkFor(store).accept(request(undefined, 'A note', 'photo-2'));
+      const blind = new PictureProvider(false);
+      // The photo's chunk comes first; a window of one still reaches the note.
+      expect((await store.embedChunks({ provider: blind, limit: 1 })).chunksEmbedded).toBe(1);
+      expect(blind.inputs.some((input) => input.image)).toBe(false);
+      expect((await store.embedChunks({ provider: new PictureProvider(true), limit: 1 })).chunksEmbedded).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
   test('an unreadable picture backs off, never holds up the rest, and after three tries embeds as text', async () => {
     const dbPath = join(temporaryDir(), 'store.sqlite');
     let clock = Date.parse('2026-10-08T00:00:00.000Z');
@@ -817,6 +915,63 @@ describe('a prepared picture through runner, sink and store', () => {
       expect(chunkRows(dbPath)[0]!.media_sha256).not.toBeNull();
       provider.mode = 'ok';
       expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('an image encoder that keeps failing the known-good picture holds photos; text after them embeds in the same pass', async () => {
+    const dbPath = join(temporaryDir(), 'store.sqlite');
+    const store = await photoStore(dbPath, ['photo-1', 'photo-2', 'photo-3']);
+    try {
+      const { media } = await landPicture(store, 'photo-1');
+      await sinkFor(store).accept(request(undefined, 'A note about the kitchen', 'photo-2'));
+      await sinkFor(store).accept(request(undefined, 'A note about the garden', 'photo-3'));
+      // The real built-in provider over a stand-in helper whose image encoder
+      // started but fails every picture, the known-good one included.
+      let clock = Date.parse('2026-10-08T00:00:00.000Z');
+      let encoderBroken = true;
+      const sent: LiteRtEmbedItem[][] = [];
+      const modelDir = temporaryDir();
+      const provider = new BuiltInSourceEmbeddingProvider({
+        env: { OLYMPUS_BUILT_IN_EMBEDDING_DIR: modelDir },
+        model: { ...EMBEDDINGGEMMA_2, modelId: 'test-litert-vision', dimension: 4 },
+        install: async () => ({ modelPath: join(modelDir, 'model.litertlm'), runtimeDir: modelDir, libraryPath: join(modelDir, 'lib') }),
+        liteRt: async () => ({
+          device: 'cpu',
+          vision: true,
+          async embed(items) {
+            sent.push([...items]);
+            if (encoderBroken && items.some((item) => typeof item !== 'string' && item.image)) {
+              throw new LiteRtPictureEngineFaultError('The image encoder could not read a known-good picture.');
+            }
+            return items.map((_, row) => Float32Array.from([1, row + 1, items.length, 1]));
+          },
+          async release() {},
+        }),
+        now: () => clock,
+      });
+      const pictureTries = () => sent.filter((items) => items.some((item) => typeof item !== 'string' && item.image)).length;
+
+      // One pass: the photo is tried on a fresh helper once more, then held,
+      // and both notes queued after it embed.
+      expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(2);
+      expect(pictureTries()).toBe(2);
+      // Held, not failed: nothing recorded, and the chunk keeps its picture.
+      expect(mediaFailures(dbPath)).toEqual([]);
+      expect(chunkRows(dbPath)[0]).toMatchObject({ media_sha256: media.sha256 });
+
+      // During the hold no picture is sent at all.
+      expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(0);
+      expect(pictureTries()).toBe(2);
+
+      // After the hold the photo is tried again, and embeds with its picture.
+      clock += PICTURE_HOLD_MS + 1;
+      encoderBroken = false;
+      expect((await store.embedChunks({ provider })).chunksEmbedded).toBe(1);
+      expect(pictureTries()).toBe(3);
+      // The photo judge's description batch (text only) may follow the photo's own.
+      expect(sent.findLast((batch) => batch.some((item) => typeof item !== 'string'))?.find((item) => typeof item !== 'string')).toMatchObject({ image: media.path });
     } finally {
       store.close();
     }
@@ -961,6 +1116,28 @@ describe('data lifecycle and the media cache', () => {
     writeFileSync(dbPath, Buffer.concat([header, Buffer.alloc(4096, 0xab)]));
     expect(() => deleteOlympusData({ sourceId: 'dropbox.files', homeDir: home, env })).toThrow('nothing was deleted');
     expect(existsSync(dbPath)).toBe(true);
+  });
+
+  test('a later store that cannot be read stops the delete before any earlier store\'s picture is released', async () => {
+    const home = temporaryDir('olympus-photo-home-');
+    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share'), [MEDIA_CACHE_DIR_ENV]: CACHE_BASE };
+    const [first, second] = dropboxTierConnectorStoreDbPaths(env);
+    mkdirSync(join(first!, '..'), { recursive: true });
+    mkdirSync(join(second!, '..'), { recursive: true });
+    const store = await photoStore(first!);
+    const { media } = await landPicture(store);
+    store.close();
+    const markers = readdirSync(`${media.path}.refs`);
+    expect(markers).toHaveLength(1);
+    writeFileSync(second!, Buffer.concat([Buffer.from('SQLite format 3\u0000', 'latin1'), Buffer.alloc(4096, 0xab)]));
+    expect(() => deleteOlympusData({ sourceId: 'dropbox.files', homeDir: home, env })).toThrow('nothing was deleted');
+    expect(readdirSync(`${media.path}.refs`)).toEqual(markers);
+    expect(existsSync(media.path)).toBe(true);
+    expect(existsSync(first!)).toBe(true);
+    // Repaired, the delete goes through and the picture with it.
+    rmSync(second!);
+    expect(deleteOlympusData({ sourceId: 'dropbox.files', homeDir: home, env }).removed).toContain(media.path);
+    expect(existsSync(media.path)).toBe(false);
   });
 });
 

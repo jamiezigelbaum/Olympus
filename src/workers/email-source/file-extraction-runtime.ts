@@ -151,10 +151,13 @@ export interface FileExtractionRuntimeOptions {
   >;
   /**
    * Corpora whose lane keeps per-tier stores with text that arrives after
-   * listing (TieredStoreSetOptions.contentArrivesLater), keyed by the lane's
-   * own corpus. Such a corpus reads candidates, locators and egress tiers
-   * across the set, and its sink lands each routed item's text in the store
-   * its content tier decides. Its existing items take the plain path.
+   * listing (TieredStoreSetOptions.contentArrivesLater or
+   * contentArrivesLaterFor), keyed by the lane's own corpus. Such a corpus
+   * reads candidates, locators and egress tiers across the set, and its sink
+   * lands each routed item's text in the store its content tier decides. Its
+   * existing items take the plain path. A lane with several stores of its own
+   * maps each of their corpora to the same set; each lists its own store
+   * (tieredExtractionView `home`).
    */
   tierSets?: ReadonlyMap<string, TieredStoreSet>;
   /**
@@ -168,6 +171,8 @@ export interface FileExtractionRuntimeOptions {
     allowsRef(input: {
       config: FileExtractionCorpusConfig;
       store: LocalConnectorStore;
+      /** Where the item's row is found: the corpus's view across its tier stores, else its store. */
+      reader: Pick<LocalConnectorStore, 'itemMatchesSearchFilters'>;
       ref: ExtractionItemRef;
     }): boolean;
   };
@@ -240,12 +245,14 @@ export function createFileExtractionRuntime(
     if (tierSet && tierSet.legSpec(store.trustDomain)?.store !== store) {
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
     }
-    const view = tierSet ? tieredExtractionView(tierSet) : undefined;
-    // A plain (untiered) store that is not Private holds no picture content;
-    // what an earlier build stored there is removed once (the names stay).
-    if (!tierSet && store.trustDomain !== 'secure_local') {
+    const view = tierSet ? tieredExtractionView(tierSet, { home: store.trustDomain }) : undefined;
+    // A store that is not Private holds no picture content of an item its set
+    // never routed (or of any item, untiered); what an earlier build stored
+    // there is removed (the names stay).
+    if (store.trustDomain !== 'secure_local') {
       try {
-        store.stripImageContentOutsidePrivate();
+        if (tierSet) store.stripImageContentOutsidePrivate({ keep: (identity) => tierSet.ledger.isRouted(identity) });
+        else store.stripImageContentOutsidePrivate();
       } catch {
         // Tried again at the next start.
       }
@@ -267,12 +274,12 @@ export function createFileExtractionRuntime(
             const page = await source.listCandidates(listOptions);
             return {
               ...page,
-              candidates: page.candidates.filter((ref) => guard.allowsRef({ config, store, ref })),
+              candidates: page.candidates.filter((ref) => guard.allowsRef({ config, store, reader: view ?? store, ref })),
             };
           },
           async fetch(ref, fetchOptions) {
             guard.assertAuthorized({ config, store });
-            if (!guard.allowsRef({ config, store, ref })) {
+            if (!guard.allowsRef({ config, store, reader: view ?? store, ref })) {
               throw new FileExtractionSourceError('source_permission_denied');
             }
             return source.fetch(ref, fetchOptions);
@@ -285,6 +292,7 @@ export function createFileExtractionRuntime(
       sink: tierSet
         ? createTieredStoreExtractionSink({
             set: tierSet,
+            home: store.trustDomain,
             syncConnectorId: FILE_EXTRACTION_SYNC_CONNECTOR_ID,
             ownerConnectorId: config.ownerConnectorId ?? `${config.provider}-connector`,
             ownershipKind: 'observed',
@@ -312,6 +320,11 @@ export function createFileExtractionRuntime(
             },
           }
         : {}),
+      // A still image whose picture could only land outside Private is never
+      // queued (the sink would refuse it after the download and the reading).
+      refusesImageContent: (ref) => view
+        ? view.refusesImageContent(ref.localItemId)
+        : store.trustDomain !== 'secure_local',
       trustTiers: {
         // Across a tier set, a routed item is never below Private on its way
         // to an extractor: its content tier is not known until its text is.
@@ -324,7 +337,7 @@ export function createFileExtractionRuntime(
             authorization: {
               assertCurrent(ref) {
                 options.scopeGuard!.assertAuthorized({ config, store });
-                if (!options.scopeGuard!.allowsRef({ config, store, ref })) {
+                if (!options.scopeGuard!.allowsRef({ config, store, reader: view ?? store, ref })) {
                   throw new FileExtractionSourceError('source_permission_denied');
                 }
               },
@@ -578,7 +591,7 @@ function defaultSourceFactories(
         ...(localRoots.length > 0 ? { localRoots } : {}),
       });
     }],
-    ['google_drive', async (input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore }) => {
+    ['google_drive', async (input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore; view?: TieredExtractionView }) => {
       const handle = extractionCredentialHandle(input.config)
         || env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE?.trim()
         || 'google_drive.personal';
@@ -598,7 +611,8 @@ function defaultSourceFactories(
         corpusId: input.config.corpusId,
         provider: input.config.provider,
         approvedScopeKey: input.config.scopes[0]!,
-        candidates: connectorStoreExtractionCandidateReader(input.store),
+        // Across the lane's tier stores when it has them (this corpus's share).
+        candidates: connectorStoreExtractionCandidateReader(input.view ?? input.store),
         client: createRestGoogleDriveApiClient({
           token: session.token,
           fetch,

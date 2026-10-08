@@ -515,6 +515,12 @@ export interface EmailSourceWorkerOptions {
     modelInstalls?: () => DashboardModelInstalls;
     /** Starts a built-in model's failed install again; false when that model is not built in here. */
     retryModel?: (model: 'embedding' | 'answers') => boolean;
+    /**
+     * The owner's Download now for the built-in transcription model:
+     * `started`, `ready` (already downloaded: nothing to do), or
+     * `unavailable` (not this machine's transcriber, or it cannot run here).
+     */
+    downloadTranscriptionModel?: () => 'started' | 'loading' | 'ready' | 'unavailable';
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
@@ -1892,13 +1898,27 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/retry') {
-          if (!sourceDashboard?.retryModel) {
+          if (!sourceDashboard?.retryModel && !sourceDashboard?.downloadTranscriptionModel) {
             throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'This worker does not support restarting a model download.');
           }
           const record = await parseObjectBody(request);
+          if (record.model === 'transcription') {
+            const outcome = sourceDashboard.downloadTranscriptionModel?.() ?? 'unavailable';
+            if (outcome === 'unavailable') {
+              throw new EmailSourceWorkerError(409, 'model_not_configured', 'The built-in transcription model is not used on this computer.');
+            }
+            return json({
+              ok: true,
+              status_message: outcome === 'ready'
+                ? 'Already downloaded.'
+                : outcome === 'loading'
+                  ? 'Starting the transcription model again. This row updates as it goes.'
+                  : 'Downloading the transcription model. This row updates as it goes.',
+            });
+          }
           const model = record.model === 'embedding' || record.model === 'answers' ? record.model : undefined;
-          if (!model) throw new EmailSourceWorkerError(400, 'invalid_request', 'model must be embedding or answers.');
-          if (!sourceDashboard.retryModel(model)) {
+          if (!model) throw new EmailSourceWorkerError(400, 'invalid_request', 'model must be embedding, answers or transcription.');
+          if (!sourceDashboard.retryModel?.(model)) {
             throw new EmailSourceWorkerError(409, 'model_not_configured', 'That model is not the built-in one on this computer.');
           }
           return json({ ok: true, status_message: 'Downloading again. This row updates as it goes.' });

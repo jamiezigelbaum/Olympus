@@ -2115,7 +2115,7 @@ function requireHash(value: string): string {
 
 function requireBoundedString(value: string, field: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 1_024) {
-    throw new TypeError(`Extraction job ${field} must be a bounded non-empty string.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a bounded non-empty string.`);
   }
   return value;
 }
@@ -2143,14 +2143,14 @@ function requireTerminalStatus(value: ExtractionTerminalStatus): ExtractionTermi
 
 function requireSafeInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new TypeError(`Extraction job ${field} must be a non-negative safe integer.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a non-negative safe integer.`);
   }
   return value;
 }
 
 function requirePositiveSafeInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new TypeError(`Extraction job ${field} must be a positive safe integer.`);
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a positive safe integer.`);
   }
   return value;
 }
