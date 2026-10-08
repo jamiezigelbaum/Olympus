@@ -1008,8 +1008,14 @@ export function dashboardPhaseUnreadableWords(read: number, unreadable: number):
 export function dashboardUnreadableSentence(source: DashboardSourceCard): string | undefined {
   const phrase = dashboardUnreadablePhrase(source);
   if (!phrase) return undefined;
-  return `${phrase[0]!.toUpperCase()}${phrase.slice(1)}: extraction failed permanently — the file is damaged`
-    + " or in a format Olympus can't read. Olympus does not retry these, and nothing is waiting on you.";
+  const lead = `${phrase[0]!.toUpperCase()}${phrase.slice(1)}: extraction failed permanently — the file is damaged`
+    + " or in a format Olympus can't read.";
+  // Past the alarm share the row says Needs you, so this sentence must not say
+  // nothing is waiting — and the rest of the source still answers.
+  return source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL
+    ? `${lead} That is more than a healthy source has, so it may be a problem in Olympus rather than your files.`
+      + ' The other files still answer questions.'
+    : `${lead} Olympus does not retry these, and nothing is waiting on you.`;
 }
 
 /** A Sync now that could not run, in plain words; the provider's own text stays in the log. */

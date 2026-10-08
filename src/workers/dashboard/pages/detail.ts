@@ -75,6 +75,7 @@ import {
   dashboardRelativeFromMs,
   dashboardNotReadByPolicyPhrase,
   dashboardUnreadableSentence,
+  DASHBOARD_MANY_UNREADABLE_LABEL,
   dashboardOperatorPaused,
   dashboardSourceById,
   dashboardStatus,
@@ -813,6 +814,10 @@ function detailChecks(
 function withConsequence(check: DetailCheck, source: DashboardSourceCard): DetailCheck {
   if (check.ok) return check;
   if (check.name === 'LEDGER') return { ...check, consequence: ledgerConsequence(check.observed) };
+  // The unreadable-share alarm holds no answers back: the readable files serve.
+  if (check.name === 'ANSWER_LANE' && source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL) {
+    return { ...check, consequence: "answers use the files that could be read; the rest can't be searched" };
+  }
   const marker = guardMarkerFor(check, source);
   const consequence = (marker ? DETAIL_GUARD_CONSEQUENCES[marker] : undefined)
     ?? DETAIL_CHECK_CONSEQUENCES[check.name];
