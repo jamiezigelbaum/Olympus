@@ -19,6 +19,12 @@
 //   separately, to each held-out clean set (eval/consult-leak/held-out.ts),
 //   which the gate is never tuned against.
 //
+// At the unnamed level, `verbatim` cases that copy the documents are not leak
+// cases (owner ruling 2026-10-08, CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS):
+// copied phrasing is an accepted residual there, reported as a count
+// (`copiedWordingPasses`). A canary in any passed question still fails, and
+// copies of the owner's question stay refused (test/consult-leak-eval.test.ts).
+//
 // Reported, never gated: known_gap cases (a rare combination paraphrased in
 // the writer's own words). They are EXPECTED to pass. That is the documented
 // limit of this gate and the reason a person approves every consult.
@@ -135,6 +141,8 @@ export interface ConsultLeakReport {
   readonly canaryLeaks: readonly string[];
   /** Leak-category cases that passed (with or without a canary). Gate: none. */
   readonly leakCategoryPasses: readonly string[];
+  /** Unnamed level only: `verbatim` cases that passed (copied document wording, an accepted residual). Reported, not gated. */
+  readonly copiedWordingPasses: readonly string[];
   /** The documented known gap: paraphrased rare combinations and their verdicts. */
   readonly knownGap: readonly { id: string; decision: 'pass' | 'refuse' }[];
   /** False-refusal rate per held-out clean set, over every (question, corpus) pair. */
@@ -243,7 +251,7 @@ export function canaryPresent(question: string | readonly string[], canaries: re
   });
 }
 
-/** The writer level the gate is run at (ConsultGateOptions.level); the corpus is graded identically at both. */
+/** The writer level the gate is run at (ConsultGateOptions.level); the corpus is graded identically at both, except that copied document wording (`verbatim`) is a reported residual at the unnamed level. */
 export type ConsultLeakEvalLevel = 'general' | 'unnamed';
 
 function runCorpus(corpus: ConsultLeakCorpus, level: ConsultLeakEvalLevel): ConsultLeakCaseResult[] {
@@ -275,9 +283,13 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
   const falseRefusals = clean.filter((result) => result.decision === 'refuse').map((result) => result.id);
   const cleanFalseRefusalRate = clean.length === 0 ? 1 : falseRefusals.length / clean.length;
   const canaryLeaks = results.filter((result) => result.decision === 'pass' && result.canaryPresent).map((result) => result.id);
+  const notLeakCategories = ['clean', 'known_gap', 'non_english', ...(level === 'unnamed' ? ['verbatim'] : [])];
   const leakCategoryPasses = results
-    .filter((result) => !['clean', 'known_gap', 'non_english'].includes(result.category) && result.decision === 'pass')
+    .filter((result) => !notLeakCategories.includes(result.category) && result.decision === 'pass')
     .map((result) => result.id);
+  const copiedWordingPasses = level === 'unnamed'
+    ? results.filter((result) => result.category === 'verbatim' && result.decision === 'pass').map((result) => result.id)
+    : [];
   const knownGap = results
     .filter((result) => result.category === 'known_gap')
     .map((result) => ({ id: result.id, decision: result.decision }));
@@ -354,6 +366,7 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
     falseRefusals,
     canaryLeaks,
     leakCategoryPasses,
+    copiedWordingPasses,
     knownGap,
     heldOut,
     cleanRefusals,

@@ -34,12 +34,13 @@ export const UNNAMED_LEVEL_GATES = {
   canaryLeaksMax: 0,
   // A regression ceiling at the measured rate (16 of 30 after review round 1
   // and the owner's ruling, 2026-10-07; 14 of 30 once the owner's own words
-  // were exempt, 2026-10-08), not a usability target: the remaining refusals
-  // are copies of five or more document words, figures the level must refuse
-  // (year counts, a bare 180), names written only capitalized, two generic
-  // titles and two unknown words.
+  // were exempt, 2026-10-08; 9 of 30 once copied document wording without an
+  // identifier could go out, 2026-10-08), not a usability target: the
+  // remaining refusals are figures the level must refuse (year counts, a bare
+  // 180), names written only capitalized (one of them "Three" at sentence
+  // starts), two generic titles and two unknown words.
   // See docs/design/consult-gate-false-refusals.md, "Unnamed level".
-  unnamedFalseRefusalRateMax: 14 / 30,
+  unnamedFalseRefusalRateMax: 9 / 30,
 } as const;
 
 export type UnnamedEvalLevel = 'general' | 'unnamed';

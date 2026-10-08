@@ -190,9 +190,10 @@ export const CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12;
  *     number or another unit, in any form, refuses it;
  *   - copied wording: the copy rules (shared runs, content runs and spans,
  *     sentence overlap) do not compare against the local answer and its gaps
- *     (`writerAnswerTexts`), and an ordered copy of the documents or the
- *     owner's question must be CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS tokens
- *     instead of four (whole three- and four-token sentences still caught);
+ *     (`writerAnswerTexts`), an ordered copy must be
+ *     CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS tokens instead of four, and a
+ *     copy of the documents is not refused on its own
+ *     (CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS);
  *   - ordinary words: a word of the owner's language dictionaries, or a
  *     country, is not taken for a name on its own when the snapshot also
  *     writes it in lower case somewhere ("Retail Park" beside "a retail
@@ -213,6 +214,45 @@ export const CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18;
 export const CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3;
 export const CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2;
 export const CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5;
+
+/**
+ * Copied document wording at the unnamed level (owner ruling 2026-10-08,
+ * after the PII bake-off: answerability first; copied phrasing from the
+ * documents is an accepted residual). At that level a copy the copy rules
+ * find (shared run, content run or span, whole short sentence, sentence
+ * overlap) in the documents or in text the writer saw is not refused on its
+ * own. It goes out only if it carries no hard identifier:
+ *
+ *   - every other rule still reads every word of the request, the copied
+ *     words included: the vocabulary rule, identifier shapes, mail
+ *     addresses, handles, hosts, secrets, identifier values and their parts,
+ *     street addresses, exact dates and years, amounts and other figures,
+ *     and digits read jointly;
+ *   - inside the copied words every word the snapshot writes capitalized in
+ *     running text (a function word aside) is a name candidate, with no
+ *     ordinary-word, sentence-start or mostly-lower-case exemption: a
+ *     snapshot name or place that is also a dictionary word ("Mason",
+ *     "Bath"), however the request writes it ("mason"), is refused as
+ *     `snapshot_name`, also when the documents write it only at sentence
+ *     starts and in lower case elsewhere ("Mason signed the inspection
+ *     report." beside "The mason repaired the wall."). A word of the question
+ *     ChatGPT sent keeps its exemption.
+ *
+ * Still refused at this level as `shared_token_run`: a copy of the owner's
+ * question as the evidence pack holds it (`user_question`); and, at both
+ * levels, `owner_question_copy` (CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS).
+ * The general level is unchanged: every copy refuses.
+ *
+ * Accepted residuals (owner ruling; measured in eval/consult-leak, reported
+ * as counts): a codename or name the documents write only in lower case
+ * ("under the blue lantern clause", "signed by mason" where the documents
+ * never capitalize it) can go out inside a copy; and a recognised name pair
+ * split across sub-questions into words read as function words ("Will May"
+ * sent as "...with will?" and "Could may attend?") is not matched as a pair.
+ * Both need the writer to work against its own rules; the writer is the
+ * owner's local model.
+ */
+export const CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS = true;
 
 /**
  * Words of the question ChatGPT sent (ConsultGateOptions.askedQuestionTexts;
@@ -2016,7 +2056,7 @@ interface RunMatcher {
  * number of question positions holding that token, so the total is bounded by
  * snapshot tokens times question tokens.
  */
-function runMatcher(question: readonly string[], minLength: number, minContent: number): RunMatcher {
+function runMatcher(question: readonly string[], minLength: number, minContent: number, onHit?: (start: number, end: number) => void): RunMatcher {
   const positions = new Map<string, number[]>();
   question.forEach((token, index) => {
     const list = positions.get(token) ?? [];
@@ -2046,7 +2086,10 @@ function runMatcher(question: readonly string[], minLength: number, minContent: 
         const contentCount = (position > 0 ? previousContent[position - 1]! : 0) + content;
         currentLength[position] = length;
         currentContent[position] = contentCount;
-        if (length >= minLength && contentCount >= minContent) hit = true;
+        if (length >= minLength && contentCount >= minContent) {
+          hit = true;
+          onHit?.(position - length + 1, position);
+        }
       }
       clear();
       [previousLength, currentLength] = [currentLength, previousLength];
@@ -2092,11 +2135,25 @@ function compareWithSnapshot(
   const reasons = new Set<ConsultGateReason>();
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const contentTokens = model.tokens.filter(isContent);
+  // Unnamed level (CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS): a copy of
+  // document wording is not refused on its own; its words are collected here
+  // and judged by the name rule without the ordinary-word exemption. A copy
+  // of the owner's question as the pack holds it (`user_question`) is refused
+  // at both levels. The general level refuses every copy, as before.
+  const copiedWords = unnamed ? new Set<string>() : undefined;
+  let copyFromQuestion = false;
+  const copyHit = (words: Iterable<string>): void => {
+    if (!copiedWords || copyFromQuestion) {
+      reasons.add('shared_token_run');
+      return;
+    }
+    for (const word of words) copiedWords.add(word);
+  };
   // The copy rules have no owner-word exemption: the owner's wording is a
   // fingerprint the provider could match to the owner's conversation.
-  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
-  const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
-  const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS);
+  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS, (start, end) => copyHit(model.tokens.slice(start, end + 1)));
+  const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0, (start, end) => copyHit(contentTokens.slice(start, end + 1)));
+  const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, copyHit);
   // A word the request writes as a literal token that the asked question also holds.
   const requestTokens = new Set(model.tokens);
   const askedToken = (token: string): boolean => asked !== undefined && asked.tokens.has(token) && requestTokens.has(token);
@@ -2122,11 +2179,11 @@ function compareWithSnapshot(
   // Unordered sentence overlap (CONSULT_GATE_SENTENCE_OVERLAP_WORDS).
   const questionContent = new Set(contentTokens);
   const contentCounts = new Map<string, number>();
-  const overlapCandidates: string[][] = [];
+  const overlapCandidates: Array<{ words: string[]; fromQuestion: boolean }> = [];
   let sentenceContent = new Set<string>();
   let sentenceTokens = 0;
   const closeOverlap = (): void => {
-    if (sentenceContent.size >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) overlapCandidates.push([...sentenceContent]);
+    if (sentenceContent.size >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) overlapCandidates.push({ words: [...sentenceContent], fromQuestion: copyFromQuestion });
     sentenceContent = new Set();
     sentenceTokens = 0;
   };
@@ -2252,13 +2309,14 @@ function compareWithSnapshot(
       if (sentence.length >= CONSULT_GATE_SHARED_RUN_TOKENS - 1 && sentence.length < runTokens
         && sentence.filter(isContent).length >= CONSULT_GATE_RUN_MIN_CONTENT_TOKENS
         && model.tokenKeys[0]!.includes(`${SEP}${sentence.join(SEP)}${SEP}`)) {
-        reasons.add('shared_token_run');
+        copyHit(sentence);
       }
       sentence = [];
     };
     // Unnamed level: the answer's own wording is not compared for copies (the
     // runs restart on either side of it); everything else below still reads it.
     const wordingExempt = unnamed && entry.path === WRITER_ANSWER_PATH;
+    copyFromQuestion = entry.kind === 'user_question';
     if (wordingExempt) {
       closeOverlap();
       fullRun.reset();
@@ -2281,8 +2339,8 @@ function compareWithSnapshot(
           contentCounts.set(token.norm, (contentCounts.get(token.norm) ?? 0) + 1);
         }
         if (sentence.length < runTokens) sentence.push(token.norm);
-        if (fullRun.feed(token.norm)) reasons.add('shared_token_run');
-        if (isContent(token.norm) && (contentRun.feed(token.norm) || contentSpan.feed(token.norm))) reasons.add('shared_token_run');
+        fullRun.feed(token.norm);
+        if (isContent(token.norm) && !contentRun.feed(token.norm)) contentSpan.feed(token.norm);
       }
       if (entry.kind === 'vocabulary') {
         previous = token;
@@ -2359,11 +2417,12 @@ function compareWithSnapshot(
       return reasons;
     }
   }
-  for (const words of overlapCandidates) {
+  for (const { words, fromQuestion } of overlapCandidates) {
     const rare = words.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES);
     if (rare.length >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) {
-      reasons.add('shared_token_run');
-      return reasons;
+      copyFromQuestion = fromQuestion;
+      copyHit(rare);
+      if (reasons.size > 0) return reasons;
     }
   }
 
@@ -2410,11 +2469,21 @@ function compareWithSnapshot(
     // dictionaries keep the general rule. (Exempting sentence-initial-only
     // words as well let 39 of 223 sample given names through and cut no
     // false refusal on the measured set, so it is not done.)
-    if (!single.strongLabel && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0) continue;
+    // Inside copied document wording (CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS)
+    // that exemption does not apply: a copy may go out, a name in it may not.
+    if (!single.strongLabel && !copiedWords?.has(token) && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0) continue;
     // A word of the question ChatGPT sent (CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS).
     if (askedToken(token)) continue;
     const stat = statOf(token);
     const dominatedByLower = stat.lower >= 3 && stat.lower >= 3 * stat.capitalized;
+    // Inside copied document wording a capitalized snapshot word is a name
+    // even at a sentence start and even when the snapshot also writes it in
+    // lower case: the copy carries the document's casing evidence with it
+    // ("Mason signed the inspection report." beside "The mason repaired").
+    if (copiedWords?.has(token)) {
+      nameHit(single.source);
+      continue;
+    }
     if (single.labelled || (single.initialOnly ? stat.lower === 0 && stat.lowerAnywhere === 0 : !dominatedByLower)) nameHit(single.source);
   }
   // Identifier and path components written capitalized (or as a label value),
@@ -2517,7 +2586,7 @@ function askedPair(asked: AskedWords, model: QuestionModel, left: string, right:
  * whose multiset equals that of any window of the question's content tokens,
  * so swapping adjacent words does not hide a copy.
  */
-function spanMatcher(question: readonly string[], size: number): { feed(token: string): boolean; reset(): void } {
+function spanMatcher(question: readonly string[], size: number, onHit?: (window: readonly string[]) => void): { feed(token: string): boolean; reset(): void } {
   const key = (tokens: readonly string[]): string => [...tokens].sort().join(' ');
   const wanted = new Set<string>();
   for (let start = 0; start + size <= question.length; start += 1) wanted.add(key(question.slice(start, start + size)));
@@ -2532,7 +2601,9 @@ function spanMatcher(question: readonly string[], size: number): { feed(token: s
       window.push(token);
       if (vocabulary.has(token)) inQuestion += 1;
       if (window.length > size && vocabulary.has(window.shift()!)) inQuestion -= 1;
-      return window.length === size && inQuestion === size && wanted.has(key(window));
+      const hit = window.length === size && inQuestion === size && wanted.has(key(window));
+      if (hit) onHit?.(window);
+      return hit;
     },
     reset(): void {
       window = [];

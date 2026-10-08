@@ -407,8 +407,22 @@ through"); the full list is the comment on
   a full percent expression ("%", "percent", "per cent"); a rate ("120 per
   hour"), money, a year count or a bare number refuses it;
 - copied wording: the copy rules do not compare against the local answer and
-  its gaps, and a copy of the documents or the owner's question must be five
-  words instead of four;
+  its gaps, and an ordered copy must be five words instead of four. Since
+  2026-10-08 (owner ruling after the PII bake-off: "loosen the copy rule at
+  Standard so copied wording from your documents can go out unless it
+  carries a hard identifier") a copy of the documents is not refused on its
+  own. Every other rule still reads every word of it, and inside the copied
+  words every word the documents capitalize counts as a name however the
+  request writes it, even at a sentence start beside a lower-case use
+  ("signed off by mason" copied from "signed off by Mason"; "moved to bath";
+  "Mason signed the inspection report." beside "the mason"). So a copy carrying a personal
+  name, a place below a country, an exact date or year, an amount, an
+  account, phone or ID number, an address, a mail address or a handle is
+  still refused. A copy of the owner's question is still refused at both
+  levels (`owner_question_copy`, below; and `shared_token_run` against the
+  question the evidence pack holds). The writer's instruction to write every
+  question in its own words is unchanged. The full rule is the comment on
+  `CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS`;
 - ordinary words: a dictionary word of the owner's languages, or a country,
   is not taken for a name on its own when the snapshot also writes it in
   lower case somewhere ("Retail Park" beside "a retail park", "Offer letter:
@@ -453,11 +467,18 @@ house number within five words of a street word ("7 Park street", "Rua da
 Rosa 12", "7 rue des Tanneurs") refuses a question that repeats the number
 with any word of the span, or the span's name words with its street word.
 
-**Accepted residuals (owner ruling).** A name, venue or project written in
-lower-case or dictionary words ("the red lion") and copied from the documents
-or the answer can pass at this level, and so can a person's name that is a
-dictionary word ("Rose", "Mason") when the snapshot also uses that word in
-lower case ("a rose bush", "the mason"). `bun eval/consult-leak/unnamed-level.ts` counts both. The rules above forbid
+**Accepted residuals (owner ruling).** Copied phrasing from the documents
+that carries no hard identifier can pass at this level (2026-10-08; the leak
+corpus counts these as `copiedWordingPasses`: 6 of its 12 `verbatim` cases).
+A name, venue or project written only in lower-case words ("the blue lantern
+clause", "the red lion") and copied from the documents or the answer can
+pass, and so can a person's name that is a dictionary word ("Rose", "Mason")
+when the snapshot also uses that word in lower case ("a rose bush", "the
+mason") and the request does not copy the words around it. A name the
+documents never capitalize can go out inside a copy, and a recognised name
+pair split across sub-questions into words read as function words ("Will
+May" as "...with will?" and "Could may attend?") is not matched as a pair:
+both need a writer working against its own rules. `bun eval/consult-leak/unnamed-level.ts` counts both. The rules above forbid
 the writer to send it; the gate does not catch it. The re-identification eval
 (`eval/consult-reid/`) and the false-refusal measurements
 (`docs/design/consult-gate-false-refusals.md`, "Unnamed level") report it.

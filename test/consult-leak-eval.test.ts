@@ -78,6 +78,13 @@ describe('the "Your situation, without names" level', () => {
     expect(report.canaryLeaks).toEqual([]);
     expect(report.leakCategoryPasses).toEqual([]);
     expect(report.gates).toEqual({ passed: true, failures: [] });
+    // Copied document wording without an identifier (owner ruling 2026-10-08):
+    // an accepted residual at this level, reported as a count. Copies of the
+    // owner's question stay refused (next test); the general level passes none.
+    expect(report.copiedWordingPasses).toEqual([
+      'tenancy-verbatim-caption', 'incident-verbatim-chunk', 'incident-verbatim-caption', 'famille-verbatim-chunk', 'famille-verbatim-chunk-2', 'r3-reorder',
+    ]);
+    expect(runConsultLeakEval(consultLeakCorpora(), 'general').copiedWordingPasses).toEqual([]);
   });
 
   test("copies of the owner's own question are refused at both levels, with the owner_question_copy reason", () => {

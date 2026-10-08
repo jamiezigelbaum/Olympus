@@ -32,6 +32,9 @@ const EVIDENCE = [{ title: 'Lease', trust_domain: 'secure_local', chunks: ['The 
 const PACK = privateEvidencePack(QUESTION, [{ id: 'lease-1', title: 'Lease', text: EVIDENCE[0]!.chunks[0]! }]);
 const CLEAN_QUESTION = 'How are rental deposit disputes usually resolved between tenants and landlords?';
 const COPIED_QUESTION = 'Does the lease for the flat ends in May and the landlord holds the deposit?';
+// Refused at both levels: it copies four words of the question ChatGPT sent
+// (a copy of the documents alone may go out at the unnamed level).
+const OWNER_COPY_QUESTION = 'When does my lease end in practice?';
 const OUTSIDE_TEXT = 'Deposit disputes are usually settled through a scheme or a small claims process.';
 
 const SETTINGS_ON: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true } };
@@ -239,6 +242,9 @@ describe('the gate fixtures behave as the tests assume', () => {
     const context = consultWriterContextFromPack(PACK, { writerVisibleTexts: [QUESTION, ANSWER, ...GAPS] });
     expect(evaluateConsultRequest([CLEAN_QUESTION], context, {}, {}, { languages: ['en'] })).toEqual({ decision: 'pass', reasons: [] });
     expect(evaluateConsultRequest([COPIED_QUESTION], context, {}, {}, { languages: ['en'] }).decision).toBe('refuse');
+    for (const level of ['general', 'unnamed'] as const) {
+      expect(evaluateConsultRequest([OWNER_COPY_QUESTION], context, {}, {}, { languages: ['en'], level, askedQuestionTexts: [QUESTION] }).reasons).toContain('owner_question_copy');
+    }
   });
 
   test('the implied-place case (M0 round 2): "Portugal" with countries and places on, absent from or present in the snapshot, and with both packs off; unit words pass', () => {
@@ -460,7 +466,7 @@ describe('the snapshot', () => {
 
 describe('writer outcomes and the gate', () => {
   test('a gate refusal is silent: the session is cancelled, nothing is sent, the block reads idle and the log carries no text', async () => {
-    const h = harness({ writerOutcome: { kind: 'questions', questions: [COPIED_QUESTION], promptTokens: 900, ms: 10 } });
+    const h = harness({ writerOutcome: { kind: 'questions', questions: [OWNER_COPY_QUESTION], promptTokens: 900, ms: 10 } });
     const { jobId, panel } = await consult(h);
     expect(h.transport.sessions[0]!.sends).toEqual([]);
     expect(h.transport.sessions[0]!.cancelled).toBe(1);

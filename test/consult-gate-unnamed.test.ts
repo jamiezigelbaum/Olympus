@@ -54,9 +54,10 @@ describe('the unnamed level widens its rules', () => {
     expect(verdict(['Please explain refunds, compare arbitration, outline mediation, describe escrow, assess depreciation, and summarize limitation periods?'], 'unnamed').reasons).toContain('too_many_content_words');
   });
 
-  test("restating the answer's situation is not copying; copying five document words still is", () => {
+  test("restating the answer's situation is not copying; copying document words goes out at unnamed only (CONSULT_GATE_UNNAMED_COPIED_WORDING_MAY_PASS)", () => {
     expect(verdict(['The landlord says they will keep the deposit. Is that allowed?'], 'unnamed').decision).toBe('pass');
-    expect(verdict(['The tenant must give 60 days notice in writing. Is email enough?'], 'unnamed').reasons).toContain('shared_token_run');
+    expect(verdict(['The tenant must give 60 days notice in writing. Is email enough?'], 'unnamed')).toEqual({ decision: 'pass', reasons: [] });
+    expect(verdict(['The tenant must give 60 days notice in writing. Is email enough?'], 'general').decision).toBe('refuse');
     expect(verdict(['The landlord says they will keep the deposit. Is that allowed?'], 'general').reasons).toContain('shared_token_run');
   });
 
