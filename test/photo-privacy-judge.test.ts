@@ -1201,6 +1201,54 @@ describe('review of #189: the judge never lets a picture out of Private without 
   });
 });
 
+describe('review of #189 (Codex on GitHub): retry accounting and changed verdicts', () => {
+  test('a picture the combined call reads but cannot judge counts as its first try and waits out the back-off', async () => {
+    const { store, dbPath } = await plainStore('secure_local', ['a']);
+    try {
+      const blank = picture();
+      await plainSink(store).accept(request('a', blank));
+      releaseMediaCacheFile(blank.path, blank.sha256, blank.stagingHolder);
+      // A vector with no direction: unjudged.
+      const provider = new JudgingProvider(new Map([[blank.sha256, scores(0, {}, 0)]]));
+      await store.embedChunks({ provider });
+      expect(provider.calls).toMatchObject({ combined: 1, imagesAlone: 0 });
+      expect(judgmentState(dbPath, blank.sha256)).toEqual({ verdict: 'unjudged', attempts: 1, tier_applied: 1 });
+      await store.embedChunks({ provider });
+      expect(provider.calls.imagesAlone).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a sensitive verdict a newer judge cannot make again is re-decided: the reason follows the stored judgment', async () => {
+    const lane = openLane(temporaryDir());
+    try {
+      await lane.set.sync(connectorFor(['img-0102']), { fetchContent: false, placement: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }) });
+      const photo = picture();
+      expect((await lane.sink.accept(request('img-0102', photo))).accepted).toBe(true);
+      releaseMediaCacheFile(photo.path, photo.sha256, photo.stagingHolder);
+      await lane.stores.secure_local!.embedChunks({ provider: new JudgingProvider(new Map([[photo.sha256, PASSPORT]])) });
+      applyMediaJudgments({ set: lane.set });
+      expect(lane.ledger.getCurrent(identity('img-0102'))!.reasons).toContain(`${IMAGE_SENSITIVE_REASON_PREFIX}id_document`);
+      const db = new Database(lane.paths.secure_local);
+      try {
+        db.query("UPDATE media_judgments SET judge_id = 'photo-judge-older' WHERE media_sha256 = ?").run(photo.sha256);
+      } finally {
+        db.close();
+      }
+      await lane.stores.secure_local!.embedChunks({ provider: new JudgingProvider(new Map(), new Set([photo.sha256])) });
+      expect(judgmentState(lane.paths.secure_local, photo.sha256)).toEqual({ verdict: 'unjudged', attempts: 1, tier_applied: 0 });
+      expect(applyMediaJudgments({ set: lane.set }).applied).toBe(1);
+      const record = lane.ledger.getCurrent(identity('img-0102'))!;
+      expect(record).toMatchObject({ contentTier: 'secure', state: 'current' });
+      expect(record.reasons).toContain(IMAGE_PRIVATE_DEFAULT_REASON);
+      expect(record.reasons).not.toContain(`${IMAGE_SENSITIVE_REASON_PREFIX}id_document`);
+    } finally {
+      lane.close();
+    }
+  });
+});
+
 const realTest = process.env.OLYMPUS_PHOTO_JUDGE_REAL_TEST === '1' ? test : test.skip;
 
 describe('the judge with the real model (opt-in)', () => {
