@@ -330,11 +330,11 @@ Owner decision, 2026-10-07. Outside help has two levels, chosen on the Mac
 card under "What may zkAPI send?" and stored as `level` in
 `~/.olympus/consult.json`:
 
-- **General questions only** (`general`): everything above, unchanged. The
+- **Strict** (`general`): everything above, unchanged. The
   loaded rules are `CONSULT_WRITER_SYSTEM`, byte for byte as before (a test
   pins its hash).
-- **Your situation, without names** (`unnamed`, the default for a new setup;
-  a settings file written before the level existed reads as `general`): the
+- **Standard (recommended)** (`unnamed`, the default everywhere; a settings
+  file without the key reads as `unnamed`, owner decision 2026-10-08): the
   rules in this section replace "Never relay private content", the verdict
   rule and the stranger test above. The loaded form is
   `CONSULT_WRITER_SYSTEM_UNNAMED` in `src/core/consult-writer.ts`, quoted

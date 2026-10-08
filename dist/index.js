@@ -3729,7 +3729,7 @@ function parseAcknowledgements(value, label) {
   }
   return { version: record.version, accepted: [...new Set(record.accepted)] };
 }
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 4, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 5, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
 var init_zkapi_consult_settings = __esm(() => {
   init_operation_error();
   ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
@@ -3746,40 +3746,28 @@ var init_zkapi_consult_settings = __esm(() => {
   };
   ZKAPI_RISK_ACKNOWLEDGEMENTS = [
     {
-      id: "per_consult_cost",
-      statement: "Each consult authorizes up to the chosen model's per-request allowance, currently $1 to $6 depending on the model. Olympus counts every consult at $6, the worst case."
+      id: "automatic",
+      statement: "Questions go out automatically when the answer from your Mac is missing something. You can turn this off at any time."
     },
     {
-      id: "no_default_limit",
-      statement: "There is no limit on the number of consults or on daily spending unless you set one (dailyRequestCap, dailySpendCapUsd)."
+      id: "provider_reads",
+      statement: "The AI provider reads each question. Olympus removes names and identifying details first, but an unusual situation could still hint at who you are."
     },
     {
-      id: "deposit_fee",
-      statement: "Depositing is an expensive on-chain transaction, paid separately from consults. Its fee can be larger than a small deposit."
+      id: "cost",
+      statement: "Each question usually costs a few cents. While it runs, up to $6 is held from your balance; the rest comes back."
     },
     {
-      id: "withdrawal_fee",
-      statement: "Getting unspent money back is a second expensive on-chain transaction, paid separately, and may require sending additional ETH for its fee."
+      id: "fees",
+      statement: "Adding money and taking it out are Ethereum transactions, each with its own network fee."
     },
     {
-      id: "note_expiry_30_days",
-      statement: "Unused balance that is not withdrawn within about 30 days becomes claimable in full by the operator. Olympus only estimates that date from the funding date you confirm; the real one is set on-chain by the deposit block."
+      id: "expiry",
+      statement: "Money left unused for about 30 days can be claimed by the zkAPI operator. The estimated date is shown on this page when Olympus knows it."
     },
     {
-      id: "no_top_up",
-      statement: "There is no top-up. Each deposit is a new note with its own fee and its own 30-day clock."
-    },
-    {
-      id: "operator_risk",
-      statement: "One operator account can pause deposits and withdrawals while the expiry clock keeps running, and one party ran the proof setup. Funds could be frozen or lost."
-    },
-    {
-      id: "local_files_risk",
-      statement: "The balance is controlled by files on this computer. Losing them loses the money."
-    },
-    {
-      id: "situation_disclosure",
-      statement: 'With "Your situation, without names", the AI provider reads your actual situation, with names, places, exact dates, amounts and account numbers removed. An unusual situation could still hint at who you are.'
+      id: "new_service",
+      statement: "zkAPI is new. Your balance is kept in files on this Mac, and its operator can pause deposits and withdrawals. Only add what you're comfortable losing."
     }
   ];
   INTEGER_BOUNDS = {
@@ -10010,7 +9998,7 @@ class HelperProcess {
       return;
     }
     if (message.error || !message.vectors || !message.dimension) {
-      pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
+      pending.reject(message.error && message.pictures ? new LiteRtPictureEngineFaultError(message.error) : new Error(message.error ?? "The built-in search model returned no vectors."));
       if (message.native) {
         this.exited = true;
         this.child.kill("SIGKILL");
@@ -10063,7 +10051,7 @@ function resolveBun() {
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
-var LiteRtImagesUnavailableError, REQUEST_TIMEOUT_MS;
+var LiteRtImagesUnavailableError, LiteRtPictureEngineFaultError, REQUEST_TIMEOUT_MS;
 var init_litert_runtime = __esm(() => {
   LiteRtImagesUnavailableError = class LiteRtImagesUnavailableError extends Error {
     indexes;
@@ -10071,6 +10059,12 @@ var init_litert_runtime = __esm(() => {
       super("The built-in search model is running without its image encoder.");
       this.name = "LiteRtImagesUnavailableError";
       this.indexes = indexes;
+    }
+  };
+  LiteRtPictureEngineFaultError = class LiteRtPictureEngineFaultError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "LiteRtPictureEngineFaultError";
     }
   };
   REQUEST_TIMEOUT_MS = 3 * 60000;
@@ -10083,7 +10077,7 @@ var init_runtime = () => {};
 var init_wordpiece = () => {};
 
 // src/workers/source-index/built-in-embedding/provider.ts
-var RETRY_AFTER_FAILURE_MS;
+var RETRY_AFTER_FAILURE_MS, PICTURE_HOLD_MS;
 var init_provider = __esm(() => {
   init_operation_error();
   init_embedding_identity();
@@ -10095,6 +10089,7 @@ var init_provider = __esm(() => {
   init_runtime();
   init_wordpiece();
   RETRY_AFTER_FAILURE_MS = 2 * 60000;
+  PICTURE_HOLD_MS = 60 * 60000;
 });
 
 // src/workers/embedding-ledger.ts
@@ -11435,6 +11430,7 @@ var init_drive_live_control = __esm(() => {
 // src/workers/google-connectors/drive-live-sync.ts
 var init_drive_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_classifier();
   init_embeddings();
   init_drive();
   init_drive_live_control();
@@ -18446,8 +18442,8 @@ import { join as join23 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
-var CONSULT_LEVEL_WHEN_UNSET = "general";
-var CONSULT_LEVEL_FOR_NEW_SETUP = "unnamed";
+var CONSULT_LEVEL_WHEN_UNSET = "unnamed";
+var CONSULT_LEVEL_FOR_NEW_SETUP = CONSULT_LEVEL_WHEN_UNSET;
 var DEFAULT_CONSULT_SETTINGS = Object.freeze({
   v: CONSULT_SETTINGS_VERSION,
   revision: 0,

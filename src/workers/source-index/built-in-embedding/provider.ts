@@ -38,6 +38,7 @@ import {
 } from './manifest.ts';
 import {
   LiteRtImagesUnavailableError,
+  LiteRtPictureEngineFaultError,
   startLiteRtEmbedder,
   type LiteRtEmbedder,
   type LiteRtEmbedderOptions,
@@ -66,6 +67,13 @@ const MAX_BATCH_ROWS = 32;
 const LITERT_BATCH = 8;
 /** After a failed install, wait this long before trying again. */
 const RETRY_AFTER_FAILURE_MS = 2 * 60_000;
+/**
+ * An image encoder that fails the known-good picture this many times in a row
+ * (each on a fresh helper) holds pictures for PICTURE_HOLD_MS, so text keeps
+ * embedding instead of every pass stopping at the first photo.
+ */
+export const PICTURE_ENGINE_FAULT_LIMIT = 2;
+export const PICTURE_HOLD_MS = 60 * 60_000;
 
 export interface BuiltInSourceEmbeddingProviderOptions {
   env?: Record<string, string | undefined>;
@@ -125,6 +133,8 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   /** One forward pass runs at a time; these wait for the slot, queries first. */
   private slotBusy = false;
   private imageSupportWarned = false;
+  /** Known-good-picture failures in a row, and until when pictures are held after too many. */
+  private pictureFaults: { count: number; heldUntilMs?: number } | undefined;
   private readonly waiting: { query: Array<() => void>; document: Array<() => void> } = { query: [], document: [] };
 
   constructor(options: BuiltInSourceEmbeddingProviderOptions = {}) {
@@ -195,6 +205,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
    */
   async imageSupport(): Promise<boolean> {
     if (this.spec.runtime !== 'litert' || !this.spec.vision) return false;
+    if (this.picturesHeld()) return false;
     const model = this.loaded ?? await this.load();
     const supported = model.kind === 'litert' && model.embedder.vision;
     if (!supported && !this.imageSupportWarned) {
@@ -369,15 +380,36 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       if (!isMediaCachePath(input.image.path, input.image.sha256)) refused.add(index);
       return { text, image: input.image.path };
     });
+    const pictures = prompts.flatMap((prompt, index) => (typeof prompt !== 'string' && !refused.has(index) ? [index] : []));
+    if (pictures.length > 0 && this.picturesHeld()) {
+      throw new SourceEmbeddingInputsFailedError(pictures, 'image_encoder_failing', 'held');
+    }
     const out: number[][] = [];
     const failed: number[] = [...refused];
     for (let offset = 0; offset < prompts.length; offset += LITERT_BATCH) {
       const batch = prompts.slice(offset, offset + LITERT_BATCH)
         .map((prompt, row) => (refused.has(offset + row) && typeof prompt !== 'string' ? prompt.text : prompt));
+      const batchPictures = batch.flatMap((prompt, row) => (typeof prompt !== 'string' ? [offset + row] : []));
       let vectors: Float32Array[];
       try {
         vectors = await this.withSlot(taskType, () => embedder.embed(batch));
+        if (batchPictures.length > 0) this.pictureFaults = undefined;
       } catch (error) {
+        if (error instanceof LiteRtPictureEngineFaultError) {
+          // The helper was replaced; the next try runs on a fresh one. Once
+          // the encoder has failed the known-good picture often enough in a
+          // row, pictures are held (nothing recorded against them) and the
+          // caller embeds the text.
+          const count = (this.pictureFaults?.count ?? 0) + 1;
+          if (count < PICTURE_ENGINE_FAULT_LIMIT) {
+            this.pictureFaults = { count };
+            offset -= LITERT_BATCH; // The same batch again.
+            continue;
+          }
+          this.pictureFaults = { count: 0, heldUntilMs: this.now() + PICTURE_HOLD_MS };
+          console.warn(`[built-in embedding] the image encoder keeps failing a known-good picture; photos wait ${PICTURE_HOLD_MS / 60_000} minutes while text keeps embedding.`);
+          throw new SourceEmbeddingInputsFailedError(pictures, 'image_encoder_failing', 'held');
+        }
         if (error instanceof LiteRtImagesUnavailableError) {
           // Held, not failed: the pictures wait for the encoder to run again.
           throw new SourceEmbeddingInputsFailedError(
@@ -411,6 +443,12 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     return out;
   }
 
+
+  /** Whether pictures are held after the image encoder kept failing the known-good picture. */
+  private picturesHeld(): boolean {
+    const heldUntilMs = this.pictureFaults?.heldUntilMs;
+    return heldUntilMs !== undefined && this.now() < heldUntilMs;
+  }
 
   private async forward(model: OnnxModel, batch: Window[]): Promise<Float64Array[]> {
     const rows = batch.length;

@@ -40,12 +40,19 @@ asking."
 
 Two levels:
 
-- **Your situation, without names** (default). The actual situation, with
-  names, places, exact dates, amounts and identifiers removed. The stated risk
-  is re-identification from an unusual combination of details.
-- **General questions only** (strict). Today's consult writer behaviour,
-  optionally with ask-before-send; this merges with the planned strict mode
-  (stage C6).
+- **Standard (recommended)** (`unnamed`, the default everywhere, including a
+  settings file with no `level`). "Sends your actual question with names,
+  places, exact dates, amounts and account numbers removed. Gets real
+  answers." The stated risk is re-identification from an unusual combination
+  of details.
+- **Strict** (`general`). "Sends only general questions; nothing about your
+  situation leaves. Safest, but rarely helpful." Today's consult writer
+  behaviour, optionally with ask-before-send; this merges with the planned
+  strict mode (stage C6).
+
+Both are always selectable. Sending needs the six cost-and-risk statements
+(acknowledgement version 5) accepted, so while they are not, choosing Standard
+shows them inline with one "Accept and save", and outside help stays paused.
 
 Status: approved, not built. It needs a writer prompt for the new level, a
 re-identification eval beside the existing leak eval, and the setting on the
@@ -58,13 +65,18 @@ card.
    1. *Install the parts:* Tor and zkAPI, one click (built in this change,
       below).
    2. *Add money:* one transfer, fee included.
-   3. *Confirm:* the cost and risk statements, then turn it on.
+   3. *Confirm:* the six cost and risk statements (version 5), then turn it on:
+      questions go out automatically; the provider reads each question; a
+      question usually costs a few cents with up to $6 held while it runs;
+      adding and taking out money each have a network fee; unused money can
+      be claimed by the operator after about 30 days (the card shows the
+      estimated date when Olympus knows it); zkAPI is new, so add only what you are comfortable losing.
 3. **Everyday panel behaviour.** The private answer panel shows "Asking
    anonymously…", then "Anonymous answer · zkAPI" with "Sent without names:
    <the exact question>", shown every time, for trust.
 
-Ongoing: weekly use, the balance, a reminder a week before the 30-day note
-expiry, and one-click off.
+Ongoing: weekly use, the balance, the estimated 30-day expiry date on the
+card (a reminder before it is not built yet), and one-click off.
 
 ## Known gaps
 
