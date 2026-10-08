@@ -860,9 +860,13 @@ function mediaCacheDeleteTargets(context: LifecyclePathContext): DeleteTarget[] 
  * returns the copies removed, or those a dry run would release. A path is
  * checked to be a media-cache file by its shape, not against this process's
  * configured cache directory, which may differ from the worker's.
+ *
+ * Every store is read before any marker is released: a later store that
+ * cannot be read stops the delete with every earlier store's markers still
+ * in place.
  */
 function releaseSourceMedia(storePaths: readonly string[], _context: LifecyclePathContext, dryRun: boolean): string[] {
-  const released: string[] = [];
+  const held: Array<{ storePath: string; rows: Array<{ media_path: string; media_sha256: string }> }> = [];
   for (const storePath of storePaths) {
     if (storePath === ':memory:' || !existsSync(storePath)) continue;
     // A file that is not SQLite at all holds no references. One that is, and
@@ -896,6 +900,10 @@ function releaseSourceMedia(storePaths: readonly string[], _context: LifecyclePa
     } finally {
       closeSqliteStore(db);
     }
+    held.push({ storePath, rows });
+  }
+  const released: string[] = [];
+  for (const { storePath, rows } of held) {
     for (const row of rows) {
       if (!isMediaCachePath(row.media_path, row.media_sha256)) continue;
       if (dryRun) {

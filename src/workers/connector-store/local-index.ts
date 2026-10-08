@@ -4926,6 +4926,30 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Holds again, once per process, every cache file this store's chunks
+   * reference: the marker then carries this store's name (so the sweep can
+   * tell it from a store that is gone), and a marker an earlier build named by
+   * a path other than the store's real path is replaced. Best effort.
+   */
+  private reassertChunkMediaHolds(): void {
+    if (!this.chunkMediaColumnsPresent) return;
+    reassertedMediaHolders ??= new Set();
+    if (reassertedMediaHolders.has(this.mediaHolder)) return;
+    try {
+      const rows = this.db.query(`
+        SELECT DISTINCT media_path, media_sha256 FROM chunks
+        WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
+      `).all() as Array<{ media_path: string; media_sha256: string }>;
+      for (const row of rows) {
+        if (existsSync(row.media_path)) retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
+      }
+      reassertedMediaHolders.add(this.mediaHolder);
+    } catch {
+      // Next pass.
+    }
+  }
+
+  /**
    * Keeps the media cache in step with this store's chunks. A chunk write
    * that attaches media retains it (this store's marker beside the file);
    * here, media no chunk here references any more (queued by the delete
@@ -7868,6 +7892,7 @@ export class LocalConnectorStore {
     // pass, and copies nothing holds are swept (at most hourly), so the
     // regular drain also keeps the media cache tidy.
     this.releaseUnreferencedChunkMedia();
+    this.reassertChunkMediaHolds();
     sweepMediaCacheThrottled();
     const limit = normalizeEmbedLimit(options.limit);
     const journalId = normalizeMaintenanceJournalId(options.journalId);
@@ -11959,6 +11984,8 @@ interface ConnectorStoreEmbeddingSeasoning {
 }
 
 let lastMediaCacheSweepMs = 0;
+/** Stores whose media holds this process has re-asserted (lazy: see embeddingQueueState). */
+let reassertedMediaHolders: Set<string> | undefined;
 /** The media cache's orphan sweep, at most once an hour per process. Best effort. */
 function sweepMediaCacheThrottled(): void {
   const now = Date.now();

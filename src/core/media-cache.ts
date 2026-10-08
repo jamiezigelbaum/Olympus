@@ -12,6 +12,14 @@
 // being deleted meanwhile cannot take the file away. A file nothing holds is
 // swept after a day.
 //
+// A marker is named by a digest of its holder's name and carries the name
+// itself, so the sweep can tell a store that is gone (its database file
+// removed) from one that still holds the file. Markers from before names were
+// recorded are empty: a store re-asserts its holds when it is opened, which
+// labels them and drops any marker an earlier build named by a path that was
+// not the store's real path. An empty marker is otherwise kept: the sweep
+// cannot tell whose it is, so it never assumes it is stale.
+//
 // Every path this module reads, marks or deletes must be one it could have
 // written: a file named `<sha256>.jpg` directly inside a directory named
 // `media-cache` or `olympus-media`. The check is structural, not against the
@@ -25,6 +33,7 @@ import {
   existsSync,
   mkdirSync,
   lstatSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -161,6 +170,9 @@ export function releaseMediaCacheFile(path: string, sha256: string, holder: stri
   try {
     const refs = refsDir(path);
     rmSync(join(refs, holderName(holder)), { force: true });
+    // The same holder's marker as an earlier build named it.
+    const legacy = legacyHolderName(holder);
+    if (legacy) rmSync(join(refs, legacy), { force: true });
     const remaining = existsSync(refs) ? readdirSync(refs) : [];
     if (remaining.length > 0) return false;
     if (existsSync(refs)) rmdirSync(refs);
@@ -173,9 +185,9 @@ export function releaseMediaCacheFile(path: string, sha256: string, holder: stri
 
 /**
  * Removes what nothing holds: stale staging holds (an extraction that died
- * between writing a file and storing its result), cache files with no holder
- * older than `maxAgeMs`, and abandoned partial writes. Returns how many files
- * were removed. Best effort.
+ * between writing a file and storing its result), markers of stores that are
+ * gone, cache files with no holder older than `maxAgeMs`, and abandoned
+ * partial writes. Returns how many files were removed. Best effort.
  */
 export function sweepMediaCache(
   dir: string,
@@ -208,7 +220,10 @@ export function sweepMediaCache(
       const refs = refsDir(path);
       if (existsSync(refs)) {
         for (const marker of readdirSync(refs)) {
-          if (marker.startsWith('staging-') && old(join(refs, marker))) rmSync(join(refs, marker), { force: true });
+          const markerPath = join(refs, marker);
+          if (marker.startsWith('staging-') ? old(markerPath) : holderGone(markerPath, marker)) {
+            rmSync(markerPath, { force: true });
+          }
         }
         if (readdirSync(refs).length > 0) continue;
         rmdirSync(refs);
@@ -227,16 +242,58 @@ export function sweepMediaCache(
 function addMarker(path: string, holder: string): void {
   const refs = refsDir(path);
   ensureOwnerOnlyDir(refs);
-  writeFileSync(join(refs, holderName(holder)), '', { mode: 0o600 });
+  const marker = join(refs, holderName(holder));
+  const name = mediaHolderName(holder);
+  if (readMarker(marker) !== name) writeFileSync(marker, name, { mode: 0o600 });
+  // Holding under the current name replaces the same holder's marker as an
+  // earlier build named it, which nothing would release.
+  const legacy = legacyHolderName(holder);
+  if (legacy) rmSync(join(refs, legacy), { force: true });
+}
+
+function readMarker(marker: string): string | undefined {
+  try {
+    return readFileSync(marker, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the store a marker names is gone: the marker carries the store's
+ * real path (and is named for it), no file is there, and the directory it
+ * lived in is. A store that exists, by whatever link or relocated path it is
+ * opened, keeps its marker; so does one whose directory is missing (a volume
+ * not mounted now), an in-memory store, and an empty marker from before names
+ * were recorded, whose holder cannot be told.
+ */
+function holderGone(marker: string, markerName: string): boolean {
+  const name = readMarker(marker);
+  if (!name || !isAbsolute(name) || holderDigest(name) !== markerName) return false;
+  return !existsSync(name) && existsSync(dirname(name));
 }
 
 function refsDir(path: string): string {
   return join(dirname(path), `${basename(path)}.refs`);
 }
 
+function holderDigest(name: string): string {
+  return createHash('sha256').update(name).digest('hex').slice(0, 32);
+}
+
 function holderName(holder: string): string {
-  const digest = createHash('sha256').update(mediaHolderName(holder)).digest('hex').slice(0, 32);
+  const digest = holderDigest(mediaHolderName(holder));
   return holder.startsWith('staging:') ? `staging-${digest}` : digest;
+}
+
+/**
+ * The marker name the first build of picture search gave a store: a digest of
+ * its path as spelled, not its real path. Undefined where the two agree.
+ */
+function legacyHolderName(holder: string): string | undefined {
+  if (holder.startsWith('staging:') || holder.startsWith('memory:')) return undefined;
+  const legacy = holderDigest(holder);
+  return legacy === holderName(holder) ? undefined : legacy;
 }
 
 function ensureOwnerOnlyDir(dir: string): void {
