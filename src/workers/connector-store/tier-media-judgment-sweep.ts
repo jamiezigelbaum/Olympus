@@ -12,10 +12,13 @@
 //   the usual rules, Personal by default), so a move out of the Private
 //   store is queued and carried out by the usual tier-move machinery (the
 //   sniffer's automatic moves, or the owner-approved migration);
-// - unjudged: nothing changes (it stays Private).
+// - unjudged: Private. Recorded unapplied only when it replaces an ordinary
+//   verdict (a new judge could not read the picture), so an item that verdict
+//   let out of Private is raised back.
 //
 // Owner overrides, Secrets and legacy (never routed) items are left as they
-// are. An item mid-move, or waiting on its names, is tried again later. A
+// are. An item mid-move, or waiting on its names, is tried again later, its
+// judgment sent to the back of the queue so it cannot starve the rest. A
 // bounded page per call; each judgment is applied once.
 
 import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
@@ -45,6 +48,7 @@ export function applyMediaJudgments(options: {
   for (const store of set.openStores()) {
     const page = store.unappliedMediaJudgments(limit);
     const done: typeof page = [];
+    const waiting: string[] = [];
     for (const entry of page) {
       let ready = true;
       for (const identity of entry.items) {
@@ -57,8 +61,6 @@ export function applyMediaJudgments(options: {
           continue;
         }
         if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') continue;
-        // Unjudged changes nothing: it is held Private exactly as before.
-        if (entry.judgment.verdict === 'unjudged') continue;
         // An unusable map or rules file: decisions wait rather than be made without them.
         if (classification?.unavailableReason) {
           ready = false;
@@ -70,6 +72,9 @@ export function applyMediaJudgments(options: {
             ...(classification?.retirePublic ? { retirePublic: true } : {}),
             report,
             autoMoves: options.autoMoves === true,
+            // A raise (a verdict that no longer lets the content out of
+            // Private) hides the copies outside Private at once.
+            hideRaises: true,
           });
         } catch {
           report.failed += 1;
@@ -77,9 +82,11 @@ export function applyMediaJudgments(options: {
         }
       }
       if (ready) done.push(entry);
-      else report.waiting += 1;
+      else waiting.push(entry.mediaSha256);
     }
     store.markMediaJudgmentsApplied(done);
+    store.markMediaJudgmentsWaiting(waiting);
+    report.waiting += waiting.length;
     report.applied += done.length;
   }
   return report;

@@ -17711,11 +17711,15 @@ function createConnectorStoreMediaJudgments(db) {
       judge_id TEXT NOT NULL,
       reason TEXT,
       judged_at TEXT NOT NULL,
-      tier_applied INTEGER NOT NULL DEFAULT 0 CHECK(tier_applied IN (0, 1))
+      tier_applied INTEGER NOT NULL DEFAULT 0 CHECK(tier_applied IN (0, 1)),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      tier_checked_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_connector_store_media_judgments_unapplied
       ON media_judgments(media_sha256) WHERE tier_applied = 0;
   `);
+  addColumnIfMissing(db, "media_judgments", "attempts", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "media_judgments", "tier_checked_at", "TEXT");
 }
 function createConnectorStoreChunkMediaReleases(db) {
   db.exec(`
@@ -20266,7 +20270,7 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -20306,6 +20310,7 @@ var init_local_index = __esm(() => {
   ]);
   CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
   CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
+  MEDIA_JUDGE_RETRY_BASE_MS = CHUNK_MEDIA_RETRY_BASE_MS;
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
     createTableSql: `
@@ -20426,12 +20431,14 @@ var init_local_index = __esm(() => {
           this.migrate();
           runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
           createConnectorStoreChunkMediaReleases(this.db);
+          createConnectorStoreMediaJudgments(this.db);
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
-        this.mediaJudgmentsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null;
+        const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
+        this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
       } catch (error) {
         closeSqliteStore(this.db);
         throw error;
@@ -20717,21 +20724,26 @@ var init_local_index = __esm(() => {
     tombstoneCopy(identity, options) {
       const syncRunId = `connector-tier-copy-${randomUUID5()}`;
       const startedAt = nowIso2();
-      return this.db.transaction(() => {
-        this.db.query(`
-        INSERT INTO sync_runs (
-          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
-          items_indexed, started_at, completed_at
-        ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
-      `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
-        return this.tombstoneItem({
-          identity,
-          mimeType: "application/octet-stream",
-          content: { kind: "metadata_only" },
-          metadata: {},
-          fetchedAt: startedAt
-        }, options.connectorId, "observed", syncRunId, options.trustTier, true);
-      })();
+      try {
+        return this.db.transaction(() => {
+          this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+            items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
+        `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+          return this.tombstoneItem({
+            identity,
+            mimeType: "application/octet-stream",
+            content: { kind: "metadata_only" },
+            metadata: {},
+            fetchedAt: startedAt
+          }, options.connectorId, "observed", syncRunId, options.trustTier, true);
+        })();
+      } finally {
+        if (!this.db.inTransaction)
+          this.releaseUnreferencedChunkMedia();
+      }
     }
     exportItemCopy(identity) {
       const row = this.db.query(`
@@ -20959,7 +20971,7 @@ var init_local_index = __esm(() => {
         if (!sha || !row.media_path || seen.has(sha))
           continue;
         seen.add(sha);
-        if (this.mediaJudgedBy(sha, judgeId) || this.chunkMediaBackingOff(sha))
+        if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha))
           continue;
         if (!isMediaCachePath(row.media_path, sha) || !existsSync15(row.media_path))
           continue;
@@ -22179,8 +22191,16 @@ var init_local_index = __esm(() => {
         }
       } catch {}
     }
-    mediaJudgedBy(mediaSha256, judgeId) {
-      return this.mediaJudgment(mediaSha256)?.judgeId === judgeId;
+    mediaJudgmentSettled(mediaSha256, judgeId) {
+      if (!this.mediaJudgmentsPresent)
+        return false;
+      const row = this.db.query("SELECT verdict, judge_id, judged_at, attempts FROM media_judgments WHERE media_sha256 = ?").get(mediaSha256);
+      if (!row || row.judge_id !== judgeId)
+        return false;
+      if (row.verdict !== "unjudged" || row.attempts >= MEDIA_JUDGE_MAX_ATTEMPTS)
+        return true;
+      const waitMs = MEDIA_JUDGE_RETRY_BASE_MS * 2 ** Math.max(0, row.attempts - 1);
+      return this.now().getTime() - Date.parse(row.judged_at) < waitMs;
     }
     mediaJudgment(mediaSha256) {
       if (!this.mediaJudgmentsPresent)
@@ -22222,25 +22242,37 @@ var init_local_index = __esm(() => {
         return;
       this.db.query(`
       INSERT INTO media_judgments (
-        media_sha256, verdict, category, margin, scores_json, judge_id, reason, judged_at, tier_applied
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        media_sha256, verdict, category, margin, scores_json, judge_id, reason, judged_at, tier_applied, attempts
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(media_sha256) DO UPDATE SET
+        attempts = CASE
+          WHEN excluded.verdict <> 'unjudged' THEN 0
+          WHEN media_judgments.verdict = 'unjudged' AND media_judgments.judge_id = excluded.judge_id
+            THEN media_judgments.attempts + 1
+          ELSE 1
+        END,
+        tier_checked_at = CASE WHEN media_judgments.verdict = excluded.verdict THEN media_judgments.tier_checked_at ELSE NULL END,
         verdict = excluded.verdict, category = excluded.category, margin = excluded.margin,
         scores_json = excluded.scores_json, judge_id = excluded.judge_id, reason = excluded.reason,
         judged_at = excluded.judged_at,
         tier_applied = CASE
-          -- Kept applied only when nothing a tier decision reads has changed.
+          -- The same judgment again leaves a pending re-decision pending: only
+          -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
-            AND media_judgments.category IS excluded.category THEN MAX(media_judgments.tier_applied, excluded.tier_applied)
+            AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
+          -- An ordinary verdict that no longer holds: the items it let out of
+          -- Private are re-decided, whatever the writer thought.
+          WHEN media_judgments.verdict = 'ordinary' THEN 0
           ELSE excluded.tier_applied
         END
-    `).run(mediaSha256, judgment.verdict, judgment.category ?? null, judgment.margin ?? null, judgment.scores ? JSON.stringify(judgment.scores) : null, judgment.judgeId, judgment.reason ?? null, this.now().toISOString(), applied ? 1 : 0);
+    `).run(mediaSha256, judgment.verdict, judgment.category ?? null, judgment.margin ?? null, judgment.scores ? JSON.stringify(judgment.scores) : null, judgment.judgeId, judgment.reason ?? null, this.now().toISOString(), applied ? 1 : 0, judgment.verdict === "unjudged" ? 1 : 0);
     }
     unappliedMediaJudgments(limit = 200) {
       if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent)
         return [];
       const rows = this.db.query(`
-      SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0 ORDER BY media_sha256 LIMIT ?
+      SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0
+      ORDER BY tier_checked_at IS NOT NULL, tier_checked_at, media_sha256 LIMIT ?
     `).all(Math.max(1, limit));
       return rows.flatMap((row) => {
         const judgment = this.mediaJudgment(row.media_sha256);
@@ -22258,6 +22290,16 @@ var init_local_index = __esm(() => {
         }));
         return [{ mediaSha256: row.media_sha256, judgment, items }];
       });
+    }
+    markMediaJudgmentsWaiting(mediaSha256s) {
+      if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0)
+        return;
+      const update = this.db.query("UPDATE media_judgments SET tier_checked_at = ? WHERE media_sha256 = ? AND tier_applied = 0");
+      const checkedAt = this.now().toISOString();
+      this.db.transaction(() => {
+        for (const sha of mediaSha256s)
+          update.run(checkedAt, sha);
+      })();
     }
     markMediaJudgmentsApplied(applied) {
       if (!this.mediaJudgmentsPresent || applied.length === 0)
@@ -24142,7 +24184,7 @@ var init_local_index = __esm(() => {
           ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
         }));
         let vectors;
-        const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgedBy(row.media_sha256, mediaJudgeId(judging)));
+        const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
         let judgedBatch;
         try {
           if (judgeNow) {
@@ -24250,7 +24292,7 @@ var init_local_index = __esm(() => {
         staleSkipped += batch.length - written;
       }
       skipped += staleSkipped;
-      if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgedBy(row.media_sha256, mediaJudgeId(judging)))) {
+      if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
         readsImages ??= await judging.imageSupport();
         if (readsImages)
           await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
@@ -25337,7 +25379,9 @@ var init_local_index = __esm(() => {
     "judge_id",
     "reason",
     "judged_at",
-    "tier_applied"
+    "tier_applied",
+    "attempts",
+    "tier_checked_at"
   ];
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
@@ -28126,7 +28170,7 @@ function rejudgeStoredContent(set, record, options) {
       report.skipped += 1;
     return;
   }
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), autoMoves ? {} : { queueWithoutHiding: true });
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true });
   if (key)
     ledger.markRejudged(identity, key);
   if (recorded.outcome === "queued_move")
@@ -28456,6 +28500,7 @@ function applyMediaJudgments(options) {
   for (const store of set.openStores()) {
     const page = store.unappliedMediaJudgments(limit);
     const done = [];
+    const waiting = [];
     for (const entry of page) {
       let ready = true;
       for (const identity of entry.items) {
@@ -28469,8 +28514,6 @@ function applyMediaJudgments(options) {
         }
         if (record.contentTier === "secrets" || record.metadataTier === "secrets")
           continue;
-        if (entry.judgment.verdict === "unjudged")
-          continue;
         if (classification?.unavailableReason) {
           ready = false;
           continue;
@@ -28480,7 +28523,8 @@ function applyMediaJudgments(options) {
             ...classification?.sniffer ? { sniffer: classification.sniffer } : {},
             ...classification?.retirePublic ? { retirePublic: true } : {},
             report,
-            autoMoves: options.autoMoves === true
+            autoMoves: options.autoMoves === true,
+            hideRaises: true
           });
         } catch {
           report.failed += 1;
@@ -28490,9 +28534,11 @@ function applyMediaJudgments(options) {
       if (ready)
         done.push(entry);
       else
-        report.waiting += 1;
+        waiting.push(entry.mediaSha256);
     }
     store.markMediaJudgmentsApplied(done);
+    store.markMediaJudgmentsWaiting(waiting);
+    report.waiting += waiting.length;
     report.applied += done.length;
   }
   return report;
@@ -92730,7 +92776,7 @@ function createConnectorStoreExtractionSink(options) {
       const judgment = plan.media ? (options.mediaJudgment ?? ((sha) => store.mediaJudgment(sha)))(plan.media.sha256) : undefined;
       if (plan.media && judgment)
         plan.media = { ...plan.media, judgment };
-      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== "secure_local" && !(plan.media && judgment?.verdict === "ordinary")) {
+      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== "secure_local" && !(options.mediaJudgment && plan.media && judgment?.verdict === "ordinary")) {
         return {
           accepted: false,
           chunksIndexed: 0,
@@ -93771,7 +93817,7 @@ var init_runner = __esm(() => {
 function createTieredStoreExtractionSink(options) {
   const set2 = options.set;
   const classificationNow = () => options.tierClassification ?? set2.classification();
-  const sinkFor = (store, recordContentTier, tierClassification) => createConnectorStoreExtractionSink({
+  const sinkFor = (store, recordContentTier, tierClassification, contentRulesRan) => createConnectorStoreExtractionSink({
     store,
     classify: (item) => buildSourceSensitivity({
       trustTier: store.activeLocalItemRow(item.identity.localItemId)?.trustTier ?? set2.restingTierFor(store.trustDomain),
@@ -93783,7 +93829,7 @@ function createTieredStoreExtractionSink(options) {
     ...options.claims ? { claims: options.claims } : {},
     ...tierClassification ? { tierClassification } : {},
     ...recordContentTier ? {} : { recordContentTier: false },
-    mediaJudgment: (sha2565) => setMediaJudgment(set2, sha2565)
+    ...contentRulesRan ? { mediaJudgment: (sha2565) => setMediaJudgment(set2, sha2565) } : {}
   });
   return {
     async accept(request) {
@@ -93795,7 +93841,7 @@ function createTieredStoreExtractionSink(options) {
         const legacy = legacyStoreFor(set2, ref.localItemId, options.home);
         if (!legacy)
           return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        return sinkFor(legacy, true, classificationNow()).accept(request);
+        return sinkFor(legacy, true, classificationNow(), false).accept(request);
       }
       const record3 = ledger.getCurrent(identity);
       if (!record3 || record3.state === "moving")
@@ -93879,7 +93925,7 @@ function createTieredStoreExtractionSink(options) {
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
-        const result2 = await sinkFor(contentStore, false, tierClassification).accept(request);
+        const result2 = await sinkFor(contentStore, false, tierClassification, true).accept(request);
         if (result2.accepted)
           ledger.recordRoutedPlacement(identity, decision, placement);
         return result2;
@@ -93913,7 +93959,7 @@ function createTieredStoreExtractionSink(options) {
           }
         });
       }
-      const result = await sinkFor(contentStore, false, tierClassification).accept(request);
+      const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
       if (!result.accepted)
         return result;
       ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: record3.generation });
@@ -93922,16 +93968,14 @@ function createTieredStoreExtractionSink(options) {
   };
 }
 function setMediaJudgment(set2, mediaSha256) {
-  let ordinary;
+  const rank = { sensitive: 2, unjudged: 1, ordinary: 0 };
+  let chosen;
   for (const domain of [...TIER_DOMAIN_ORDER].reverse()) {
     const judgment = set2.store(domain)?.mediaJudgment(mediaSha256);
-    if (!judgment)
-      continue;
-    if (judgment.verdict !== "ordinary")
-      return judgment;
-    ordinary ??= judgment;
+    if (judgment && (!chosen || rank[judgment.verdict] > rank[chosen.verdict]))
+      chosen = judgment;
   }
-  return ordinary;
+  return chosen;
 }
 function skipped(skippedReason) {
   return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
@@ -116973,15 +117017,18 @@ class TierSnifferService {
         const identity = recordIdentity(record3);
         const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record3.generation}`;
         try {
-          const source = set2.ledger.copies(identity).find((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record3.generation + 1);
+          const sources = set2.ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record3.generation + 1);
+          const source = sources[0];
           const exported = source ? set2.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
           if (!exported)
             throw new Error("no current copy");
+          const contentSource = sources.find((copy) => copy.layers !== "metadata");
+          const contentCopy = contentSource && contentSource !== source ? set2.store(contentSource.trustDomain)?.exportItemCopy(identity) : exported;
           await moveTieredItem({
             set: set2,
             identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
             target: { metadataTier: record3.targetMetadataTier, contentTier: record3.targetContentTier },
-            vectorIdentities: matchingVectorIdentities(set2, exported),
+            vectorIdentities: contentCopy ? matchingVectorIdentities(set2, contentCopy) : {},
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY },
             replaceOwnSupersededCopy: true
           });

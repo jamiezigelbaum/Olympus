@@ -115,7 +115,9 @@ Nothing below names a source. Every step is shared and keyed by media type.
    The shared store sink refuses an unjudged or sensitive picture (and the
    text read off any picture without an ordinary verdict) for any store that
    is not Private (`store_image_content_private_only`, names only), whichever
-   lane wrote it; the store itself refuses chunk media outside a Private
+   lane wrote it; only a tiered store set, which has run the content rules on
+   the text, may pass an ordinary picture through it, so a plain sink keeps
+   all picture content Private; the store itself refuses chunk media outside a Private
    store unless it holds an ordinary verdict for that picture (keyed on the
    stored verdict, never on the absence of one); and a tier-move copy keeps
    an ordinary picture (with its verdict and, where the destination embeds
@@ -160,22 +162,29 @@ Shared and source-neutral (`src/workers/source-index/media-judge.ts`,
   (the picture with no text) in the same call. Photos embedded before the
   judge (an existing install) are judged once from their picture alone
   (`embedImageVectors`, at most 200 per pass). The encoder not running holds
-  them (nothing recorded); a picture it cannot read is recorded `unjudged`.
+  them (nothing recorded); a picture it cannot read is recorded `unjudged`
+  and judged again after 1 h, then 2 h, up to three tries per judge (a new
+  judge starts its own count); after that it stays Private.
   A provider without these methods judges nothing, so its photos stay
   Private.
 - **Stored.** Schema v14 adds `media_judgments` (one row per picture digest:
-  verdict, category, margin, per-category scores, judge id, `tier_applied`);
-  additive, no released version changed. The row goes with the last chunk
+  verdict, category, margin, per-category scores, judge id, `tier_applied`,
+  unjudged `attempts`, `tier_checked_at`); additive, no released version
+  changed (a store from an earlier build of v14 gains the last two columns
+  on open). The row goes with the last chunk
   that carries the picture, and travels with a tier-move copy.
 - **Applied.** The sniffer's tick and each tiered sync apply new judgments
   (`applyMediaJudgments`): each item carrying the picture is re-decided from
-  its stored copy, exactly as a re-judge does. Ordinary photos are queued to
+  its stored copy, exactly as a re-judge does; a judgment whose item is
+  mid-move or waiting on its names goes to the back of the queue, so it never
+  starves later ones. Ordinary photos are queued to
   leave the Private store and moved by the usual tier-move machinery (the
-  sniffer's automatic moves copy the picture vector when the destination
-  already embeds with the same model; otherwise the owner-approved
+  sniffer's automatic moves copy the picture vector, read from the copy that
+  holds the content, when the destination already embeds with the same model; otherwise the owner-approved
   migration); sensitive ones stay, with the category in their reason. A
   re-read of the same picture lands where its verdict puts it; a changed
-  picture is unjudged again until it is embedded.
+  picture is unjudged again until it is embedded (on an item already in
+  Personal, a raise: the Personal copy is hidden at once).
 - **Calibration (shipped judge code, owner's Mac, M3 GPU, 140 vision tokens):**
   22 public specimen images (passports, identity cards, driving licences,
   bank cards, bank statements, payslips): all 22 sensitive (10 id_document,

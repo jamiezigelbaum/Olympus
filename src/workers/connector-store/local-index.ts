@@ -263,6 +263,10 @@ const CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60_000;
 const CHUNK_MEDIA_MAX_ATTEMPTS = 3;
 /** Pictures judged on their own per embed pass (about half a second each on an M3). */
 const MEDIA_JUDGE_MAX_PER_PASS = 200;
+/** A picture the judge could not read is judged again after 1 h, 2 h, ... */
+const MEDIA_JUDGE_RETRY_BASE_MS = CHUNK_MEDIA_RETRY_BASE_MS;
+/** ... and left unjudged (Private) after this many tries by one judge. */
+const MEDIA_JUDGE_MAX_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3;
 const CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32;
 
@@ -424,7 +428,10 @@ export function connectorStoreMigrations() {
  * The photo judge's verdict per picture this store holds (media-judge.ts),
  * keyed by the picture's digest like the media cache. `tier_applied` is 0
  * until the tier set has re-decided the items carrying the picture
- * (tier-media-judgment-sweep.ts).
+ * (tier-media-judgment-sweep.ts). `attempts` counts the tries that left a
+ * picture unjudged (it is judged again after a back-off, up to a bound);
+ * `tier_checked_at` is when the sweep last found an item carrying it not yet
+ * ready, so waiting judgments go to the back of the queue.
  */
 function createConnectorStoreMediaJudgments(db: Database): void {
   db.exec(`
@@ -437,11 +444,17 @@ function createConnectorStoreMediaJudgments(db: Database): void {
       judge_id TEXT NOT NULL,
       reason TEXT,
       judged_at TEXT NOT NULL,
-      tier_applied INTEGER NOT NULL DEFAULT 0 CHECK(tier_applied IN (0, 1))
+      tier_applied INTEGER NOT NULL DEFAULT 0 CHECK(tier_applied IN (0, 1)),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      tier_checked_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_connector_store_media_judgments_unapplied
       ON media_judgments(media_sha256) WHERE tier_applied = 0;
   `);
+  // A store migrated to 14 by an earlier build of this schema lacks the
+  // columns added since; every object above is idempotent, and so is this.
+  addColumnIfMissing(db, 'media_judgments', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'media_judgments', 'tier_checked_at', 'TEXT');
 }
 
 /**
@@ -2453,6 +2466,7 @@ export class LocalConnectorStore {
         this.migrate();
         runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
         createConnectorStoreChunkMediaReleases(this.db);
+        createConnectorStoreMediaJudgments(this.db);
         validateConnectorStoreSchema(this.db);
       }
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
@@ -2460,9 +2474,12 @@ export class LocalConnectorStore {
       this.imageMediaReadsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
       ).get() !== null;
-      this.mediaJudgmentsPresent = this.db.query(
+      // A read-only open of a store from an earlier build of v14 (without
+      // every column) reads no judgments: its pictures are unjudged, so Private.
+      const judgmentColumns = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'",
-      ).get() !== null;
+      ).get() !== null ? tableColumns(this.db, 'media_judgments', false) : [];
+      this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
     } catch (error) {
       closeSqliteStore(this.db);
       throw error;
@@ -2914,28 +2931,34 @@ export class LocalConnectorStore {
   ): boolean {
     const syncRunId = `connector-tier-copy-${randomUUID()}`;
     const startedAt = nowIso();
-    return this.db.transaction(() => {
-      this.db.query(`
-        INSERT INTO sync_runs (
-          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
-          items_indexed, started_at, completed_at
-        ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
-      `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
-      return this.tombstoneItem(
-        {
-          identity,
-          mimeType: 'application/octet-stream',
-          content: { kind: 'metadata_only' },
-          metadata: {},
-          fetchedAt: startedAt,
-        },
-        options.connectorId,
-        'observed',
-        syncRunId,
-        options.trustTier,
-        true,
-      );
-    })();
+    try {
+      return this.db.transaction(() => {
+        this.db.query(`
+          INSERT INTO sync_runs (
+            sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+            items_indexed, started_at, completed_at
+          ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
+        `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+        return this.tombstoneItem(
+          {
+            identity,
+            mimeType: 'application/octet-stream',
+            content: { kind: 'metadata_only' },
+            metadata: {},
+            fetchedAt: startedAt,
+          },
+          options.connectorId,
+          'observed',
+          syncRunId,
+          options.trustTier,
+          true,
+        );
+      })();
+    } finally {
+      // The pictures its chunks carried (and their judgments) go when no
+      // other chunk here carries them; inside a caller's transaction, after it.
+      if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
+    }
   }
 
   /**
@@ -3267,7 +3290,7 @@ export class LocalConnectorStore {
       const sha = row.media_sha256;
       if (!sha || !row.media_path || seen.has(sha)) continue;
       seen.add(sha);
-      if (this.mediaJudgedBy(sha, judgeId) || this.chunkMediaBackingOff(sha)) continue;
+      if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha)) continue;
       if (!isMediaCachePath(row.media_path, sha) || !existsSync(row.media_path)) continue;
       images.push({ path: row.media_path, sha256: sha, mimeType: 'image/jpeg' });
     }
@@ -3286,7 +3309,8 @@ export class LocalConnectorStore {
       this.db.transaction(() => {
         batch.forEach((image, index) => {
           const judgment = judgments[index]!;
-          // Unjudged: nothing for the tier set to change (it stays Private).
+          // Unjudged: nothing for the tier set to change (it stays Private),
+          // and it is tried again after a back-off, a bounded number of times.
           this.writeMediaJudgment(image.sha256, judgment, judgment.verdict === 'unjudged');
           judged += 1;
         });
@@ -5107,16 +5131,24 @@ export class LocalConnectorStore {
     }
   }
 
-  /** The photo judge's verdict on a picture this store holds, by its digest; undefined when it was never judged here. */
   /**
-   * Whether this picture's stored judgment was made by the judge `judgeId`
-   * names. One made by another prompt set, threshold or model is stale and
-   * the picture is judged again (until then, its stored verdict stands).
+   * Whether this picture needs no judging now: its stored judgment was made
+   * by the judge `judgeId` names and is a verdict, or it is unjudged and
+   * either waiting out its back-off or out of tries. One made by another
+   * prompt set, threshold or model is stale and the picture is judged again
+   * (until then, its stored verdict stands).
    */
-  private mediaJudgedBy(mediaSha256: string, judgeId: string): boolean {
-    return this.mediaJudgment(mediaSha256)?.judgeId === judgeId;
+  private mediaJudgmentSettled(mediaSha256: string, judgeId: string): boolean {
+    if (!this.mediaJudgmentsPresent) return false;
+    const row = this.db.query('SELECT verdict, judge_id, judged_at, attempts FROM media_judgments WHERE media_sha256 = ?')
+      .get(mediaSha256) as { verdict: MediaJudgment['verdict']; judge_id: string; judged_at: string; attempts: number } | null;
+    if (!row || row.judge_id !== judgeId) return false;
+    if (row.verdict !== 'unjudged' || row.attempts >= MEDIA_JUDGE_MAX_ATTEMPTS) return true;
+    const waitMs = MEDIA_JUDGE_RETRY_BASE_MS * 2 ** Math.max(0, row.attempts - 1);
+    return this.now().getTime() - Date.parse(row.judged_at) < waitMs;
   }
 
+  /** The photo judge's verdict on a picture this store holds, by its digest; undefined when it was never judged here. */
   mediaJudgment(mediaSha256: string): MediaJudgment | undefined {
     if (!this.mediaJudgmentsPresent) return undefined;
     const row = this.db.query(`
@@ -5169,22 +5201,36 @@ export class LocalConnectorStore {
   /**
    * Records a picture's judgment. `applied`: the tier set has nothing left to
    * re-decide for it (a judgment that travelled with a copy, or one recorded
-   * where the decision was already made with it).
+   * where the decision was already made with it). An unjudged result counts
+   * one more try by the same judge (the first by a new one); a verdict clears
+   * the count. A changed verdict goes to the front of the sweep's queue, and
+   * one that replaces an ordinary verdict is always left for the sweep.
    */
   private writeMediaJudgment(mediaSha256: string, judgment: MediaJudgment, applied: boolean): void {
     if (!this.mediaJudgmentsPresent) return;
     this.db.query(`
       INSERT INTO media_judgments (
-        media_sha256, verdict, category, margin, scores_json, judge_id, reason, judged_at, tier_applied
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        media_sha256, verdict, category, margin, scores_json, judge_id, reason, judged_at, tier_applied, attempts
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(media_sha256) DO UPDATE SET
+        attempts = CASE
+          WHEN excluded.verdict <> 'unjudged' THEN 0
+          WHEN media_judgments.verdict = 'unjudged' AND media_judgments.judge_id = excluded.judge_id
+            THEN media_judgments.attempts + 1
+          ELSE 1
+        END,
+        tier_checked_at = CASE WHEN media_judgments.verdict = excluded.verdict THEN media_judgments.tier_checked_at ELSE NULL END,
         verdict = excluded.verdict, category = excluded.category, margin = excluded.margin,
         scores_json = excluded.scores_json, judge_id = excluded.judge_id, reason = excluded.reason,
         judged_at = excluded.judged_at,
         tier_applied = CASE
-          -- Kept applied only when nothing a tier decision reads has changed.
+          -- The same judgment again leaves a pending re-decision pending: only
+          -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
-            AND media_judgments.category IS excluded.category THEN MAX(media_judgments.tier_applied, excluded.tier_applied)
+            AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
+          -- An ordinary verdict that no longer holds: the items it let out of
+          -- Private are re-decided, whatever the writer thought.
+          WHEN media_judgments.verdict = 'ordinary' THEN 0
           ELSE excluded.tier_applied
         END
     `).run(
@@ -5197,12 +5243,15 @@ export class LocalConnectorStore {
       judgment.reason ?? null,
       this.now().toISOString(),
       applied ? 1 : 0,
+      judgment.verdict === 'unjudged' ? 1 : 0,
     );
   }
 
   /**
    * Judgments the tier set has not yet applied, with the active items whose
-   * content carries each picture (tier-media-judgment-sweep.ts). Bounded.
+   * content carries each picture (tier-media-judgment-sweep.ts). Bounded:
+   * never-checked judgments first, then those that have waited longest, so
+   * judgments whose items are not ready cannot starve the rest.
    */
   unappliedMediaJudgments(limit = 200): Array<{
     mediaSha256: string;
@@ -5211,7 +5260,8 @@ export class LocalConnectorStore {
   }> {
     if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent) return [];
     const rows = this.db.query(`
-      SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0 ORDER BY media_sha256 LIMIT ?
+      SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0
+      ORDER BY tier_checked_at IS NOT NULL, tier_checked_at, media_sha256 LIMIT ?
     `).all(Math.max(1, limit)) as Array<{ media_sha256: string }>;
     return rows.flatMap((row) => {
       const judgment = this.mediaJudgment(row.media_sha256);
@@ -5230,6 +5280,19 @@ export class LocalConnectorStore {
       }));
       return [{ mediaSha256: row.media_sha256, judgment, items }];
     });
+  }
+
+  /**
+   * Sends judgments the tier set could not apply yet (an item mid-move or
+   * waiting on its names) to the back of the queue.
+   */
+  markMediaJudgmentsWaiting(mediaSha256s: readonly string[]): void {
+    if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0) return;
+    const update = this.db.query('UPDATE media_judgments SET tier_checked_at = ? WHERE media_sha256 = ? AND tier_applied = 0');
+    const checkedAt = this.now().toISOString();
+    this.db.transaction(() => {
+      for (const sha of mediaSha256s) update.run(checkedAt, sha);
+    })();
   }
 
   /**
@@ -8472,7 +8535,7 @@ export class LocalConnectorStore {
       // Pictures not yet judged are judged from the same model call: the
       // provider hands back each picture's image-only vector too.
       const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined
-        && batch.some((row) => row.media_sha256 && !this.mediaJudgedBy(row.media_sha256, mediaJudgeId(judging)));
+        && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
         if (judgeNow) {
@@ -8610,7 +8673,7 @@ export class LocalConnectorStore {
       staleSkipped += batch.length - written;
     }
     skipped += staleSkipped;
-    if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgedBy(row.media_sha256, mediaJudgeId(judging)))) {
+    if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
       readsImages ??= await judging.imageSupport!();
       if (readsImages) await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
     }
@@ -13326,6 +13389,7 @@ function validateConnectorStoreSchema(db: Database): void {
 
 const CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [
   'media_sha256', 'verdict', 'category', 'margin', 'scores_json', 'judge_id', 'reason', 'judged_at', 'tier_applied',
+  'attempts', 'tier_checked_at',
 ] as const;
 
 function validateConnectorStoreV12Schema(
