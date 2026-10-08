@@ -7665,11 +7665,11 @@ var init_vocabulary = __esm(() => {
     senderDuplicate: "That sender is already private.",
     section: "Privacy",
     row: {
-      none: "Your description · no always-private rules",
-      one: "Your description · {n} always-private rule",
-      many: "Your description · {n} always-private rules"
+      none: "Uses your description. No always-private rules.",
+      one: "Uses your description and {n} always-private rule.",
+      many: "Uses your description and {n} always-private rules."
     },
-    rowNoCount: "Your description and always-private rules",
+    rowNoCount: "Uses your description and always-private rules.",
     edit: "Edit",
     editLabel: "Edit what's private",
     dashboardPending: {

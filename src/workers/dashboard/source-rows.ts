@@ -711,7 +711,7 @@ export function dashboardNeedsSection(items: readonly DashboardNeedItem[]): stri
 }
 
 /**
- * The Privacy row on Setup: "Your description · N always-private rules" and
+ * The Privacy row on Setup: "Uses your description and N always-private rules." and
  * Edit, or the one ask to set it up. Absent when the worker reports nothing.
  */
 export function dashboardPrivacySection(options: DashboardRowOptions | undefined): string {
