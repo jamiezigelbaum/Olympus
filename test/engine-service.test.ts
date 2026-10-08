@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
+import { spawn as spawnChild, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,8 +38,8 @@ import { runDoctor, type DoctorDeps, type DoctorHostFacts } from '../src/core/do
 import { emptyRemoteAccessStatus, remoteAccessDir, writeRemoteAccessStatus } from '../src/core/remote-access.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
-import { buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
-import type { NativeProcessServiceContext, NativeProcessServiceDefinition } from '../src/core/native-process-service.ts';
+import { buildEnvBridgeSovereigntyConfig, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
+import { createNativeProcessService, type NativeProcessServiceContext, type NativeProcessServiceDefinition } from '../src/core/native-process-service.ts';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -319,6 +319,147 @@ describe('engine host without OpenClaw', () => {
     expect(stopped).toEqual(['olympus-remote-relay', 'olympus-worker']);
     expect(JSON.parse(readFileSync(engineStatusPath({ HOME: home }), 'utf8')).state).toBe('stopped');
   });
+
+  test('a dashboard save that reloads the worker (exit 75) gets a restarted worker from the host, through a group that answers EPERM', async () => {
+    // Incident 2026-10-08: saving the zkAPI acknowledgements on the Anonymous
+    // answers card reloaded the worker, the host logged "descendants could not
+    // be stopped after an unexpected exit" and never restarted it. This drives
+    // the real saveRoute -> requestModelReload -> exit(75) path in a child the
+    // real supervisor hosts, with the macOS answer for a group of exiting
+    // members (EPERM until launchd reaps them, then ESRCH).
+    const { home, root } = fixture();
+    const paths = enginePaths(home);
+    mkdirSync(join(home, '.olympus'), { recursive: true, mode: 0o700 });
+    writeFileSync(paths.configPath, JSON.stringify(defaultEngineConfig()));
+    const policyPath = join(home, '.olympus', 'sovereignty.json');
+    const policy = structuredClone(loadSovereigntyPreset('private-cloud-only')) as SovereigntyConfig;
+    (policy.modelProfiles as Record<string, unknown>)['zkapi-consult'] = {
+      provider: 'zkapi',
+      trust: 'standard_cloud',
+      purpose: 'consult',
+      baseUrl: 'http://127.0.0.1:8787/v1',
+      model: 'openai/gpt-5-mini',
+      secretRef: 'env:OLYMPUS_ZKAPI_API_KEY',
+      zkapi: { fundingDate: '2026-10-01', acknowledgements: { version: 0, accepted: [] } },
+    };
+    writeFileSync(policyPath, JSON.stringify(policy), { mode: 0o600 });
+    const src = join(import.meta.dir, '..', 'src');
+    const workerScript = join(root, 'reloading-worker.ts');
+    const savedPath = join(root, 'saved.json');
+    const readyPath = join(root, 'ready');
+    writeFileSync(workerScript, `
+import { readFileSync, writeFileSync } from 'node:fs';
+import { createDashboardConsultAdapter } from ${JSON.stringify(join(src, 'workers/email-source/dashboard-consult.ts'))};
+import { createModelKeyReload, workerRestartsItself } from ${JSON.stringify(join(src, 'core/model-key-reload.ts'))};
+import { ZKAPI_RISK_ACKNOWLEDGEMENTS } from ${JSON.stringify(join(src, 'core/zkapi-consult-settings.ts'))};
+const env = process.env;
+writeFileSync(env.READY_PATH!, env.INSTANCE + ':' + process.pid);
+setInterval(() => {}, 1000);
+if (env.LAUNCH === '0') {
+  // The worker's own wiring (email-source/server.ts): launched by the native
+  // worker service, so it restarts itself by exiting.
+  const requestReload = createModelKeyReload({
+    managed: workerRestartsItself({ nativeServiceSupervised: true }, env),
+    shutdown: () => { console.log('Olympus private email source worker shutting down on SIGTERM.'); },
+    exit: (code) => process.exit(code),
+  });
+  const path = env.POLICY_PATH!;
+  const backend = createDashboardConsultAdapter({
+    sovereignty: { config: JSON.parse(readFileSync(path, 'utf8')), source: 'file', path },
+    secretPresent: () => false,
+    requestReload,
+    env: { HOME: env.HOME },
+    readiness: async () => { throw new Error('unused'); },
+    recoverSession: async () => { throw new Error('unused'); },
+  });
+  setTimeout(() => {
+    void backend.saveRoute({ acknowledged: ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id) })
+      .then((saved) => writeFileSync(env.SAVED_PATH!, JSON.stringify(saved)));
+  }, 100);
+}
+`);
+    const spawned: ChildProcess[] = [];
+    let launch = 0;
+    const worker = createNativeProcessService({
+      id: 'olympus-worker',
+      label: 'worker',
+      initialConfig: {},
+      reload: { configPrefixes: [] },
+      readinessPollMs: 10,
+      stopGraceMs: 300,
+      restartDelaysMs: [20, 40],
+      spawn: ((command: string, args: readonly string[], spawnOptions: object) => {
+        const child = spawnChild(command, args as string[], spawnOptions as Parameters<typeof spawnChild>[2]);
+        spawned.push(child);
+        return child;
+      }) as unknown as typeof spawnChild,
+      async prepareStart() {
+        const instance = `instance-${launch}`;
+        const env = {
+          HOME: home,
+          PATH: process.env.PATH ?? '',
+          LAUNCH: String(launch),
+          INSTANCE: instance,
+          READY_PATH: readyPath,
+          POLICY_PATH: policyPath,
+          SAVED_PATH: savedPath,
+        };
+        launch += 1;
+        return {
+          command: process.execPath,
+          args: [workerScript],
+          env,
+          startupTimeoutMs: 10_000,
+          endpointOccupied: false,
+          readinessProbe: async (child) => {
+            try {
+              return readFileSync(readyPath, 'utf8') === `${instance}:${String(child.pid)}`;
+            } catch {
+              return false;
+            }
+          },
+        };
+      },
+    });
+    const realKill = process.kill;
+    let reapedAt: number | undefined;
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      const first = spawned[0];
+      if (!first?.pid || pid !== -first.pid || first.exitCode === null) return realKill(pid, signal);
+      reapedAt ??= Date.now() + 150;
+      throw Object.assign(new Error('synthetic'), { code: Date.now() < reapedAt ? 'EPERM' : 'ESRCH' });
+    }) as typeof process.kill;
+    const lines: string[] = [];
+    let handle: Awaited<ReturnType<typeof startEngineHost>> | undefined;
+    try {
+      handle = await startEngineHost({
+        moduleUrl: 'file:///fixture/dist/cli.js',
+        env: { HOME: home },
+        homeDir: home,
+        services: () => [worker],
+        log: (line) => lines.push(line),
+        exit: () => { throw new Error('must not exit'); },
+        installSignalHandlers: false,
+      });
+      const deadline = Date.now() + 15_000;
+      while (lines.filter((line) => line === 'olympus-worker: Olympus worker is ready.').length < 2 && Date.now() < deadline) {
+        await Bun.sleep(20);
+      }
+      expect(JSON.parse(readFileSync(savedPath, 'utf8'))).toMatchObject({ ok: true, restarting: true });
+      const written = JSON.parse(readFileSync(policyPath, 'utf8')) as SovereigntyConfig;
+      expect(written.modelProfiles['zkapi-consult']?.zkapi?.acknowledgements?.version).toBeGreaterThan(0);
+      expect(spawned).toHaveLength(2);
+      expect(spawned[0]!.exitCode).toBe(75);
+      expect(spawned[1]!.exitCode).toBeNull();
+      expect(lines).toContain('olympus-worker: Olympus worker exited unexpectedly.');
+      expect(lines.filter((line) => line === 'olympus-worker: Olympus worker is ready.')).toHaveLength(2);
+      expect(lines.filter((line) => line.includes('could not be stopped'))).toEqual([]);
+      expect(handle!.status().services['olympus-worker']?.state).toBe('ok');
+    } finally {
+      process.kill = realKill;
+      await handle?.stop();
+    }
+  }, 30_000);
 
   test('refuses to start without engine.json (exit 78, so launchd throttles)', async () => {
     const { home } = fixture();

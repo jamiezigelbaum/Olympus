@@ -3,6 +3,14 @@ import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
 const DEFAULT_READINESS_POLL_MS = 100;
 const DEFAULT_STOP_GRACE_MS = 2_000;
 const DEFAULT_RESTART_DELAYS_MS = [250, 1_000, 5_000, 15_000, 30_000] as const;
+/**
+ * How long a group whose leader has exited may stay unsignalable (EPERM) after
+ * the forced kill before the supervisor stops waiting for it. On macOS a
+ * process group left holding only exiting or zombie members answers every
+ * kill(-pgid) with EPERM until launchd reaps them, usually within milliseconds.
+ */
+const DEFAULT_DESCENDANT_SETTLE_MS = 2_000;
+const DESCENDANT_SETTLE_POLL_MS = 50;
 
 /**
  * Where supervised children write. Inside the OpenClaw Gateway they write
@@ -135,6 +143,13 @@ export interface NativeProcessServiceOptions<TSettings extends NativeProcessStar
    * ready keeps climbing the backoff instead of restarting at the first delay.
    */
   stableUptimeMs?: number;
+  /**
+   * Bound on waiting for a process group whose leader has exited but which the
+   * kernel will not let us signal (EPERM) to empty, after the forced kill.
+   * Defaults to two seconds. Past it the supervisor reports the descendants
+   * loudly and carries on: a crashed child is still replaced.
+   */
+  descendantSettleMs?: number;
 }
 
 /** OpenClaw replacement starts have a five-second deadline. Keep the host
@@ -172,8 +187,15 @@ interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
   restartTimer: ReturnType<typeof setTimeout> | undefined;
   /** Resets backoff once a ready child has stayed up for `stableUptimeMs`. */
   stableTimer: ReturnType<typeof setTimeout> | undefined;
-  cleanupPromise: Promise<void> | undefined;
+  cleanupPromise: Promise<GroupStopResult> | undefined;
 }
+
+/**
+ * `stopped`: the group is gone or took the forced kill. `unconfirmed`: the
+ * leader has exited, but the group still refused every signal after the forced
+ * kill and the settle bound; whatever is left cannot be signalled by us.
+ */
+type GroupStopResult = 'stopped' | 'unconfirmed';
 
 /** The lifetime was retired (stop, or a newer start) before or during launch. */
 export class NativeProcessServiceStoppedError extends Error {}
@@ -204,8 +226,19 @@ class NativeProcessReportedStartError extends Error {}
  *   crash: it schedules no replacement, keeps health clear for the current
  *   lifetime only, and still terminates the child's process group;
  * - SIGTERM then a bounded SIGKILL go to the whole detached group. There is no
- *   `kill(-pgid, 0)` liveness gate: a live zombie would defeat it and leak real
- *   descendants;
+ *   `kill(-pgid, 0)` liveness gate before them: a live zombie would defeat it
+ *   and leak real descendants;
+ * - a group that answers EPERM once its leader has exited is not a cleanup
+ *   failure in itself. macOS answers EPERM for a group holding only exiting or
+ *   zombie members (a descendant mid-exit when the leader went). The forced
+ *   kill is still sent, the group gets a bounded settle, and a group still
+ *   refusing after that is reported loudly as unconfirmed. EPERM while the
+ *   leader is alive stays a hard failure that keeps custody of the child;
+ * - a ready child that exits for any reason (crash, signal, or a deliberate
+ *   self-restart exit such as 75) is always replaced unless completion
+ *   semantics apply. Descendant cleanup that fails or stays unconfirmed is
+ *   reported, and the replacement is still scheduled: the supervisor never
+ *   stays alive with no child;
  * - failure reporting is categorical and never forwards raw stderr or spawn
  *   errors, which can carry arguments and environment detail.
  */
@@ -217,6 +250,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
   const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
   const restartOnCleanExit = options.restartOnCleanExit ?? true;
   const stableUptimeMs = options.stableUptimeMs ?? 0;
+  const descendantSettleMs = options.descendantSettleMs ?? DEFAULT_DESCENDANT_SETTLE_MS;
   const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current: ServiceLifetime<TSettings> | undefined;
@@ -224,6 +258,29 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
   let retirement: Promise<void> | undefined;
 
   const isCurrent = (lifetime: ServiceLifetime<TSettings>): boolean => current === lifetime && !lifetime.stopping;
+
+  const stopChild = (
+    lifetime: ServiceLifetime<TSettings>,
+    expectedChild?: ChildProcess,
+  ): Promise<GroupStopResult> => terminateChild(lifetime, stopGraceMs, descendantSettleMs, expectedChild);
+
+  const warn = (lifetime: ServiceLifetime<TSettings>, message: string): void => {
+    try {
+      lifetime.context.logger?.warn?.(message);
+    } catch {
+      // A retired logger never changes supervision.
+    }
+  };
+
+  /**
+   * Loud, categorical report that a child's group could not be confirmed
+   * stopped. Health carries it for the current lifetime; the logger carries it
+   * even when health is about to be replaced by the restart's own messages.
+   */
+  const reportStuckDescendants = (lifetime: ServiceLifetime<TSettings>, message: string): void => {
+    warn(lifetime, message);
+    reportFailure(lifetime, message);
+  };
 
   const reportFailure = (lifetime: ServiceLifetime<TSettings>, message: string): void => {
     if (!isCurrent(lifetime)) return;
@@ -254,8 +311,17 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       if (!isCurrent(lifetime)) return;
       void launch(lifetime).catch(async (error) => {
         if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime)) return;
-        await terminateChild(lifetime, stopGraceMs);
+        let stuck = false;
+        try {
+          stuck = await stopChild(lifetime) === 'unconfirmed';
+        } catch {
+          stuck = true;
+        }
+        if (stuck) {
+          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
+        }
         reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
+        // Retrying is mandatory: a cleanup problem never ends supervision.
         scheduleRestart(lifetime);
       });
     }, delay);
@@ -269,8 +335,12 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
    * callers report categorically.
    */
   const completeCleanExit = (lifetime: ServiceLifetime<TSettings>, child: ChildProcess): Promise<void> => {
-    return terminateChild(lifetime, stopGraceMs, child).then(() => {
+    return stopChild(lifetime, child).then((result) => {
       if (!isCurrent(lifetime)) return;
+      if (result === 'unconfirmed') {
+        reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
+        return;
+      }
       clearFailure(lifetime);
       try {
         lifetime.context.logger?.info?.(`Olympus ${options.label} completed a clean exit.`);
@@ -327,12 +397,25 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         });
         return;
       }
-      const cleanup = terminateChild(lifetime, stopGraceMs, child);
+      // Every exit of a ready child is replaced, including a deliberate
+      // self-restart (the worker's credential/policy reload exits 75) and a
+      // zero exit when clean exits are supervised. Entered synchronously to
+      // keep the exact PGID.
+      const cleanup = stopChild(lifetime, child);
       reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
-      void cleanup.then(() => {
+      void cleanup.then(
+        (result) => {
+          if (result === 'unconfirmed') {
+            reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
+          }
+        },
+        () => {
+          reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
+        },
+      ).then(() => {
+        // The leader is gone, so nothing is left to keep custody of. A host
+        // left alive with no child is the failure this must never produce.
         scheduleRestart(lifetime);
-      }).catch(() => {
-        reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit.`);
       });
     });
 
@@ -397,7 +480,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         await launch(lifetime);
       } catch (error) {
         if (error instanceof NativeProcessServiceStoppedError) return;
-        await terminateChild(lifetime, stopGraceMs);
+        await stopChild(lifetime);
         const message = error instanceof NativeProcessConfigurationError
           ? error.message
           : `Olympus ${options.label} failed to become ready.`;
@@ -429,7 +512,10 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     }
     // A failed signal retains both the lifetime and exact child/PGID. No new
     // start may pass this boundary until a later stop establishes cleanup.
-    const cleanup = terminateChild(lifetime, stopGraceMs).then(() => {
+    const cleanup = stopChild(lifetime).then((result) => {
+      if (result === 'unconfirmed') {
+        warn(lifetime, `Olympus ${options.label} descendants could not be confirmed stopped; its process group refused every signal.`);
+      }
       if (retiring === lifetime) retiring = undefined;
     });
     retirement = cleanup;
@@ -499,46 +585,78 @@ async function readinessReceiptAfterExit<TSettings extends NativeProcessStartSet
 async function terminateChild<TSettings extends NativeProcessStartSettings>(
   lifetime: ServiceLifetime<TSettings>,
   graceMs: number,
+  settleMs: number,
   expectedChild?: ChildProcess,
-): Promise<void> {
+): Promise<GroupStopResult> {
   if (lifetime.cleanupPromise) return await lifetime.cleanupPromise;
   const child = lifetime.child;
-  if (expectedChild && child !== expectedChild) return;
+  if (expectedChild && child !== expectedChild) return 'stopped';
   lifetime.childReady = false;
   if (!child?.pid) {
     if (lifetime.child === child) lifetime.child = undefined;
-    return;
+    return 'stopped';
   }
-  const cleanup = terminateChildProcessGroup(child, graceMs);
+  const cleanup = terminateChildProcessGroup(child, graceMs, settleMs);
   lifetime.cleanupPromise = cleanup;
   try {
-    await cleanup;
-    notifyChildObserver('stopped', lifetime.serviceId, child.pid);
+    const result = await cleanup;
+    // An unconfirmed group stays in the engine host's children record, so the
+    // next host start still sweeps it.
+    if (result === 'stopped') notifyChildObserver('stopped', lifetime.serviceId, child.pid);
     if (lifetime.child === child) lifetime.child = undefined;
+    return result;
   } finally {
     if (lifetime.cleanupPromise === cleanup) lifetime.cleanupPromise = undefined;
   }
 }
 
-async function terminateChildProcessGroup(child: ChildProcess, graceMs: number): Promise<void> {
+async function terminateChildProcessGroup(child: ChildProcess, graceMs: number, settleMs: number): Promise<GroupStopResult> {
   const processGroupId = child.pid;
-  if (!processGroupId) return;
+  if (!processGroupId) return 'stopped';
   signalChildTree(child, 'SIGTERM');
   await waitForChildExit(child, graceMs);
   // The direct child may exit before one of its descendants. On POSIX the
   // detached child's process group survives its leader, so always send the
   // bounded hard-stop signal to the whole group after the grace period.
-  signalChildTree(child, 'SIGKILL');
+  const forced = signalChildTree(child, 'SIGKILL');
   await waitForChildExit(child, 1_000);
+  if (forced !== 'denied') return 'stopped';
+  return await settleDeniedGroup(child, settleMs);
 }
 
-function signalChildTree(child: ChildProcess, signal: NodeJS.Signals): void {
+/**
+ * The leader has exited and the group refused the forced kill (EPERM). On
+ * macOS that is a group holding only exiting or zombie members, which empties
+ * as soon as launchd reaps them. Poll for that, re-sending the forced kill if
+ * a signalable member shows up, within a fixed bound.
+ */
+async function settleDeniedGroup(child: ChildProcess, settleMs: number): Promise<GroupStopResult> {
+  const deadline = Date.now() + settleMs;
+  for (;;) {
+    const probe = signalChildTree(child, 0);
+    if (probe === 'gone') return 'stopped';
+    if (probe === 'sent') signalChildTree(child, 'SIGKILL');
+    if (Date.now() >= deadline) return 'unconfirmed';
+    await delay(Math.min(DESCENDANT_SETTLE_POLL_MS, Math.max(deadline - Date.now(), 0)));
+  }
+}
+
+/**
+ * `gone`: no such group (ESRCH), so already stopped. `denied`: EPERM after the
+ * leader exited: what is left cannot be signalled by us (see
+ * settleDeniedGroup). EPERM while the leader is alive, and any other error,
+ * throws: that is a real cleanup failure and the caller keeps custody.
+ */
+function signalChildTree(child: ChildProcess, signal: NodeJS.Signals | 0): 'sent' | 'gone' | 'denied' {
   try {
     if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal);
-    else child.kill(signal);
+    else if (signal !== 0) child.kill(signal);
+    return 'sent';
   } catch (error) {
-    // A missing group is already stopped; denied signals are cleanup failures.
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return 'gone';
+    if (code === 'EPERM' && childExited(child)) return 'denied';
+    throw error;
   }
 }
 
