@@ -10,7 +10,8 @@
 // `{"id":N,"items":[{"text":"...","image":"/abs/path.jpg"?},...]}` gets
 // `{"id":N,"vectors":"<base64 float32 little-endian>","dimension":D}` (one
 // vector per text or item; an item with an image is embedded as text and
-// picture together; `"failed":[i,...]` names items whose picture could not be
+// picture together, and one with an image and empty text as the picture
+// alone; `"failed":[i,...]` names items whose picture could not be
 // read and `"unsupported":[i,...]` items sent a picture to an engine started
 // without its encoder, their vectors left as zeros) or
 // `{"id":N,"error":"..."}`, with `"native":true` when LiteRT-LM itself failed
@@ -109,8 +110,11 @@ function requestItems(request: { texts?: unknown; items?: unknown }, vision: boo
   if (raw.length === 0) throw new Error('An empty batch has nothing to embed.');
   return raw.map((entry) => {
     const item = entry as { text?: unknown; image?: unknown };
-    // bun:ffi cannot take a pointer to an empty buffer.
-    if (typeof item?.text !== 'string' || item.text.length === 0) throw new Error('Every input must be non-empty text.');
+    // bun:ffi cannot take a pointer to an empty buffer: an item with no text
+    // is a picture alone (its image-only vector, for the photo judge).
+    if (typeof item?.text !== 'string' || (item.text.length === 0 && item.image === undefined)) {
+      throw new Error('Every input must be non-empty text, or a picture.');
+    }
     if (item.image === undefined) return { text: item.text };
     if (typeof item.image !== 'string' || !isAbsolute(item.image)) throw new Error('An image must be an absolute file path.');
     // Without the image encoder a picture fails its own item, never the batch.
@@ -193,10 +197,12 @@ function embedRaw(
     // One item is its text, then its picture: LiteRT embeds them together.
     const perItem: Array<Array<Pointer | null>> = items.map((item, index) => {
       const parts: Array<Pointer | null> = [];
-      const text = Buffer.from(item.text, 'utf8');
-      // input_data_create copies the bytes.
-      parts.push(lib.litert_lm_input_data_create(INPUT_TEXT, ptr(text), text.length));
       const image = images[index];
+      if (item.text.length > 0 || !image) {
+        const text = Buffer.from(item.text, 'utf8');
+        // input_data_create copies the bytes.
+        parts.push(lib.litert_lm_input_data_create(INPUT_TEXT, ptr(text), text.length));
+      }
       if (image) parts.push(lib.litert_lm_input_data_create(INPUT_IMAGE, ptr(image), image.length));
       inputs.push(...parts);
       return parts;

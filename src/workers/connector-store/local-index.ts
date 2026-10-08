@@ -123,6 +123,12 @@ import {
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
 import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../source-index/built-in-embedding/manifest.ts';
+import {
+  canJudgeMedia,
+  judgeMediaImages,
+  judgeReturnedImageVectors,
+  type MediaJudgment,
+} from '../source-index/media-judge.ts';
 import type {
   SourceIndexCorpusSearchAdapter,
   SourceIndexCorpusSearchRequest,
@@ -247,13 +253,15 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
 const CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60_000;
 /** ... and dropped (the photo embeds as text) after this many failures. */
 const CHUNK_MEDIA_MAX_ATTEMPTS = 3;
+/** Pictures judged on their own per embed pass (about half a second each on an M3). */
+const MEDIA_JUDGE_MAX_PER_PASS = 200;
 const MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3;
 const CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32;
 
@@ -388,7 +396,7 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 13,
       name: 'connector_store_chunk_media',
       up(db: Database) {
         // Additive and inert: existing chunks keep NULL media and embed
@@ -398,7 +406,41 @@ export function connectorStoreMigrations() {
         createConnectorStoreChunkMediaReleases(db);
       },
     },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: 'connector_store_media_judgments',
+      up(db: Database) {
+        // Additive and inert: a new table only. A picture with no judgment
+        // is unjudged, and an unjudged picture rests Private exactly as
+        // before (docs/design/photo-embeddings.md, owner decision 2026-10-08).
+        createConnectorStoreMediaJudgments(db);
+      },
+    },
   ];
+}
+
+/**
+ * The photo judge's verdict per picture this store holds (media-judge.ts),
+ * keyed by the picture's digest like the media cache. `tier_applied` is 0
+ * until the tier set has re-decided the items carrying the picture
+ * (tier-media-judgment-sweep.ts).
+ */
+function createConnectorStoreMediaJudgments(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS media_judgments (
+      media_sha256 TEXT PRIMARY KEY,
+      verdict TEXT NOT NULL CHECK(verdict IN ('sensitive', 'ordinary', 'unjudged')),
+      category TEXT,
+      margin REAL,
+      scores_json TEXT,
+      judge_id TEXT NOT NULL,
+      reason TEXT,
+      judged_at TEXT NOT NULL,
+      tier_applied INTEGER NOT NULL DEFAULT 0 CHECK(tier_applied IN (0, 1))
+    );
+    CREATE INDEX IF NOT EXISTS idx_connector_store_media_judgments_unapplied
+      ON media_judgments(media_sha256) WHERE tier_applied = 0;
+  `);
 }
 
 /**
@@ -882,6 +924,8 @@ export interface ConnectorStoreItemCopy {
     embeddingInputHash: string | null;
     mediaPath?: string | null;
     mediaSha256?: string | null;
+    /** The photo judge's verdict on the chunk's picture, when it was judged. */
+    mediaJudgment?: MediaJudgment;
   }>;
   /** Current vectors only (content hash equal to the chunk's embedding input hash). */
   vectors: ReadonlyArray<{ chunkIndex: number; modelId: string; contentHash: string; embedding: Uint8Array }>;
@@ -1875,6 +1919,12 @@ export interface ConnectorStoreRepresentationRestoreItem {
 export interface ConnectorStoreChunkMedia {
   path: string;
   sha256: string;
+  /**
+   * The photo judge's verdict on the picture, when one was made (in any
+   * store of the item's tier set). Only an ordinary verdict lets the picture
+   * rest outside a Private store.
+   */
+  judgment?: MediaJudgment;
 }
 
 /**
@@ -2322,6 +2372,8 @@ export class LocalConnectorStore {
   private chunkMediaColumnsPresent = false;
   /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
   private imageMediaReadsPresent = false;
+  /** Whether the v14 `media_judgments` table is here (a read-only open of an older store has none). */
+  private mediaJudgmentsPresent = false;
   /** This store's name in the media cache's reference markers. */
   private readonly mediaHolder: string;
   private readonly stillImagesRead: boolean;
@@ -2406,6 +2458,9 @@ export class LocalConnectorStore {
       this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
       this.imageMediaReadsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
+      ).get() !== null;
+      this.mediaJudgmentsPresent = this.db.query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'",
       ).get() !== null;
     } catch (error) {
       closeSqliteStore(this.db);
@@ -2936,7 +2991,10 @@ export class LocalConnectorStore {
       contentHash: chunk.content_hash,
       embeddingInputHash: chunk.embedding_input_hash,
       ...(chunk.media_path && chunk.media_sha256 ? { mediaPath: chunk.media_path, mediaSha256: chunk.media_sha256 } : {}),
-    }));
+    })).map((chunk) => {
+      const judgment = chunk.mediaSha256 ? this.mediaJudgment(chunk.mediaSha256) : undefined;
+      return judgment ? { ...chunk, mediaJudgment: judgment } : chunk;
+    });
     const vectors = (this.db.query(`
       SELECT c.chunk_index, e.model_id, e.content_hash, e.embedding
       FROM chunk_embeddings e
@@ -3074,19 +3132,28 @@ export class LocalConnectorStore {
         media_sha256: string | null;
       }>;
       const namesOnly = options.layers === 'metadata';
-      // A picture rests only in a Private store: a copy into any other store
-      // (an owner's override, a move to Personal) keeps the text and drops
-      // the picture, and its chunks are re-hashed below so they embed as text.
-      const keepsMedia = this.trustDomain === 'secure_local' && this.chunkMediaColumnsPresent;
-      const strippedMedia = !keepsMedia && copy.chunks.some((chunk) => chunk.mediaSha256);
+      // A picture rests in a Private store, or in another store only when the
+      // photo judge found it ordinary (docs/design/photo-embeddings.md): a
+      // copy of an unjudged or sensitive picture into any other store (an
+      // owner's override) keeps the text and drops the picture, and its
+      // chunks are re-hashed below so they embed as text.
+      const keepsMedia = (chunk: ConnectorStoreItemCopy['chunks'][number]): boolean => this.chunkMediaColumnsPresent
+        && (this.trustDomain === 'secure_local' || (this.mediaJudgmentsPresent && chunk.mediaJudgment?.verdict === 'ordinary'));
+      const strippedMedia = copy.chunks.some((chunk) => chunk.mediaSha256 && !keepsMedia(chunk));
       const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
         const current = existing[index];
         return current?.chunk_index === chunk.chunkIndex
           && current.bounded_text === chunk.boundedText
           && current.content_hash === chunk.contentHash
           && current.embedding_input_hash === chunk.embeddingInputHash
-          && (current.media_sha256 ?? undefined) === (keepsMedia ? chunk.mediaSha256 ?? undefined : undefined);
+          && (current.media_sha256 ?? undefined) === (keepsMedia(chunk) ? chunk.mediaSha256 ?? undefined : undefined);
       });
+      if (!namesOnly) {
+        // The judgment travels with its picture; it was applied where it was made.
+        for (const chunk of copy.chunks) {
+          if (chunk.mediaSha256 && chunk.mediaJudgment && keepsMedia(chunk)) this.writeMediaJudgment(chunk.mediaSha256, chunk.mediaJudgment, true);
+        }
+      }
       let chunksWritten = 0;
       if (!unchanged) {
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(itemPk);
@@ -3104,7 +3171,7 @@ export class LocalConnectorStore {
         for (const chunk of copy.chunks) {
           if (this.chunkMediaColumnsPresent) {
             insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now,
-              keepsMedia ? chunk.mediaPath ?? null : null, keepsMedia ? chunk.mediaSha256 ?? null : null);
+              keepsMedia(chunk) ? chunk.mediaPath ?? null : null, keepsMedia(chunk) ? chunk.mediaSha256 ?? null : null);
           } else {
             insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
           }
@@ -3167,13 +3234,63 @@ export class LocalConnectorStore {
           : {}),
       };
     })();
-    if (this.trustDomain === 'secure_local' && options.layers !== 'metadata') {
+    if (options.layers !== 'metadata' && this.chunkMediaColumnsPresent) {
       for (const chunk of copy.chunks) {
-        if (chunk.mediaPath && chunk.mediaSha256) retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+        if (!chunk.mediaPath || !chunk.mediaSha256) continue;
+        if (this.trustDomain !== 'secure_local' && chunk.mediaJudgment?.verdict !== 'ordinary') continue;
+        retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
       }
     }
     this.releaseUnreferencedChunkMedia();
     return imported;
+  }
+
+  /**
+   * Judges pictures this store holds that have no judgment yet: photos
+   * embedded before the judge existed, and any the combined call above could
+   * not judge. A bounded number per pass; the encoder not running (or any
+   * other failure) leaves the rest for a later pass with nothing recorded,
+   * and a picture the encoder cannot read is recorded unjudged (it stays
+   * Private).
+   */
+  private async judgeUnjudgedMedia(
+    provider: Parameters<typeof judgeMediaImages>[0],
+    rows: ReadonlyArray<{ media_path: string | null; media_sha256: string | null }>,
+    assertAuthorized: (() => void | Promise<void>) | undefined,
+  ): Promise<number> {
+    const seen = new Set<string>();
+    const images: Array<{ path: string; sha256: string; mimeType: string }> = [];
+    for (const row of rows) {
+      if (images.length >= MEDIA_JUDGE_MAX_PER_PASS) break;
+      const sha = row.media_sha256;
+      if (!sha || !row.media_path || seen.has(sha)) continue;
+      seen.add(sha);
+      if (this.mediaJudgment(sha) || this.chunkMediaBackingOff(sha)) continue;
+      if (!isMediaCachePath(row.media_path, sha) || !existsSync(row.media_path)) continue;
+      images.push({ path: row.media_path, sha256: sha, mimeType: 'image/jpeg' });
+    }
+    let judged = 0;
+    for (let offset = 0; offset < images.length; offset += EMBEDDING_BATCH_SIZE) {
+      const batch = images.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+      let judgments: MediaJudgment[];
+      try {
+        await assertAuthorized?.();
+        judgments = await judgeMediaImages(provider, batch);
+      } catch {
+        // Held (the encoder is not running), an engine fault, or a lost
+        // approval: nothing is recorded, and a later pass tries again.
+        return judged;
+      }
+      this.db.transaction(() => {
+        batch.forEach((image, index) => {
+          const judgment = judgments[index]!;
+          // Unjudged: nothing for the tier set to change (it stays Private).
+          this.writeMediaJudgment(image.sha256, judgment, judgment.verdict === 'unjudged');
+          judged += 1;
+        });
+      })();
+    }
+    return judged;
   }
 
   /** The stored row's embedding seasoning, for re-hashing chunk inputs. */
@@ -3431,6 +3548,11 @@ export class LocalConnectorStore {
       WHERE i.tombstoned = 0
         AND LOWER(i.mime_type) LIKE 'image/%'
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        ${this.mediaJudgmentsPresent && this.chunkMediaColumnsPresent ? `
+        AND NOT EXISTS (
+          SELECT 1 FROM chunks c JOIN media_judgments j ON j.media_sha256 = c.media_sha256
+          WHERE c.item_pk = i.item_pk AND j.verdict = 'ordinary'
+        )` : ''}
     `).all() as Array<{
       item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
     }>;
@@ -4946,13 +5068,140 @@ export class LocalConnectorStore {
         const referenced = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
           .get(entry.media_sha256) as { present: number } | null;
         // The media cache refuses any path that is not its own `<sha256>.jpg`.
-        if (!referenced) releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+        if (!referenced) {
+          releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+          // The judgment goes with the last chunk that carried the picture.
+          if (this.mediaJudgmentsPresent) this.db.query('DELETE FROM media_judgments WHERE media_sha256 = ?').run(entry.media_sha256);
+        }
         this.db.query('DELETE FROM chunk_media_releases WHERE media_sha256 = ?').run(entry.media_sha256);
       }
       }
     } catch {
       // Kept longer, never lost: the queue row stays for the next pass.
     }
+  }
+
+  /** The photo judge's verdict on a picture this store holds, by its digest; undefined when it was never judged here. */
+  mediaJudgment(mediaSha256: string): MediaJudgment | undefined {
+    if (!this.mediaJudgmentsPresent) return undefined;
+    const row = this.db.query(`
+      SELECT verdict, category, margin, scores_json, judge_id, reason FROM media_judgments WHERE media_sha256 = ?
+    `).get(mediaSha256) as {
+      verdict: MediaJudgment['verdict']; category: string | null; margin: number | null;
+      scores_json: string | null; judge_id: string; reason: string | null;
+    } | null;
+    if (!row) return undefined;
+    let scores: MediaJudgment['scores'];
+    try {
+      scores = row.scores_json ? JSON.parse(row.scores_json) as MediaJudgment['scores'] : undefined;
+    } catch {
+      scores = undefined;
+    }
+    return {
+      verdict: row.verdict,
+      ...(row.category ? { category: row.category as NonNullable<MediaJudgment['category']> } : {}),
+      ...(row.margin !== null ? { margin: row.margin } : {}),
+      ...(scores ? { scores } : {}),
+      judgeId: row.judge_id,
+      ...(row.reason ? { reason: row.reason } : {}),
+    };
+  }
+
+  /**
+   * The judgment of the picture an item's content carries (its first chunk's
+   * media), or undefined: no picture, or one never judged. Either way the
+   * classifier then treats the picture as unjudged.
+   */
+  imageJudgmentForItem(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): MediaJudgment | undefined {
+    if (!this.chunkMediaColumnsPresent || !this.mediaJudgmentsPresent) return undefined;
+    const row = this.db.query(`
+      SELECT c.media_sha256
+      FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0 AND c.media_sha256 IS NOT NULL
+      ORDER BY c.chunk_index LIMIT 1
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { media_sha256: string } | null;
+    return row ? this.mediaJudgment(row.media_sha256) : undefined;
+  }
+
+  /**
+   * Records a picture's judgment. `applied`: the tier set has nothing left to
+   * re-decide for it (a judgment that travelled with a copy, or one recorded
+   * where the decision was already made with it).
+   */
+  private writeMediaJudgment(mediaSha256: string, judgment: MediaJudgment, applied: boolean): void {
+    if (!this.mediaJudgmentsPresent) return;
+    this.db.query(`
+      INSERT INTO media_judgments (
+        media_sha256, verdict, category, margin, scores_json, judge_id, reason, judged_at, tier_applied
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(media_sha256) DO UPDATE SET
+        verdict = excluded.verdict, category = excluded.category, margin = excluded.margin,
+        scores_json = excluded.scores_json, judge_id = excluded.judge_id, reason = excluded.reason,
+        judged_at = excluded.judged_at,
+        tier_applied = CASE
+          WHEN media_judgments.verdict = excluded.verdict THEN MAX(media_judgments.tier_applied, excluded.tier_applied)
+          ELSE excluded.tier_applied
+        END
+    `).run(
+      mediaSha256,
+      judgment.verdict,
+      judgment.category ?? null,
+      judgment.margin ?? null,
+      judgment.scores ? JSON.stringify(judgment.scores) : null,
+      judgment.judgeId,
+      judgment.reason ?? null,
+      this.now().toISOString(),
+      applied ? 1 : 0,
+    );
+  }
+
+  /**
+   * Judgments the tier set has not yet applied, with the active items whose
+   * content carries each picture (tier-media-judgment-sweep.ts). Bounded.
+   */
+  unappliedMediaJudgments(limit = 200): Array<{
+    mediaSha256: string;
+    judgment: MediaJudgment;
+    items: Array<Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>>;
+  }> {
+    if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent) return [];
+    const rows = this.db.query(`
+      SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0 ORDER BY media_sha256 LIMIT ?
+    `).all(Math.max(1, limit)) as Array<{ media_sha256: string }>;
+    return rows.flatMap((row) => {
+      const judgment = this.mediaJudgment(row.media_sha256);
+      if (!judgment) return [];
+      const items = (this.db.query(`
+        SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE c.media_sha256 = ? AND i.tombstoned = 0
+      `).all(row.media_sha256) as Array<{
+        provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+      }>).map((item) => ({
+        provider: item.provider,
+        accountScope: item.account_scope,
+        providerItemId: item.provider_item_id,
+        ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
+      }));
+      return [{ mediaSha256: row.media_sha256, judgment, items }];
+    });
+  }
+
+  /** Marks judgments as applied by the tier set. */
+  markMediaJudgmentsApplied(mediaSha256s: readonly string[]): void {
+    if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0) return;
+    const update = this.db.query('UPDATE media_judgments SET tier_applied = 1 WHERE media_sha256 = ?');
+    this.db.transaction(() => {
+      for (const sha of mediaSha256s) update.run(sha);
+    })();
   }
 
   /**
@@ -7359,9 +7608,14 @@ export class LocalConnectorStore {
     if (media && !this.chunkMediaColumnsPresent) {
       throw new Error('Connector store chunks cannot carry media before the v13 schema.');
     }
-    // A picture rests only in a Private store (docs/design/photo-embeddings.md).
-    if (media && this.trustDomain !== 'secure_local') {
-      throw new Error('Connector store chunks carry picture media only in a Private store.');
+    // A picture rests in a Private store, or in another store only with the
+    // photo judge's ordinary verdict on it, never on the absence of one
+    // (docs/design/photo-embeddings.md).
+    if (media?.judgment && media.judgment.verdict !== 'unjudged' && this.mediaJudgmentsPresent) {
+      this.writeMediaJudgment(media.sha256, media.judgment, true);
+    }
+    if (media && this.trustDomain !== 'secure_local' && this.mediaJudgment(media.sha256)?.verdict !== 'ordinary') {
+      throw new Error('Connector store chunks carry picture media outside a Private store only when the photo judge found it ordinary.');
     }
     // Media (a prepared photo) rides on the first chunk, and its digest is
     // part of that chunk's embedding input: a changed picture re-embeds.
@@ -8093,6 +8347,10 @@ export class LocalConnectorStore {
     // skipped rather than silently dropped out of the counts.
     let staleSkipped = 0;
     let readsImages: boolean | undefined;
+    // The photo judge (media-judge.ts): only a provider whose model reads
+    // pictures can judge them; with any other, every picture stays unjudged
+    // (and its item Private).
+    const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
@@ -8150,8 +8408,31 @@ export class LocalConnectorStore {
           : {}),
       }));
       let vectors: number[][];
+      // Pictures not yet judged are judged from the same model call: the
+      // provider hands back each picture's image-only vector too.
+      const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined
+        && batch.some((row) => row.media_sha256 && !this.mediaJudgment(row.media_sha256));
+      let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
-        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
+        if (judgeNow) {
+          const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
+          vectors = returned.vectors;
+          judgedBatch = new Map();
+          const wanted = batch.flatMap((row, index) => (row.media_sha256 && returned.imageVectors[index] ? [index] : []));
+          if (wanted.length > 0) {
+            try {
+              const judgments = await judgeReturnedImageVectors(judging!, wanted.map((index) => returned.imageVectors[index]));
+              wanted.forEach((index, row) => {
+                // An unjudged picture here is judged again on its own below.
+                if (judgments[row]!.verdict !== 'unjudged') judgedBatch!.set(batch[index]!.chunk_pk, judgments[row]!);
+              });
+            } catch {
+              // The descriptions could not be embedded: judged on a later pass.
+            }
+          }
+        } else {
+          vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
+        }
       } catch (error) {
         if (!(error instanceof SourceEmbeddingInputsFailedError)) throw error;
         const failedRows = new Set(error.failedIndexes.map((index) => batch[index]).filter((row) => row !== undefined));
@@ -8218,7 +8499,11 @@ export class LocalConnectorStore {
             row.item_pk,
             row.content_hash,
           );
-          if (write.changes > 0) written += 1;
+          if (write.changes > 0) {
+            written += 1;
+            const judgment = judgedBatch?.get(row.chunk_pk);
+            if (judgment && row.media_sha256) this.writeMediaJudgment(row.media_sha256, judgment, false);
+          }
         }
         if (journalId) {
           const cumulative = embedded + written;
@@ -8264,6 +8549,10 @@ export class LocalConnectorStore {
       staleSkipped += batch.length - written;
     }
     skipped += staleSkipped;
+    if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgment(row.media_sha256))) {
+      readsImages ??= await judging.imageSupport!();
+      if (readsImages) await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
+    }
     if (journalId) {
       const completedAt = this.now().toISOString();
       const cursor = embeddingMaintenanceJournal(
@@ -12840,6 +13129,8 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'idx_connector_store_chunks_media',
   'chunk_media_failures',
   'image_media_reads',
+  'media_judgments',
+  'idx_connector_store_media_judgments_unapplied',
 ] as const;
 
 const CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
@@ -12946,8 +13237,11 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   // Only the chunk shape here: the media tables, index and trigger are
   // created idempotently after migration (an earlier build of version 13 may
   // lack some), then the whole schema is checked.
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+  if (version === 13) {
     validateConnectorStoreV12Schema(db, 'v13', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+    validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
 }
 
@@ -12957,13 +13251,19 @@ function validateConnectorStoreV6Schema(db: Database): void {
 }
 
 function validateConnectorStoreSchema(db: Database): void {
-  validateConnectorStoreV12Schema(db, 'v13', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
   assertExactTableColumns(db, 'image_media_reads', ['item_pk', 'read_at'], false, 'v13');
   assertIndexColumns(db, 'idx_connector_store_chunks_media', ['media_sha256'], 'v13');
   assertTriggerExists(db, 'connector_store_chunk_media_release', 'v13');
+  assertExactTableColumns(db, 'media_judgments', [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, 'v14');
+  assertIndexColumns(db, 'idx_connector_store_media_judgments_unapplied', ['media_sha256'], 'v14');
 }
+
+const CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [
+  'media_sha256', 'verdict', 'category', 'margin', 'scores_json', 'judge_id', 'reason', 'judged_at', 'tier_applied',
+] as const;
 
 function validateConnectorStoreV12Schema(
   db: Database,

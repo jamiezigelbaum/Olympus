@@ -31,7 +31,7 @@ describe('beta1 connector-store upgrade compatibility', () => {
     try {
       // The beta1 schema-12 file is upgraded to the current schema (13 adds
       // chunk media) without losing anything.
-      expect(schemaVersion(db)).toBe(13);
+      expect(schemaVersion(db)).toBe(14);
       expect(db.query(`
         SELECT source_scope_generation, source_scope_revision, source_scope_folder_keys_json
         FROM items WHERE local_item_id = ?
@@ -70,7 +70,7 @@ describe('beta1 connector-store upgrade compatibility', () => {
 
     const migrated = new Database(dbPath, { readonly: true, create: false, strict: true });
     try {
-      expect(schemaVersion(migrated)).toBe(13);
+      expect(schemaVersion(migrated)).toBe(14);
       expect(migrated.query(`
         SELECT source_scope_generation, source_scope_revision, source_scope_folder_keys_json
         FROM items WHERE local_item_id = ?

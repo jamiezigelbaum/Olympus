@@ -8848,6 +8848,7 @@ function classifyItemTiersWithPublic(input, options) {
     text,
     ...input.namesOnly ? { namesOnly: true } : {},
     ...isImageMediaType(input.mimeType) ? { image: true } : {},
+    ...input.imageJudgment ? { imageJudgment: input.imageJudgment } : {},
     matchInput,
     names: snifferNames(signals),
     metadata,
@@ -8897,6 +8898,7 @@ function classifyContentTier(input, options = {}) {
     signals: {},
     text,
     ...isImageMediaType(input.mimeType) ? { image: true } : {},
+    ...input.imageJudgment ? { imageJudgment: input.imageJudgment } : {},
     matchInput: namesMatchInput({
       ...input.title?.trim() ? { title: input.title } : {},
       ...input.path?.trim() ? { path: input.path } : {},
@@ -9049,7 +9051,16 @@ function contentPass(args) {
       };
     }
   }
-  if (args.image) {
+  const imageOrdinary = args.image === true && args.imageJudgment?.verdict === "ordinary";
+  if (args.image && args.imageJudgment?.verdict === "sensitive") {
+    return {
+      tier: maxTier(metadata.tier, "secure"),
+      decidedBy: "default",
+      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`],
+      pending: false
+    };
+  }
+  if (args.image && !imageOrdinary) {
     return { tier: maxTier(metadata.tier, "secure"), decidedBy: "default", reasons: [IMAGE_PRIVATE_DEFAULT_REASON], pending: false };
   }
   if (metadata.forced) {
@@ -9098,7 +9109,14 @@ function contentPass(args) {
   }
   if (reasons.length === 0)
     reasons.push("content:no_raise");
+  if (imageOrdinary)
+    reasons.unshift(IMAGE_ORDINARY_REASON);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+function imageCategoryCode(category) {
+  const allowed = "abcdefghijklmnopqrstuvwxyz0123456789_";
+  const code = [...(category ?? "").toLowerCase()].filter((char) => allowed.includes(char)).join("");
+  return code || "unspecified";
 }
 function resolveVerdicts(resting, raises, lowers, restingIsConfigured) {
   const topRaise = raises.reduce((best, verdict) => best === undefined || tierRank(verdict.tier) > tierRank(best.tier) ? verdict : best, undefined);
@@ -9220,7 +9238,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-02.p4", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-02.p4", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_engine();
   init_sender_rules();
@@ -11806,6 +11824,110 @@ var init_reactions = __esm(() => {
   };
 });
 
+// src/workers/source-index/media-judge.ts
+function mediaJudgeId(provider) {
+  return `${MEDIA_JUDGE_PROMPT_SET}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
+}
+function dot(left, right) {
+  let sum = 0;
+  const length = Math.min(left.length, right.length);
+  for (let index = 0;index < length; index += 1)
+    sum += left[index] * right[index];
+  return sum;
+}
+function rounded(value) {
+  return Math.round(value * 1e4) / 1e4;
+}
+function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const ordinary = scores.ordinary;
+  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
+  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
+    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
+  }
+  let top = sensitive[0][0];
+  let topScore = -Infinity;
+  for (const [category, score] of sensitive) {
+    if (score > topScore) {
+      top = category;
+      topScore = score;
+    }
+  }
+  const margin = topScore - ordinary;
+  const intimateMargin = scores.intimate - ordinary;
+  const kept = Object.fromEntries(Object.entries(scores).map(([key, value]) => [key, rounded(value)]));
+  if (margin >= thresholds.margin) {
+    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
+  }
+  if (intimateMargin >= thresholds.intimateMargin) {
+    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
+  }
+  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
+}
+function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (!imageVector || imageVector.length === 0)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  const scores = {};
+  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
+    scores[category] = dot(imageVector, promptVectors[category]);
+  }
+  return judgeMediaScores(scores, judgeId, thresholds);
+}
+function canJudgeMedia(provider) {
+  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
+}
+function mediaJudgePromptVectors(provider) {
+  const key = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
+  let cached = promptVectorCache.get(key);
+  if (!cached) {
+    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
+    cached = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
+      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
+        throw new Error("The photo judge's descriptions could not be embedded.");
+      }
+      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
+    });
+    promptVectorCache.set(key, cached);
+    cached.catch(() => promptVectorCache.delete(key));
+  }
+  return cached;
+}
+async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (images.length === 0)
+    return [];
+  const prompts = await mediaJudgePromptVectors(provider);
+  const vectors = await provider.embedImageVectors([...images]);
+  const judgeId = mediaJudgeId(provider);
+  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
+}
+async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const prompts = await mediaJudgePromptVectors(provider);
+  const judgeId = mediaJudgeId(provider);
+  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
+}
+var MEDIA_JUDGE_SENSITIVE_CATEGORIES, MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-08", MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ", MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
+var init_media_judge = __esm(() => {
+  MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
+    "id_document",
+    "bank_card",
+    "financial_document",
+    "medical_document",
+    "intimate"
+  ];
+  MEDIA_JUDGE_PROMPTS = Object.freeze({
+    id_document: "a photo of a passport, national identity card or driving licence",
+    bank_card: "a photo of a credit card, debit card or bank card",
+    financial_document: "a bank statement, payslip or document showing account numbers",
+    medical_document: "a medical report or lab test results document",
+    intimate: "a nude, intimate or sexually explicit photo",
+    ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
+  });
+  MEDIA_JUDGE_THRESHOLDS = Object.freeze({
+    margin: 0.04,
+    intimateMargin: 0.02
+  });
+  promptVectorCache = new Map;
+});
+
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
 import { existsSync as existsSync8, lstatSync as lstatSync3, mkdirSync as mkdirSync8, statSync as statSync5 } from "node:fs";
@@ -11926,15 +12048,39 @@ function connectorStoreMigrations() {
       }
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 13,
       name: "connector_store_chunk_media",
       up(db) {
         addColumnIfMissing(db, "chunks", "media_path", "TEXT");
         addColumnIfMissing(db, "chunks", "media_sha256", "TEXT");
         createConnectorStoreChunkMediaReleases(db);
       }
+    },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: "connector_store_media_judgments",
+      up(db) {
+        createConnectorStoreMediaJudgments(db);
+      }
     }
   ];
+}
+function createConnectorStoreMediaJudgments(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS media_judgments (
+      media_sha256 TEXT PRIMARY KEY,
+      verdict TEXT NOT NULL CHECK(verdict IN ('sensitive', 'ordinary', 'unjudged')),
+      category TEXT,
+      margin REAL,
+      scores_json TEXT,
+      judge_id TEXT NOT NULL,
+      reason TEXT,
+      judged_at TEXT NOT NULL,
+      tier_applied INTEGER NOT NULL DEFAULT 0 CHECK(tier_applied IN (0, 1))
+    );
+    CREATE INDEX IF NOT EXISTS idx_connector_store_media_judgments_unapplied
+      ON media_judgments(media_sha256) WHERE tier_applied = 0;
+  `);
 }
 function createConnectorStoreChunkMediaReleases(db) {
   db.exec(`
@@ -13348,8 +13494,11 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV11Schema(db);
   if (version === 12)
     validateConnectorStoreV12Schema(db);
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+  if (version === 13) {
     validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+    validateConnectorStoreV12Schema(db, "v14", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
 }
 function validateConnectorStoreV6Schema(db) {
@@ -13357,12 +13506,14 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreFtsOwnership(db, "v6");
 }
 function validateConnectorStoreSchema(db) {
-  validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  validateConnectorStoreV12Schema(db, "v14", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
   assertExactTableColumns(db, "image_media_reads", ["item_pk", "read_at"], false, "v13");
   assertIndexColumns(db, "idx_connector_store_chunks_media", ["media_sha256"], "v13");
   assertTriggerExists(db, "connector_store_chunk_media_release", "v13");
+  assertExactTableColumns(db, "media_judgments", [...CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS], false, "v14");
+  assertIndexColumns(db, "idx_connector_store_media_judgments_unapplied", ["media_sha256"], "v14");
 }
 function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
   validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
@@ -13817,13 +13968,13 @@ function errorMessage2(error) {
 function nowIso() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 13, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_media_cache();
@@ -13840,6 +13991,7 @@ var init_local_index = __esm(() => {
   init_file_lease();
   init_embeddings();
   init_manifest();
+  init_media_judge();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
@@ -13923,6 +14075,7 @@ var init_local_index = __esm(() => {
     reactionsColumnPresent = false;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
+    mediaJudgmentsPresent = false;
     mediaHolder;
     stillImagesRead;
     tierLedgerHandle;
@@ -13980,6 +14133,7 @@ var init_local_index = __esm(() => {
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+        this.mediaJudgmentsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null;
       } catch (error) {
         closeSqliteStore(this.db);
         throw error;
@@ -14310,7 +14464,10 @@ var init_local_index = __esm(() => {
         contentHash: chunk.content_hash,
         embeddingInputHash: chunk.embedding_input_hash,
         ...chunk.media_path && chunk.media_sha256 ? { mediaPath: chunk.media_path, mediaSha256: chunk.media_sha256 } : {}
-      }));
+      })).map((chunk) => {
+        const judgment = chunk.mediaSha256 ? this.mediaJudgment(chunk.mediaSha256) : undefined;
+        return judgment ? { ...chunk, mediaJudgment: judgment } : chunk;
+      });
       const vectors = this.db.query(`
       SELECT c.chunk_index, e.model_id, e.content_hash, e.embedding
       FROM chunk_embeddings e
@@ -14398,12 +14555,18 @@ var init_local_index = __esm(() => {
         FROM chunks WHERE item_pk = ? ORDER BY chunk_index
       `).all(itemPk);
         const namesOnly = options.layers === "metadata";
-        const keepsMedia = this.trustDomain === "secure_local" && this.chunkMediaColumnsPresent;
-        const strippedMedia = !keepsMedia && copy.chunks.some((chunk) => chunk.mediaSha256);
+        const keepsMedia = (chunk) => this.chunkMediaColumnsPresent && (this.trustDomain === "secure_local" || this.mediaJudgmentsPresent && chunk.mediaJudgment?.verdict === "ordinary");
+        const strippedMedia = copy.chunks.some((chunk) => chunk.mediaSha256 && !keepsMedia(chunk));
         const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
           const current = existing[index];
-          return current?.chunk_index === chunk.chunkIndex && current.bounded_text === chunk.boundedText && current.content_hash === chunk.contentHash && current.embedding_input_hash === chunk.embeddingInputHash && (current.media_sha256 ?? undefined) === (keepsMedia ? chunk.mediaSha256 ?? undefined : undefined);
+          return current?.chunk_index === chunk.chunkIndex && current.bounded_text === chunk.boundedText && current.content_hash === chunk.contentHash && current.embedding_input_hash === chunk.embeddingInputHash && (current.media_sha256 ?? undefined) === (keepsMedia(chunk) ? chunk.mediaSha256 ?? undefined : undefined);
         });
+        if (!namesOnly) {
+          for (const chunk of copy.chunks) {
+            if (chunk.mediaSha256 && chunk.mediaJudgment && keepsMedia(chunk))
+              this.writeMediaJudgment(chunk.mediaSha256, chunk.mediaJudgment, true);
+          }
+        }
         let chunksWritten = 0;
         if (!unchanged) {
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(itemPk);
@@ -14418,7 +14581,7 @@ var init_local_index = __esm(() => {
           `);
           for (const chunk of copy.chunks) {
             if (this.chunkMediaColumnsPresent) {
-              insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now, keepsMedia ? chunk.mediaPath ?? null : null, keepsMedia ? chunk.mediaSha256 ?? null : null);
+              insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now, keepsMedia(chunk) ? chunk.mediaPath ?? null : null, keepsMedia(chunk) ? chunk.mediaSha256 ?? null : null);
             } else {
               insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
             }
@@ -14475,14 +14638,53 @@ var init_local_index = __esm(() => {
           ...vectorsCopied === 0 ? { vectorsNotCopiedReason: hashMismatch ? "input_hash_mismatch" : "no_current_vectors" } : {}
         };
       })();
-      if (this.trustDomain === "secure_local" && options.layers !== "metadata") {
+      if (options.layers !== "metadata" && this.chunkMediaColumnsPresent) {
         for (const chunk of copy.chunks) {
-          if (chunk.mediaPath && chunk.mediaSha256)
-            retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+          if (!chunk.mediaPath || !chunk.mediaSha256)
+            continue;
+          if (this.trustDomain !== "secure_local" && chunk.mediaJudgment?.verdict !== "ordinary")
+            continue;
+          retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
         }
       }
       this.releaseUnreferencedChunkMedia();
       return imported;
+    }
+    async judgeUnjudgedMedia(provider, rows, assertAuthorized) {
+      const seen = new Set;
+      const images = [];
+      for (const row of rows) {
+        if (images.length >= MEDIA_JUDGE_MAX_PER_PASS)
+          break;
+        const sha = row.media_sha256;
+        if (!sha || !row.media_path || seen.has(sha))
+          continue;
+        seen.add(sha);
+        if (this.mediaJudgment(sha) || this.chunkMediaBackingOff(sha))
+          continue;
+        if (!isMediaCachePath(row.media_path, sha) || !existsSync8(row.media_path))
+          continue;
+        images.push({ path: row.media_path, sha256: sha, mimeType: "image/jpeg" });
+      }
+      let judged = 0;
+      for (let offset = 0;offset < images.length; offset += EMBEDDING_BATCH_SIZE) {
+        const batch = images.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+        let judgments;
+        try {
+          await assertAuthorized?.();
+          judgments = await judgeMediaImages(provider, batch);
+        } catch {
+          return judged;
+        }
+        this.db.transaction(() => {
+          batch.forEach((image, index) => {
+            const judgment = judgments[index];
+            this.writeMediaJudgment(image.sha256, judgment, judgment.verdict === "unjudged");
+            judged += 1;
+          });
+        })();
+      }
+      return judged;
     }
     chunkMediaBackingOff(mediaSha256) {
       const row = this.db.query("SELECT failed_at, attempts FROM chunk_media_failures WHERE media_sha256 = ?").get(mediaSha256);
@@ -14659,6 +14861,11 @@ var init_local_index = __esm(() => {
       WHERE i.tombstoned = 0
         AND LOWER(i.mime_type) LIKE 'image/%'
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        ${this.mediaJudgmentsPresent && this.chunkMediaColumnsPresent ? `
+        AND NOT EXISTS (
+          SELECT 1 FROM chunks c JOIN media_judgments j ON j.media_sha256 = c.media_sha256
+          WHERE c.item_pk = i.item_pk AND j.verdict = 'ordinary'
+        )` : ""}
     `).all();
       const ledger = this.tierLedger();
       let stripped = 0;
@@ -15645,12 +15852,99 @@ var init_local_index = __esm(() => {
             break;
           for (const entry of queued) {
             const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
-            if (!referenced)
+            if (!referenced) {
               releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+              if (this.mediaJudgmentsPresent)
+                this.db.query("DELETE FROM media_judgments WHERE media_sha256 = ?").run(entry.media_sha256);
+            }
             this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
           }
         }
       } catch {}
+    }
+    mediaJudgment(mediaSha256) {
+      if (!this.mediaJudgmentsPresent)
+        return;
+      const row = this.db.query(`
+      SELECT verdict, category, margin, scores_json, judge_id, reason FROM media_judgments WHERE media_sha256 = ?
+    `).get(mediaSha256);
+      if (!row)
+        return;
+      let scores;
+      try {
+        scores = row.scores_json ? JSON.parse(row.scores_json) : undefined;
+      } catch {
+        scores = undefined;
+      }
+      return {
+        verdict: row.verdict,
+        ...row.category ? { category: row.category } : {},
+        ...row.margin !== null ? { margin: row.margin } : {},
+        ...scores ? { scores } : {},
+        judgeId: row.judge_id,
+        ...row.reason ? { reason: row.reason } : {}
+      };
+    }
+    imageJudgmentForItem(identity) {
+      if (!this.chunkMediaColumnsPresent || !this.mediaJudgmentsPresent)
+        return;
+      const row = this.db.query(`
+      SELECT c.media_sha256
+      FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0 AND c.media_sha256 IS NOT NULL
+      ORDER BY c.chunk_index LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      return row ? this.mediaJudgment(row.media_sha256) : undefined;
+    }
+    writeMediaJudgment(mediaSha256, judgment, applied) {
+      if (!this.mediaJudgmentsPresent)
+        return;
+      this.db.query(`
+      INSERT INTO media_judgments (
+        media_sha256, verdict, category, margin, scores_json, judge_id, reason, judged_at, tier_applied
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(media_sha256) DO UPDATE SET
+        verdict = excluded.verdict, category = excluded.category, margin = excluded.margin,
+        scores_json = excluded.scores_json, judge_id = excluded.judge_id, reason = excluded.reason,
+        judged_at = excluded.judged_at,
+        tier_applied = CASE
+          WHEN media_judgments.verdict = excluded.verdict THEN MAX(media_judgments.tier_applied, excluded.tier_applied)
+          ELSE excluded.tier_applied
+        END
+    `).run(mediaSha256, judgment.verdict, judgment.category ?? null, judgment.margin ?? null, judgment.scores ? JSON.stringify(judgment.scores) : null, judgment.judgeId, judgment.reason ?? null, this.now().toISOString(), applied ? 1 : 0);
+    }
+    unappliedMediaJudgments(limit = 200) {
+      if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent)
+        return [];
+      const rows = this.db.query(`
+      SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0 ORDER BY media_sha256 LIMIT ?
+    `).all(Math.max(1, limit));
+      return rows.flatMap((row) => {
+        const judgment = this.mediaJudgment(row.media_sha256);
+        if (!judgment)
+          return [];
+        const items = this.db.query(`
+        SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        WHERE c.media_sha256 = ? AND i.tombstoned = 0
+      `).all(row.media_sha256).map((item) => ({
+          provider: item.provider,
+          accountScope: item.account_scope,
+          providerItemId: item.provider_item_id,
+          ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
+        }));
+        return [{ mediaSha256: row.media_sha256, judgment, items }];
+      });
+    }
+    markMediaJudgmentsApplied(mediaSha256s) {
+      if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0)
+        return;
+      const update = this.db.query("UPDATE media_judgments SET tier_applied = 1 WHERE media_sha256 = ?");
+      this.db.transaction(() => {
+        for (const sha of mediaSha256s)
+          update.run(sha);
+      })();
     }
     relinquishItems(options) {
       try {
@@ -17056,8 +17350,11 @@ var init_local_index = __esm(() => {
       if (media && !this.chunkMediaColumnsPresent) {
         throw new Error("Connector store chunks cannot carry media before the v13 schema.");
       }
-      if (media && this.trustDomain !== "secure_local") {
-        throw new Error("Connector store chunks carry picture media only in a Private store.");
+      if (media?.judgment && media.judgment.verdict !== "unjudged" && this.mediaJudgmentsPresent) {
+        this.writeMediaJudgment(media.sha256, media.judgment, true);
+      }
+      if (media && this.trustDomain !== "secure_local" && this.mediaJudgment(media.sha256)?.verdict !== "ordinary") {
+        throw new Error("Connector store chunks carry picture media outside a Private store only when the photo judge found it ordinary.");
       }
       const desired = chunks.map((chunk, index) => {
         const chunkMedia = index === 0 ? media : undefined;
@@ -17472,6 +17769,7 @@ var init_local_index = __esm(() => {
       let embedded = priorCounts?.chunksEmbedded ?? 0;
       let staleSkipped = 0;
       let readsImages;
+      const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
@@ -17509,8 +17807,26 @@ var init_local_index = __esm(() => {
           ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
         }));
         let vectors;
+        const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgment(row.media_sha256));
+        let judgedBatch;
         try {
-          vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+          if (judgeNow) {
+            const returned = await judging.embedWithImageVectors(inputsFor(batch));
+            vectors = returned.vectors;
+            judgedBatch = new Map;
+            const wanted = batch.flatMap((row, index) => row.media_sha256 && returned.imageVectors[index] ? [index] : []);
+            if (wanted.length > 0) {
+              try {
+                const judgments = await judgeReturnedImageVectors(judging, wanted.map((index) => returned.imageVectors[index]));
+                wanted.forEach((index, row) => {
+                  if (judgments[row].verdict !== "unjudged")
+                    judgedBatch.set(batch[index].chunk_pk, judgments[row]);
+                });
+              } catch {}
+            }
+          } else {
+            vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+          }
         } catch (error) {
           if (!(error instanceof SourceEmbeddingInputsFailedError))
             throw error;
@@ -17563,8 +17879,12 @@ var init_local_index = __esm(() => {
               embedding = excluded.embedding,
               embedded_at = excluded.embedded_at
           `).run(row.chunk_pk, provider.modelId, row.item_pk, row.content_hash, encodeEmbedding(vector, provider.dimension), now, row.chunk_pk, row.item_pk, row.content_hash);
-            if (write.changes > 0)
+            if (write.changes > 0) {
               written += 1;
+              const judgment = judgedBatch?.get(row.chunk_pk);
+              if (judgment && row.media_sha256)
+                this.writeMediaJudgment(row.media_sha256, judgment, false);
+            }
           }
           if (journalId) {
             const cumulative = embedded + written;
@@ -17595,6 +17915,11 @@ var init_local_index = __esm(() => {
         staleSkipped += batch.length - written;
       }
       skipped += staleSkipped;
+      if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgment(row.media_sha256))) {
+        readsImages ??= await judging.imageSupport();
+        if (readsImages)
+          await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
+      }
       if (journalId) {
         const completedAt = this.now().toISOString();
         const cursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, embedded, journalLeaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
@@ -18545,7 +18870,9 @@ var init_local_index = __esm(() => {
     "connector_store_chunk_media_release",
     "idx_connector_store_chunks_media",
     "chunk_media_failures",
-    "image_media_reads"
+    "image_media_reads",
+    "media_judgments",
+    "idx_connector_store_media_judgments_unapplied"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -18665,6 +18992,17 @@ var init_local_index = __esm(() => {
     "claim_holder",
     "claim_generation",
     "accepted_at"
+  ];
+  CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS = [
+    "media_sha256",
+    "verdict",
+    "category",
+    "margin",
+    "scores_json",
+    "judge_id",
+    "reason",
+    "judged_at",
+    "tier_applied"
   ];
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
@@ -20116,16 +20454,79 @@ class BuiltInSourceEmbeddingProvider {
     }
     return sums.map((sum) => normalize2(sum));
   }
-  async embedLiteRt(embedder, inputs, taskType) {
-    const refused = new Set;
-    const prompts = inputs.map((input, index) => {
+  async embedWithImageVectors(inputs) {
+    if (inputs.length === 0)
+      return { vectors: [], imageVectors: [] };
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== "litert" || !this.spec.vision) {
+      return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
+        return;
+      }) };
+    }
+    const extra = inputs.flatMap((input, index) => input.image && isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
+    const { vectors, failed } = await this.liteRtVectors(model.embedder, [...this.liteRtItems(inputs, "RETRIEVAL_DOCUMENT"), ...extra.map((index) => ({ text: "", image: inputs[index].image.path }))], "RETRIEVAL_DOCUMENT", new Set(this.refusedPictures(inputs)));
+    const documentFailures = failed.filter((index) => index < inputs.length);
+    if (documentFailures.length > 0)
+      throw new SourceEmbeddingInputsFailedError(documentFailures, "image_unreadable");
+    const imageVectors = inputs.map(() => {
+      return;
+    });
+    extra.forEach((input, row) => {
+      imageVectors[input] = vectors[inputs.length + row];
+    });
+    return { vectors: vectors.slice(0, inputs.length), imageVectors };
+  }
+  async embedImageVectors(images) {
+    if (images.length === 0)
+      return [];
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== "litert" || !this.spec.vision) {
+      throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
+    }
+    const refused = new Set(images.flatMap((image, index) => isMediaCachePath(image.path, image.sha256) ? [] : [index]));
+    const live = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
+    const out = images.map(() => {
+      return;
+    });
+    if (live.length === 0)
+      return out;
+    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
+    live.forEach(({ index }, row) => {
+      out[index] = vectors[row];
+    });
+    return out;
+  }
+  async embedPromptTexts(texts) {
+    if (texts.length === 0)
+      return [];
+    const model = this.loaded ?? await this.load();
+    if (model.kind !== "litert")
+      throw new Error("The photo judge needs the LiteRT model.");
+    const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
+    if (failed.length > 0)
+      throw new Error("The photo judge's descriptions could not be embedded.");
+    return vectors;
+  }
+  refusedPictures(inputs) {
+    if (!this.spec.vision)
+      return [];
+    return inputs.flatMap((input, index) => input.image && !isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
+  }
+  liteRtItems(inputs, taskType) {
+    return inputs.map((input) => {
       const text = promptText(this.spec, input, taskType);
       if (taskType !== "RETRIEVAL_DOCUMENT" || !this.spec.vision || !input.image)
         return text;
-      if (!isMediaCachePath(input.image.path, input.image.sha256))
-        refused.add(index);
       return { text, image: input.image.path };
     });
+  }
+  async embedLiteRt(embedder, inputs, taskType) {
+    const { vectors, failed } = await this.liteRtVectors(embedder, this.liteRtItems(inputs, taskType), taskType, new Set(taskType === "RETRIEVAL_DOCUMENT" ? this.refusedPictures(inputs) : []));
+    if (failed.length > 0)
+      throw new SourceEmbeddingInputsFailedError(failed, "image_unreadable");
+    return vectors;
+  }
+  async liteRtVectors(embedder, prompts, taskType, refused) {
     const out = [];
     const failed = [...refused];
     for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
@@ -20142,19 +20543,16 @@ class BuiltInSourceEmbeddingProvider {
       for (const [row, vector] of vectors.entries()) {
         if (vector.length === 0) {
           failed.push(offset + row);
-          out.push([]);
+          out.push(undefined);
           continue;
         }
         if (vector.length !== this.dimension) {
           throw new OperationError("source_index_error", `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
         }
-        out.push(normalize2(vector));
+        out.push(refused.has(offset + row) ? undefined : normalize2(vector));
       }
     }
-    if (failed.length > 0) {
-      throw new SourceEmbeddingInputsFailedError([...new Set(failed)].sort((left, right) => left - right), "image_unreadable");
-    }
-    return out;
+    return { vectors: out, failed: [...new Set(failed)].sort((left, right) => left - right) };
   }
   async forward(model, batch) {
     const rows = batch.length;
@@ -20854,18 +21252,26 @@ function rejudgeRoutedItems(options) {
   for (const record of page.records) {
     report.seen += 1;
     try {
-      rejudgeOne(set, record, classification, report, key, options.autoMoves === true);
+      rejudgeStoredContent(set, record, {
+        sniffer: classification.sniffer,
+        ...classification.retirePublic ? { retirePublic: true } : {},
+        report,
+        key,
+        autoMoves: options.autoMoves === true
+      });
     } catch {
       report.failed += 1;
     }
   }
   return { report, ...page.next ? { next: page.next } : {} };
 }
-function rejudgeOne(set, record, classification, report, key, autoMoves) {
+function rejudgeStoredContent(set, record, options) {
+  const { report, key, autoMoves } = options;
   const ledger = set.ledger;
   const identity = identityOf2(record);
   if (ledger.getOverride(identity)) {
-    ledger.markRejudged(identity, key);
+    if (key)
+      ledger.markRejudged(identity, key);
     report.skipped += 1;
     return;
   }
@@ -20876,10 +21282,12 @@ function rejudgeOne(set, record, classification, report, key, autoMoves) {
   const text = exported?.chunks.map((chunk) => chunk.boundedText).join(`
 `) ?? "";
   if (!exported || !text.trim()) {
-    ledger.markRejudged(identity, key);
+    if (key)
+      ledger.markRejudged(identity, key);
     report.skipped += 1;
     return;
   }
+  const imageJudgment = exported.chunks.find((chunk) => chunk.mediaJudgment)?.mediaJudgment;
   const title = columnString(exported.columns["title"]);
   const path = columnString(exported.columns["locator_uri"]);
   const sender = columnString(exported.columns["sender_label"]);
@@ -20894,10 +21302,11 @@ function rejudgeOne(set, record, classification, report, key, autoMoves) {
     ...path ? { path } : {},
     ...sender ? { sender } : {},
     ...mimeType ? { mimeType } : {},
+    ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
     subject: identity
   }, {
-    sniffer: classification.sniffer,
-    ...classification.retirePublic ? { retirePublic: true } : {}
+    ...options.sniffer ? { sniffer: options.sniffer } : {},
+    ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {
     metadataTier: record.metadataTier,
@@ -20926,7 +21335,8 @@ function rejudgeOne(set, record, classification, report, key, autoMoves) {
     return;
   }
   if (content.contentPending && record.state === "pending") {
-    ledger.markHeldRejudged(record, key);
+    if (key)
+      ledger.markHeldRejudged(record, key);
     report.asked += 1;
     return;
   }
@@ -20942,7 +21352,8 @@ function rejudgeOne(set, record, classification, report, key, autoMoves) {
     return;
   }
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), autoMoves ? {} : { queueWithoutHiding: true });
-  ledger.markRejudged(identity, key);
+  if (key)
+    ledger.markRejudged(identity, key);
   if (recorded.outcome === "queued_move")
     report.movesQueued += 1;
   else
@@ -21216,6 +21627,8 @@ function raiseIfImage(set, record) {
   const mimeType = exported.columns["mime_type"];
   if (typeof mimeType !== "string" || !isImageMediaType(mimeType))
     return false;
+  if (exported.chunks.some((chunk) => chunk.mediaJudgment?.verdict === "ordinary"))
+    return false;
   const decision = {
     metadataTier: record.metadataTier,
     contentTier: maxTier(record.contentTier, "secure"),
@@ -21258,6 +21671,62 @@ var init_tier_image_content_sweep = __esm(() => {
   init_tier_ledger();
 });
 
+// src/workers/connector-store/tier-media-judgment-sweep.ts
+function applyMediaJudgments(options) {
+  const report = { ...emptyTierRejudgeReport(), applied: 0, waiting: 0 };
+  const { set } = options;
+  const ledger = set.ledger;
+  const classification = set.classification();
+  const limit = Math.max(1, options.limit ?? DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT);
+  for (const store of set.openStores()) {
+    const page = store.unappliedMediaJudgments(limit);
+    const done = [];
+    for (const entry of page) {
+      let ready = true;
+      for (const identity of entry.items) {
+        report.seen += 1;
+        const record = ledger.getCurrent(identity);
+        if (!record || !record.routed)
+          continue;
+        if (record.state === "moving" || record.metadataPending) {
+          ready = false;
+          continue;
+        }
+        if (record.contentTier === "secrets" || record.metadataTier === "secrets")
+          continue;
+        if (entry.judgment.verdict === "unjudged")
+          continue;
+        if (classification?.unavailableReason) {
+          ready = false;
+          continue;
+        }
+        try {
+          rejudgeStoredContent(set, record, {
+            ...classification?.sniffer ? { sniffer: classification.sniffer } : {},
+            ...classification?.retirePublic ? { retirePublic: true } : {},
+            report,
+            autoMoves: options.autoMoves === true
+          });
+        } catch {
+          report.failed += 1;
+          ready = false;
+        }
+      }
+      if (ready)
+        done.push(entry.mediaSha256);
+      else
+        report.waiting += 1;
+    }
+    store.markMediaJudgmentsApplied(done);
+    report.applied += done.length;
+  }
+  return report;
+}
+var DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT = 200;
+var init_tier_media_judgment_sweep = __esm(() => {
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -21270,6 +21739,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_row_rehome();
   init_tier_rules_sweep();
   init_tier_image_content_sweep();
+  init_tier_media_judgment_sweep();
 });
 
 // src/workers/connector-store/principal.ts
@@ -29977,6 +30447,7 @@ init_tier_rejudge();
 init_tier_names_only_settle();
 init_tier_rules_sweep();
 init_tier_image_content_sweep();
+init_tier_media_judgment_sweep();
 init_tier_ledger();
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
@@ -30329,6 +30800,12 @@ class TierSnifferService {
         }
       } catch {}
       try {
+        const judged = applyMediaJudgments({ set, autoMoves: this.autoMovesFor(set) });
+        if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
+          this.options.log?.(`Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, ` + `${judged.updated} kept where they were, ${judged.asked} asked about).`);
+        }
+      } catch {}
+      try {
         const settled = settleNamesOnlyItems({ set });
         if (settled.settled > 0) {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
@@ -30412,6 +30889,7 @@ class TierSnifferService {
             set,
             identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
             target: { metadataTier: record.targetMetadataTier, contentTier: record.targetContentTier },
+            vectorIdentities: matchingVectorIdentities(set, exported),
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY },
             replaceOwnSupersededCopy: true
           });
@@ -30458,6 +30936,28 @@ function recordIdentity(record) {
 var AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 function isBuiltInLane(lane) {
   return lane.kind === BUILT_IN_SNIFFER_LANE.kind && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;
+}
+function matchingVectorIdentities(set, exported) {
+  const identities = {};
+  for (const domain of ["public_safe", "internal", "secure_local"]) {
+    try {
+      const store = set.store(domain);
+      if (!store)
+        continue;
+      const own = store.embeddingAuthorities().find((authority) => exported.vectorAuthorities.some((minted) => minted.modelId === authority.modelId && minted.provider === authority.provider && minted.backend === authority.backend && minted.dimension === authority.dimension && minted.epochId === authority.epochId));
+      if (!own || own.backend !== "local" && own.backend !== "cloud")
+        continue;
+      identities[domain] = {
+        modelId: own.modelId,
+        provider: own.provider,
+        backend: own.backend,
+        dimension: own.dimension,
+        epochId: own.epochId,
+        configHash: own.configHash ?? ""
+      };
+    } catch {}
+  }
+  return identities;
 }
 function setEmbedsWithBuiltInOnly(set) {
   try {

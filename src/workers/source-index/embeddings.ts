@@ -61,6 +61,22 @@ export interface SourceEmbeddingProvider {
    * picture.
    */
   imageSupport?(): Promise<boolean>;
+  /**
+   * Present only on a provider whose model reads pictures: the documents'
+   * vectors exactly as `embed` returns them, plus each picture's IMAGE-ONLY
+   * vector, in the same model call (the photo judge, media-judge.ts). An
+   * image vector is undefined for an input with no picture, or whose picture
+   * alone could not be read. Failures are those of `embed`.
+   */
+  embedWithImageVectors?(inputs: SourceEmbeddingInput[]): Promise<{ vectors: number[][]; imageVectors: Array<number[] | undefined> }>;
+  /**
+   * Present only on a provider whose model reads pictures: each picture's
+   * image-only vector (undefined for one the encoder could not read). Throws
+   * `SourceEmbeddingInputsFailedError` (held) while the encoder is not running.
+   */
+  embedImageVectors?(images: SourceEmbeddingImageInput[]): Promise<Array<number[] | undefined>>;
+  /** Present only with `embedImageVectors`: text embedded exactly as given, with no task prefix (the judge's descriptions). */
+  embedPromptTexts?(texts: string[]): Promise<number[][]>;
 }
 
 /**
@@ -1224,6 +1240,21 @@ export function memoizeQueryEmbeddings(provider: SourceEmbeddingProvider): Sourc
     },
     ...(provider.assertBindingCurrent ? { assertBindingCurrent: () => provider.assertBindingCurrent!() } : {}),
     ...(provider.imageSupport ? { imageSupport: () => provider.imageSupport!() } : {}),
+    ...mediaJudgeMethods(provider),
   };
   return memoized;
+}
+
+/**
+ * The photo judge's methods of a provider, forwarded by a wrapper: a wrapper
+ * that dropped them would leave every photo unjudged (and Private).
+ */
+export function mediaJudgeMethods(
+  provider: SourceEmbeddingProvider,
+): Pick<SourceEmbeddingProvider, 'embedWithImageVectors' | 'embedImageVectors' | 'embedPromptTexts'> {
+  return {
+    ...(provider.embedWithImageVectors ? { embedWithImageVectors: (inputs: SourceEmbeddingInput[]) => provider.embedWithImageVectors!(inputs) } : {}),
+    ...(provider.embedImageVectors ? { embedImageVectors: (images: SourceEmbeddingImageInput[]) => provider.embedImageVectors!(images) } : {}),
+    ...(provider.embedPromptTexts ? { embedPromptTexts: (texts: string[]) => provider.embedPromptTexts!(texts) } : {}),
+  };
 }

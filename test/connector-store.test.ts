@@ -2183,7 +2183,7 @@ describe('LocalConnectorStore reactions', () => {
     await store.syncFromConnector(createChatConnector([reactedChatItem(THUMBS_UP_BY_TWO)]), { fetchContent: true });
     store.close();
 
-    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(13);
+    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(14);
 
     const db = new Database(dbPath, { readonly: true });
     try {

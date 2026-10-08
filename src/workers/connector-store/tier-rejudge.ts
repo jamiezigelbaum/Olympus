@@ -44,6 +44,7 @@ import {
   namesDecidedByOwner,
   TIER_CLASSIFIER_VERSION,
   type TierDecision,
+  type TierSniffer,
 } from '../classification/tier-classifier.ts';
 import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
@@ -105,7 +106,13 @@ export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierR
   for (const record of page.records) {
     report.seen += 1;
     try {
-      rejudgeOne(set, record, classification, report, key, options.autoMoves === true);
+      rejudgeStoredContent(set, record, {
+        sniffer: classification.sniffer,
+        ...(classification.retirePublic ? { retirePublic: true } : {}),
+        report,
+        key,
+        autoMoves: options.autoMoves === true,
+      });
     } catch {
       // The item keeps its recorded decision; a later pass tries again.
       report.failed += 1;
@@ -114,18 +121,30 @@ export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierR
   return { report, ...(page.next ? { next: page.next } : {}) };
 }
 
-function rejudgeOne(
+/**
+ * Re-judges one routed item's content from the copy the store serving it
+ * holds, exactly as a landing judges it: the re-judge pass above, and the
+ * photo judge's verdicts (tier-media-judgment-sweep.ts) use it. A still
+ * image's picture judgment travels with the stored copy, so a re-judge never
+ * forgets it. `key` stamps the row for the re-judge pass; without one (a
+ * sweep that runs with no sniffer) nothing is stamped.
+ */
+export function rejudgeStoredContent(
   set: TieredStoreSet,
   record: TierLedgerRecord,
-  classification: NonNullable<ReturnType<TieredStoreSet['classification']>>,
-  report: TierRejudgeReport,
-  key: { engineVersion: string; snifferId: string },
-  autoMoves: boolean,
+  options: {
+    sniffer?: TierSniffer;
+    retirePublic?: boolean;
+    report: TierRejudgeReport;
+    key?: { engineVersion: string; snifferId: string };
+    autoMoves: boolean;
+  },
 ): void {
+  const { report, key, autoMoves } = options;
   const ledger = set.ledger;
   const identity = identityOf(record);
   if (ledger.getOverride(identity)) {
-    ledger.markRejudged(identity, key);
+    if (key) ledger.markRejudged(identity, key);
     report.skipped += 1;
     return;
   }
@@ -137,10 +156,11 @@ function rejudgeOne(
   if (!exported || !text.trim()) {
     // Nothing to read back: the decision stands, and the row is not re-read
     // until the classifier or the sniffer changes again.
-    ledger.markRejudged(identity, key);
+    if (key) ledger.markRejudged(identity, key);
     report.skipped += 1;
     return;
   }
+  const imageJudgment = exported.chunks.find((chunk) => chunk.mediaJudgment)?.mediaJudgment;
   const title = columnString(exported.columns['title']);
   const path = columnString(exported.columns['locator_uri']);
   const sender = columnString(exported.columns['sender_label']);
@@ -156,11 +176,12 @@ function rejudgeOne(
       ...(path ? { path } : {}),
       ...(sender ? { sender } : {}),
       ...(mimeType ? { mimeType } : {}),
+      ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
       subject: identity,
     },
     {
-      sniffer: classification.sniffer!,
-      ...(classification.retirePublic ? { retirePublic: true } : {}),
+      ...(options.sniffer ? { sniffer: options.sniffer } : {}),
+      ...(options.retirePublic ? { retirePublic: true } : {}),
     },
   );
   const decision: TierDecision = {
@@ -194,7 +215,7 @@ function rejudgeOne(
   if (content.contentPending && record.state === 'pending') {
     // Already held for this question: the content pass just queued it again
     // (`subject` above); the sniffer's answer settles the row.
-    ledger.markHeldRejudged(record, key);
+    if (key) ledger.markHeldRejudged(record, key);
     report.asked += 1;
     return;
   }
@@ -214,7 +235,7 @@ function rejudgeOne(
     set.placementFor(decision),
     autoMoves ? {} : { queueWithoutHiding: true },
   );
-  ledger.markRejudged(identity, key);
+  if (key) ledger.markRejudged(identity, key);
   if (recorded.outcome === 'queued_move') report.movesQueued += 1;
   else report.updated += 1;
 }

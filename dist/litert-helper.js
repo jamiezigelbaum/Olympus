@@ -94,8 +94,9 @@ function requestItems(request, vision) {
     throw new Error("An empty batch has nothing to embed.");
   return raw.map((entry) => {
     const item = entry;
-    if (typeof item?.text !== "string" || item.text.length === 0)
-      throw new Error("Every input must be non-empty text.");
+    if (typeof item?.text !== "string" || item.text.length === 0 && item.image === undefined) {
+      throw new Error("Every input must be non-empty text, or a picture.");
+    }
     if (item.image === undefined)
       return { text: item.text };
     if (typeof item.image !== "string" || !isAbsolute(item.image))
@@ -161,9 +162,11 @@ function embedRaw(lib, engine, options, items, images) {
   try {
     const perItem = items.map((item, index) => {
       const parts = [];
-      const text = Buffer.from(item.text, "utf8");
-      parts.push(lib.litert_lm_input_data_create(INPUT_TEXT, ptr(text), text.length));
       const image = images[index];
+      if (item.text.length > 0 || !image) {
+        const text = Buffer.from(item.text, "utf8");
+        parts.push(lib.litert_lm_input_data_create(INPUT_TEXT, ptr(text), text.length));
+      }
       if (image)
         parts.push(lib.litert_lm_input_data_create(INPUT_IMAGE, ptr(image), image.length));
       inputs.push(...parts);

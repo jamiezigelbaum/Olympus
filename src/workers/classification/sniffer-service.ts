@@ -12,7 +12,9 @@ import {
   isClassifierApproved,
   readClassificationLedger,
 } from '../classification-ledger.ts';
-import { moveTieredItem } from '../connector-store/tier-move.ts';
+import { moveTieredItem, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
+import type { ConnectorStoreItemCopy } from '../connector-store/local-index.ts';
+import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { BUILT_IN_EMBEDDING_PROVIDER } from '../source-index/built-in-embedding/provider.ts';
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
@@ -41,6 +43,7 @@ import {
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
 import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import { sweepImageContentToPrivate } from '../connector-store/tier-image-content-sweep.ts';
+import { applyMediaJudgments } from '../connector-store/tier-media-judgment-sweep.ts';
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
@@ -645,6 +648,19 @@ export class TierSnifferService {
         // A set that cannot be read keeps its placements this tick.
       }
       try {
+        // The photo judge's verdicts: an ordinary photo leaves the Private
+        // store (a queued move), a sensitive one stays.
+        const judged = applyMediaJudgments({ set, autoMoves: this.autoMovesFor(set) });
+        if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
+          this.options.log?.(
+            `Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, `
+            + `${judged.updated} kept where they were, ${judged.asked} asked about).`,
+          );
+        }
+      } catch {
+        // A set that cannot be read keeps its placements this tick.
+      }
+      try {
         const settled = settleNamesOnlyItems({ set });
         if (settled.settled > 0) {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
@@ -741,6 +757,10 @@ export class TierSnifferService {
             set,
             identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
             target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
+            // Vectors made by the very model a destination already embeds
+            // with are copied, not made again (a judged-ordinary photo keeps
+            // its picture vector when it leaves the Private store).
+            vectorIdentities: matchingVectorIdentities(set, exported),
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY },
             // Every embedding here is the built-in local model: an older
             // superseded copy this item's own earlier move left in the
@@ -816,6 +836,43 @@ function isBuiltInLane(lane: SnifferLane): boolean {
   return lane.kind === BUILT_IN_SNIFFER_LANE.kind
     && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId
     && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;
+}
+
+/**
+ * For each store of the set, the embedding identity it already writes
+ * vectors under when that is exactly the identity the item's vectors were
+ * minted under: a move may copy those vectors there instead of embedding
+ * again. A store with no such identity gets none (it embeds with its own model).
+ */
+function matchingVectorIdentities(
+  set: TieredStoreSet,
+  exported: ConnectorStoreItemCopy,
+): Partial<Record<SourceTrustDomain, TierMoveEmbeddingIdentity>> {
+  const identities: Partial<Record<SourceTrustDomain, TierMoveEmbeddingIdentity>> = {};
+  for (const domain of ['public_safe', 'internal', 'secure_local'] as const) {
+    try {
+      const store = set.store(domain);
+      if (!store) continue;
+      const own = store.embeddingAuthorities().find((authority) => exported.vectorAuthorities.some((minted) =>
+        minted.modelId === authority.modelId
+        && minted.provider === authority.provider
+        && minted.backend === authority.backend
+        && minted.dimension === authority.dimension
+        && minted.epochId === authority.epochId));
+      if (!own || (own.backend !== 'local' && own.backend !== 'cloud')) continue;
+      identities[domain] = {
+        modelId: own.modelId,
+        provider: own.provider,
+        backend: own.backend,
+        dimension: own.dimension,
+        epochId: own.epochId,
+        configHash: own.configHash ?? '',
+      };
+    } catch {
+      // That store embeds with its own model.
+    }
+  }
+  return identities;
 }
 
 /** Every open store of the set embeds (if at all) with the built-in local model only. */
