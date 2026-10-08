@@ -206,6 +206,13 @@ export class NativeProcessServiceStoppedError extends Error {}
  */
 export class NativeProcessConfigurationError extends Error {}
 
+/** The child accepted the forced kill but has not exited; custody is kept. */
+class NativeProcessChildAliveError extends Error {
+  constructor() {
+    super('Olympus child process has not exited after the forced kill.');
+  }
+}
+
 /** The supervisor already sent this sanitized failure to its current health lease. */
 class NativeProcessReportedStartError extends Error {}
 
@@ -234,6 +241,9 @@ class NativeProcessReportedStartError extends Error {}
  *   kill is still sent, the group gets a bounded settle, and a group still
  *   refusing after that is reported loudly as unconfirmed. EPERM while the
  *   leader is alive stays a hard failure that keeps custody of the child;
+ * - cleanup succeeds only once the direct child's exit is observed. A child
+ *   that accepted the forced kill but is still running fails the cleanup, so
+ *   stop() rejects and keeps custody, and no replacement is spawned over it;
  * - a ready child that exits for any reason (crash, signal, or a deliberate
  *   self-restart exit such as 75) is always replaced unless completion
  *   semantics apply. Descendant cleanup that fails or stays unconfirmed is
@@ -346,7 +356,8 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         }
         return isCurrent(lifetime);
       } catch {
-        // Only a live child whose group refused the signal gets here.
+        // A live child: its group refused the signal, or it took the forced
+        // kill and has not exited yet. Either way it is still ours.
       }
       if (!isCurrent(lifetime)) return false;
       if (!child || childExited(child)) {
@@ -664,6 +675,10 @@ async function terminateChildProcessGroup(child: ChildProcess, graceMs: number, 
   // bounded hard-stop signal to the whole group after the grace period.
   const forced = signalChildTree(child, 'SIGKILL');
   await waitForChildExit(child, 1_000);
+  // An accepted signal is not an exit. A child still running here (stuck in
+  // an uninterruptible wait, say) is not stopped: reject, so every caller
+  // keeps custody of it and its record, and no replacement is spawned over it.
+  if (!childExited(child)) throw new NativeProcessChildAliveError();
   if (forced !== 'denied') return 'stopped';
   return await settleDeniedGroup(child, settleMs);
 }

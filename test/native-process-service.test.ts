@@ -329,11 +329,24 @@ interface SyntheticChild extends EventEmitter {
   exitNow(signal: NodeJS.Signals): void;
 }
 
-test('a failed relaunch whose child is alive, unready and refuses group signals is never spawned over: the next start waits for its exit', async () => {
+/**
+ * Synthetic children under the real supervisor. `stuck(index)` decides how
+ * child `index` answers group signals while it lives: `eperm` refuses them,
+ * `accepts` takes them without ever exiting (an uninterruptible wait), and
+ * `false` exits on the signal. Direct kills are only recorded; a stuck child
+ * leaves only when the test calls exitNow. `ready(index)` is its readiness.
+ */
+function syntheticSupervisor(options: {
+  stuck: (index: number) => 'eperm' | 'accepts' | false;
+  ready: (index: number) => boolean;
+  startupTimeoutMs?: number;
+}) {
   const children: SyntheticChild[] = [];
   const health: string[] = [];
   const warnings: string[] = [];
+  const stopped: number[] = [];
   let launches = 0;
+  const live = (child: SyntheticChild) => child.exitCode === null && child.signalCode === null;
   const makeChild = (): SyntheticChild => {
     const child: SyntheticChild = Object.assign(new EventEmitter(), {
       pid: 980_000 + children.length,
@@ -342,7 +355,7 @@ test('a failed relaunch whose child is alive, unready and refuses group signals 
       directKills: [] as string[],
       kill(signal?: NodeJS.Signals) { child.directKills.push(signal ?? 'SIGTERM'); return true; },
       exitNow(signal: NodeJS.Signals) {
-        if (child.exitCode !== null || child.signalCode !== null) return;
+        if (!live(child)) return;
         child.signalCode = signal;
         child.emit('exit', null, signal);
       },
@@ -350,23 +363,20 @@ test('a failed relaunch whose child is alive, unready and refuses group signals 
     children.push(child);
     return child;
   };
-  // Child 0 starts ready and then crashes, so the relaunch path runs. Child 1
-  // (the failed relaunch) never becomes ready and its group answers EPERM
-  // while it lives; its direct SIGKILL is recorded but does nothing until the
-  // test lets it exit. Later children behave.
   const realKill = process.kill;
   process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
     const child = children.find((entry) => entry.pid === -pid);
     if (!child) return realKill(pid, signal);
-    const index = children.indexOf(child);
-    if (index === 1 && child.exitCode === null && child.signalCode === null) {
-      throw Object.assign(new Error('synthetic EPERM'), { code: 'EPERM' });
-    }
-    if (child.exitCode !== null || child.signalCode !== null) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
-    if (signal !== 0) setTimeout(() => child.exitNow(signal as NodeJS.Signals), 0);
+    if (!live(child)) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    const stuck = options.stuck(children.indexOf(child));
+    if (stuck === 'eperm') throw Object.assign(new Error('synthetic EPERM'), { code: 'EPERM' });
+    if (stuck === false && signal !== 0) setTimeout(() => child.exitNow(signal as NodeJS.Signals), 0);
     return true;
   }) as typeof process.kill;
-  cleanups.push(() => { process.kill = realKill; });
+  const restore = () => { process.kill = realKill; };
+  cleanups.push(restore);
+  setNativeProcessChildObserver({ spawned() {}, stopped: (_id, pgid) => { stopped.push(pgid); } });
+  cleanups.push(() => setNativeProcessChildObserver(undefined));
   const service = createNativeProcessService({
     id: 'fixture',
     label: 'fixture',
@@ -383,35 +393,75 @@ test('a failed relaunch whose child is alive, unready and refuses group signals 
         command: '/synthetic/unused',
         args: [],
         env: {},
-        startupTimeoutMs: launch === 1 ? 150 : 2_000,
+        startupTimeoutMs: options.ready(launch) ? 2_000 : (options.startupTimeoutMs ?? 150),
         endpointOccupied: false,
-        readinessProbe: async () => launch !== 1,
+        readinessProbe: async () => options.ready(launch),
       };
     },
   });
-  try {
-    await service.start({
-      logger: { warn: (message) => { warnings.push(message); } },
-      serviceHealth: { reportFailure: (error) => { health.push(error.message); }, clearFailure: () => { health.push('clear'); } },
-    });
-    expect(children).toHaveLength(1);
-    children[0]!.exitNow('SIGSEGV');
-    await waitUntil(() => children.length === 2, 'the relaunch');
-    const waiting = 'Olympus fixture could not be stopped after a failed start; waiting for it to exit before starting another.';
-    await waitUntil(() => warnings.includes(waiting), 'the failed relaunch to be reported');
-    // Well past several backoff rounds: still exactly one live child, killed
-    // directly, and no second spawn over it.
-    await Bun.sleep(400);
-    expect(children).toHaveLength(2);
-    expect(children[1]!.directKills.filter((signal) => signal === 'SIGKILL').length).toBeGreaterThan(1);
-    expect(warnings.filter((message) => message === waiting)).toHaveLength(1);
-    // Once it exits, the next start follows.
-    children[1]!.exitNow('SIGKILL');
-    await waitUntil(() => children.length === 3 && health.at(-1) === 'clear', 'the replacement after the exit');
-    expect(health).toContain('Olympus fixture failed to become ready.');
-  } finally {
+  const context: NativeProcessServiceContext = {
+    logger: { warn: (message) => { warnings.push(message); } },
+    serviceHealth: { reportFailure: (error) => { health.push(error.message); }, clearFailure: () => { health.push('clear'); } },
+  };
+  const finish = async () => {
     for (const child of children) child.exitNow('SIGKILL');
-    await service.stop();
-    process.kill = realKill;
+    try { await service.stop(); } finally { restore(); }
+  };
+  return { service, context, children, health, warnings, stopped, finish };
+}
+
+const WAITING = 'Olympus fixture could not be stopped after a failed start; waiting for it to exit before starting another.';
+
+for (const [name, stuck] of [
+  ['refuses group signals (EPERM)', 'eperm'],
+  ['takes every signal but never exits', 'accepts'],
+] as const) {
+  test(`a failed relaunch whose child is alive, unready and ${name} is never spawned over: the next start waits for its exit`, async () => {
+    // Child 0 starts ready and then crashes, so the relaunch path runs. Child
+    // 1 (the failed relaunch) never becomes ready and will not go away until
+    // the test lets it. Later children behave.
+    const run = syntheticSupervisor({ stuck: (index) => (index === 1 ? stuck : false), ready: (index) => index !== 1 });
+    try {
+      await run.service.start(run.context);
+      expect(run.children).toHaveLength(1);
+      run.children[0]!.exitNow('SIGSEGV');
+      await waitUntil(() => run.children.length === 2, 'the relaunch');
+      await waitUntil(() => run.warnings.includes(WAITING), 'the failed relaunch to be reported');
+      // Through several cleanup rounds: still one live child, killed directly
+      // each round, never spawned over, and its record kept.
+      await waitUntil(() => run.children[1]!.directKills.filter((signal) => signal === 'SIGKILL').length >= 2, 'repeated direct kills');
+      expect(run.children).toHaveLength(2);
+      expect(run.warnings.filter((message) => message === WAITING)).toHaveLength(1);
+      expect(run.stopped).not.toContain(run.children[1]!.pid);
+      // Once it exits, the next start follows.
+      run.children[1]!.exitNow('SIGKILL');
+      await waitUntil(() => run.children.length === 3 && run.health.at(-1) === 'clear', 'the replacement after the exit');
+      expect(run.health).toContain('Olympus fixture failed to become ready.');
+      expect(run.stopped).toContain(run.children[1]!.pid);
+    } finally {
+      await run.finish();
+    }
+  }, 15_000);
+}
+
+test('stop() never reports success while the child took every signal but has not exited, and keeps custody', async () => {
+  let stuck = true;
+  const run = syntheticSupervisor({ stuck: () => (stuck ? 'accepts' : false), ready: () => true });
+  try {
+    await run.service.start(run.context);
+    const child = run.children[0]!;
+    await expect(run.service.stop()).rejects.toThrow('has not exited after the forced kill');
+    expect(child.signalCode).toBeNull();
+    expect(run.stopped).not.toContain(child.pid);
+    // Custody kept: a new start must not spawn beside it.
+    await expect(run.service.start(run.context)).rejects.toThrow('has not exited after the forced kill');
+    expect(run.children).toHaveLength(1);
+    // Once it can exit, the retained stop completes and a start may follow.
+    stuck = false;
+    await run.service.stop();
+    expect(child.signalCode).not.toBeNull();
+    expect(run.stopped).toContain(child.pid);
+  } finally {
+    await run.finish();
   }
 }, 15_000);

@@ -12094,6 +12094,12 @@ class NativeProcessServiceStoppedError extends Error {
 class NativeProcessConfigurationError extends Error {
 }
 
+class NativeProcessChildAliveError extends Error {
+  constructor() {
+    super("Olympus child process has not exited after the forced kill.");
+  }
+}
+
 class NativeProcessReportedStartError extends Error {
 }
 function createNativeProcessService(options) {
@@ -12432,6 +12438,8 @@ async function terminateChildProcessGroup(child, graceMs, settleMs) {
   await waitForChildExit(child, graceMs);
   const forced = signalChildTree(child, "SIGKILL");
   await waitForChildExit(child, 1000);
+  if (!childExited(child))
+    throw new NativeProcessChildAliveError;
   if (forced !== "denied")
     return "stopped";
   return await settleDeniedGroup(child, settleMs);

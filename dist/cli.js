@@ -68565,6 +68565,8 @@ async function terminateChildProcessGroup(child, graceMs, settleMs) {
   await waitForChildExit(child, graceMs);
   const forced2 = signalChildTree(child, "SIGKILL");
   await waitForChildExit(child, 1000);
+  if (!childExited(child))
+    throw new NativeProcessChildAliveError;
   if (forced2 !== "denied")
     return "stopped";
   return await settleDeniedGroup(child, settleMs);
@@ -68624,12 +68626,17 @@ function delay(ms) {
     timeout.unref?.();
   });
 }
-var DEFAULT_READINESS_POLL_MS = 100, DEFAULT_STOP_GRACE_MS = 2000, DEFAULT_RESTART_DELAYS_MS, DEFAULT_DESCENDANT_SETTLE_MS = 2000, DESCENDANT_SETTLE_POLL_MS = 50, childStdio = "ignore", childObserver, NativeProcessServiceStoppedError, NativeProcessConfigurationError, NativeProcessReportedStartError;
+var DEFAULT_READINESS_POLL_MS = 100, DEFAULT_STOP_GRACE_MS = 2000, DEFAULT_RESTART_DELAYS_MS, DEFAULT_DESCENDANT_SETTLE_MS = 2000, DESCENDANT_SETTLE_POLL_MS = 50, childStdio = "ignore", childObserver, NativeProcessServiceStoppedError, NativeProcessConfigurationError, NativeProcessChildAliveError, NativeProcessReportedStartError;
 var init_native_process_service = __esm(() => {
   DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
   NativeProcessServiceStoppedError = class NativeProcessServiceStoppedError extends Error {
   };
   NativeProcessConfigurationError = class NativeProcessConfigurationError extends Error {
+  };
+  NativeProcessChildAliveError = class NativeProcessChildAliveError extends Error {
+    constructor() {
+      super("Olympus child process has not exited after the forced kill.");
+    }
   };
   NativeProcessReportedStartError = class NativeProcessReportedStartError extends Error {
   };
