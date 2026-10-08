@@ -54,8 +54,11 @@ Words the owner typed (owner ruling, 2026-10-08). At Standard, a word or
 phrase from the owner's own question may go out even when the private
 documents also contain it: the owner already sent it to ChatGPT, so it is
 not private evidence ("fees in Catalonia" when the owner asked about
-Catalonia). Only the exact words and phrases the owner typed count, not the
-document words around them. Hard identifiers stay blocked at both levels
+Catalonia). Only the exact words the owner typed count, not the document
+words around them, and never the owner's wording: a run of four words copied
+from the owner's question is refused at both levels, because the zkAPI
+model's provider also sees the ChatGPT conversation and could link the
+two. Hard identifiers stay blocked at both levels
 even when the owner typed them: mail addresses, phone, account, IBAN and ID
 numbers, street addresses, exact dates and years, secrets and handles.
 Typing an IBAN into ChatGPT never lets it go out to zkAPI. Strict is

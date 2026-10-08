@@ -420,12 +420,17 @@ through"); the full list is the comment on
   appears in the owner's own question is not private evidence, since the
   owner already sent it to ChatGPT. The orchestrator passes that question to
   the gate apart from the snapshot (`ownerQuestionTexts`), and at this level
-  only it is exempt from the name, place, copy and figure rules: "Catalonia"
-  typed by the owner may go out even though the documents also name it.
-  Only the exact tokens and phrases count, never their neighbours: typing
-  "Lopez" does not unlock "Maria Lopez", and a copied run is exempt only
-  when, less function words at its ends, it is a phrase of the owner's
-  question. A figure the owner typed may be repeated when it has at most
+  only its words are exempt from the name, place and figure rules:
+  "Catalonia" typed by the owner may go out even though the documents also
+  name it. Only the exact words count, never their neighbours: typing
+  "Lopez" does not unlock "Maria Lopez", and a name pair is exempt only if
+  the owner wrote it side by side. The owner's wording is not exempt: the
+  zkAPI model's provider also sees the owner's ChatGPT conversation, so a
+  copied sentence would link the anonymous request to the owner. At both
+  levels a request repeating four consecutive words of the owner's question
+  (two of them content words), or four consecutive content words, is refused
+  (`owner_question_copy`), and the other copy rules compare against the
+  owner's question as before. A figure the owner typed may be repeated when it has at most
   three digits, or when the request writes it with its currency or unit
   every time ("450 euros"); a number inside a phone, account or ID-like digit
   run gives no exemption. The full rule is the comment on

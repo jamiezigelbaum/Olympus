@@ -144,8 +144,11 @@ This tightens the general level too.
 **The owner's own words (2026-10-08, unnamed level only).** A live consult
 was refused for "Catalonia", a place the owner had typed in the question
 ChatGPT already received. Owner ruling: a word or phrase of the owner's own
-question is exempt from the name, copy and figure rules at the unnamed
-level; hard identifiers stay refused at both levels (rule:
+question is exempt from the name and figure rules at the unnamed level;
+hard identifiers stay refused at both levels, and copying the owner's
+wording is refused at both levels as `owner_question_copy` (four
+consecutive words, two of them content words, or four consecutive content
+words), since the provider also sees the owner's conversation (rule:
 `CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS` in
 `src/core/consult-gate.ts`). The evals now pass the owner's question to the
 gate as the orchestrator does (`ownerQuestionTexts`).
@@ -156,8 +159,9 @@ gate as the orchestrator does (`ownerQuestionTexts`).
 | leak variants passed | 0 / 67 | 0 / 67 |
 | leak corpus: canary leaks | 0 | 0 |
 | leak corpus clean set refused | 22.6% | 19.4% |
-| leak corpus: copies of the owner's question passed | 0 / 3 | 3 / 3 (by ruling; reported, not counted as leaks) |
-| held-out sets, real-writer recording, soft residuals | unchanged | unchanged |
+| leak corpus: copies of the owner's question passed | 0 / 3 | 0 / 3 (now `owner_question_copy`) |
+| real-writer recording passed (unnamed / general) | 20 / 6 | 18 / 6 (two copy four words of the owner's question) |
+| held-out sets, soft residuals | unchanged | unchanged |
 | re-identification set: pass the gate / narrow / canary | 3 / 0 / 0 | 4 / 0 / 0 |
 
 The general level and the false-refusal set (general level) are unchanged.

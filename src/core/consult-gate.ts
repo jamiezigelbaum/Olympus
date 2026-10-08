@@ -224,11 +224,6 @@ export const CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5;
  *     as a token the owner's question also holds ("Catalonia"); a pair is
  *     exempt only when the owner wrote the two words next to each other, so
  *     typing "Lopez" does not unlock "Maria Lopez";
- *   - copied wording: a shared run, content run or content span is not a
- *     copy when the copied tokens, less function words at either end, are a
- *     phrase of the owner's question in the same order; one copied word
- *     beyond the owner's phrase makes the whole run a copy again. The
- *     unordered sentence overlap does not count the owner's words;
  *   - figures: a snapshot figure the owner's question also writes is not
  *     refused when it has at most three digits, or when the request writes
  *     it with a currency or unit every time ("EUR 3,000"). The owner's
@@ -236,6 +231,14 @@ export const CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5;
  *     CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS digits, or digits joined
  *     by spaces, hyphens or slashes, as in phone, account and ID numbers)
  *     gives no exemption.
+ *
+ * Not exempt: copied wording. The consult provider can also see the owner's
+ * conversation, so the owner's wording would link the anonymous request to
+ * the owner (2026-10-08). The copy rules compare against the owner's question
+ * as before, and at both levels a request repeating a run of
+ * CONSULT_GATE_OWNER_QUESTION_COPY_TOKENS tokens of the owner's question (two
+ * or more of them content words), or of as many consecutive content words, is
+ * refused as `owner_question_copy` (copiesOwnerQuestion).
  *
  * Unchanged at both levels whatever the owner typed: the vocabulary rule,
  * mail addresses, handles, hosts, secrets, identifier shapes, whole
@@ -245,6 +248,7 @@ export const CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5;
  * inflection, a decoding or a glued form of an owner word is not exempt.
  */
 export const CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS = 7;
+export const CONSULT_GATE_OWNER_QUESTION_COPY_TOKENS = 4;
 // Bounds on ownerQuestionTexts; larger input is ignored (no exemption).
 export const CONSULT_GATE_OWNER_WORDS_MAX_TEXTS = 4;
 export const CONSULT_GATE_OWNER_WORDS_MAX_BYTES = 16_384;
@@ -352,7 +356,8 @@ export type ConsultGateReason =
   | 'snapshot_date'
   | 'snapshot_figure'
   | 'repeats_recent_consult'
-  | 'links_recent_consult';
+  | 'links_recent_consult'
+  | 'owner_question_copy';
 
 /**
  * `recentApprovedQuestions`: texts of consults sent recently (the name dates
@@ -760,9 +765,12 @@ function evaluateCheckedRequest(
     ? consultVocabulary({ languages: options?.languages ?? [], domains: { units: false, countries: true, places: false, technical: false, medicines: false, medicineBrands: false } })
     : null;
   const ordinaryWord = languageOnly ? (token: string) => languageOnly.has(token) : undefined;
-  // Unnamed level: the words the owner typed (CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS).
-  const owner = unnamed ? ownerWords(options?.ownerQuestionTexts) : undefined;
-  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, owner)) reasons.add(reason);
+  // The words the owner typed (CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS):
+  // copying the owner's wording is refused at both levels; single words,
+  // names, places and figures are exempt at the unnamed level only.
+  const owner = ownerWords(options?.ownerQuestionTexts);
+  if (owner && copiesOwnerQuestion(model, owner)) reasons.add('owner_question_copy');
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, unnamed ? owner : undefined)) reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent)) reasons.add(reason);
   return reasons.size > 0 ? refuse([...reasons]) : { decision: 'pass', reasons: [] };
 }
@@ -1123,11 +1131,13 @@ export interface ConsultGateOptions {
    * The owner's own question, exactly as the owner typed it (the answer
    * path's question, which the hosted assistant already received). Never
    * snapshot or evidence text, and never the writer's output. At the
-   * "unnamed" level only, a word or phrase the request repeats from it is
-   * exempt from the snapshot name, copy and figure rules (owner ruling
-   * 2026-10-08; see CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS). The
-   * general level ignores it. A value that is not a short list of strings is
-   * ignored, which only removes the exemption.
+   * "unnamed" level only, a word, name, place or figure the request repeats
+   * from it is exempt from the snapshot name and figure rules (owner ruling
+   * 2026-10-08; see CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS). At both
+   * levels, a run of its wording copied into the request is refused
+   * (`owner_question_copy`). A value that is not a short list of strings is
+   * ignored: no exemption and no such check (the copy rules still compare
+   * against the owner's question in the snapshot).
    */
   readonly ownerQuestionTexts?: readonly string[];
 }
@@ -1989,13 +1999,7 @@ interface RunMatcher {
  * number of question positions holding that token, so the total is bounded by
  * snapshot tokens times question tokens.
  */
-function runMatcher(
-  question: readonly string[],
-  minLength: number,
-  minContent: number,
-  // A run ending at question position `end`, `length` tokens long, that is not a copy (the owner's own phrase).
-  exempt?: (end: number, length: number) => boolean,
-): RunMatcher {
+function runMatcher(question: readonly string[], minLength: number, minContent: number): RunMatcher {
   const positions = new Map<string, number[]>();
   question.forEach((token, index) => {
     const list = positions.get(token) ?? [];
@@ -2025,7 +2029,7 @@ function runMatcher(
         const contentCount = (position > 0 ? previousContent[position - 1]! : 0) + content;
         currentLength[position] = length;
         currentContent[position] = contentCount;
-        if (length >= minLength && contentCount >= minContent && !(exempt && exempt(position, length))) hit = true;
+        if (length >= minLength && contentCount >= minContent) hit = true;
       }
       clear();
       [previousLength, currentLength] = [currentLength, previousLength];
@@ -2071,14 +2075,11 @@ function compareWithSnapshot(
   const reasons = new Set<ConsultGateReason>();
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const contentTokens = model.tokens.filter(isContent);
-  // Unnamed level, owner's words: a copied run, less function words at its
-  // ends, that is a phrase of the owner's question is not a copy. Anything
-  // beyond the phrase makes the whole run a copy again.
-  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS,
-    owner ? (end, length) => ownerPhrase(owner, model.tokens.slice(end - length + 1, end + 1)) : undefined);
-  const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0,
-    owner ? (end, length) => owner.contentKey.includes(`${SEP}${contentTokens.slice(end - length + 1, end + 1).join(SEP)}${SEP}`) : undefined);
-  const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, owner ? (key) => owner.contentWindows.has(key) : undefined);
+  // The copy rules have no owner-word exemption: the owner's wording is a
+  // fingerprint the provider could match to the owner's conversation.
+  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
+  const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
+  const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS);
   // A word the request writes as a literal token that the owner's question also holds.
   const askedTokens = new Set(model.tokens);
   const ownerToken = (token: string): boolean => owner !== undefined && owner.tokens.has(token) && askedTokens.has(token);
@@ -2232,8 +2233,7 @@ function compareWithSnapshot(
     const closeSentence = (): void => {
       if (sentence.length >= CONSULT_GATE_SHARED_RUN_TOKENS - 1 && sentence.length < runTokens
         && sentence.filter(isContent).length >= CONSULT_GATE_RUN_MIN_CONTENT_TOKENS
-        && model.tokenKeys[0]!.includes(`${SEP}${sentence.join(SEP)}${SEP}`)
-        && !(owner && ownerPhrase(owner, sentence))) {
+        && model.tokenKeys[0]!.includes(`${SEP}${sentence.join(SEP)}${SEP}`)) {
         reasons.add('shared_token_run');
       }
       sentence = [];
@@ -2342,8 +2342,7 @@ function compareWithSnapshot(
     }
   }
   for (const words of overlapCandidates) {
-    // The owner's own words do not count toward a copied sentence.
-    const rare = words.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES && !ownerToken(word));
+    const rare = words.filter((word) => (contentCounts.get(word) ?? 0) <= CONSULT_GATE_RARE_WORD_OCCURRENCES);
     if (rare.length >= CONSULT_GATE_SENTENCE_OVERLAP_WORDS) {
       reasons.add('shared_token_run');
       return reasons;
@@ -2414,13 +2413,11 @@ function compareWithSnapshot(
 interface OwnerWords {
   // Normalized tokens of the owner's question.
   readonly tokens: ReadonlySet<string>;
-  // SEP-delimited token sequences; separate texts are joined by a break no phrase can span.
-  readonly key: string;
-  readonly contentKey: string;
+  // Tokens and content tokens of each text, in order, for the owner-question copy rule.
+  readonly sequences: readonly (readonly string[])[];
+  readonly contentSequences: readonly (readonly string[])[];
   // Adjacent token pairs, `left SEP right`.
   readonly pairs: ReadonlySet<string>;
-  // Sorted content-word windows of CONSULT_GATE_CONTENT_RUN_TOKENS, as spanMatcher keys them.
-  readonly contentWindows: ReadonlySet<string>;
   // Figure keys of the numbers that stand alone (see the constant's comment).
   readonly figures: ReadonlySet<string>;
 }
@@ -2431,10 +2428,9 @@ function ownerWords(texts: unknown): OwnerWords | undefined {
   if ((texts as string[]).reduce((total, text) => total + utf8Bytes(text), 0) > CONSULT_GATE_OWNER_WORDS_MAX_BYTES) return undefined;
   const tokens = new Set<string>();
   const pairs = new Set<string>();
-  const contentWindows = new Set<string>();
   const figures = new Set<string>();
-  const keys: string[] = [];
-  const contentKeys: string[] = [];
+  const sequences: string[][] = [];
+  const contentSequences: string[][] = [];
   for (const text of texts as string[]) {
     const folded = foldText(text);
     const sequence = wordsOf(folded);
@@ -2443,11 +2439,8 @@ function ownerWords(texts: unknown): OwnerWords | undefined {
       tokens.add(token);
       if (index > 0) pairs.add(`${sequence[index - 1]}${SEP}${token}`);
     });
-    keys.push(sequence.join(SEP));
-    contentKeys.push(content.join(SEP));
-    for (let start = 0; start + CONSULT_GATE_CONTENT_RUN_TOKENS <= content.length; start += 1) {
-      contentWindows.add([...content.slice(start, start + CONSULT_GATE_CONTENT_RUN_TOKENS)].sort().join(' '));
-    }
+    sequences.push(sequence);
+    contentSequences.push(content);
     // A number inside a longer digit run, or one joined to other digits by a
     // space, hyphen or slash (phone, account and ID numbers, dates), is blanked.
     const standalone = caseFold(folded).replace(/\d(?:\d|[\s.\-/_](?=\d))*/gu, (run) =>
@@ -2456,18 +2449,27 @@ function ownerWords(texts: unknown): OwnerWords | undefined {
     for (const key of figureKeys(standalone, false).keys()) figures.add(key);
     for (const key of figureKeys(numberWordsToDigits(wordsOf(standalone)).join(' '), false).keys()) figures.add(key);
   }
-  const join = (parts: readonly string[]): string => `${SEP}${parts.join(`${SEP}\u0002${SEP}`)}${SEP}`;
-  return { tokens, key: join(keys), contentKey: join(contentKeys), pairs, contentWindows, figures };
+  return { tokens, sequences, contentSequences, pairs, figures };
 }
 
-// True when `sequence`, less function words at either end, is a phrase of the owner's question.
-function ownerPhrase(owner: OwnerWords, sequence: readonly string[]): boolean {
-  let start = 0;
-  let end = sequence.length;
-  while (start < end && !isContent(sequence[start]!)) start += 1;
-  while (end > start && !isContent(sequence[end - 1]!)) end -= 1;
-  if (start === end) return false;
-  return owner.key.includes(`${SEP}${sequence.slice(start, end).join(SEP)}${SEP}`);
+/**
+ * Both levels: a run of CONSULT_GATE_OWNER_QUESTION_COPY_TOKENS consecutive
+ * tokens of the owner's question, at least CONSULT_GATE_RUN_MIN_CONTENT_TOKENS
+ * of them content words, or of as many consecutive content words (function
+ * words removed on both sides), repeated in the request.
+ */
+function copiesOwnerQuestion(model: QuestionModel, owner: OwnerWords): boolean {
+  const tokenRun = runMatcher(model.tokens, CONSULT_GATE_OWNER_QUESTION_COPY_TOKENS, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
+  const contentRun = runMatcher(model.tokens.filter(isContent), CONSULT_GATE_OWNER_QUESTION_COPY_TOKENS, 0);
+  for (const sequence of owner.sequences) {
+    tokenRun.reset();
+    for (const token of sequence) if (tokenRun.feed(token)) return true;
+  }
+  for (const sequence of owner.contentSequences) {
+    contentRun.reset();
+    for (const token of sequence) if (contentRun.feed(token)) return true;
+  }
+  return false;
 }
 
 // True when the owner wrote `left right` side by side (either order) and the request writes it the same way.
@@ -2482,12 +2484,7 @@ function ownerPair(owner: OwnerWords, model: QuestionModel, left: string, right:
  * whose multiset equals that of any window of the question's content tokens,
  * so swapping adjacent words does not hide a copy.
  */
-function spanMatcher(
-  question: readonly string[],
-  size: number,
-  // A window key (sorted tokens) that is not a copy (the owner's own words).
-  exempt?: (key: string) => boolean,
-): { feed(token: string): boolean; reset(): void } {
+function spanMatcher(question: readonly string[], size: number): { feed(token: string): boolean; reset(): void } {
   const key = (tokens: readonly string[]): string => [...tokens].sort().join(' ');
   const wanted = new Set<string>();
   for (let start = 0; start + size <= question.length; start += 1) wanted.add(key(question.slice(start, start + size)));
@@ -2502,9 +2499,7 @@ function spanMatcher(
       window.push(token);
       if (vocabulary.has(token)) inQuestion += 1;
       if (window.length > size && vocabulary.has(window.shift()!)) inQuestion -= 1;
-      if (window.length !== size || inQuestion !== size) return false;
-      const windowKey = key(window);
-      return wanted.has(windowKey) && !(exempt && exempt(windowKey));
+      return window.length === size && inQuestion === size && wanted.has(key(window));
     },
     reset(): void {
       window = [];

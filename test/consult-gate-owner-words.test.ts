@@ -46,37 +46,52 @@ const PASS: ConsultGateVerdict = { decision: 'pass', reasons: [] };
 
 describe('a word the owner typed may go out at the unnamed level', () => {
   test('the Catalonia case passes at unnamed and is still refused at general', () => {
-    const asked = ['How are notary and registration fees usually split between buyer and seller in Catalonia?'];
+    const asked = ['Who usually pays the notary fees in Catalonia?'];
     expect(verdict(asked, 'unnamed')).toEqual(PASS);
     // Without the owner's words, the same request is refused as before.
-    // (the gate stops at its first reason: here the copy of the owner's question).
-    expect(verdict(asked, 'unnamed', OWNER, false).reasons).toContain('shared_token_run');
-    expect(verdict(['Who usually pays the notary fees in Catalonia?'], 'unnamed', OWNER, false).reasons).toContain('snapshot_name');
+    expect(verdict(asked, 'unnamed', OWNER, false).reasons).toContain('snapshot_name');
     const strict = verdict(asked, 'general');
-    expect(strict.decision).toBe('refuse');
-    expect(verdict(['Who usually pays the notary fees in Catalonia?'], 'general').reasons).toContain('snapshot_name');
-    // The general level ignores the owner's words entirely.
+    expect(strict.reasons).toContain('snapshot_name');
+    // The general level has no owner-word exemption.
     expect(strict).toEqual(verdict(asked, 'general', OWNER, false));
-    // A shorter request with the owner's place name passes too.
-    expect(verdict(['Who usually pays the notary fees in Catalonia?'], 'unnamed')).toEqual(PASS);
-  });
-
-  test('an owner phrase copied whole is not a copy; one document word beyond it is', () => {
-    const owner = 'Why must the buyer sign before the notary within thirty days?';
-    expect(verdict(['Why must a buyer sign before the notary within thirty days?'], 'unnamed', owner)).toEqual(PASS);
-    expect(verdict(['Why must a buyer sign before the notary within thirty days?'], 'unnamed', owner, false).reasons).toContain('shared_token_run');
-    expect(verdict(['Why must a buyer sign before the notary within thirty days of acceptance?'], 'unnamed', owner).reasons).toContain('shared_token_run');
   });
 
   test('an amount the owner typed with its currency may go out; written bare it is still refused', () => {
     const owner = 'Is the agency fee of 450 euros normal in Catalonia?';
-    expect(verdict(['Is an agency fee of 450 euros normal in Catalonia?'], 'unnamed', owner)).toEqual(PASS);
-    expect(verdict(['Is a fee of 450 euros usual for an agency?'], 'unnamed', owner)).toEqual(PASS);
-    expect(verdict(['Is a fee of 450 euros usual for an agency?'], 'unnamed', owner, false).reasons).toContain('snapshot_figure');
-    expect(verdict(['Is an agency fee of 450 euros normal in Catalonia?'], 'general', owner).reasons).toContain('snapshot_figure');
+    expect(verdict(['Would 450 euros be a usual agency fee?'], 'unnamed', owner)).toEqual(PASS);
+    expect(verdict(['Would 450 euros be a usual agency fee?'], 'unnamed', owner, false).reasons).toContain('snapshot_figure');
+    expect(verdict(['Would 450 euros be a usual agency fee?'], 'general', owner).reasons).toContain('snapshot_figure');
     const large = 'Is a deposit of 30,000 euros normal for a flat?';
-    expect(verdict(['Is a deposit of 30,000 euros normal for a flat?'], 'unnamed', large)).toEqual(PASS);
-    expect(verdict(['Is a deposit of 30,000 normal for a flat?'], 'unnamed', large).reasons).toContain('snapshot_figure');
+    expect(verdict(['Would 30,000 euros be a usual deposit for a flat?'], 'unnamed', large)).toEqual(PASS);
+    expect(verdict(['Would 30,000 be a usual deposit for a flat?'], 'unnamed', large).reasons).toContain('snapshot_figure');
+  });
+});
+
+describe("the owner's wording never goes out: a copied run is refused at both levels", () => {
+  test('the live question copied whole, or a four-word run of it, is refused as owner_question_copy', () => {
+    for (const level of ['unnamed', 'general'] as const) {
+      const whole = verdict(['How are notary and registration fees usually split between buyer and seller in Catalonia?'], level);
+      expect(whole.reasons).toContain('owner_question_copy');
+      // Four consecutive tokens, two of them content words.
+      expect(verdict(['Who decides how fees usually split between parties?'], level).reasons).toContain('owner_question_copy');
+      // Four consecutive content words, function words changed around them.
+      expect(verdict(['Do the notary or the registration, the fees, usually differ?'], level).reasons).toContain('owner_question_copy');
+    }
+    // Three words of the owner's wording are not a run.
+    expect(verdict(['Who usually pays registration fees in Catalonia?'], 'unnamed')).toEqual(PASS);
+  });
+
+  test('an owner phrase gives no copy exemption against the documents either', () => {
+    const owner = 'Why must the buyer sign before the notary within thirty days?';
+    for (const level of ['unnamed', 'general'] as const) {
+      expect(verdict(['Why must a buyer sign before the notary within thirty days?'], level, owner).reasons).toContain('owner_question_copy');
+    }
+  });
+
+  test('a malformed owner field removes the check, but the copy rules still compare against the owner question in the snapshot', () => {
+    const asked = ['How are notary and registration fees usually split between buyer and seller in Catalonia?'];
+    expect(verdict(asked, 'unnamed', OWNER, false).reasons).toContain('shared_token_run');
+    expect(verdict(asked, 'general', OWNER, false).reasons).toContain('shared_token_run');
   });
 });
 
@@ -130,7 +145,7 @@ describe('the exemption covers exactly what the owner typed', () => {
     expect(verdict(['Did Grace sign before the notary?'], 'unnamed', owner).reasons).toContain('snapshot_name');
     // A pair the owner wrote side by side may go out as that pair.
     const pair = 'Did Grace Mason sign the letter before the notary?';
-    expect(verdict(['Did Grace Mason sign before the notary?'], 'unnamed', pair)).toEqual(PASS);
+    expect(verdict(['Was it Grace Mason who signed before a notary?'], 'unnamed', pair)).toEqual(PASS);
   });
 
   test('exact tokens only: an inflection or a glued form of an owner word is not exempt', () => {

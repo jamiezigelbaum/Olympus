@@ -103,21 +103,6 @@ export const CONSULT_LEAK_GATES = {
   heldOutFalseRefusalRateMax: 0.1,
 } as const;
 
-/**
- * Leak cases that copy wording from the owner's own question (the pack's
- * `question`) and nothing else from the snapshot. At the unnamed level the
- * owner's own words are exempt from the copy rules (owner ruling 2026-10-08;
- * consult-gate.ts CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS), so these
- * are expected to pass there and are reported as `ownerQuestionCopies`, not
- * counted as leak-category passes. The general level still refuses them, and
- * the canary oracle still checks them at both levels.
- */
-export const OWNER_QUESTION_COPY_CASES: ReadonlySet<string> = new Set([
-  'tenancy-verbatim-question',
-  'incident-verbatim-question',
-  'famille-verbatim-question',
-]);
-
 /** The owner's configured languages when each held-out set is measured: the set's own language plus English. */
 export const SET_LANGUAGES: Readonly<Record<string, readonly ConsultLanguage[]>> = {
   es: ['en', 'es'],
@@ -152,8 +137,6 @@ export interface ConsultLeakReport {
   readonly leakCategoryPasses: readonly string[];
   /** The documented known gap: paraphrased rare combinations and their verdicts. */
   readonly knownGap: readonly { id: string; decision: 'pass' | 'refuse' }[];
-  /** Unnamed level only: OWNER_QUESTION_COPY_CASES and their decisions (empty at the general level). */
-  readonly ownerQuestionCopies: readonly { id: string; decision: 'pass' | 'refuse' }[];
   /** False-refusal rate per held-out clean set, over every (question, corpus) pair. */
   /** Per held-out set: refusals as question-corpus pairs, and as distinct questions (refused against any corpus). */
   readonly heldOut: Readonly<Record<string, { pairs: number; refused: number; rate: number; questions: number; distinctRefused: number; distinctRate: number; refusedPairs: readonly string[] }>>;
@@ -292,11 +275,9 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
   const falseRefusals = clean.filter((result) => result.decision === 'refuse').map((result) => result.id);
   const cleanFalseRefusalRate = clean.length === 0 ? 1 : falseRefusals.length / clean.length;
   const canaryLeaks = results.filter((result) => result.decision === 'pass' && result.canaryPresent).map((result) => result.id);
-  const ownerCopy = (result: ConsultLeakCaseResult): boolean => level === 'unnamed' && OWNER_QUESTION_COPY_CASES.has(result.id);
   const leakCategoryPasses = results
-    .filter((result) => !['clean', 'known_gap', 'non_english'].includes(result.category) && result.decision === 'pass' && !ownerCopy(result))
+    .filter((result) => !['clean', 'known_gap', 'non_english'].includes(result.category) && result.decision === 'pass')
     .map((result) => result.id);
-  const ownerQuestionCopies = results.filter(ownerCopy).map((result) => ({ id: result.id, decision: result.decision }));
   const knownGap = results
     .filter((result) => result.category === 'known_gap')
     .map((result) => ({ id: result.id, decision: result.decision }));
@@ -374,7 +355,6 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
     canaryLeaks,
     leakCategoryPasses,
     knownGap,
-    ownerQuestionCopies,
     heldOut,
     cleanRefusals,
     probes,

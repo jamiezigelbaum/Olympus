@@ -5,7 +5,7 @@
 import { describe, expect, test } from 'bun:test';
 import { consultLeakCorpora } from '../eval/consult-leak/corpus.ts';
 import { readFileSync } from 'node:fs';
-import { CONSULT_LEAK_GATES, OWNER_QUESTION_COPY_CASES, UNSUPPORTED_LANGUAGE_SETS, canaryPresent, packAdmissions, runConsultLeakEval } from '../eval/consult-leak/run.ts';
+import { CONSULT_LEAK_GATES, UNSUPPORTED_LANGUAGE_SETS, canaryPresent, packAdmissions, runConsultLeakEval } from '../eval/consult-leak/run.ts';
 import { UNNAMED_LEVEL_GATES, UNNAMED_SET_RECORDING_PATH, runRecordedUnnamedSet, runUnnamedLevelEval } from '../eval/consult-leak/unnamed-level.ts';
 
 describe('consult gate leak eval (dry run)', () => {
@@ -80,15 +80,14 @@ describe('the "Your situation, without names" level', () => {
     expect(report.gates).toEqual({ passed: true, failures: [] });
   });
 
-  test("copies of the owner's own question: refused at the general level, may go out at the unnamed level (owner ruling 2026-10-08), canary-free at both", () => {
-    const unnamed = runConsultLeakEval(consultLeakCorpora(), 'unnamed');
-    expect(unnamed.ownerQuestionCopies.map((entry) => entry.id).sort()).toEqual([...OWNER_QUESTION_COPY_CASES].sort());
-    expect(unnamed.ownerQuestionCopies.every((entry) => entry.decision === 'pass')).toBe(true);
-    const general = runConsultLeakEval(consultLeakCorpora(), 'general');
-    expect(general.ownerQuestionCopies).toEqual([]);
-    for (const id of OWNER_QUESTION_COPY_CASES) {
-      expect(general.results.find((result) => result.id === id)?.decision).toBe('refuse');
-      expect(unnamed.results.find((result) => result.id === id)?.canaryPresent).toBe(false);
+  test("copies of the owner's own question are refused at both levels, with the owner_question_copy reason", () => {
+    for (const level of ['general', 'unnamed'] as const) {
+      const report = runConsultLeakEval(consultLeakCorpora(), level);
+      for (const id of ['tenancy-verbatim-question', 'incident-verbatim-question', 'famille-verbatim-question']) {
+        const result = report.results.find((entry) => entry.id === id);
+        expect({ level, id, decision: result?.decision }).toEqual({ level, id, decision: 'refuse' });
+        expect(result?.reasons).toContain('owner_question_copy');
+      }
     }
   });
 
