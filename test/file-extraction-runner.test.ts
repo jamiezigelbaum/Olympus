@@ -513,6 +513,26 @@ describe('extraction runner: one refused bucket never fails a plan pass', () => 
       jobs.close();
     }
   });
+
+  test('a request-wide invalid value fails the plan instead of counting every bucket as refused', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor()],
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return { candidates: [ref(1), ref(2)], done: true };
+            },
+          }),
+        },
+      });
+      await expect(runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND, priority: -1 })).rejects.toThrow('priority');
+    } finally {
+      jobs.close();
+    }
+  });
 });
 
 describe('extraction runner: empty output never reaches the sink', () => {

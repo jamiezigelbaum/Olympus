@@ -164,6 +164,19 @@ describe('Dropbox Venice extraction proof', () => {
     expect(client.extractCalls).toHaveLength(0);
   });
 
+  test('a scope whose candidates were all refused needs attention, not an empty scope', async () => {
+    const client = new FakeVeniceProofClient({ plans: [plan({ jobsQueued: 0, jobsRefused: 2 })], batches: [] });
+    const report = await runDropboxVeniceExtractionProof({
+      client,
+      approvedScopeKeys: [SCOPE_A],
+      now: new Date('2026-06-21T12:00:00.000Z'),
+      env: veniceEnv(),
+    });
+    expect(report.scopes[0]).toMatchObject({ status: 'attention', plan: { jobs_refused: 2 } });
+    expect(report.status).not.toBe('blocked_no_candidate');
+    expect(client.extractCalls).toHaveLength(0);
+  });
+
   test('continues across empty scopes but stops after the first planned proof job', async () => {
     const client = new FakeVeniceProofClient({
       plans: [
@@ -280,6 +293,7 @@ class FakeVeniceProofClient implements DropboxVeniceExtractionProofClient {
 function plan(options: {
   jobsQueued: number;
   jobsExisting?: number;
+  jobsRefused?: number;
   egressDestination?: string;
 }): DropboxContentExtractionEnqueueResult {
   return {
@@ -291,7 +305,7 @@ function plan(options: {
     jobs_forced: 0,
     jobs_skipped_too_large: 0,
     jobs_unroutable: 0,
-    jobs_refused: 0,
+    jobs_refused: options.jobsRefused ?? 0,
     extractor_kinds: ['venice_e2ee_document'],
     done: true,
     policy: {

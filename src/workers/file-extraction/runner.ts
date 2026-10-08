@@ -65,6 +65,7 @@ import type {
   LocalFileExtractionJobStore,
   RecycleExtractionLeasesResult,
 } from './job-store.ts';
+import { ExtractionJobFieldError } from './job-store.ts';
 import type { ExtractionReclassificationRule, ExtractionHealthProbeMap } from './registry.ts';
 import {
   EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
@@ -644,10 +645,12 @@ export function createFileExtractionRunner(
             ...(request.force !== undefined ? { force: request.force } : {}),
           });
         } catch (error) {
-          // A refusal of the whole bucket (the job store's validation, a
-          // TypeError) is counted and reported, and the rest of the pass goes
-          // on. A database fault is not a bucket's fault: it still fails the pass.
-          if (!(error instanceof TypeError)) throw error;
+          // A bucket refused for its own extractor kind or version is counted
+          // and reported, and the rest of the pass goes on. Anything else (a
+          // request-wide value such as priority, or a database fault) is not one
+          // bucket's fault: it still fails the plan.
+          if (!(error instanceof ExtractionJobFieldError)
+            || (error.field !== 'extractorKind' && error.field !== 'extractorVersion')) throw error;
           jobsRefused += refs.length;
           console.error(
             `[olympus:file-extraction] plan_bucket_refused corpus_id=${request.corpusId} extractor_kind=${extractorKind} `

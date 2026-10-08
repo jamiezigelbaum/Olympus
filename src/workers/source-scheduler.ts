@@ -1709,6 +1709,7 @@ export function createWhatsAppSchedulerSource(input: {
             jobs_queued: plan.jobsQueued,
             jobs_existing: plan.jobsExisting,
             jobs_unroutable: plan.jobsUnroutable,
+            jobs_refused: plan.jobsRefused,
             jobs_processed: run.processedJobs,
             jobs_indexed: run.counts.indexed,
             jobs_metadata_only: run.counts.metadata_only,
