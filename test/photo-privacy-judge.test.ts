@@ -493,6 +493,25 @@ describe('the judge in the embed pass', () => {
       await store.embedChunks({ provider });
       expect(provider.calls.imagesAlone).toBe(before + 1);
       expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'sensitive', category: 'bank_card', tier_applied: 0 })]);
+      // A judgment replaced between the sweep reading it and marking it stays unapplied.
+      const page = store.unappliedMediaJudgments();
+      expect(page).toHaveLength(1);
+      const replaced = new Database(dbPath);
+      try {
+        replaced.query("UPDATE media_judgments SET verdict = 'ordinary', category = NULL").run();
+      } finally {
+        replaced.close();
+      }
+      store.markMediaJudgmentsApplied(page);
+      expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'ordinary', tier_applied: 0 })]);
+      store.markMediaJudgmentsApplied(store.unappliedMediaJudgments());
+      expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'ordinary', tier_applied: 1 })]);
+      const restored = new Database(dbPath);
+      try {
+        restored.query("UPDATE media_judgments SET verdict = 'sensitive', category = 'bank_card', tier_applied = 0").run();
+      } finally {
+        restored.close();
+      }
       // Still sensitive, but another category: applied again too.
       const recategorized = new Database(dbPath);
       try {

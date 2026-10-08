@@ -44,7 +44,7 @@ export function applyMediaJudgments(options: {
   const limit = Math.max(1, options.limit ?? DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT);
   for (const store of set.openStores()) {
     const page = store.unappliedMediaJudgments(limit);
-    const done: string[] = [];
+    const done: typeof page = [];
     for (const entry of page) {
       let ready = true;
       for (const identity of entry.items) {
@@ -76,7 +76,7 @@ export function applyMediaJudgments(options: {
           ready = false;
         }
       }
-      if (ready) done.push(entry.mediaSha256);
+      if (ready) done.push(entry);
       else report.waiting += 1;
     }
     store.markMediaJudgmentsApplied(done);

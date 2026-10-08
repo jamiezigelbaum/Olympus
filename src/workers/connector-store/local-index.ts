@@ -5232,12 +5232,21 @@ export class LocalConnectorStore {
     });
   }
 
-  /** Marks judgments as applied by the tier set. */
-  markMediaJudgmentsApplied(mediaSha256s: readonly string[]): void {
-    if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0) return;
-    const update = this.db.query('UPDATE media_judgments SET tier_applied = 1 WHERE media_sha256 = ?');
+  /**
+   * Marks judgments as applied by the tier set: each only while the stored
+   * judgment is still the one the sweep applied. One replaced in between
+   * (judged again by the embed lane) stays unapplied for the next sweep.
+   */
+  markMediaJudgmentsApplied(applied: ReadonlyArray<{ mediaSha256: string; judgment: MediaJudgment }>): void {
+    if (!this.mediaJudgmentsPresent || applied.length === 0) return;
+    const update = this.db.query(`
+      UPDATE media_judgments SET tier_applied = 1
+      WHERE media_sha256 = ? AND verdict = ? AND category IS ? AND judge_id = ?
+    `);
     this.db.transaction(() => {
-      for (const sha of mediaSha256s) update.run(sha);
+      for (const entry of applied) {
+        update.run(entry.mediaSha256, entry.judgment.verdict, entry.judgment.category ?? null, entry.judgment.judgeId);
+      }
     })();
   }
 

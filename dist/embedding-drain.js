@@ -15997,13 +15997,17 @@ var init_local_index = __esm(() => {
         return [{ mediaSha256: row.media_sha256, judgment, items }];
       });
     }
-    markMediaJudgmentsApplied(mediaSha256s) {
-      if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0)
+    markMediaJudgmentsApplied(applied) {
+      if (!this.mediaJudgmentsPresent || applied.length === 0)
         return;
-      const update = this.db.query("UPDATE media_judgments SET tier_applied = 1 WHERE media_sha256 = ?");
+      const update = this.db.query(`
+      UPDATE media_judgments SET tier_applied = 1
+      WHERE media_sha256 = ? AND verdict = ? AND category IS ? AND judge_id = ?
+    `);
       this.db.transaction(() => {
-        for (const sha of mediaSha256s)
-          update.run(sha);
+        for (const entry of applied) {
+          update.run(entry.mediaSha256, entry.judgment.verdict, entry.judgment.category ?? null, entry.judgment.judgeId);
+        }
       })();
     }
     relinquishItems(options) {
@@ -21814,7 +21818,7 @@ function applyMediaJudgments(options) {
         }
       }
       if (ready)
-        done.push(entry.mediaSha256);
+        done.push(entry);
       else
         report.waiting += 1;
     }
