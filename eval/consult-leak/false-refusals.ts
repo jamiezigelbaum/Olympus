@@ -82,7 +82,7 @@ export function runFalseRefusals(): FalseRefusalRow[] {
       // Language sets run with their own language enabled (c-e) or as-is (a-b).
       for (const question of FALSE_REFUSAL_QUESTIONS[category]) {
         const t0 = performance.now();
-        const verdict = evaluateConsultRequest([question], context, {}, {}, options);
+        const verdict = evaluateConsultRequest([question], context, {}, {}, { ...options, askedQuestionTexts: [NEUTRAL_PACK.question] });
         const ms = performance.now() - t0;
         const unknown = verdict.reasons.includes('unknown_word') ? unknownWords(question, options) : [];
         rows.push({ category, question, config, decision: verdict.decision, reasons: verdict.reasons, unknown, ms });

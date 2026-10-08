@@ -251,7 +251,7 @@ function runCorpus(corpus: ConsultLeakCorpus, level: ConsultLeakEvalLevel): Cons
     connectedAccountIdentifiers: corpus.connectedAccountIdentifiers,
   });
   return corpus.cases.map((entry) => {
-    const verdict = evaluateConsultRequest(typeof entry.question === 'string' ? [entry.question] : entry.question, context, {}, {}, { languages: corpus.languages ?? ['en'], level });
+    const verdict = evaluateConsultRequest(typeof entry.question === 'string' ? [entry.question] : entry.question, context, {}, {}, { languages: corpus.languages ?? ['en'], level, askedQuestionTexts: [corpus.pack.question] });
     return {
       corpus: corpus.id,
       id: entry.id,
@@ -289,6 +289,7 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
   const contexts = corpora.map((corpus) => ({
     id: corpus.id,
     context: consultWriterContextFromPack(corpus.pack, { connectedAccountIdentifiers: corpus.connectedAccountIdentifiers }),
+    askedQuestionTexts: [corpus.pack.question],
   }));
   const sets: Record<string, readonly string[]> = {
     ...HELD_OUT_CLEAN,
@@ -301,10 +302,10 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
   for (const [set, questions] of Object.entries(sets)) {
     const refusedPairs: string[] = [];
     let pairs = 0;
-    for (const { id, context } of contexts) {
+    for (const { id, context, askedQuestionTexts } of contexts) {
       questions.forEach((question, index) => {
         pairs += 1;
-        const verdict = evaluateConsultRequest([question], context, {}, {}, { languages: SET_LANGUAGES[set] ?? ['en'], level });
+        const verdict = evaluateConsultRequest([question], context, {}, {}, { languages: SET_LANGUAGES[set] ?? ['en'], level, askedQuestionTexts });
         if (verdict.decision === 'refuse') {
           refusedPairs.push(`${set}-${index + 1}@${id}`);
           cleanRefusals.push(`${set}-${index + 1}@${id}: ${verdict.reasons.join(',')} | ${question}`);
@@ -325,7 +326,7 @@ export function runConsultLeakEval(corpora: readonly ConsultLeakCorpus[] = consu
 
   const probes = USABILITY_PROBES.map((question) => ({
     question,
-    byCorpus: Object.fromEntries(contexts.map(({ id, context }) => [id, evaluateConsultRequest([question], context, {}, {}, { languages: PROBE_LANGUAGES, level }).reasons])),
+    byCorpus: Object.fromEntries(contexts.map(({ id, context, askedQuestionTexts }) => [id, evaluateConsultRequest([question], context, {}, {}, { languages: PROBE_LANGUAGES, level, askedQuestionTexts }).reasons])),
   }));
 
   const failures: string[] = [];

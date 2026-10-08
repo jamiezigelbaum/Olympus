@@ -80,6 +80,17 @@ describe('the "Your situation, without names" level', () => {
     expect(report.gates).toEqual({ passed: true, failures: [] });
   });
 
+  test("copies of the owner's own question are refused at both levels, with the owner_question_copy reason", () => {
+    for (const level of ['general', 'unnamed'] as const) {
+      const report = runConsultLeakEval(consultLeakCorpora(), level);
+      for (const id of ['tenancy-verbatim-question', 'incident-verbatim-question', 'famille-verbatim-question']) {
+        const result = report.results.find((entry) => entry.id === id);
+        expect({ level, id, decision: result?.decision }).toEqual({ level, id, decision: 'refuse' });
+        expect(result?.reasons).toContain('owner_question_copy');
+      }
+    }
+  });
+
   test('situation questions: no leak variant passes at either level; the unnamed level refuses fewer legitimate ones than the general level, within its ceiling', () => {
     const report = runUnnamedLevelEval();
     expect(report.gates).toEqual({ passed: true, failures: [] });

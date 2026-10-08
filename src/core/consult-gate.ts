@@ -172,7 +172,8 @@ export const CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12;
  * years, ages, exact amounts, account, phone and ID numbers, addresses,
  * mail addresses, handles, hosts and secrets are refused exactly as at the
  * general level, which is unchanged (eval/consult-leak: zero leaks at both
- * levels):
+ * levels; words of the question ChatGPT sent have their own exemption, at
+ * CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS). The widened rules:
  *
  *   - size: a whole sub-question may hold
  *     CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION content words and
@@ -212,6 +213,53 @@ export const CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18;
 export const CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3;
 export const CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2;
 export const CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5;
+
+/**
+ * Words of the question ChatGPT sent (ConsultGateOptions.askedQuestionTexts;
+ * owner ruling 2026-10-08). That question is the hosted assistant's tool
+ * argument: OpenAI already holds it, so a word of it is not private evidence
+ * (accepted residual: it is not a verified owner message; see
+ * docs/design/private-answers.md). At the unnamed level, and only there:
+ *
+ *   - names and places: a capitalized word, a name pair or an identifier
+ *     component from the snapshot is not refused when the request writes it
+ *     as a token the asked question also holds ("Catalonia"); a pair is
+ *     exempt only when the asked question has the two words next to each
+ *     other, so "Lopez" does not unlock "Maria Lopez";
+ *   - figures: a snapshot figure the asked question also writes is not
+ *     refused when both sides make it an amount, never an identifier: it has
+ *     at most three digits, or the asked question writes it with a currency
+ *     or unit right next to it every time AND the request does too; a
+ *     year-like value (19xx, 20xx) is never exempt; and a number inside a
+ *     longer digit run (more than CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS
+ *     digits, digits joined by spaces, hyphens or slashes, or digits glued to
+ *     letters, as in phone, account and ID numbers) gives no exemption. The
+ *     joint-digit rule is never exempt.
+ *
+ * Not exempt: copied wording. The consult provider can also see the
+ * conversation, so its wording would link the anonymous request to the owner
+ * (2026-10-08). The copy rules compare against the asked question as before,
+ * and at both levels a request is refused as `owner_question_copy` when it
+ * repeats, in any order, a window of CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS
+ * consecutive tokens of the asked question (two or more of them content
+ * words) or of as many consecutive content words, with number words read as
+ * digits on both sides (copiesAskedQuestion). The check reads the whole
+ * retained question (askedQuestionFullTexts) even when the writer and the
+ * exemptions saw only its first part.
+ *
+ * Unchanged at both levels whatever was asked: the vocabulary rule, mail
+ * addresses, handles, hosts, secrets, identifier shapes, whole identifier
+ * values and their segments, author and account values, street addresses,
+ * exact dates, years and other identifier-like numbers, and digits read
+ * jointly. Exact tokens only: an inflection, a decoding or a glued form of
+ * an asked word is not exempt.
+ */
+export const CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS = 7;
+export const CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS = 4;
+// Bounds on askedQuestionTexts (larger input: no exemption) and
+// askedQuestionFullTexts (larger input: refused as malformed).
+export const CONSULT_GATE_ASKED_WORDS_MAX_TEXTS = 4;
+export const CONSULT_GATE_ASKED_WORDS_MAX_BYTES = 16_384;
 
 /**
  * Identifiers whose compacted form is at least this long are also matched as a
@@ -316,7 +364,8 @@ export type ConsultGateReason =
   | 'snapshot_date'
   | 'snapshot_figure'
   | 'repeats_recent_consult'
-  | 'links_recent_consult';
+  | 'links_recent_consult'
+  | 'owner_question_copy';
 
 /**
  * `recentApprovedQuestions`: texts of consults sent recently (the name dates
@@ -724,7 +773,17 @@ function evaluateCheckedRequest(
     ? consultVocabulary({ languages: options?.languages ?? [], domains: { units: false, countries: true, places: false, technical: false, medicines: false, medicineBrands: false } })
     : null;
   const ordinaryWord = languageOnly ? (token: string) => languageOnly.has(token) : undefined;
-  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord)) reasons.add(reason);
+  // The question ChatGPT sent (CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS):
+  // copying its wording is refused at both levels, over the whole retained
+  // question; single words, names, places and figures of the part the writer
+  // saw are exempt at the unnamed level only.
+  const copySource: unknown = options?.askedQuestionFullTexts ?? options?.askedQuestionTexts;
+  if (copySource !== undefined) {
+    if (!askedTextsValid(copySource)) return refuse(['writer_context_malformed']);
+    if (copiesAskedQuestion(model, copySource)) reasons.add('owner_question_copy');
+  }
+  const asked = unnamed ? askedWords(options?.askedQuestionTexts) : undefined;
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked)) reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent)) reasons.add(reason);
   return reasons.size > 0 ? refuse([...reasons]) : { decision: 'pass', reasons: [] };
 }
@@ -1081,6 +1140,23 @@ export interface ConsultGateOptions {
    * absent included, is the general level.
    */
   readonly level?: ConsultLevel;
+  /**
+   * The question ChatGPT sent (the answer path's tool argument, which the
+   * hosted assistant already holds), as far as the writer saw it. Never
+   * snapshot or evidence text, and never the writer's output. At the
+   * "unnamed" level only, a word, name, place or figure the request repeats
+   * from it is exempt from the snapshot name and figure rules (owner ruling
+   * 2026-10-08; see CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS). A value
+   * that is not a short list of strings gives no exemption.
+   */
+  readonly askedQuestionTexts?: readonly string[];
+  /**
+   * The whole retained question when askedQuestionTexts is a cut of it: the
+   * copy check (`owner_question_copy`, both levels) reads this instead.
+   * Absent: the copy check reads askedQuestionTexts. A value present but not
+   * a short list of strings refuses the request (`writer_context_malformed`).
+   */
+  readonly askedQuestionFullTexts?: readonly string[];
 }
 
 export const DEFAULT_CONSULT_LANGUAGES: readonly ConsultLanguage[] = Object.freeze(['en']);
@@ -1620,6 +1696,8 @@ interface QuestionModel {
   // Unnamed level: figures every occurrence of which, in every view and in
   // digits or words, is a plain number followed by a duration or percent word.
   readonly ruleOnlyKeys: ReadonlySet<string>;
+  // How each figure key is written across the request (every view, digits and words).
+  readonly figureSeen: ReadonlyMap<string, FigureSeen>;
   readonly digitConcat: string;
   readonly dates: DateKeys;
   readonly hostKeys: ReadonlySet<string>;
@@ -1701,7 +1779,7 @@ function questionModel(subQuestions: readonly string[]): QuestionModel {
     const seen = ruleSeen.get(key);
     return seen !== undefined && seen.rule && !seen.bare && !seen.other;
   }));
-  return { tokens, forms, tokenKeys, numberKeys, ruleOnlyKeys, digitConcat, dates, hostKeys, compactViews };
+  return { tokens, forms, tokenKeys, numberKeys, ruleOnlyKeys, figureSeen: ruleSeen, digitConcat, dates, hostKeys, compactViews };
 }
 
 /**
@@ -2009,13 +2087,30 @@ function compareWithSnapshot(
   context: ConsultWriterContext,
   unnamed: boolean,
   ordinaryWord?: (token: string) => boolean,
+  asked?: AskedWords,
 ): Set<ConsultGateReason> {
   const reasons = new Set<ConsultGateReason>();
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
-  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
   const contentTokens = model.tokens.filter(isContent);
+  // The copy rules have no owner-word exemption: the owner's wording is a
+  // fingerprint the provider could match to the owner's conversation.
+  const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
   const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
   const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS);
+  // A word the request writes as a literal token that the asked question also holds.
+  const requestTokens = new Set(model.tokens);
+  const askedToken = (token: string): boolean => asked !== undefined && asked.tokens.has(token) && requestTokens.has(token);
+  // Snapshot figures the asked question writes as an amount (askedWords), and
+  // the request too: at most three digits, or a currency or unit next to it
+  // every time. Never a year-like value.
+  const askedFigures = new Set<string>();
+  if (asked) {
+    for (const key of model.numberKeys) {
+      if (!asked.figures.has(key) || YEAR_LIKE.test(key)) continue;
+      const seen = model.figureSeen.get(key);
+      if (key.length <= 3 || (seen !== undefined && seen.unit && !seen.bare)) askedFigures.add(key);
+    }
+  }
   const longestCompact = Math.max(...model.compactViews.map((view) => view.length));
   const formHit = (form: string): FormSource | undefined =>
     form.length >= CONSULT_GATE_MIN_IDENTIFIER_CHARS ? model.forms.get(form) : undefined;
@@ -2257,8 +2352,8 @@ function compareWithSnapshot(
   // itself writes it that way every time (QuestionModel.ruleOnlyKeys).
   for (const key of figureRefused) {
     const seen = figureSeen.get(key);
-    const exempt = seen !== undefined && seen.rule && !seen.bare && !seen.other
-      && key.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key);
+    const exempt = askedFigures.has(key) || (seen !== undefined && seen.rule && !seen.bare && !seen.other
+      && key.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key));
     if (!exempt) {
       reasons.add('snapshot_figure');
       return reasons;
@@ -2285,6 +2380,8 @@ function compareWithSnapshot(
       if (!namelike(pair.left) && !namelike(pair.right)) continue;
     }
     const pairSource = model.forms.get(pair.left + pair.right) ?? model.forms.get(pair.right + pair.left);
+    // The asked question has this pair, side by side, and so does the request.
+    if (asked && askedPair(asked, model, pair.left, pair.right)) continue;
     if (pairSource) nameHit(pairSource);
     // A part alone is protected when the pair was written mid-sentence and the
     // part (an ordinary word, or the vocabulary rule would already refuse it)
@@ -2292,7 +2389,7 @@ function compareWithSnapshot(
     if (!pair.midSentence) continue;
     for (const part of [pair.left, pair.right]) {
       const partSource = model.forms.get(part);
-      if (partSource && part.length >= 3 && neverLower(part)) nameHit(partSource);
+      if (partSource && part.length >= 3 && neverLower(part) && !askedToken(part)) nameHit(partSource);
     }
   }
   for (const [token, single] of singleCandidates) {
@@ -2314,6 +2411,8 @@ function compareWithSnapshot(
     // words as well let 39 of 223 sample given names through and cut no
     // false refusal on the measured set, so it is not done.)
     if (!single.strongLabel && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0) continue;
+    // A word of the question ChatGPT sent (CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS).
+    if (askedToken(token)) continue;
     const stat = statOf(token);
     const dominatedByLower = stat.lower >= 3 && stat.lower >= 3 * stat.capitalized;
     if (single.labelled || (single.initialOnly ? stat.lower === 0 && stat.lowerAnywhere === 0 : !dominatedByLower)) nameHit(single.source);
@@ -2323,8 +2422,94 @@ function compareWithSnapshot(
   // use in prose or in the owner's question. A lower-case component that is a
   // dictionary word (a folder named "tenancy") is not protected: it is the
   // topic, and protecting it would refuse every question about that topic.
-  for (const [token, source] of componentCandidates) if (statOf(token).lowerAnywhere === 0) identifierHit(source);
+  for (const [token, source] of componentCandidates) if (statOf(token).lowerAnywhere === 0 && !askedToken(token)) identifierHit(source);
   return reasons;
+}
+
+// --- The question ChatGPT sent (CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS) ---
+
+const YEAR_LIKE = /^(?:19|20)\d\d$/u;
+
+interface AskedWords {
+  // Normalized tokens of the asked question.
+  readonly tokens: ReadonlySet<string>;
+  // Adjacent token pairs, `left SEP right`.
+  readonly pairs: ReadonlySet<string>;
+  // Figure keys the asked question writes as an amount (see the constant's comment).
+  readonly figures: ReadonlySet<string>;
+}
+
+function askedTextsValid(texts: unknown): texts is readonly string[] {
+  return Array.isArray(texts) && texts.length <= CONSULT_GATE_ASKED_WORDS_MAX_TEXTS
+    && texts.every((text) => typeof text === 'string')
+    && (texts as string[]).reduce((total, text) => total + utf8Bytes(text), 0) <= CONSULT_GATE_ASKED_WORDS_MAX_BYTES;
+}
+
+function askedWords(texts: unknown): AskedWords | undefined {
+  if (!askedTextsValid(texts) || texts.length === 0) return undefined;
+  const tokens = new Set<string>();
+  const pairs = new Set<string>();
+  const seen = new Map<string, FigureSeen>();
+  for (const text of texts) {
+    const folded = foldText(text);
+    const sequence = wordsOf(folded);
+    sequence.forEach((token, index) => {
+      tokens.add(token);
+      if (index > 0) pairs.add(`${sequence[index - 1]}${SEP}${token}`);
+    });
+    // Identifier-like numbers are blanked: a digit run longer than the limit,
+    // digits joined by a space, hyphen or slash (phone, account and ID
+    // numbers, dates), or digits glued to a letter ("AB123456", "12b").
+    const normalized = caseFold(folded);
+    const standalone = normalized.replace(/\d(?:\d|[\s.\-/_](?=\d))*/gu, (run, offset: number) => {
+      const glued = /[\p{L}]/u.test(normalized[offset - 1] ?? '') || /[\p{L}]/u.test(normalized[offset + run.length] ?? '');
+      return glued || run.replace(/\D/gu, '').length > CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS || /\d[\s\-/]+\d/u.test(run) ? ' ' : run;
+    });
+    // Read as the request is read: digits, then digits and number words as tokens.
+    for (const form of [figureKeys(standalone, true), figureKeys(numberWordsToDigits(wordsOf(standalone)).join(' '), true)]) {
+      for (const [key, value] of form) seen.set(key, mergeFigureSeen(seen.get(key), value));
+    }
+  }
+  // An amount, never an identifier: at most three digits, or a currency or
+  // unit right next to it every time the asked question writes it; never a year.
+  const figures = new Set([...seen].filter(([key, value]) => !YEAR_LIKE.test(key) && (key.length <= 3 || (value.unit && !value.bare))).map(([key]) => key));
+  return { tokens, pairs, figures };
+}
+
+/**
+ * Both levels: the request repeats, in any order, a window of
+ * CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS consecutive tokens of the asked
+ * question with at least CONSULT_GATE_RUN_MIN_CONTENT_TOKENS content words,
+ * or a window of as many consecutive content words (function words removed
+ * on both sides). Number words are read as digits on both sides ("two days"
+ * is "2 days"). An ordered run is one such window, so it is covered.
+ */
+function copiesAskedQuestion(model: QuestionModel, texts: readonly string[]): boolean {
+  const size = CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS;
+  const windows = (sequence: readonly string[], minContent: number): string[] => {
+    const keys: string[] = [];
+    for (let start = 0; start + size <= sequence.length; start += 1) {
+      const window = sequence.slice(start, start + size);
+      if (window.filter(isContent).length >= minContent) keys.push([...window].sort().join(SEP));
+    }
+    return keys;
+  };
+  const request = numberWordsToDigits(model.tokens);
+  const tokenWindows = new Set(windows(request, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS));
+  const contentWindows = new Set(windows(request.filter(isContent), 0));
+  for (const text of texts) {
+    const sequence = numberWordsToDigits(wordsOf(foldText(text)));
+    if (windows(sequence, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS).some((key) => tokenWindows.has(key))) return true;
+    if (windows(sequence.filter(isContent), 0).some((key) => contentWindows.has(key))) return true;
+  }
+  return false;
+}
+
+// True when the asked question has `left right` side by side (either order) and the request writes it the same way.
+function askedPair(asked: AskedWords, model: QuestionModel, left: string, right: string): boolean {
+  const written = (a: string, b: string): boolean => model.tokenKeys[0]!.includes(`${SEP}${a}${SEP}${b}${SEP}`);
+  return (asked.pairs.has(`${left}${SEP}${right}`) && written(left, right))
+    || (asked.pairs.has(`${right}${SEP}${left}`) && written(right, left));
 }
 
 /**
