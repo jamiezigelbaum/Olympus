@@ -380,6 +380,7 @@ describe('the panel model over the built-in model', () => {
         title: 'Integral approach notes',
         source: 'dropbox',
         date: '2020-02-05T13:56:40Z',
+        family: 'file',
       }],
       unreadable: 1,
       sources: [0],
@@ -396,7 +397,7 @@ describe('the panel model over the built-in model', () => {
 
   test('search hits become evidence items with stable ids; hits without text are skipped', () => {
     const items = privateEvidenceItems([...PRIVATE_HITS, { sourceItem: { providerItemId: 'empty' } }]);
-    expect(items).toEqual([{ id: 'personal:m-1', text: PRIVATE_PASSAGE, title: 'Lease renewal', source: 'Gmail', date: '2026-04-01' }]);
+    expect(items).toEqual([{ id: 'personal:m-1', text: PRIVATE_PASSAGE, title: 'Lease renewal', source: 'Gmail', date: '2026-04-01', family: 'email' }]);
   });
 });
 

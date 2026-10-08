@@ -20,7 +20,7 @@ eval protects.
 
 [`questions/held-out.json`](questions/held-out.json) holds generic questions
 with `{placeholders}` so the set stays reusable by any operator, not bespoke to
-one corpus. Eight question *shapes* (see [`types.ts`](types.ts)) each probe a
+one corpus. Nine question *shapes* (see [`types.ts`](types.ts)) each probe a
 generalization trap the per-question approach failed:
 
 - `value_lookup` — a specific value on a specific date/record
@@ -31,6 +31,9 @@ generalization trap the per-question approach failed:
 - `summary_or_sentiment` — gist or tone of a thread/document
 - `coverage_negative` — the honest answer is "I have nothing on this"
 - `gap_honesty` — some evidence is unextractable; the analyst must say so
+- `version_conflict` — several versions of one document disagree; the answer
+  gives the newest version's value and names it by date (or each version's
+  value), and repeated runs state the same facts
 
 ## How to run it against a real corpus
 

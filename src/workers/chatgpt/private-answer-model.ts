@@ -33,6 +33,8 @@ import type {
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { AnalystModelRequest } from '../../core/analyst.ts';
 import { SourceModelPolicyDeniedError } from '../../core/source-model-policy.ts';
+import { EVIDENCE_COPY_SIMILARITY, evidenceDateValue, evidenceVersionGroups, evidenceVersions } from '../../core/evidence-versions.ts';
+import type { SourceFamily } from '../../core/source-index/types.ts';
 import {
   NoPrivateEvidenceError,
   checkPrivateEvidence,
@@ -269,10 +271,15 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       // Readable items there were, but none may be read now: no evidence.
       const hadReadable = read.items.length > 0;
+      // Other versions of the items read, not read themselves: only their
+      // dates may reach the answer's version note, and only if eligible now.
+      const siblings = unreadVersions(live, picked, (index) => read.items[index]!);
+      let eligibleSiblings: number[] = [];
       // Immediately before the answer: only items still eligible now (and
       // only still-eligible unreadable items are counted), in one lookup.
       {
-        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...unreadableHits]);
+        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...siblings.map(hitOf), ...unreadableHits]);
+        eligibleSiblings = siblings.filter((_, position) => ok[picked.length + position]);
         picked = picked.filter((_, position) => ok[position]);
         unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
       }
@@ -361,8 +368,14 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       if (unreadable > 0) unanswered.push(unreadableNote(unreadable));
       // The consult snapshot (verdict and the fitted pack) rides along for
       // the jobs engine; it is never part of what the panel decrypts.
+      const answerText = withoutEvidenceMarkers(result.answer);
+      // Versions are judged with the search-time text the selection grouped
+      // them by, over the items read and their other versions that passed the
+      // final eligibility check, so the note also says so when only the
+      // newest version was read.
+      const versionNote = citedVersionNote([...picked, ...eligibleSiblings].map((index) => read.items[index]!), result.citations.map((citation) => citation.id));
       return {
-        answer: withoutEvidenceMarkers(result.answer),
+        answer: versionNote ? `${answerText} ${versionNote}` : answerText,
         citations,
         unanswered,
         ...(result.consult ? { consult: { verdict: result.consult.verdict, pack: result.consult.pack } } : {}),
@@ -371,6 +384,60 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
     async reset() {
       await model?.stop();
     },
+  };
+}
+
+/**
+ * One sentence saying which version the answer read, when a cited item is
+ * one of several versions of a document among the matched items (a small model
+ * does not reliably say it itself). Dates and the citation ids only; the
+ * answer's text is not consulted.
+ */
+export function citedVersionNote(items: readonly BuiltInEvidenceItem[], citedIds: readonly string[]): string | undefined {
+  const groups = evidenceVersionGroups(items.map(versionText));
+  const cited = new Set(citedIds);
+  for (const group of groups) {
+    const members = group.map((index) => items[index]!);
+    const used = members.filter((item) => cited.has(item.id));
+    if (used.length === 0 || members.some((item) => !Number.isFinite(evidenceDateValue(item.date)))) continue;
+    const label = versionDateLabel(members.map((item) => item.date!));
+    const newest = members[0]!;
+    if (used.includes(newest)) {
+      return `Several versions of ${quoteTitle(newest)} were found; this answer uses the newest, saved ${label(newest.date!)}.`;
+    }
+    return `This answer uses an older version of ${quoteTitle(used[0]!)}, saved ${label(used[0]!.date!)}; the newest version was saved ${label(newest.date!)}.`;
+  }
+  return undefined;
+}
+
+function versionText(item: BuiltInEvidenceItem): { text: string; date?: string; family?: string } {
+  return { text: item.text, ...(item.date ? { date: item.date } : {}), ...(item.family ? { family: item.family } : {}) };
+}
+
+/** Indexes in `live`, not in `picked`, that are other versions of a picked item. */
+function unreadVersions(live: readonly number[], picked: readonly number[], itemAt: (index: number) => BuiltInEvidenceItem): number[] {
+  const chosen = new Set(picked);
+  const out: number[] = [];
+  for (const group of evidenceVersionGroups(live.map((index) => versionText(itemAt(index))))) {
+    const members = group.map((position) => live[position]!);
+    if (!members.some((index) => chosen.has(index))) continue;
+    for (const index of members) if (!chosen.has(index)) out.push(index);
+  }
+  return out;
+}
+
+function quoteTitle(item: BuiltInEvidenceItem): string {
+  return item.title ? `“${item.title}”` : 'this document';
+}
+
+/** "1 December 2025", with the time when two versions share a day. */
+function versionDateLabel(dates: readonly string[]): (date: string) => string {
+  const day = (date: string) => new Date(Date.parse(date)).toISOString().slice(0, 10);
+  const sameDay = new Set(dates.map(day)).size < dates.length;
+  return (date) => {
+    const at = new Date(Date.parse(date));
+    const text = at.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+    return sameDay ? `${text}, ${at.toISOString().slice(11, 16)} UTC` : text;
   };
 }
 
@@ -409,6 +476,7 @@ export function privateEvidence(
     const locator = string(hit.locator) ?? string(citation?.uri) ?? string(content?.url);
     const source = string(citation?.sourceLabel) ?? string(sourceItem?.provider);
     const date = string(citation?.authoredAt) ?? string(content?.authoredAt) ?? string(citation?.updatedAt);
+    const family = string(sourceItem?.family) as SourceFamily | undefined;
     sources.push(index);
     items.push({
       id: items.some((item) => item.id === id) ? `${id}#${index + 1}` : id,
@@ -417,6 +485,7 @@ export function privateEvidence(
       ...(locator ? { locator } : {}),
       ...(source ? { source } : {}),
       ...(date ? { date } : {}),
+      ...(family ? { family } : {}),
     });
   });
   return { items, unreadable, sources };
@@ -444,6 +513,14 @@ export async function panelItems(
  * `maxLeadingItems`) clearly ahead of every other item by relevance
  * (leadingCount), or the only readable item. Leading items are read alone,
  * in depth; an item merely within the relevance floor of them is left out.
+ *
+ * Versions of one document (evidence-versions.ts: nearly the same text):
+ * when any version is read, the group's newest version is read right after
+ * it, whatever its own score or retrieval order, so every run over the same
+ * matches reads the same newest version (owner report 2026-10-08). Near-exact
+ * copies of an item read are left out, so copies cannot crowd out other
+ * documents; other versions keep their own place in the ranking (a question
+ * may ask about an earlier one, or about one of several look-alike items).
  */
 export async function panelSelection(
   question: string,
@@ -465,14 +542,54 @@ export async function panelSelection(
       scores = undefined;
     }
   }
-  if (!scores || scores.length !== order.length || scores.some((score) => !Number.isFinite(score))) {
-    return { items: order.slice(0, max), leading: false };
+  const versions = evidenceVersions(read.items.map(versionText));
+  const groupOf = new Map<number, readonly number[]>();
+  for (const group of versions.groups) {
+    for (const member of group) groupOf.set(member, group);
   }
-  const ranked = [...order].sort((a, b) => (scores![b]! - scores![a]!) || (a - b));
-  const floor = scores[ranked[0]!]! - Math.max(0, limits.relevanceMargin);
-  const picked = ranked.filter((index) => scores![index]! >= floor).slice(0, max);
-  const leading = leadingCount(ranked.map((index) => scores![index]!), Math.min(maxLeading, picked.length), limits.leadGap ?? 0);
-  return leading > 0 ? { items: picked.slice(0, leading), leading: true } : { items: picked, leading: false };
+  // Ranked items as units: an item alone, or a version followed by its
+  // group's newest when that is not placed yet. Near-exact copies of a
+  // placed item are left out.
+  const units = (ranked: readonly number[]): number[][] => {
+    const placed = new Set<number>();
+    const copies = new Set<number>();
+    const out: number[][] = [];
+    for (const index of ranked) {
+      if (placed.has(index) || copies.has(index)) continue;
+      const unit = [index];
+      const group = groupOf.get(index);
+      if (group) {
+        const newest = group[0]!;
+        if (newest !== index && !placed.has(newest)) unit.push(newest);
+        for (const member of group) {
+          if (!unit.includes(member) && unit.some((kept) => versions.similarity(kept, member) >= EVIDENCE_COPY_SIMILARITY)) copies.add(member);
+        }
+      }
+      for (const member of unit) placed.add(member);
+      out.push(unit);
+    }
+    return out;
+  };
+  // Units in order up to `max` items; a unit that does not fit whole keeps
+  // its last members (a version's newest).
+  const flatten = (picked: readonly number[][]): number[] => {
+    const items: number[] = [];
+    for (const unit of picked) {
+      const room = max - items.length;
+      if (room <= 0) break;
+      items.push(...(unit.length <= room ? unit : unit.slice(-room)));
+    }
+    return items;
+  };
+  if (!scores || scores.length !== order.length || scores.some((score) => !Number.isFinite(score))) {
+    return { items: flatten(units(order).slice(0, max)), leading: false };
+  }
+  const ranked = units([...order].sort((a, b) => (scores![b]! - scores![a]!) || (a - b)));
+  const unitScore = (unit: readonly number[]) => scores![unit[0]!]!;
+  const floor = unitScore(ranked[0]!) - Math.max(0, limits.relevanceMargin);
+  const picked = ranked.filter((unit) => unitScore(unit) >= floor).slice(0, max);
+  const leading = leadingCount(ranked.map(unitScore), Math.min(maxLeading, picked.length), limits.leadGap ?? 0);
+  return leading > 0 ? { items: flatten(picked.slice(0, leading)), leading: true } : { items: flatten(picked), leading: false };
 }
 
 /**
