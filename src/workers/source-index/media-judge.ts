@@ -85,14 +85,19 @@ export interface MediaJudgment {
   margin?: number;
   /** The per-category scores, kept so a later threshold can be re-applied without the picture. */
   scores?: Partial<Record<MediaJudgeCategory, number>>;
-  /** Which judge decided: the prompt set and the model that read the picture. */
+  /** Which judge decided: the prompt set, the thresholds and the model that read the picture. */
   judgeId: string;
   /** Why a picture is unjudged (it could not be read). */
   reason?: string;
 }
 
-export function mediaJudgeId(provider: Pick<SourceEmbeddingProvider, 'modelId' | 'configHash'>): string {
-  return `${MEDIA_JUDGE_PROMPT_SET}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
+// A stored judgment made under any other id is stale: the picture is judged
+// again, and a changed verdict is applied again.
+export function mediaJudgeId(
+  provider: Pick<SourceEmbeddingProvider, 'modelId' | 'configHash'>,
+  thresholds: MediaJudgeThresholds = MEDIA_JUDGE_THRESHOLDS,
+): string {
+  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
 }
 
 function dot(left: readonly number[], right: readonly number[]): number {
@@ -149,6 +154,9 @@ export function judgeImageVector(
   thresholds: MediaJudgeThresholds = MEDIA_JUDGE_THRESHOLDS,
 ): MediaJudgment {
   if (!imageVector || imageVector.length === 0) return { verdict: 'unjudged', judgeId, reason: 'image_unreadable' };
+  // A vector with no direction scores 0 against every description, which
+  // would read as ordinary.
+  if (Math.hypot(...imageVector) < 1e-6) return { verdict: 'unjudged', judgeId, reason: 'image_unreadable' };
   const scores: Partial<Record<MediaJudgeCategory, number>> = {};
   for (const category of Object.keys(MEDIA_JUDGE_PROMPTS) as MediaJudgeCategory[]) {
     scores[category] = dot(imageVector, promptVectors[category]);
@@ -209,7 +217,7 @@ export async function judgeMediaImages(
   if (images.length === 0) return [];
   const prompts = await mediaJudgePromptVectors(provider);
   const vectors = await provider.embedImageVectors([...images]);
-  const judgeId = mediaJudgeId(provider);
+  const judgeId = mediaJudgeId(provider, thresholds);
   return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
 }
 
@@ -220,6 +228,6 @@ export async function judgeReturnedImageVectors(
   thresholds: MediaJudgeThresholds = MEDIA_JUDGE_THRESHOLDS,
 ): Promise<MediaJudgment[]> {
   const prompts = await mediaJudgePromptVectors(provider);
-  const judgeId = mediaJudgeId(provider);
+  const judgeId = mediaJudgeId(provider, thresholds);
   return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
 }

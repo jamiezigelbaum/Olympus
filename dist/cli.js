@@ -17433,8 +17433,8 @@ var init_manifest = __esm(() => {
 });
 
 // src/workers/source-index/media-judge.ts
-function mediaJudgeId(provider) {
-  return `${MEDIA_JUDGE_PROMPT_SET}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
+function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
 }
 function dot(left, right) {
   let sum = 0;
@@ -17474,6 +17474,8 @@ function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) 
 function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
   if (!imageVector || imageVector.length === 0)
     return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  if (Math.hypot(...imageVector) < 0.000001)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
   const scores = {};
   for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
     scores[category] = dot(imageVector, promptVectors[category]);
@@ -17504,12 +17506,12 @@ async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRES
     return [];
   const prompts = await mediaJudgePromptVectors(provider);
   const vectors = await provider.embedImageVectors([...images]);
-  const judgeId = mediaJudgeId(provider);
+  const judgeId = mediaJudgeId(provider, thresholds);
   return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
 }
 async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
   const prompts = await mediaJudgePromptVectors(provider);
-  const judgeId = mediaJudgeId(provider);
+  const judgeId = mediaJudgeId(provider, thresholds);
   return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
 }
 var MEDIA_JUDGE_SENSITIVE_CATEGORIES, MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-08", MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ", MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
@@ -20925,6 +20927,7 @@ var init_local_index = __esm(() => {
       return imported;
     }
     async judgeUnjudgedMedia(provider, rows, assertAuthorized) {
+      const judgeId = mediaJudgeId(provider);
       const seen = new Set;
       const images = [];
       for (const row of rows) {
@@ -20934,7 +20937,7 @@ var init_local_index = __esm(() => {
         if (!sha || !row.media_path || seen.has(sha))
           continue;
         seen.add(sha);
-        if (this.mediaJudgment(sha) || this.chunkMediaBackingOff(sha))
+        if (this.mediaJudgedBy(sha, judgeId) || this.chunkMediaBackingOff(sha))
           continue;
         if (!isMediaCachePath(row.media_path, sha) || !existsSync15(row.media_path))
           continue;
@@ -22135,6 +22138,9 @@ var init_local_index = __esm(() => {
           }
         }
       } catch {}
+    }
+    mediaJudgedBy(mediaSha256, judgeId) {
+      return this.mediaJudgment(mediaSha256)?.judgeId === judgeId;
     }
     mediaJudgment(mediaSha256) {
       if (!this.mediaJudgmentsPresent)
@@ -23625,7 +23631,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store chunks cannot carry media before the v13 schema.");
       }
       if (media?.judgment && media.judgment.verdict !== "unjudged" && this.mediaJudgmentsPresent) {
-        this.writeMediaJudgment(media.sha256, media.judgment, true);
+        this.writeMediaJudgment(media.sha256, media.judgment, false);
       }
       if (media && this.trustDomain !== "secure_local" && this.mediaJudgment(media.sha256)?.verdict !== "ordinary") {
         throw new Error("Connector store chunks carry picture media outside a Private store only when the photo judge found it ordinary.");
@@ -24081,7 +24087,7 @@ var init_local_index = __esm(() => {
           ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
         }));
         let vectors;
-        const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgment(row.media_sha256));
+        const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgedBy(row.media_sha256, mediaJudgeId(judging)));
         let judgedBatch;
         try {
           if (judgeNow) {
@@ -24189,7 +24195,7 @@ var init_local_index = __esm(() => {
         staleSkipped += batch.length - written;
       }
       skipped += staleSkipped;
-      if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgment(row.media_sha256))) {
+      if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgedBy(row.media_sha256, mediaJudgeId(judging)))) {
         readsImages ??= await judging.imageSupport();
         if (readsImages)
           await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);

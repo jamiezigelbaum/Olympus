@@ -203,6 +203,7 @@ describe('the judge: thresholds and categories', () => {
   test('a picture with no vector, or scores that are not numbers, is unjudged', () => {
     expect(judgeImageVector(undefined, basisPrompts, 'j')).toMatchObject({ verdict: 'unjudged', reason: 'image_unreadable' });
     expect(judgeImageVector([], basisPrompts, 'j').verdict).toBe('unjudged');
+    expect(judgeImageVector(new Array(8).fill(0), basisPrompts, 'j').verdict).toBe('unjudged');
     expect(judgeMediaScores({ ...ORDINARY, intimate: Number.NaN }, 'j').verdict).toBe('unjudged');
     const { ordinary: _omitted, ...noOrdinary } = ORDINARY;
     expect(judgeMediaScores(noOrdinary, 'j').verdict).toBe('unjudged');
@@ -370,7 +371,8 @@ describe('where a judged picture may rest', () => {
       expect((await sink.accept(request('c', ordinary, IMAGE_MEDIA_DESCRIPTOR, 'internal'))).accepted).toBe(true);
       for (const media of [unjudged, sensitive, ordinary]) releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder);
       expect(chunkMedia(dbPath)).toEqual([{ media_sha256: ordinary.sha256 }]);
-      expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ media_sha256: ordinary.sha256, verdict: 'ordinary', tier_applied: 1 })]);
+      // Unapplied: the sweep re-decides every item carrying this picture.
+      expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ media_sha256: ordinary.sha256, verdict: 'ordinary', tier_applied: 0 })]);
       // The store holds the file for the Personal copy; the refused ones are gone.
       expect(existsSync(ordinary.path)).toBe(true);
       expect(existsSync(unjudged.path)).toBe(false);
@@ -468,6 +470,29 @@ describe('the judge in the embed pass', () => {
       expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'sensitive', category: 'bank_card' })]);
       await store.embedChunks({ provider });
       expect(provider.calls.imagesAlone).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a judgment made by an older judge is stale: the picture is judged again and the new verdict applied', async () => {
+    const { store, dbPath } = await plainStore('secure_local', ['a']);
+    try {
+      const card = picture();
+      await plainSink(store).accept(request('a', card));
+      const provider = new JudgingProvider(new Map([[card.sha256, scores(0.6, { bank_card: 0.7 })]]));
+      await store.embedChunks({ provider });
+      const db = new Database(dbPath);
+      try {
+        // As if an earlier judge had found it ordinary and that had been applied.
+        db.query("UPDATE media_judgments SET judge_id = 'photo-judge-older', verdict = 'ordinary', category = NULL, tier_applied = 1").run();
+      } finally {
+        db.close();
+      }
+      const before = provider.calls.imagesAlone;
+      await store.embedChunks({ provider });
+      expect(provider.calls.imagesAlone).toBe(before + 1);
+      expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'sensitive', category: 'bank_card', tier_applied: 0 })]);
     } finally {
       store.close();
     }

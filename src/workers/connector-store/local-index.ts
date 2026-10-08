@@ -127,6 +127,7 @@ import {
   canJudgeMedia,
   judgeMediaImages,
   judgeReturnedImageVectors,
+  mediaJudgeId,
   type MediaJudgment,
 } from '../source-index/media-judge.ts';
 import type {
@@ -3258,6 +3259,7 @@ export class LocalConnectorStore {
     rows: ReadonlyArray<{ media_path: string | null; media_sha256: string | null }>,
     assertAuthorized: (() => void | Promise<void>) | undefined,
   ): Promise<number> {
+    const judgeId = mediaJudgeId(provider);
     const seen = new Set<string>();
     const images: Array<{ path: string; sha256: string; mimeType: string }> = [];
     for (const row of rows) {
@@ -3265,7 +3267,7 @@ export class LocalConnectorStore {
       const sha = row.media_sha256;
       if (!sha || !row.media_path || seen.has(sha)) continue;
       seen.add(sha);
-      if (this.mediaJudgment(sha) || this.chunkMediaBackingOff(sha)) continue;
+      if (this.mediaJudgedBy(sha, judgeId) || this.chunkMediaBackingOff(sha)) continue;
       if (!isMediaCachePath(row.media_path, sha) || !existsSync(row.media_path)) continue;
       images.push({ path: row.media_path, sha256: sha, mimeType: 'image/jpeg' });
     }
@@ -5082,6 +5084,15 @@ export class LocalConnectorStore {
   }
 
   /** The photo judge's verdict on a picture this store holds, by its digest; undefined when it was never judged here. */
+  /**
+   * Whether this picture's stored judgment was made by the judge `judgeId`
+   * names. One made by another prompt set, threshold or model is stale and
+   * the picture is judged again (until then, its stored verdict stands).
+   */
+  private mediaJudgedBy(mediaSha256: string, judgeId: string): boolean {
+    return this.mediaJudgment(mediaSha256)?.judgeId === judgeId;
+  }
+
   mediaJudgment(mediaSha256: string): MediaJudgment | undefined {
     if (!this.mediaJudgmentsPresent) return undefined;
     const row = this.db.query(`
@@ -7611,8 +7622,10 @@ export class LocalConnectorStore {
     // A picture rests in a Private store, or in another store only with the
     // photo judge's ordinary verdict on it, never on the absence of one
     // (docs/design/photo-embeddings.md).
+    // Written unapplied: other items may carry the same picture, and the
+    // sweep re-decides each of them (a no-op for this one).
     if (media?.judgment && media.judgment.verdict !== 'unjudged' && this.mediaJudgmentsPresent) {
-      this.writeMediaJudgment(media.sha256, media.judgment, true);
+      this.writeMediaJudgment(media.sha256, media.judgment, false);
     }
     if (media && this.trustDomain !== 'secure_local' && this.mediaJudgment(media.sha256)?.verdict !== 'ordinary') {
       throw new Error('Connector store chunks carry picture media outside a Private store only when the photo judge found it ordinary.');
@@ -8411,7 +8424,7 @@ export class LocalConnectorStore {
       // Pictures not yet judged are judged from the same model call: the
       // provider hands back each picture's image-only vector too.
       const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined
-        && batch.some((row) => row.media_sha256 && !this.mediaJudgment(row.media_sha256));
+        && batch.some((row) => row.media_sha256 && !this.mediaJudgedBy(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
         if (judgeNow) {
@@ -8549,7 +8562,7 @@ export class LocalConnectorStore {
       staleSkipped += batch.length - written;
     }
     skipped += staleSkipped;
-    if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgment(row.media_sha256))) {
+    if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgedBy(row.media_sha256, mediaJudgeId(judging)))) {
       readsImages ??= await judging.imageSupport!();
       if (readsImages) await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
     }
