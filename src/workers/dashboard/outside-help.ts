@@ -28,7 +28,8 @@ import {
 
 /** One word for Setup's row. */
 export interface DashboardOutsideHelpSummary {
-  readonly state: 'off' | 'on' | 'invalid' | 'route_not_configured' | 'fence_held';
+  /** `needs_acceptance`: on, but paused until the current statements are accepted. */
+  readonly state: 'off' | 'on' | 'invalid' | 'route_not_configured' | 'fence_held' | 'needs_acceptance';
 }
 
 export interface DashboardOutsideHelpLanguage {
@@ -83,7 +84,7 @@ export interface DashboardOutsideHelpStatus {
     readonly languages: readonly ConsultLanguage[];
     readonly domains: ConsultDomainPacks;
     readonly strict: boolean;
-    /** What zkAPI may send: "unnamed" (the situation without names) or "general" (textbook questions only). */
+    /** What zkAPI may send: "unnamed" (Standard: the situation without names) or "general" (Strict: general questions only). */
     readonly level: ConsultLevel;
     readonly invalidReason?: string;
   };
@@ -123,6 +124,7 @@ export function summaryOf(status: DashboardOutsideHelpStatus): DashboardOutsideH
   if (status.settings.state === 'invalid') return { state: 'invalid' };
   if (status.route.state === 'not_configured') return { state: 'route_not_configured' };
   if (status.route.state === 'configured' && status.route.readiness && status.route.readiness.fences.length > 0) return { state: 'fence_held' };
+  if (status.settings.state === 'on' && status.route.state === 'configured' && !status.route.acknowledgements.complete) return { state: 'needs_acceptance' };
   return { state: status.settings.state };
 }
 
@@ -202,7 +204,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   parts.push(renderProblems(status, canEdit));
 
   // 3. The disclosure (design §A.10: up front) while outside help is off:
-  // three short lines, the rest one click away. Once it is on, the same
+  // two short lines, the rest one click away. Once it is on, the same
   // content moves into its own collapsed section below.
   const shortList = `<ul class="ohshort" data-outside-disclosure>${W.disclosureShort.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
   const fullList = `<ul class="ohlist">${W.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
@@ -212,8 +214,10 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
       + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml(W.disclosureMore)}</summary>${fullList}</details>`);
   }
 
-  // 4. Cost and risk: the nine acknowledgements, collapsed once accepted.
-  if (route.state === 'configured') parts.push(renderAcknowledgements(route, canEdit));
+  // 4. The statements: one line once accepted; otherwise, while Strict is
+  // chosen, here with one Accept (with Standard chosen they sit inside
+  // What may zkAPI send?, beside the choice that needs them).
+  if (route.state === 'configured') parts.push(renderAcknowledgements(route, status.settings.level, canEdit));
 
   // 5. Secondary sections, collapsed unless they need attention.
   const more: string[] = [];
@@ -232,7 +236,17 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   const config = {
     csrfToken: input.csrfToken ?? '',
     paths: DASHBOARD_OUTSIDE_HELP_PATHS,
-    copy: { saving: W.saving, failed: W.saveFailed, restarting: W.restarting, on: W.state.on, off: W.state.off },
+    copy: {
+      saving: W.saving,
+      failed: W.saveFailed,
+      failedStatus: W.saveFailedStatus,
+      unreachable: W.saveUnreachable,
+      restarting: W.restarting,
+      on: W.state.on,
+      off: W.state.off,
+      levelSave: W.levelSave,
+      levelAcceptSave: W.levelAcceptSave,
+    },
   };
   const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(config)}</script>` : '';
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) });
@@ -264,35 +278,45 @@ function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: Dashboar
   if (route.state === 'configured' && route.readiness) lines.push(`<p class="ohline" data-outside-usage>${escapeHtml(usageLine(route.readiness))}</p>`);
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="${invalid ? 'yes' : 'no'}">`
     + head + lines.join('')
-    + `<p class="ohsmall" data-outside-cost>${escapeHtml(W.costLines.join(' '))}</p>`
+    + `<p class="ohsmall" data-outside-cost>${escapeHtml(W.costLine)}</p>`
     + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 
 /**
- * "What may zkAPI send?": the two levels, saved through the same local-grade,
- * CSRF-protected settings route as the switch (the worker re-checks every
- * rule). Choosing "Your situation, without names" needs every
- * acknowledgement at the current version, which includes the statement of
- * what that level sends.
+ * "What may zkAPI send?": Standard (recommended, the default) and Strict,
+ * saved through the same local-grade, CSRF-protected settings route as the
+ * switch (the worker re-checks every rule). Both are always selectable.
+ * While the current statements are not accepted, choosing Standard shows
+ * them right here with one "Accept and save": the level is saved, then the
+ * statements are recorded. Saving a level alone is never refused for them;
+ * nothing is sent until they are accepted, and the card says so.
  */
 function renderLevel(status: DashboardOutsideHelpStatus, canEdit: boolean): string {
   const invalid = status.settings.state === 'invalid';
   const route = status.route;
-  const acknowledged = route.state === 'configured' && route.acknowledgements.complete;
+  const needsAcceptance = route.state === 'configured' && !route.acknowledgements.complete;
   const current = status.settings.level;
+  const blocked = !canEdit || invalid ? ' disabled aria-disabled="true"' : '';
   const options = (['unnamed', 'general'] as const).map((level) => {
     const copy = W.levels[level];
-    // The unnamed option is offered once its acknowledgement is recorded, or when it is already the setting.
-    const blocked = !canEdit || invalid || (level === 'unnamed' && current !== 'unnamed' && !acknowledged);
-    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? ' checked' : ''}${blocked ? ' disabled aria-disabled="true"' : ''}>`
+    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? ' checked' : ''}${blocked}>`
       + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
   }).join('');
-  const hint = current !== 'unnamed' && !acknowledged && route.state === 'configured' ? `<p class="pnote ohsmall">${escapeHtml(W.levelNeedsAcks)}</p>` : '';
-  const disabled = canEdit && !invalid ? '' : ' disabled aria-disabled="true"';
+  const accepting = needsAcceptance && current === 'unnamed';
+  const acceptBlock = needsAcceptance
+    ? `<div class="ohaccept" data-outside-level-acks${accepting ? '' : ' hidden'}>`
+      + `<p class="pnote">${escapeHtml(W.levelAcceptIntro)}</p>${renderStatements(true)}</div>`
+    : '';
   return `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml(current)}" data-outside-current="${status.settings.state === 'on' ? 'on' : 'off'}">`
-    + `<div class="sect">${escapeHtml(W.levelTitle)}</div>${options}${hint}`
-    + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(W.levelSave)}</button></div>`
+    + `<div class="sect">${escapeHtml(W.levelTitle)}</div>${options}${acceptBlock}`
+    + `<div class="pbuttons"><button type="submit" class="btn${accepting ? ' primary' : ''}" data-outside-level-save${blocked}>${escapeHtml(accepting ? W.levelAcceptSave : W.levelSave)}</button></div>`
     + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+
+/** The current statements as a plain list; with `inputs`, the ids an Accept posts. */
+function renderStatements(inputs: boolean): string {
+  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml(entry.id)}">${escapeHtml(entry.statement)}</li>`).join('')}</ul>`
+    + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml(entry.id)}">`).join('') : '');
 }
 
 function renderRouteLine(route: DashboardOutsideHelpRoute): string {
@@ -305,9 +329,12 @@ function renderRouteLine(route: DashboardOutsideHelpRoute): string {
       ? `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReadyNoTor)} <span class="attn">${escapeHtml(W.addressVisible)}</span></p>`
       : `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReady)}</p>`;
   }
-  const first = ready.blockers[0];
+  // The statements are said once, where they are accepted (and by the state line), never again here.
+  const others = ready.blockers.filter((code) => code !== 'acknowledgements_incomplete');
+  if (others.length === 0) return `<p class="ohline" data-outside-route="ready_but_statements">${escapeHtml(W.routeReadyButStatements)}</p>`;
+  const first = others[0];
   const reason = first ? outsideHelpBlockerWords(first) : W.routeUnknown;
-  const more = ready.blockers.length > 1 ? ` ${fill(W.routeMore, { n: String(ready.blockers.length - 1) })}` : '';
+  const more = others.length > 1 ? ` ${fill(W.routeMore, { n: String(others.length - 1) })}` : '';
   return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml(fill(W.routeNotReady, { reason }))}${escapeHtml(more)}</p>`
     + (ready.torMode === 'off' ? `<p class="ohline attn">${escapeHtml(W.addressVisible)}</p>` : '');
 }
@@ -340,6 +367,8 @@ function renderProblems(status: DashboardOutsideHelpStatus, canEdit: boolean): s
     items.push(`<li><span>${escapeHtml(W.routeUnknown)}</span></li>`);
   } else {
     for (const code of route.readiness.blockers) {
+      // Said once, beside the statements themselves (inline under Standard, or Cost and risk).
+      if (code === 'acknowledgements_incomplete') continue;
       const tool = TOOL_BLOCKERS.get(code);
       const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
       // Missing and installable: the parts' own To fix line (below) says it, with its button.
@@ -379,24 +408,24 @@ function renderSetupSteps(secretRef: string, needed: boolean, tools = ''): strin
   });
 }
 
-function renderAcknowledgements(route: ConfiguredRoute, canEdit: boolean): string {
+function renderAcknowledgements(route: ConfiguredRoute, level: ConsultLevel, canEdit: boolean): string {
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
-  const complete = route.acknowledgements.complete;
-  const accepted = new Set(complete ? route.acknowledgements.accepted : []);
-  const boxes = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<label class="ohack"><input type="checkbox" name="acknowledged" value="${escapeHtml(entry.id)}"`
-    + `${accepted.has(entry.id) ? ' checked' : ''}${disabled}><span>${escapeHtml(entry.statement)}</span></label>`).join('');
-  const form = `<form class="ohform" data-outside-form="route">${boxes}`
-    + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(W.saveRoute)}</button>`
-    + `<span class="hint">${escapeHtml(W.saveRestarts)}</span></div>`
-    + `<span class="actmsg" data-action-message role="status"></span></form>`;
-  const head = `<div class="sect${complete ? '' : ' attn'}">${escapeHtml(W.costTitle)}</div>`;
-  if (complete) {
+  const n = String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length);
+  if (route.acknowledgements.complete) {
     // Accepted at the current wording: one line, the statements one click away.
-    return head + `<p class="pnote" data-outside-acknowledged="yes">${escapeHtml(fill(W.acknowledged, { n: String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length) }))}</p>`
-      + `<details class="howto" data-outside-ack-review><summary>${escapeHtml(W.acknowledgedReview)}</summary>${form}</details>`;
+    return `<div class="sect">${escapeHtml(W.costTitle)}</div>`
+      + `<p class="pnote" data-outside-acknowledged="yes">${escapeHtml(fill(W.acknowledged, { n }))}</p>`
+      + `<details class="howto" data-outside-ack-review><summary>${escapeHtml(W.acknowledgedReview)}</summary>${renderStatements(false)}</details>`;
   }
-  return head + `<p class="pnote">${escapeHtml(W.costIntro)}</p>`
-    + `<p class="pnote" data-outside-acknowledged="no">${escapeHtml(W.notAcknowledged)}</p>` + form;
+  // Not accepted: with Standard chosen the statements sit in What may zkAPI
+  // send? (one Accept and save); with Strict, here, with one Accept.
+  return `<div data-outside-ack-standalone${level === 'unnamed' ? ' hidden' : ''}>`
+    + `<div class="sect attn">${escapeHtml(W.costTitle)}</div>`
+    + `<p class="pnote" data-outside-acknowledged="no">${escapeHtml(W.costIntro)}</p>`
+    + `<form class="ohform" data-outside-form="route" data-outside-accept>${renderStatements(true)}`
+    + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(W.accept)}</button>`
+    + `<span class="hint">${escapeHtml(W.saveRestarts)}</span></div>`
+    + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
 }
 
 function renderLimits(route: ConfiguredRoute, blockers: readonly string[], canEdit: boolean): string {
@@ -507,7 +536,19 @@ function renderDetails(route: ConfiguredRoute): string {
  * the Control UI action set: those are shared with the native surfaces, and
  * these routes exist for this page alone.
  */
-export function outsideHelpClientScript(config: { csrfToken: string; paths: typeof DASHBOARD_OUTSIDE_HELP_PATHS; copy: { saving: string; failed: string; restarting: string; on: string; off: string } }): string {
+export interface OutsideHelpClientCopy {
+  saving: string;
+  failed: string;
+  failedStatus: string;
+  unreachable: string;
+  restarting: string;
+  on: string;
+  off: string;
+  levelSave: string;
+  levelAcceptSave: string;
+}
+
+export function outsideHelpClientScript(config: { csrfToken: string; paths: typeof DASHBOARD_OUTSIDE_HELP_PATHS; copy: OutsideHelpClientCopy }): string {
   return `(function () {
   var config = ${escapeScriptJson(JSON.stringify(config))};
   var root = document.querySelector('[data-outside-help]');
@@ -531,9 +572,45 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     var input = root.querySelector('[name="' + name + '"]');
     return input ? input.value : '';
   }
+  // The statement ids an Accept posts: the ones listed in that form.
+  function statementIds(container) {
+    return Array.prototype.map.call(container.querySelectorAll('input[name="acknowledged"]'), function (input) { return input.value; });
+  }
+  // The server's own words for a refusal; the generic line only when there are none.
+  function failure(response, result) {
+    if (result && result.error && typeof result.error.message === 'string' && result.error.message) return result.error.message;
+    if (result && typeof result.message === 'string' && result.message) return result.message;
+    if (result && typeof result.error === 'string' && result.error) return result.error;
+    return response && response.status ? config.copy.failedStatus.replace('{status}', String(response.status)) : config.copy.failed;
+  }
+  // Standard chosen while the statements are not accepted: they show inline,
+  // and the button reads Accept and save. Strict: the button is a plain Save,
+  // and the statements show in their own section instead.
+  var levelForm = root.querySelector('form[data-outside-form="level"]');
+  var levelAcks = levelForm ? levelForm.querySelector('[data-outside-level-acks]') : null;
+  var standalone = root.querySelector('[data-outside-ack-standalone]');
+  function levelAccepting() {
+    var picked = levelForm ? levelForm.querySelector('input[name="level"]:checked') : null;
+    return Boolean(levelAcks) && Boolean(picked) && picked.value === 'unnamed';
+  }
+  function syncLevel() {
+    if (!levelForm || !levelAcks) return;
+    var accepting = levelAccepting();
+    if (accepting) levelAcks.removeAttribute('hidden'); else levelAcks.setAttribute('hidden', '');
+    if (standalone) { if (accepting) standalone.setAttribute('hidden', ''); else standalone.removeAttribute('hidden'); }
+    var save = levelForm.querySelector('[data-outside-level-save]');
+    if (save) {
+      save.textContent = accepting ? config.copy.levelAcceptSave : config.copy.levelSave;
+      if (accepting) save.classList.add('primary'); else save.classList.remove('primary');
+    }
+  }
+  if (levelForm) {
+    levelForm.querySelectorAll('input[name="level"]').forEach(function (input) { input.addEventListener('change', syncLevel); });
+  }
   // Each post carries the whole card's state for its route, wherever on the
-  // card the fields sit: the switch reads the language boxes, and every route
-  // save reads the acknowledgements, the funding date and both limits.
+  // card the fields sit: the switch reads the language boxes, and a limits
+  // save reads the funding date and both limits. Only an Accept posts the
+  // statements; any other save leaves the recorded acceptance as it is.
   function bodyFor(form, kind, submitter) {
     if (kind === 'enable') {
       var invalid = form.getAttribute('data-outside-invalid') === 'yes';
@@ -543,11 +620,9 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       return body;
     }
     if (kind === 'route') {
-      if (form.hasAttribute('data-outside-nolimit')) {
-        return { acknowledged: checked('acknowledged'), daily_request_cap: null, daily_spend_cap_usd: null };
-      }
+      if (form.hasAttribute('data-outside-accept')) return { acknowledged: statementIds(form) };
+      if (form.hasAttribute('data-outside-nolimit')) return { daily_request_cap: null, daily_spend_cap_usd: null };
       return {
-        acknowledged: checked('acknowledged'),
         funding_date: String(field('funding_date') || ''),
         daily_request_cap: numberOrNull(field('daily_request_cap')),
         daily_spend_cap_usd: numberOrNull(field('daily_spend_cap_usd')),
@@ -557,7 +632,8 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       var picked = form.querySelector('input[name="level"]:checked');
       // On or off as the status line says now (the switch updates it in place), so saving a level never flips the switch.
       var state = root.querySelector('[data-outside-state-text]');
-      return { enabled: state ? state.getAttribute('data-outside-state') === 'on' : form.getAttribute('data-outside-current') === 'on', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
+      var current = state ? state.getAttribute('data-outside-state') : form.getAttribute('data-outside-current');
+      return { enabled: current === 'on' || current === 'needs_acceptance', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
     }
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
@@ -575,6 +651,25 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     setTimeout(poll, delay);
   }
   var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon };
+  // One post; a network failure (Olympus restarting, say) is its own answer, never a thrown error.
+  async function send(path, body) {
+    var response;
+    try {
+      response = await fetch(path, body === null
+        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+        : {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+    } catch (error) {
+      return { ok: false, text: config.copy.unreachable, result: {} };
+    }
+    var result = {};
+    try { result = await response.json(); } catch (error) { result = {}; }
+    if (!response.ok || !result || !result.ok) return { ok: false, text: failure(response, result), result: result || {} };
+    return { ok: true, text: result.status_message || '', result: result };
+  }
   root.querySelectorAll('form[data-outside-form]').forEach(function (form) {
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
@@ -583,42 +678,44 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       if (confirmText && !window.confirm(confirmText)) return;
       var buttons = form.querySelectorAll('button');
       buttons.forEach(function (button) { button.disabled = true; });
+      function fail(text) {
+        message(form, text, true);
+        buttons.forEach(function (button) { button.disabled = false; });
+      }
       message(form, config.copy.saving, false);
       try {
         // The local unlock presents no credential at all: the boundary wants a
         // loopback browser and nothing else. Every other form carries the CSRF token.
+        var accepting = kind === 'level' && levelAccepting();
         var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
-        var response = await fetch(paths[kind], kind === 'unlock'
-          ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
-          : {
-            method: 'POST', credentials: 'same-origin', cache: 'no-store',
-            headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-        var result = {};
-        try { result = await response.json(); } catch (error) { result = {}; }
-        if (!response.ok || !result.ok) {
-          message(form, (result.error && result.error.message) || config.copy.failed, true);
-          buttons.forEach(function (button) { button.disabled = false; });
-          return;
+        var outcome = await send(paths[kind], body);
+        if (!outcome.ok) return fail(outcome.text);
+        var text = outcome.text;
+        var result = outcome.result;
+        if (accepting) {
+          // Accept and save: the level is saved; now record the statements.
+          if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
+          var accepted = await send(config.paths.route, { acknowledged: statementIds(levelAcks) });
+          if (!accepted.ok) return fail(accepted.text);
+          text = accepted.text;
+          result = accepted.result;
         }
-        message(form, result.status_message || '', false);
+        message(form, text, false);
         if (kind === 'enable' && body && !body.replace_invalid) {
           // Say the new state at once, before the reload that redraws the card.
           var line = root.querySelector('[data-outside-state-text]');
           if (line) line.textContent = body.enabled ? config.copy.on : config.copy.off;
           if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
-          if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
         }
+        if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
         if (result.restarting) {
-          message(form, (result.status_message || '') + ' ' + config.copy.restarting, false);
+          message(form, text + ' ' + config.copy.restarting, false);
           reloadWhenBack(4000);
         } else {
           setTimeout(function () { window.location.reload(); }, 900);
         }
       } catch (error) {
-        message(form, config.copy.failed, true);
-        buttons.forEach(function (button) { button.disabled = false; });
+        fail(config.copy.failed);
       }
     });
   });

@@ -21,11 +21,11 @@
  *     acknowledgements, the per-language vocabulary packs;
  *   - `setEnabled`: writes consult.json through the writer (compare-and-swap
  *     on the revision the page was built from), with the level the owner
- *     chose ("What may zkAPI send?"); turning on, and choosing "Your
- *     situation, without names", each require a configured route with every
- *     acknowledgement accepted at the current version (version 4 adds the
- *     statement of what that level sends);
- *   - `saveRoute`: records the nine acknowledgements (version 4), the
+ *     chose ("What may zkAPI send?": Standard or Strict); turning on requires
+ *     a configured route with every statement accepted at the current
+ *     version. Choosing a level is never refused for the statements: sending
+ *     needs them anyway (the transport), so the card says it is paused;
+ *   - `saveRoute`: records the six statements (version 5) when accepted, the
  *     owner-confirmed funding date and the optional daily caps in the zkapi
  *     profile of the owner's sovereignty policy file, as one transaction over
  *     the file as it is now (lease, re-read, patch only that block, validate,
@@ -41,7 +41,7 @@
  */
 import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
 import {
-  CONSULT_LEVEL_WHEN_UNSET,
+  CONSULT_LEVEL_FOR_REPAIR,
   CONSULT_LEVELS,
   DEFAULT_CONSULT_SETTINGS,
   readConsultSettings,
@@ -136,14 +136,21 @@ export const DASHBOARD_ZKAPI_DEFAULT_MODEL = 'openai/gpt-5-mini';
 const ALL_LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS) as ConsultLanguage[];
 const ACKNOWLEDGEMENT_IDS: readonly string[] = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);
 
+/** Every statement accepted at the current version: the same rule the transport sends by. */
+function acknowledgementsCurrent(acknowledgements: { version: number; accepted: readonly string[] } | undefined): boolean {
+  return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION
+    && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
+}
+
 const MESSAGES = {
   needsRevision: 'This change needs the settings revision the page was built from. Reload the page and try again.',
   conflict: 'Anonymous answers were changed somewhere else since this page loaded. Reload the page to see the current setting.',
   invalidCurrent: 'The outside-help settings file on this computer is damaged. Choose Replace the file to write a fresh one.',
   routeMissing: 'Add zkAPI before turning anonymous answers on.',
-  acknowledgementsIncomplete: 'Read and tick every statement about cost and risk before turning anonymous answers on.',
-  levelAcknowledgementsIncomplete: 'Read and tick every statement about cost and risk, including what "Your situation, without names" sends, before choosing it.',
-  levelUnknown: 'Choose what zkAPI may send: your situation without names, or general questions only.',
+  acknowledgementsIncomplete: 'Accept the statements on this page before turning anonymous answers on.',
+  levelUnknown: 'Choose what zkAPI may send: Standard or Strict.',
+  levelSaved: 'Saved.',
+  levelSavedPaused: 'Saved. Anonymous answers stay paused until you accept the statements on this page.',
   languageMissing: 'A chosen language has no vocabulary pack installed on this computer.',
   languagesEmpty: 'Choose at least one language.',
   noHome: 'Olympus cannot find your home folder, so it cannot write the settings file.',
@@ -156,7 +163,7 @@ const MESSAGES = {
   policyUnreadable: 'Your privacy policy file could not be read. Nothing was written.',
   policyUncertain: 'Olympus could not confirm whether your privacy policy file changed. Reload the page to see the current state.',
   routeExists: 'A zkAPI route is already configured.',
-  tickAll: 'Tick every statement to record your acknowledgement.',
+  tickAll: 'Accept every statement to record your acknowledgement.',
   fundingDate: 'Enter the funding date as YYYY-MM-DD, the day the deposit was confirmed.',
   caps: 'A daily limit must be a whole number of requests, or a positive number of dollars.',
   confirm: 'This action needs your confirmation.',
@@ -278,8 +285,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     if (!route) return { state: 'not_configured', policyWritable: policyWritable() };
     const settings = route.profile.zkapi;
     const acknowledgements = settings?.acknowledgements ?? { version: 0, accepted: [] };
-    const complete = acknowledgements.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION
-      && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
+    const complete = acknowledgementsCurrent(acknowledgements);
     const base: Extract<DashboardOutsideHelpRoute, { state: 'configured' }> = {
       state: 'configured',
       profileId: route.id,
@@ -370,8 +376,10 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     summary() {
       const settings = settingsView();
       if (settings.state === 'invalid') return { state: 'invalid' };
-      if (!zkapiProfile()) return { state: 'route_not_configured' };
+      const route = zkapiProfile();
+      if (!route) return { state: 'route_not_configured' };
       if (fenceHeld()) return { state: 'fence_held' };
+      if (settings.state === 'on' && !acknowledgementsCurrent(route.profile.zkapi?.acknowledgements)) return { state: 'needs_acceptance' };
       return { state: settings.state };
     },
 
@@ -406,27 +414,26 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       // The level: what the form chose, else the file's own. A file that is
       // being replaced because it is damaged keeps the narrower level unless
       // the owner chose otherwise, so a repair never widens the scope.
-      let level: ConsultLevel = current.state === 'invalid' ? CONSULT_LEVEL_WHEN_UNSET : base.level;
+      let level: ConsultLevel = current.state === 'invalid' ? CONSULT_LEVEL_FOR_REPAIR : base.level;
       if (update.level !== undefined) {
         if (typeof update.level !== 'string' || !(CONSULT_LEVELS as readonly string[]).includes(update.level)) return invalid(MESSAGES.levelUnknown, 'level_unknown');
         level = update.level as ConsultLevel;
       }
-      const acknowledgementsComplete = (): boolean => {
-        const acknowledgements = zkapiProfile()?.profile.zkapi?.acknowledgements;
-        return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION
-          && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
-      };
-      // Widening to "Your situation, without names" needs the owner to have
-      // read what it sends (acknowledgement `situation_disclosure`, version 4),
-      // whether outside help is on or off; narrowing never does.
-      if (level === 'unnamed' && update.level === 'unnamed' && (current.state !== 'valid' || current.settings.level !== 'unnamed')) {
-        if (!zkapiProfile()) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
-        if (!acknowledgementsComplete()) return { ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: MESSAGES.levelAcknowledgementsIncomplete };
-      }
-      if (enabled) {
+      const acknowledgementsComplete = (): boolean => acknowledgementsCurrent(zkapiProfile()?.profile.zkapi?.acknowledgements);
+      // Only turning outside help ON (from off, no file or a damaged file)
+      // needs the route, the current statements and installed languages.
+      // Keeping it on while choosing a level is never refused: the level is
+      // saved, and if the statements are not accepted at the current version
+      // the transport sends nothing (zkapiMoneyStatus) and the card says it
+      // is paused until they are. The level itself needs no acknowledgement
+      // here, for the same reason: no question leaves without them.
+      const turningOn = enabled && !(current.state === 'valid' && current.settings.enabled);
+      if (turningOn) {
         const route = zkapiProfile();
         if (!route) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
         if (!acknowledgementsComplete()) return { ok: false, httpStatus: 409, code: 'acknowledgements_incomplete', message: MESSAGES.acknowledgementsIncomplete };
+      }
+      if (enabled && (turningOn || update.languages !== undefined)) {
         const installed = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed.has(language))) return invalid(MESSAGES.languageMissing, 'language_pack_missing');
       }
@@ -441,7 +448,11 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         ...(replaceInvalid ? { replaceInvalid: true } : {}),
       }, location);
       if (result.ok) {
-        return { ok: true, status_message: enabled ? MESSAGES.turnedOn : MESSAGES.turnedOff, revision: result.settings.revision };
+        const paused = enabled && Boolean(zkapiProfile()) && !acknowledgementsComplete();
+        const message = update.level !== undefined
+          ? paused ? MESSAGES.levelSavedPaused : MESSAGES.levelSaved
+          : enabled ? MESSAGES.turnedOn : MESSAGES.turnedOff;
+        return { ok: true, status_message: message, revision: result.settings.revision };
       }
       return writeRefusal(result.reason, result.current?.state === 'valid' ? result.current.settings.revision : 0);
     },
@@ -449,15 +460,20 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     async saveRoute(update) {
       const route = zkapiProfile();
       if (!route) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
+      // The statements: recorded only when this save accepts them (every one,
+      // at the current version). A save without them (the funding date, the
+      // limits) leaves the recorded acceptance exactly as it is.
       const acknowledged = update.acknowledged;
-      if (!Array.isArray(acknowledged) || !acknowledged.every((item) => typeof item === 'string')) return invalid(MESSAGES.tickAll, 'acknowledgements_incomplete');
-      const accepted = new Set(acknowledged as string[]);
-      if (!ACKNOWLEDGEMENT_IDS.every((id) => accepted.has(id))) return invalid(MESSAGES.tickAll, 'acknowledgements_incomplete');
-      // The owned fields of the zkapi block, applied over the block as the
-      // file holds it now; `null` clears a cap.
       const zkapi: Record<string, unknown> = {};
       const cleared: string[] = [];
-      zkapi.acknowledgements = { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [...ACKNOWLEDGEMENT_IDS] };
+      if (acknowledged !== undefined) {
+        if (!Array.isArray(acknowledged) || !acknowledged.every((item) => typeof item === 'string')) return invalid(MESSAGES.tickAll, 'acknowledgements_incomplete');
+        const accepted = new Set(acknowledged as string[]);
+        if (!ACKNOWLEDGEMENT_IDS.every((id) => accepted.has(id))) return invalid(MESSAGES.tickAll, 'acknowledgements_incomplete');
+        zkapi.acknowledgements = { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [...ACKNOWLEDGEMENT_IDS] };
+      }
+      // The other owned fields of the zkapi block, applied over the block as
+      // the file holds it now; `null` clears a cap.
       if (update.funding_date !== undefined && update.funding_date !== null && update.funding_date !== '') {
         if (typeof update.funding_date !== 'string' || parseIsoDate(update.funding_date) === undefined) return invalid(MESSAGES.fundingDate, 'funding_date_invalid');
         zkapi.fundingDate = update.funding_date;
