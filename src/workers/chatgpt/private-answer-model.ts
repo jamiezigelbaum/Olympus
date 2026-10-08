@@ -33,6 +33,7 @@ import type {
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { AnalystModelRequest } from '../../core/analyst.ts';
 import { SourceModelPolicyDeniedError } from '../../core/source-model-policy.ts';
+import { evidenceVersionGroups } from '../../core/evidence-versions.ts';
 import {
   NoPrivateEvidenceError,
   checkPrivateEvidence,
@@ -361,8 +362,13 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       if (unreadable > 0) unanswered.push(unreadableNote(unreadable));
       // The consult snapshot (verdict and the fitted pack) rides along for
       // the jobs engine; it is never part of what the panel decrypts.
+      const answerText = withoutEvidenceMarkers(result.answer);
+      // Versions are judged over every readable match still eligible, with
+      // the search-time text the selection grouped them by, so the note also
+      // says so when only the newest version was read.
+      const versionNote = citedVersionNote(live.map((index) => read.items[index]!), result.citations.map((citation) => citation.id));
       return {
-        answer: withoutEvidenceMarkers(result.answer),
+        answer: versionNote ? `${answerText} ${versionNote}` : answerText,
         citations,
         unanswered,
         ...(result.consult ? { consult: { verdict: result.consult.verdict, pack: result.consult.pack } } : {}),
@@ -371,6 +377,44 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
     async reset() {
       await model?.stop();
     },
+  };
+}
+
+/**
+ * One sentence saying which version the answer read, when a cited item is
+ * one of several versions of a document among the matched items (a small model
+ * does not reliably say it itself). Dates and the citation ids only; the
+ * answer's text is not consulted.
+ */
+export function citedVersionNote(items: readonly BuiltInEvidenceItem[], citedIds: readonly string[]): string | undefined {
+  const groups = evidenceVersionGroups(items.map((item) => ({ text: item.text, ...(item.date ? { date: item.date } : {}) })));
+  const cited = new Set(citedIds);
+  for (const group of groups) {
+    const members = group.map((index) => items[index]!);
+    const used = members.filter((item) => cited.has(item.id));
+    if (used.length === 0 || members.some((item) => !item.date)) continue;
+    const label = versionDateLabel(members.map((item) => item.date!));
+    const newest = members[0]!;
+    if (used.includes(newest)) {
+      return `Several versions of ${quoteTitle(newest)} were found; this answer uses the newest, saved ${label(newest.date!)}.`;
+    }
+    return `This answer uses an older version of ${quoteTitle(used[0]!)}, saved ${label(used[0]!.date!)}; the newest version was saved ${label(newest.date!)}.`;
+  }
+  return undefined;
+}
+
+function quoteTitle(item: BuiltInEvidenceItem): string {
+  return item.title ? `“${item.title}”` : 'this document';
+}
+
+/** "1 December 2025", with the time when two versions share a day. */
+function versionDateLabel(dates: readonly string[]): (date: string) => string {
+  const day = (date: string) => new Date(Date.parse(date)).toISOString().slice(0, 10);
+  const sameDay = new Set(dates.map(day)).size < dates.length;
+  return (date) => {
+    const at = new Date(Date.parse(date));
+    const text = at.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+    return sameDay ? `${text}, ${at.toISOString().slice(11, 16)} UTC` : text;
   };
 }
 
@@ -444,6 +488,13 @@ export async function panelItems(
  * `maxLeadingItems`) clearly ahead of every other item by relevance
  * (leadingCount), or the only readable item. Leading items are read alone,
  * in depth; an item merely within the relevance floor of them is left out.
+ *
+ * Versions of one document (evidence-versions.ts: nearly the same text) take
+ * one place in the ranking, at their most relevant member's score: that
+ * member is read, and so is the group's newest version when it is another
+ * one, whatever their own scores or retrieval order. Other versions are left
+ * out, so copies cannot crowd out other documents, and every run over the
+ * same matches reads the same newest version (owner report 2026-10-08).
  */
 export async function panelSelection(
   question: string,
@@ -465,14 +516,44 @@ export async function panelSelection(
       scores = undefined;
     }
   }
-  if (!scores || scores.length !== order.length || scores.some((score) => !Number.isFinite(score))) {
-    return { items: order.slice(0, max), leading: false };
+  const versions = new Map<number, number[]>();
+  for (const group of evidenceVersionGroups(read.items.map((item) => ({ text: item.text, ...(item.date ? { date: item.date } : {}) })))) {
+    for (const member of group) versions.set(member, group);
   }
-  const ranked = [...order].sort((a, b) => (scores![b]! - scores![a]!) || (a - b));
-  const floor = scores[ranked[0]!]! - Math.max(0, limits.relevanceMargin);
-  const picked = ranked.filter((index) => scores![index]! >= floor).slice(0, max);
-  const leading = leadingCount(ranked.map((index) => scores![index]!), Math.min(maxLeading, picked.length), limits.leadGap ?? 0);
-  return leading > 0 ? { items: picked.slice(0, leading), leading: true } : { items: picked, leading: false };
+  // Ranked items as units: an item alone, or a version group's most
+  // relevant member followed by the group's newest.
+  const units = (ranked: readonly number[]): number[][] => {
+    const seen = new Set<readonly number[]>();
+    const out: number[][] = [];
+    for (const index of ranked) {
+      const group = versions.get(index);
+      if (!group) {
+        out.push([index]);
+        continue;
+      }
+      if (seen.has(group)) continue;
+      seen.add(group);
+      out.push(group[0] === index ? [index] : [index, group[0]!]);
+    }
+    return out;
+  };
+  const flatten = (picked: readonly number[][]): number[] => {
+    const items: number[] = [];
+    for (const unit of picked) {
+      if (items.length > 0 && items.length + unit.length > max) break;
+      items.push(...unit);
+    }
+    return items;
+  };
+  if (!scores || scores.length !== order.length || scores.some((score) => !Number.isFinite(score))) {
+    return { items: flatten(units(order).slice(0, max)), leading: false };
+  }
+  const ranked = units([...order].sort((a, b) => (scores![b]! - scores![a]!) || (a - b)));
+  const unitScore = (unit: readonly number[]) => scores![unit[0]!]!;
+  const floor = unitScore(ranked[0]!) - Math.max(0, limits.relevanceMargin);
+  const picked = ranked.filter((unit) => unitScore(unit) >= floor).slice(0, max);
+  const leading = leadingCount(ranked.map(unitScore), Math.min(maxLeading, picked.length), limits.leadGap ?? 0);
+  return leading > 0 ? { items: flatten(picked.slice(0, leading)), leading: true } : { items: flatten(picked), leading: false };
 }
 
 /**

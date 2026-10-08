@@ -142,6 +142,14 @@
       "expectedEvidence": [],
       "maxTrustDomain": "secure_local",
       "notes": "Answered locally (Argus) by default. No raw secure_local content in output; any cloud escalation must be explicitly approved through the release gate."
+    },
+    {
+      "id": "versions-01",
+      "shape": "version_conflict",
+      "question": "What {value} does my {document_with_several_versions} give?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Pick a document the corpus holds in several versions (drafts, revisions, copies) that disagree on the value. Correct answer gives the newest version's value and names that version by its date, or lists each version's value with its date; never an older version's value presented as current. Ask it three times: every answer must state the same facts."
     }
   ]
 }

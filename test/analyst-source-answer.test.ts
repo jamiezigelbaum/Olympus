@@ -62,9 +62,9 @@ const INTERNAL_SECRET = 'INTERNAL-RAW-CHUNK-TEXT cholesterol LDL 100 mg/dL';
 const SECURE_SECRET = 'SECURE-RAW-CHUNK-TEXT total testosterone 612 ng/dL';
 // Local-leg prompt budget for the fitting tests (measured with
 // analystPromptBytes against the fixtures below): the whole two-candidate
-// pack is ~3,290 bytes, so 3,200 forces a fit that keeps one candidate, the
+// pack is ~3,415 bytes, so 3,330 forces a fit that keeps one candidate, the
 // Personal note (first in round-robin order).
-const ONE_CANDIDATE_PROMPT_BYTES = 3_200;
+const ONE_CANDIDATE_PROMPT_BYTES = 3_330;
 
 function adapterReturning(ids: string[]): SourceIndexCorpusSearchAdapter {
   return (request) => ({

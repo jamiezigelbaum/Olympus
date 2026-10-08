@@ -23,6 +23,13 @@
 // passes when every cited item is an expected one. Add --embedding-dir
 // <built-in-embedding dir> to rank with the built-in embedding model (the
 // engine's default), or leave it out to measure retrieval order alone.
+//
+// --versions runs the same panel path over synthetic documents held in several
+// versions that disagree (eval/fixtures/versioned-documents.ts), each question
+// --repeat times (default 3) in a different retrieval order. A question passes
+// when every run gives the newest version's values, every superseded value an
+// answer names comes with its version's date, and all runs state the same set
+// of figures (owner report 2026-10-08: three runs, three prices).
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,6 +46,7 @@ import { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } from '../src
 import { BuiltInSourceEmbeddingProvider } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import { gradeAnswer } from './grade.ts';
 import type { EvalQuestion } from './types.ts';
+import { VERSIONED_FIXTURE_ITEMS, VERSIONED_FIXTURE_QUESTIONS, versionedFixtureHits } from './fixtures/versioned-documents.ts';
 
 const DEMO = join(import.meta.dir, '..', 'chatgpt-plugin', 'demo-data');
 const CORPUS = 'secure_local.demo';
@@ -209,6 +217,70 @@ async function runPanel(model: ReturnType<typeof createBuiltInAnalystModel>, mod
   process.stdout.write(`${JSON.stringify({ modelId, mode: 'panel', ranking: relevance ? 'embedding' : 'retrieval order', questions: PANEL_QUESTIONS.length, passed, outcomes }, null, 2)}\n`);
 }
 
+/** Whether the answer states the value as a whole figure ("5,000" is not in "625,000"). */
+function mentions(answer: string, value: string): boolean {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\d.,])${escaped}(?!\\d)`).test(answer);
+}
+
+/**
+ * The figures an answer states (amounts and day-month-year dates), normalized,
+ * as a sorted set, leaving out superseded values (checked for their dates on
+ * their own): what the answer gives as current must be the same every run.
+ */
+function statedFigures(answer: string, superseded: readonly string[]): string {
+  const skip = new Set(superseded.map((value) => value.replace(/[.,]/g, '')));
+  const amounts = answer.match(/\d{1,3}(?:[.,]\d{3})+|\d+(?:\.\d+)?%/g) ?? [];
+  const dates = answer.match(/\b\d{1,2} (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{4}\b/g) ?? [];
+  return [...new Set([...amounts.map((value) => value.replace(/[.,]/g, '')), ...dates])].filter((value) => !skip.has(value)).sort().join(' ');
+}
+
+/** The panel path over versioned documents: newest values every run, superseded values dated, the same figures each run. */
+async function runVersions(model: ReturnType<typeof createBuiltInAnalystModel>, modelId: string): Promise<void> {
+  const repeat = Math.max(1, Number(arg('repeat') ?? 3));
+  const { answerPrivately } = await import('../src/core/analyst-built-in.ts');
+  const panel = createBuiltInPrivateAnswerModel({
+    model,
+    available: () => true,
+    answer: answerPrivately,
+    eligible: async (items) => items.map(() => true),
+  });
+  const ids = VERSIONED_FIXTURE_ITEMS.map((item) => item.id);
+  const dated = (answer: string, value: string) => {
+    const at = answer.indexOf(value);
+    const around = answer.slice(Math.max(0, at - 160), at + value.length + 160);
+    return /\b20\d\d\b|version|draft|earlier|older|revised/i.test(around.replace(value, ''));
+  };
+  let passed = 0;
+  const outcomes: Array<Record<string, unknown>> = [];
+  for (const question of VERSIONED_FIXTURE_QUESTIONS) {
+    const runs: Array<Record<string, unknown>> = [];
+    const figures = new Set<string>();
+    let ok = true;
+    for (let run = 0; run < repeat; run += 1) {
+      // A different retrieval order each run (a rotation), as different searches surface them.
+      const order = ids.map((_, index) => ids[(index + run * 2) % ids.length]!);
+      const startedAt = Date.now();
+      let read: readonly number[] = [];
+      const result = await panel.answerPrivately(question.question, versionedFixtureHits(order), undefined, { evidence: (stats) => { read = stats.used ?? []; } });
+      const newest = question.expectedNewest.every((value) => mentions(result.answer, value));
+      const superseded = question.supersededValues.filter((value) => mentions(result.answer, value));
+      const disclosed = superseded.every((value) => dated(result.answer, value));
+      figures.add(statedFigures(result.answer, question.supersededValues));
+      const runOk = newest && disclosed;
+      ok &&= runOk;
+      runs.push({ order, read: read.map((index) => order[index]), newest, superseded, disclosed, durationMs: Date.now() - startedAt, answer: result.answer });
+      console.error(`${modelId} versions ${question.id} run ${run + 1} ${runOk ? 'PASS' : 'FAIL'} ${((Date.now() - startedAt) / 1000).toFixed(1)}s read=${read.map((index) => order[index]).join(',')} superseded=${superseded.join('|') || '-'}`);
+    }
+    const consistent = figures.size === 1;
+    ok &&= consistent;
+    if (ok) passed += 1;
+    outcomes.push({ id: question.id, passed: ok, consistent, figures: [...figures], runs });
+  }
+  await model.stop();
+  process.stdout.write(`${JSON.stringify({ modelId, mode: 'versions', repeat, questions: VERSIONED_FIXTURE_QUESTIONS.length, passed, outcomes }, null, 2)}\n`);
+}
+
 async function main(): Promise<void> {
   const modelArg = arg('model') ?? '';
   const gguf = arg('gguf');
@@ -252,6 +324,10 @@ async function main(): Promise<void> {
     fetchImpl: timedFetch,
     waitForInstall: true,
   });
+  if (process.argv.includes('--versions')) {
+    await runVersions(model, spec.modelId);
+    return;
+  }
   if (process.argv.includes('--panel')) {
     await runPanel(model, spec.modelId);
     return;
