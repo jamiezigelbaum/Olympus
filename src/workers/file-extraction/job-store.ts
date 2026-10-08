@@ -416,9 +416,18 @@ export interface ExtractionCorpusReadiness {
   /**
    * Failed jobs whose item nothing else has read successfully — the ones that
    * actually cost content. A failure superseded by another extractor's
-   * `indexed` job against the same item is history, not homework.
+   * `indexed` job against the same item is history, not homework, and so is
+   * a failure on a settled item (see `unreadableItems`).
    */
   failedActionableJobs: number;
+  /**
+   * Items extraction gave up on: no `indexed` job, at least one
+   * `failed_terminal` job, and nothing queued, leased or retryable left to
+   * try. Owner ruling, 2026-10-08: one damaged file is a fact the page states,
+   * not a pause — these leave `failedActionableJobs` and count here instead.
+   * Disjoint from the two policy exits above.
+   */
+  unreadableItems: number;
   retryableDueJobs: number;
   oldestActionableAt?: string;
   newestTerminalProgressAt?: string;
@@ -1449,8 +1458,15 @@ export class LocalFileExtractionJobStore {
     }
     let blockedByPolicyItems = 0;
     let metadataOnlyExpectedItems = 0;
-    for (const itemRows of byItem.values()) {
+    let unreadableItems = 0;
+    const settledFailedItems = new Set<string>();
+    for (const [itemId, itemRows] of byItem) {
       if (itemRows.some((row) => row.status === 'indexed')) continue;
+      const settledFailed = itemRows.some((row) => row.status === 'failed_terminal')
+        && !itemRows.some((row) => (
+          row.status === 'queued' || row.status === 'leased' || row.status === 'failed_retryable'
+        ));
+      if (settledFailed) settledFailedItems.add(itemId);
       if (itemRows.some((row) => row.status === 'blocked_policy')) {
         blockedByPolicyItems += 1;
       } else if (itemRows.some((row) => (
@@ -1459,6 +1475,8 @@ export class LocalFileExtractionJobStore {
         || row.status === 'skipped_too_large'
       ))) {
         metadataOnlyExpectedItems += 1;
+      } else if (settledFailed) {
+        unreadableItems += 1;
       }
     }
     const now = (options.now ?? new Date()).toISOString();
@@ -1468,7 +1486,8 @@ export class LocalFileExtractionJobStore {
       row.status === 'failed_retryable' || row.status === 'failed_terminal'
     ));
     const failedActionableJobs = failedRows.filter((row) => !(
-      byItem.get(row.local_item_id)?.some((candidate) => candidate.status === 'indexed') ?? false
+      (byItem.get(row.local_item_id)?.some((candidate) => candidate.status === 'indexed') ?? false)
+      || settledFailedItems.has(row.local_item_id)
     )).length;
     const retryableDueRows = rows.filter((row) => (
       row.status === 'failed_retryable'
@@ -1501,6 +1520,7 @@ export class LocalFileExtractionJobStore {
       failedRetryableJobs: count('failed_retryable'),
       failedTerminalJobs: count('failed_terminal'),
       failedActionableJobs,
+      unreadableItems,
       retryableDueJobs: retryableDueRows.length,
       ...(oldestActionableAt ? { oldestActionableAt } : {}),
       ...(newestTerminalProgressAt ? { newestTerminalProgressAt } : {}),
@@ -1523,7 +1543,10 @@ export class LocalFileExtractionJobStore {
           MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
           MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
           MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
-              THEN 1 ELSE 0 END) AS metadata_only_jobs
+              THEN 1 ELSE 0 END) AS metadata_only_jobs,
+          MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
+          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable')
+              THEN 1 ELSE 0 END) AS in_flight_jobs
         FROM extraction_jobs
         WHERE corpus_id = ?
         GROUP BY local_item_id
@@ -1531,9 +1554,16 @@ export class LocalFileExtractionJobStore {
       SELECT
         SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 1 THEN 1 ELSE 0 END) AS blocked_items,
         SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 1
-            THEN 1 ELSE 0 END) AS metadata_only_items
+            THEN 1 ELSE 0 END) AS metadata_only_items,
+        SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 0
+            AND terminal_failed_jobs = 1 AND in_flight_jobs = 0
+            THEN 1 ELSE 0 END) AS unreadable_items
       FROM item_state
-    `).get(corpus) as { blocked_items: number | null; metadata_only_items: number | null } | null;
+    `).get(corpus) as {
+      blocked_items: number | null;
+      metadata_only_items: number | null;
+      unreadable_items: number | null;
+    } | null;
     const jobs = this.db.query(`
       SELECT
         SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
@@ -1558,6 +1588,20 @@ export class LocalFileExtractionJobStore {
                 AND superseding.job_id <> j.job_id
                 AND superseding.status = 'indexed'
             )
+            AND NOT (
+              EXISTS (
+                SELECT 1 FROM extraction_jobs settled
+                WHERE settled.corpus_id = j.corpus_id
+                  AND settled.local_item_id = j.local_item_id
+                  AND settled.status = 'failed_terminal'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM extraction_jobs pending
+                WHERE pending.corpus_id = j.corpus_id
+                  AND pending.local_item_id = j.local_item_id
+                  AND pending.status IN ('queued', 'leased', 'failed_retryable')
+              )
+            )
           THEN 1 ELSE 0 END) AS failed_actionable_jobs
       FROM extraction_jobs j
       WHERE corpus_id = ?
@@ -1572,6 +1616,7 @@ export class LocalFileExtractionJobStore {
       failedRetryableJobs: jobCount('failed_retryable_jobs'),
       failedTerminalJobs: jobCount('failed_terminal_jobs'),
       failedActionableJobs: jobCount('failed_actionable_jobs'),
+      unreadableItems: count(items?.unreadable_items),
       retryableDueJobs: jobCount('retryable_due_jobs'),
       ...(typeof jobs?.oldest_actionable_at === 'string' ? { oldestActionableAt: jobs.oldest_actionable_at } : {}),
       ...(typeof jobs?.newest_terminal_progress_at === 'string'

@@ -965,7 +965,9 @@ describe('extraction job store: corpus readiness', () => {
       leasedJobs: 0,
       failedRetryableJobs: 0,
       failedTerminalJobs: 2,
-      failedActionableJobs: 1,
+      // 'broken' has nothing left to try: it is unreadable, not homework.
+      failedActionableJobs: 0,
+      unreadableItems: 1,
       retryableDueJobs: 0,
     });
     // Another corpus's jobs are not this corpus's readiness.
@@ -977,7 +979,41 @@ describe('extraction job store: corpus readiness', () => {
       failedRetryableJobs: 0,
       failedTerminalJobs: 0,
       failedActionableJobs: 0,
+      unreadableItems: 0,
       retryableDueJobs: 0,
+    });
+  });
+
+  test('a settled failure is unreadable, not actionable, on both readiness paths', () => {
+    const { store } = newStore();
+    // Settled: failed for good, nothing queued, leased or retryable behind it.
+    settle(store, 'damaged', 'failed_terminal');
+    settle(store, 'damaged-twice', 'failed_terminal');
+    settle(store, 'damaged-twice', 'failed_terminal', 'local_ocr');
+    // A policy exit wins the item: fenced, not unreadable, and not homework.
+    settle(store, 'fenced-broken', 'failed_terminal');
+    settle(store, 'fenced-broken', 'blocked_policy', 'local_ocr');
+    // Still in progress: a retry is booked, so the failure stays actionable.
+    const retrying = enqueueOne(store, 'retrying');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId: retrying, status: 'failed_retryable', errorKind: 'extractor_unavailable' });
+    // A terminal failure with another extractor still queued is not settled.
+    settle(store, 'second-try', 'failed_terminal');
+    enqueueOne(store, 'second-try', { kind: 'local_ocr' });
+
+    const expected = {
+      blockedByPolicyItems: 1,
+      unreadableItems: 2,
+      failedRetryableJobs: 1,
+      failedTerminalJobs: 5,
+      // The retryable job, and second-try's terminal one while its retry waits.
+      failedActionableJobs: 2,
+    };
+    expect(store.corpusReadiness(LANE.corpusId)).toMatchObject(expected);
+    expect(store.scopedReadiness([LANE])).toMatchObject(expected);
+    expect(createExtractionReadinessLedger(store).snapshotForCorpus(LANE.corpusId)?.counts).toMatchObject({
+      extraction_jobs_failed_actionable: 2,
+      extraction_items_unreadable: 2,
     });
   });
 
@@ -995,7 +1031,8 @@ describe('extraction job store: corpus readiness', () => {
       extraction_jobs_queued_actionable: 1,
       extraction_jobs_leased: 0,
       extraction_jobs_failed: 1,
-      extraction_jobs_failed_actionable: 1,
+      extraction_jobs_failed_actionable: 0,
+      extraction_items_unreadable: 1,
       extraction_jobs_retryable_due_actionable: 0,
     });
   });
