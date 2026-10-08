@@ -20,6 +20,12 @@ const SERVICE_LABEL = 'worker';
 const READINESS_PROBE_TIMEOUT_MS = 1_000;
 const ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250;
 const DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 10_000;
+/**
+ * The worker's readiness proves it is listening, not that it stays up. A
+ * worker that crashes or reloads again within this long keeps climbing the
+ * restart backoff instead of restarting at the first delay every time.
+ */
+const DEFAULT_WORKER_STABLE_UPTIME_MS = 30_000;
 
 export const NATIVE_CAPTURE_OWNER_ENV_NAMES = {
   telegram: 'OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER',
@@ -41,6 +47,8 @@ export interface NativeWorkerServiceOptions {
   readinessPollMs?: number;
   stopGraceMs?: number;
   restartDelaysMs?: readonly number[];
+  /** How long a ready worker must stay up before restart backoff resets. */
+  stableUptimeMs?: number;
   fetch?: typeof fetch;
   /** Test seam; production always uses applyWorkerSetupEnv's default path. */
   workerEnvPath?: string;
@@ -92,6 +100,7 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
     ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
     ...(options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {}),
     defaultStartupTimeoutMs: DEFAULT_WORKER_STARTUP_TIMEOUT_MS,
+    stableUptimeMs: options.stableUptimeMs ?? DEFAULT_WORKER_STABLE_UPTIME_MS,
     prepareStart: async (input) => {
       invalidate();
       const generation = proofGeneration;
