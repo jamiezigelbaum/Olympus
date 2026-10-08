@@ -128240,7 +128240,7 @@ function createConsultOrchestrator(options) {
     if (verdict.decision !== "pass") {
       await closeSession();
       fail(jobId);
-      record4(jobId, "gate_refused", startedAt, String(verdict.reasons.length));
+      record4(jobId, "gate_refused", startedAt, [...verdict.reasons].sort().join(","));
       return;
     }
     const opened = await opening.catch(() => {

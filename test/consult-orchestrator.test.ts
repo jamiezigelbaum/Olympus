@@ -466,7 +466,7 @@ describe('writer outcomes and the gate', () => {
     expect(h.transport.sessions[0]!.cancelled).toBe(1);
     expect(h.transport.opens[0]!.signal!.aborted).toBe(true);
     expect((await envelope(jobId, panel, await h.jobs.claim(jobId, panel.publicKey, 2))).outside).toEqual({ state: 'idle' });
-    expect(h.logs.some((line) => line.startsWith('[consult] outcome=gate_refused'))).toBe(true);
+    expect(h.logs.some((line) => /^\[consult\] outcome=gate_refused code=[a-z_]+(,[a-z_]+)* ms=\d+$/.test(line))).toBe(true);
     for (const line of h.logs) expect(line).not.toContain('lease');
     expect(h.orchestrator.recentQuestions).toEqual([]);
   });
