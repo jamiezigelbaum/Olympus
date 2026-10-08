@@ -164,10 +164,13 @@ export interface ConnectorStoreExtractionSinkOptions {
    */
   recordContentTier?: boolean;
   /**
-   * The photo judge's verdict on a picture, by its digest. Default: this
-   * store's own record. A tiered store set looks in every store of the set,
-   * since a picture is judged where it was first embedded (its Private
-   * store) and may land in another.
+   * The photo judge's verdict on a picture, by its digest. Supplied only by a
+   * sink that has already run the content rules (account and card numbers)
+   * on the text read off the picture, i.e. a tiered store set, which looks in
+   * every store of the set since a picture is judged where it was first
+   * embedded (its Private store) and may land in another. Without it the
+   * sink is plain: it attaches this store's own record to the picture but
+   * never lets picture content into a store outside Private.
    */
   mediaJudgment?: (mediaSha256: string) => MediaJudgment | undefined;
 }
@@ -312,11 +315,14 @@ export function createConnectorStoreExtractionSink(
       // pass had already stored its text.
       // The judge's verdict on the picture travels with it to the store; only
       // an ordinary verdict lets a picture (and the text read off it) rest
-      // outside a Private store. No verdict is never taken for ordinary.
+      // outside a Private store, and only through a sink that has run the
+      // content rules on that text (a tiered store set). A plain sink runs no
+      // rules, so it never lets picture content outside a Private store. No
+      // verdict is never taken for ordinary.
       const judgment = plan.media ? (options.mediaJudgment ?? ((sha: string) => store.mediaJudgment(sha)))(plan.media.sha256) : undefined;
       if (plan.media && judgment) plan.media = { ...plan.media, judgment };
       if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== 'secure_local'
-        && !(plan.media && judgment?.verdict === 'ordinary')) {
+        && !(options.mediaJudgment && plan.media && judgment?.verdict === 'ordinary')) {
         return {
           accepted: false,
           chunksIndexed: 0,

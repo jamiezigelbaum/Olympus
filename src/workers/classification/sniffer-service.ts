@@ -749,10 +749,17 @@ export class TierSnifferService {
         try {
           // A raise (a re-judged item now held) hid its copies first: they
           // are the move's sources all the same.
-          const source = set.ledger.copies(identity).find((copy) => copy.state === 'current'
+          const sources = set.ledger.copies(identity).filter((copy) => copy.state === 'current'
             || (copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1));
+          const source = sources[0];
           const exported = source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
           if (!exported) throw new Error('no current copy');
+          // The vectors are on the copy that holds the content, not on a
+          // names-only copy (a photo's names rest Personal, its content Private).
+          const contentSource = sources.find((copy) => copy.layers !== 'metadata');
+          const contentCopy = contentSource && contentSource !== source
+            ? set.store(contentSource.trustDomain)?.exportItemCopy(identity)
+            : exported;
           await moveTieredItem({
             set,
             identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
@@ -760,7 +767,7 @@ export class TierSnifferService {
             // Vectors made by the very model a destination already embeds
             // with are copied, not made again (a judged-ordinary photo keeps
             // its picture vector when it leaves the Private store).
-            vectorIdentities: matchingVectorIdentities(set, exported),
+            vectorIdentities: contentCopy ? matchingVectorIdentities(set, contentCopy) : {},
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY },
             // Every embedding here is the built-in local model: an older
             // superseded copy this item's own earlier move left in the

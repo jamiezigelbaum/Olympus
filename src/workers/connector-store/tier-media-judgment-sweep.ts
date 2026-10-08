@@ -15,7 +15,8 @@
 // - unjudged: nothing changes (it stays Private).
 //
 // Owner overrides, Secrets and legacy (never routed) items are left as they
-// are. An item mid-move, or waiting on its names, is tried again later. A
+// are. An item mid-move, or waiting on its names, is tried again later, its
+// judgment sent to the back of the queue so it cannot starve the rest. A
 // bounded page per call; each judgment is applied once.
 
 import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
@@ -45,6 +46,7 @@ export function applyMediaJudgments(options: {
   for (const store of set.openStores()) {
     const page = store.unappliedMediaJudgments(limit);
     const done: typeof page = [];
+    const waiting: string[] = [];
     for (const entry of page) {
       let ready = true;
       for (const identity of entry.items) {
@@ -77,9 +79,11 @@ export function applyMediaJudgments(options: {
         }
       }
       if (ready) done.push(entry);
-      else report.waiting += 1;
+      else waiting.push(entry.mediaSha256);
     }
     store.markMediaJudgmentsApplied(done);
+    store.markMediaJudgmentsWaiting(waiting);
+    report.waiting += waiting.length;
     report.applied += done.length;
   }
   return report;
