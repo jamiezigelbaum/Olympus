@@ -1097,6 +1097,106 @@ describe('the sniffer\'s automatic move of a judged-ordinary photo', () => {
   }
 });
 
+describe('review of #189: the judge never lets a picture out of Private without the content rules and a verdict that still holds', () => {
+  test('a legacy (never routed) item in a Personal store gets no pass for its picture, even with an ordinary verdict there', async () => {
+    const dir = temporaryDir();
+    const ledger = new TierLedger({ dbPath: join(dir, 'tier-ledger.sqlite') });
+    const secrets = new SecretLocationsIndex({ dbPath: join(dir, 'secret-locations.sqlite') });
+    const internal = new LocalConnectorStore({ dbPath: join(dir, 'internal.sqlite'), corpusId: CORPUS('internal'), family: 'file', trustDomain: 'internal', tierLedger: ledger });
+    const secure = new LocalConnectorStore({ dbPath: join(dir, 'secure.sqlite'), corpusId: CORPUS('secure_local'), family: 'file', trustDomain: 'secure_local', tierLedger: ledger });
+    try {
+      await internal.syncFromConnector(connectorFor(['seed', 'legacy']), { fetchContent: false });
+      const photo = picture();
+      // The Personal store holds an ordinary verdict for this picture.
+      expect((await plainSink(internal, () => judgment('ordinary')).accept(request('seed', photo, IMAGE_MEDIA_DESCRIPTOR, 'internal'))).accepted).toBe(true);
+      const set = createTieredLaneSet({
+        setId: 'judge.files.legacy',
+        ledger,
+        secretLocations: secrets,
+        legs: { internal: { store: internal, legacy: true }, secure_local: { store: secure, legacy: true } },
+      });
+      expect(ledger.isRouted(identity('legacy'))).toBe(false);
+      const sink = createTieredStoreExtractionSink({ set, syncConnectorId: 'extraction', ownerConnectorId: 'judge-connector', ownershipKind: 'observed' });
+      const card = await sink.accept(request('legacy', photo, `${IMAGE_MEDIA_DESCRIPTOR}\nCard 4111 1111 1111 1111 exp 09/29`, 'internal'));
+      releaseMediaCacheFile(photo.path, photo.sha256, photo.stagingHolder);
+      expect(card.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY);
+      expect(internal.searchItems('4111', 5)).toEqual([]);
+    } finally {
+      internal.close();
+      secure.close();
+      secrets.close();
+      ledger.close();
+    }
+  });
+
+  /** An ordinary photo, judged in Private and moved to Personal; the Private copy stays behind, hidden. */
+  async function movedToPersonal(lane: Lane) {
+    await lane.set.sync(connectorFor(['kitchen']), { fetchContent: false, placement: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }) });
+    const photo = picture();
+    expect((await lane.sink.accept(request('kitchen', photo))).accepted).toBe(true);
+    const provider = new JudgingProvider();
+    await lane.stores.secure_local!.embedChunks({ provider });
+    expect(applyMediaJudgments({ set: lane.set })).toMatchObject({ applied: 1, movesQueued: 1 });
+    const queued = lane.ledger.getCurrent(identity('kitchen'))!;
+    await moveTieredItem({
+      set: lane.set,
+      identity: { ...identity('kitchen'), family: 'file', localItemId: 'personal:kitchen' },
+      target: { metadataTier: queued.targetMetadataTier!, contentTier: queued.targetContentTier! },
+      vectorIdentities: { internal: provider },
+      replaceOwnSupersededCopy: true,
+    });
+    expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ contentTier: 'private', state: 'current' });
+    expect(lane.stores.secure_local!.mediaJudgment(photo.sha256)?.verdict).toBe('ordinary');
+    return { photo, provider };
+  }
+
+  function setJudgment(dbPath: string, sha: string, fields: string): void {
+    const db = new Database(dbPath);
+    try {
+      db.query(`UPDATE media_judgments SET ${fields} WHERE media_sha256 = ?`).run(sha);
+    } finally {
+      db.close();
+    }
+  }
+
+  test('a stale ordinary verdict on the hidden Private copy never outweighs a newer one in Personal', async () => {
+    const lane = openLane(temporaryDir());
+    try {
+      const { photo } = await movedToPersonal(lane);
+      // A newer judge found the picture sensitive in the Personal store (its sweep not yet run).
+      setJudgment(lane.paths.internal, photo.sha256, "verdict = 'sensitive', category = 'id_document', judge_id = 'photo-judge-newer', tier_applied = 0");
+      // The same picture is read again: the newer verdict decides, not the stale one.
+      const relanded = await lane.sink.accept(request('kitchen', photo, `${IMAGE_MEDIA_DESCRIPTOR}\nAGAIN`));
+      releaseMediaCacheFile(photo.path, photo.sha256, photo.stagingHolder);
+      expect(relanded).toMatchObject({ accepted: false, skippedReason: EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED });
+      expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
+      expect(lane.stores.internal!.mediaJudgment(photo.sha256)?.verdict).toBe('sensitive');
+      expect(lane.stores.internal!.searchItems('AGAIN', 5)).toEqual([]);
+    } finally {
+      lane.close();
+    }
+  });
+
+  test('a new judge that cannot read a picture once judged ordinary raises its item back to Private', async () => {
+    const lane = openLane(temporaryDir());
+    try {
+      const { photo } = await movedToPersonal(lane);
+      releaseMediaCacheFile(photo.path, photo.sha256, photo.stagingHolder);
+      // An older judge made the ordinary verdict the Personal copy rests on.
+      setJudgment(lane.paths.internal, photo.sha256, "judge_id = 'photo-judge-older'");
+      await lane.stores.internal!.embedChunks({ provider: new JudgingProvider(new Map(), new Set([photo.sha256])) });
+      expect(judgmentState(lane.paths.internal, photo.sha256)).toEqual({ verdict: 'unjudged', attempts: 1, tier_applied: 0 });
+      const report = applyMediaJudgments({ set: lane.set });
+      expect(report.applied).toBeGreaterThanOrEqual(1);
+      expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
+      expect(lane.ledger.getCurrent(identity('kitchen'))!.reasons).toContain(IMAGE_PRIVATE_DEFAULT_REASON);
+      expect(lane.ledger.copies(identity('kitchen')).find((copy) => copy.trustDomain === 'internal')).toMatchObject({ state: 'superseded' });
+    } finally {
+      lane.close();
+    }
+  });
+});
+
 const realTest = process.env.OLYMPUS_PHOTO_JUDGE_REAL_TEST === '1' ? test : test.skip;
 
 describe('the judge with the real model (opt-in)', () => {

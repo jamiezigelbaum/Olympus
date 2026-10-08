@@ -78,7 +78,15 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
   // names at listing: the set's own classification unless one is given,
   // resolved per landing so an edited map or rules file applies at once.
   const classificationNow = (): ConnectorStoreTierClassification | undefined => options.tierClassification ?? set.classification();
-  const sinkFor = (store: LocalConnectorStore, recordContentTier: boolean, tierClassification: ConnectorStoreTierClassification | undefined): ExtractionSink =>
+  // `contentRulesRan`: the landing has judged the text with the content rules
+  // (classifyContentTier), so the sink may let an ordinary picture rest
+  // outside Private. A legacy landing runs no rules, so it never may.
+  const sinkFor = (
+    store: LocalConnectorStore,
+    recordContentTier: boolean,
+    tierClassification: ConnectorStoreTierClassification | undefined,
+    contentRulesRan: boolean,
+  ): ExtractionSink =>
     createConnectorStoreExtractionSink({
       store,
       classify: (item: RawItem) => buildSourceSensitivity({
@@ -94,7 +102,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ...(options.claims ? { claims: options.claims } : {}),
       ...(tierClassification ? { tierClassification } : {}),
       ...(recordContentTier ? {} : { recordContentTier: false }),
-      mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256),
+      ...(contentRulesRan ? { mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256) } : {}),
     });
 
   return {
@@ -113,7 +121,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if (!ledger.isRouted(identity)) {
         const legacy = legacyStoreFor(set, ref.localItemId, options.home);
         if (!legacy) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        return sinkFor(legacy, true, classificationNow()).accept(request);
+        return sinkFor(legacy, true, classificationNow(), false).accept(request);
       }
 
       const record = ledger.getCurrent(identity);
@@ -213,7 +221,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
-        const result = await sinkFor(contentStore, false, tierClassification).accept(request);
+        const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
         if (result.accepted) ledger.recordRoutedPlacement(identity, decision, placement);
         return result;
       }
@@ -257,7 +265,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           },
         );
       }
-      const result = await sinkFor(contentStore, false, tierClassification).accept(request);
+      const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
       if (!result.accepted) return result;
       ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: record.generation });
       return result;
@@ -266,20 +274,19 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
 }
 
 /**
- * The photo judge's verdict on a picture across the set. Stores can disagree
- * (a superseded copy keeps the judgment it was made under, and a newer judge
- * may since have re-judged the current copy), so ordinary holds only when no
- * store's judgment says otherwise: any sensitive or unjudged verdict wins.
+ * The photo judge's verdict on a picture across the stores of the set. A
+ * store may keep an older verdict (a hidden copy left behind by a move is
+ * never judged again), so the most cautious one wins: sensitive, then
+ * unjudged, and ordinary only when no store holds anything else.
  */
 function setMediaJudgment(set: TieredStoreSet, mediaSha256: string): MediaJudgment | undefined {
-  let ordinary: MediaJudgment | undefined;
+  const rank = { sensitive: 2, unjudged: 1, ordinary: 0 } as const;
+  let chosen: MediaJudgment | undefined;
   for (const domain of [...TIER_DOMAIN_ORDER].reverse()) {
     const judgment = set.store(domain)?.mediaJudgment(mediaSha256);
-    if (!judgment) continue;
-    if (judgment.verdict !== 'ordinary') return judgment;
-    ordinary ??= judgment;
+    if (judgment && (!chosen || rank[judgment.verdict] > rank[chosen.verdict])) chosen = judgment;
   }
-  return ordinary;
+  return chosen;
 }
 
 function skipped(skippedReason: string): ExtractionSinkResult {

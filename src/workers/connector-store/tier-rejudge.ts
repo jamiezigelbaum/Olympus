@@ -138,6 +138,12 @@ export function rejudgeStoredContent(
     report: TierRejudgeReport;
     key?: { engineVersion: string; snifferId: string };
     autoMoves: boolean;
+    /**
+     * Hide the current copies at once on a raise even when moves wait for the
+     * owner (the photo judge: a picture whose ordinary verdict no longer
+     * holds must not stay visible outside Private).
+     */
+    hideRaises?: boolean;
   },
 ): void {
   const { report, key, autoMoves } = options;
@@ -233,7 +239,7 @@ export function rejudgeStoredContent(
     identity,
     decision,
     set.placementFor(decision),
-    autoMoves ? {} : { queueWithoutHiding: true },
+    autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true },
   );
   if (key) ledger.markRejudged(identity, key);
   if (recorded.outcome === 'queued_move') report.movesQueued += 1;

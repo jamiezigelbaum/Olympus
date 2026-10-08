@@ -5203,7 +5203,8 @@ export class LocalConnectorStore {
    * re-decide for it (a judgment that travelled with a copy, or one recorded
    * where the decision was already made with it). An unjudged result counts
    * one more try by the same judge (the first by a new one); a verdict clears
-   * the count. A changed verdict goes to the front of the sweep's queue.
+   * the count. A changed verdict goes to the front of the sweep's queue, and
+   * one that replaces an ordinary verdict is always left for the sweep.
    */
   private writeMediaJudgment(mediaSha256: string, judgment: MediaJudgment, applied: boolean): void {
     if (!this.mediaJudgmentsPresent) return;
@@ -5226,6 +5227,9 @@ export class LocalConnectorStore {
           -- Kept applied only when nothing a tier decision reads has changed.
           WHEN media_judgments.verdict = excluded.verdict
             AND media_judgments.category IS excluded.category THEN MAX(media_judgments.tier_applied, excluded.tier_applied)
+          -- An ordinary verdict that no longer holds: the items it let out of
+          -- Private are re-decided, whatever the writer thought.
+          WHEN media_judgments.verdict = 'ordinary' THEN 0
           ELSE excluded.tier_applied
         END
     `).run(
