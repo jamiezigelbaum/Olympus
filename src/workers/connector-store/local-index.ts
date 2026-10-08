@@ -8477,6 +8477,9 @@ export class LocalConnectorStore {
     // pictures can judge them; with any other, every picture stays unjudged
     // (and its item Private).
     const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
+    // One judgment per picture per pass: several items carrying the same
+    // picture are one try, not several.
+    const judgedThisPass = new Set<string>();
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
@@ -8631,7 +8634,10 @@ export class LocalConnectorStore {
             const judgment = judgedBatch?.get(row.chunk_pk);
             // Unjudged: nothing for the tier set to change unless it replaces
             // another verdict (the upsert leaves that for the sweep).
-            if (judgment && row.media_sha256) this.writeMediaJudgment(row.media_sha256, judgment, judgment.verdict === 'unjudged');
+            if (judgment && row.media_sha256 && !judgedThisPass.has(row.media_sha256)) {
+              judgedThisPass.add(row.media_sha256);
+              this.writeMediaJudgment(row.media_sha256, judgment, judgment.verdict === 'unjudged');
+            }
           }
         }
         if (journalId) {

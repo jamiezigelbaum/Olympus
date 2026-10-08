@@ -24148,6 +24148,7 @@ var init_local_index = __esm(() => {
       let embedded = priorCounts?.chunksEmbedded ?? 0;
       let staleSkipped = heldPictures;
       const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
+      const judgedThisPass = new Set;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
@@ -24259,8 +24260,10 @@ var init_local_index = __esm(() => {
             if (write.changes > 0) {
               written += 1;
               const judgment = judgedBatch?.get(row.chunk_pk);
-              if (judgment && row.media_sha256)
+              if (judgment && row.media_sha256 && !judgedThisPass.has(row.media_sha256)) {
+                judgedThisPass.add(row.media_sha256);
                 this.writeMediaJudgment(row.media_sha256, judgment, judgment.verdict === "unjudged");
+              }
             }
           }
           if (journalId) {
