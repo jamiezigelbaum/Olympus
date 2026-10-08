@@ -227,7 +227,8 @@ export type OlympusDashboardControlParams =
   | {
       /** Start a built-in model's failed install again (ChatGPT's olympus_model_retry). */
       action: 'retry_model';
-      model: 'embedding' | 'answers';
+      /** `transcription`: the owner's Download now for the built-in transcription model. */
+      model: 'embedding' | 'answers' | 'transcription';
     }
   | {
       /**

@@ -42,6 +42,7 @@ import {
 } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import {
   LiteRtImagesUnavailableError,
+  LiteRtPictureEngineFaultError,
   startLiteRtEmbedder,
   type LiteRtEmbedder,
   type LiteRtEmbedderOptions,
@@ -49,6 +50,7 @@ import {
 import {
   EngineFaultError,
   KNOWN_GOOD_JPEG_BASE64,
+  PictureEngineFaultError,
   embedIsolatingPictures,
 } from '../src/workers/source-index/built-in-embedding/litert-isolation.ts';
 import type { EmbeddingBatch, EmbeddingRuntime } from '../src/workers/source-index/built-in-embedding/runtime.ts';
@@ -795,7 +797,7 @@ describe('built-in embedding with a LiteRT model', () => {
 });
 
 /** A helper script that speaks the LiteRT helper's protocol without LiteRT. */
-function fakeHelper(behaviour: 'ok' | 'no-vision' | 'fatal' | 'crash-first-gpu-batch' | 'native-error-on-gpu' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
+function fakeHelper(behaviour: 'ok' | 'no-vision' | 'fatal' | 'crash-first-gpu-batch' | 'native-error-on-gpu' | 'picture-fault' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
   const path = join(temporaryDir(), 'fake-helper.js');
   writeFileSync(path, `
     const settings = JSON.parse(process.argv[2]);
@@ -818,6 +820,7 @@ function fakeHelper(behaviour: 'ok' | 'no-vision' | 'fatal' | 'crash-first-gpu-b
       const texts = items.map((item) => item.text);
       if (behaviour === 'crash-first-gpu-batch' && device === 'gpu') process.exit(3);
       if (behaviour === 'native-error-on-gpu' && device === 'gpu') { console.log(JSON.stringify({ id, error: 'LiteRT-LM could not embed this batch.', native: true })); return; }
+      if (behaviour === 'picture-fault' && items.some((item) => item.image)) { console.log(JSON.stringify({ id, error: 'The image encoder could not read a known-good picture.', native: true, pictures: true })); return; }
       if (texts.includes('bad')) { console.log(JSON.stringify({ id, error: 'Every input must be non-empty text.' })); return; }
       const vectors = new Float32Array(items.length * 2);
       // As the real helper: a picture it cannot read (no encoder, or a bad
@@ -864,7 +867,7 @@ describe('picture failure isolation in the LiteRT helper', () => {
       throw new EngineFaultError('GPU lost');
     }, () => {
       throw new EngineFaultError('GPU lost');
-    })).toThrow(EngineFaultError);
+    })).toThrow(PictureEngineFaultError);
   });
 
   test('a failure with no picture in the batch is the engine\'s, as before', () => {
@@ -935,6 +938,13 @@ describe('the LiteRT helper process', () => {
     await expect(embedder.embed(['bad'])).rejects.toThrow('non-empty text');
     expect(Array.from((await embedder.embed(['abcd']))[0]!)).toEqual([4, 2]);
     expect(embedder.device).toBe('cpu');
+    await embedder.release();
+  });
+
+  test('an encoder failing the known-good picture is its own fault; the helper is replaced and text still embeds', async () => {
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('picture-fault'), { visionTokensPerImage: 140 }));
+    await expect(embedder.embed([{ text: 'abc', image: '/media/a.jpg' }, 'de'])).rejects.toBeInstanceOf(LiteRtPictureEngineFaultError);
+    expect(Array.from((await embedder.embed(['abc']))[0]!)).toEqual([3, 2]);
     await embedder.release();
   });
 

@@ -6,6 +6,7 @@ import {
   DASHBOARD_PREVIEW_NOW,
 } from '../scripts/dashboard-preview.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { builtInTranscriptionDashboardState } from '../src/workers/source-index/built-in-reasoning/transcription-model.ts';
 import { renderDashboardDetailPage } from '../src/workers/dashboard/pages/detail.ts';
 import { renderDashboardHomePage } from '../src/workers/dashboard/pages/home.ts';
 import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
@@ -342,6 +343,72 @@ describe('rule 5: the Models row', () => {
     const ready = render({ state: 'ready' });
     expect(ready).toContain('<summary>Models — Built-in · Ready</summary>');
     expect(ready).not.toContain('class="minstall');
+  });
+
+  test('the built-in transcription model: not needed without audio, its download, and ready', () => {
+    const view = buildDashboardPreviewView('review');
+    const render = (transcription: NonNullable<DashboardRowOptions['modelInstalls']>['transcription']) => dashboardModelsSection(
+      dashboardSourceStates(view, { now: NOW, modelInstalls: { embedding: { kind: 'built_in', state: 'ready' }, ...(transcription ? { transcription } : {}) } }),
+      view,
+    );
+    const none = render(undefined);
+    expect(none).not.toContain('Transcription:');
+    const status = (fields: Partial<Parameters<typeof builtInTranscriptionDashboardState>[0]['status']>) => ({
+      state: 'not_started' as const, modelId: 'm', percent: 0, label: '', bytesDone: 0, bytesTotal: 0, updatedAt: '', ...fields,
+    });
+    const current = (fields: Parameters<typeof status>[0]) => ({ file: 'current' as const, status: status(fields) });
+    const notNeeded = render(builtInTranscriptionDashboardState({ file: 'missing', status: status({}) }));
+    expect(notNeeded).toContain('<li>Transcription: Not needed: no audio in your chosen folders ');
+    expect(notNeeded).toContain('<summary>Models — Built-in · Ready</summary>');
+    const downloading = render(builtInTranscriptionDashboardState(
+      current({ state: 'downloading', percent: 42, bytesDone: 428_000_000, bytesTotal: 1_019_141_728 }),
+      { installing: true },
+    ));
+    expect(downloading).toContain('<summary>Models — Built-in · Getting ready</summary>');
+    expect(downloading).toContain('<li>Transcription: Built-in · Getting ready</li>');
+    expect(downloading).toContain('<p class="sline">Downloading the transcription model · 42% · 0.4 of 1.0 GB</p>');
+    const failed = render(builtInTranscriptionDashboardState(current({
+      state: 'failed', percent: 10,
+      failure: { reason: 'insufficient_space', message: 'x', bytesNeeded: 3, bytesFree: 1, retryAfter: '' },
+    })));
+    expect(failed).toContain('<summary>Models — Built-in · Needs you</summary>');
+    expect(failed).toContain('Couldn&#39;t download the transcription model: the disk is full');
+    const ready = render(builtInTranscriptionDashboardState(current({ state: 'loading', percent: 100 })));
+    expect(ready).toContain('<li>Transcription: Built-in · Ready</li>');
+    expect(ready).not.toContain('class="minstall');
+  });
+
+  test('transcription: a download left behind by a stopped engine, an unreadable or older status file, and a model that will not start', () => {
+    const view = buildDashboardPreviewView('review');
+    const render = (transcription: NonNullable<DashboardRowOptions['modelInstalls']>['transcription']) => dashboardModelsSection(
+      dashboardSourceStates(view, { now: NOW, modelInstalls: { embedding: { kind: 'built_in', state: 'ready' }, ...(transcription ? { transcription } : {}) } }),
+      view,
+    );
+    const status = { state: 'downloading' as const, modelId: 'm', percent: 40, label: '', bytesDone: 4, bytesTotal: 10, updatedAt: '' };
+    // F1: the file says 40% but nothing in this process is downloading.
+    const stale = builtInTranscriptionDashboardState({ file: 'current', status }, { installing: false });
+    expect(stale).toEqual({ state: 'interrupted' });
+    const staleHtml = render(stale);
+    expect(staleHtml).toContain('<li>Transcription: Download stopped before it finished ');
+    expect(staleHtml).toContain('Download now');
+    expect(staleHtml).not.toContain('class="minstall');
+    // F2: unreadable, or written for another model, is not "no audio".
+    const unreadable = builtInTranscriptionDashboardState({ file: 'unreadable', status: { ...status, state: 'not_started' } });
+    expect(unreadable).toEqual({ state: 'not_downloaded' });
+    const unreadableHtml = render(unreadable);
+    expect(unreadableHtml).toContain('<li>Transcription: Not downloaded ');
+    expect(unreadableHtml).toContain('Download now');
+    // F3: downloaded, but its server would not start: Try again, not Download now.
+    const loadFailed = builtInTranscriptionDashboardState({
+      file: 'current',
+      status: { ...status, state: 'failed', failure: { reason: 'runtime_load_failed', message: 'x' } },
+    });
+    expect(loadFailed).toEqual({ state: 'load_failed' });
+    const loadHtml = render(loadFailed);
+    expect(loadHtml).toContain('<li>Transcription: Couldn&#39;t start the transcription model ');
+    expect(loadHtml).toContain('Try again');
+    expect(loadHtml).not.toContain('Download now');
+    expect(loadHtml).toContain('<summary>Models — Built-in · Needs you</summary>');
   });
 
   test('a failed built-in download is a Needs-you item with one Try again', () => {

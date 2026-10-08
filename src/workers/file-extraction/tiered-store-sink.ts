@@ -63,6 +63,12 @@ export interface TieredStoreExtractionSinkOptions {
   ownershipKind: ConnectorStoreOwnershipKind;
   claims?: ExtractionClaimReader;
   tierClassification?: ConnectorStoreTierClassification;
+  /**
+   * The legacy store this sink's corpus serves, in a lane with several: an
+   * item the set never routed lands there when that store holds it, exactly
+   * as the corpus's plain sink did.
+   */
+  home?: SourceTrustDomain;
 }
 
 export function createTieredStoreExtractionSink(options: TieredStoreExtractionSinkOptions): ExtractionSink {
@@ -103,7 +109,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       const identity = stored ?? { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId };
       const ledger = set.ledger;
       if (!ledger.isRouted(identity)) {
-        const legacy = legacyStoreFor(set, ref.localItemId);
+        const legacy = legacyStoreFor(set, ref.localItemId, options.home);
         if (!legacy) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
         return sinkFor(legacy, true, classificationNow()).accept(request);
       }
@@ -185,7 +191,11 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
 
-      const placement = set.placementFor(decision);
+      // A first landing places the item as one whose text arrives after
+      // listing (its names stay), also in a lane where only some items' does.
+      // A re-judgment places it as every caller with only a decision does, so
+      // the two never disagree into a move and back.
+      const placement = set.placementFor(decision, record.contentRead ? {} : { contentArrivesLater: true });
       const contentCopy = placement.copies.find((copy) => copy.layers !== 'metadata');
       const contentStore = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
@@ -254,11 +264,17 @@ function skipped(skippedReason: string): ExtractionSinkResult {
 }
 
 /**
- * The lane's own store that holds a legacy item's row: the first legacy leg
- * with the row, else the first legacy leg (the plain sink then reports the
- * item missing exactly as before).
+ * The lane's own store that holds a legacy item's row: the home store when it
+ * holds it, else the first legacy leg with the row, else the first legacy leg
+ * (the plain sink then reports the item missing exactly as before).
  */
-function legacyStoreFor(set: TieredStoreSet, localItemId: string): LocalConnectorStore | undefined {
+function legacyStoreFor(
+  set: TieredStoreSet,
+  localItemId: string,
+  home?: SourceTrustDomain,
+): LocalConnectorStore | undefined {
+  const homeStore = home !== undefined && set.legSpec(home)?.legacy === true ? set.store(home) : undefined;
+  if (homeStore?.activeLocalItemRow(localItemId)) return homeStore;
   const legacy = TIER_DOMAIN_ORDER
     .filter((domain: SourceTrustDomain) => set.legSpec(domain)?.legacy === true)
     .flatMap((domain) => {

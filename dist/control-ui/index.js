@@ -90,7 +90,10 @@ function mountDashboardController(options) {
     }
     applyWriteCapability();
   }
-  function pendingMessage(action) {
+  function pendingMessage(params) {
+    const action = params.action;
+    if (params.action === "retry_model" && params.model === "transcription")
+      return "Starting…";
     switch (action) {
       case "start_oauth":
         return "Connecting…";
@@ -108,7 +111,10 @@ function mountDashboardController(options) {
         return "Working…";
     }
   }
-  function successMessage(action) {
+  function successMessage(params) {
+    const action = params.action;
+    if (params.action === "retry_model" && params.model === "transcription")
+      return "Started. This row updates as it goes.";
     switch (action) {
       case "connect_api_key":
         return "Key accepted. This card updates when Olympus confirms the connection.";
@@ -263,7 +269,7 @@ function mountDashboardController(options) {
     }
     if (form.hasAttribute("data-model-retry")) {
       const model = form.dataset.modelRetry;
-      return model === "embedding" || model === "answers" ? { action: "retry_model", model } : undefined;
+      return model === "embedding" || model === "answers" || model === "transcription" ? { action: "retry_model", model } : undefined;
     }
     if (form.hasAttribute("data-disconnect-kind")) {
       return {
@@ -346,7 +352,7 @@ function mountDashboardController(options) {
     }
     if (params.action === "start_oauth")
       clearAuthorizationFallback(form);
-    setFormPending(form, true, pendingMessage(params.action));
+    setFormPending(form, true, pendingMessage(params));
     let result;
     try {
       result = await options.transport.control(params);
@@ -410,7 +416,7 @@ function mountDashboardController(options) {
     }
     if (params.action === "cancel_oauth")
       awaitingAuthorizationReturn = false;
-    say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params.action) : unreleasedMessage(params.action));
+    say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params) : unreleasedMessage(params.action));
     await refreshNow(false, released);
   }
   function agentParams(form) {

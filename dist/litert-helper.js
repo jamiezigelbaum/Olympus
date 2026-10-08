@@ -8,6 +8,9 @@ var KNOWN_GOOD_JPEG_BASE64 = "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAA
 
 class EngineFaultError extends Error {
 }
+
+class PictureEngineFaultError extends EngineFaultError {
+}
 function embedIsolatingPictures(indexes, hasImage, run, probeKnownGoodPicture) {
   if (indexes.length === 0)
     return [];
@@ -31,8 +34,15 @@ function embedIsolatingPictures(indexes, hasImage, run, probeKnownGoodPicture) {
       failed.push(index);
     }
   }
-  if (failed.length > 0)
-    probeKnownGoodPicture();
+  if (failed.length > 0) {
+    try {
+      probeKnownGoodPicture();
+    } catch (error) {
+      if (!(error instanceof EngineFaultError))
+        throw error;
+      throw new PictureEngineFaultError(`The image encoder could not read a known-good picture: ${error.message}`);
+    }
+  }
   return failed;
 }
 
@@ -273,7 +283,12 @@ function main() {
         ...unsupported.length > 0 ? { unsupported } : {}
       });
     } catch (error) {
-      send({ id, error: error instanceof Error ? error.message : String(error), ...error instanceof NativeError ? { native: true } : {} });
+      send({
+        id,
+        error: error instanceof Error ? error.message : String(error),
+        ...error instanceof EngineFaultError ? { native: true } : {},
+        ...error instanceof PictureEngineFaultError ? { pictures: true } : {}
+      });
     }
   });
   lines.on("close", () => process.exit(0));

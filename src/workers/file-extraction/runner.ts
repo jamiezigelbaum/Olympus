@@ -44,6 +44,7 @@
 
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
+import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { releaseMediaCacheFile } from '../../core/media-cache.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { isModelEndpointRedirectError } from '../../core/model-transport.ts';
@@ -56,6 +57,7 @@ import { isFileExtractionSourceError } from '../../core/file-extraction-source.t
 import {
   ExtractionCommandTimeoutError,
 } from './extractors/command-runner.ts';
+import { isImageMediaType } from '../classification/tier-classifier.ts';
 import { resolveExtractionMimeType } from './extractors/bounded-text.ts';
 import type {
   ExtractionLaneKey,
@@ -116,6 +118,10 @@ export const EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = 'extractor_empty_output';
 export const EXTRACTION_ERROR_KIND_SINK_FAILED = 'sink_write_failed';
 export const EXTRACTION_ERROR_KIND_LEASE_LOST = 'lease_lost';
 export const EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = 'source_scope_superseded';
+// A throw escaped one job's settlement path; that job settles retryable and the batch goes on.
+export const EXTRACTION_ERROR_KIND_INTERNAL_ERROR = 'extraction_internal_error';
+// The store refused the outcome as written (for example an invalid error kind); recorded again plainly.
+export const EXTRACTION_ERROR_KIND_RECORD_REFUSED = 'extraction_record_refused';
 
 /**
  * Egress refusals, split by WHY rather than collapsed into one token. An
@@ -243,6 +249,13 @@ export interface ExtractionRunnerCorpus {
   authorization?: {
     assertCurrent(ref: ExtractionItemRef): void | Promise<void>;
   };
+  /**
+   * Whether the sink would refuse this item's picture content (a still image
+   * whose content can only land in a store that is not Private). Such an item
+   * is not queued at all: refusing it at the sink would cost the download and
+   * the reading first. The sink still refuses it either way.
+   */
+  refusesImageContent?: (ref: ExtractionItemRef) => boolean;
 }
 
 export interface FileExtractionRunnerOptions {
@@ -288,11 +301,19 @@ export interface ExtractionPlanResult {
   jobsSkippedTooLarge: number;
   jobsUnroutable: number;
   /**
-   * Candidates whose bucket the job store refused (an extractor kind or
-   * version it does not accept). Counted, never thrown: one bad bucket must
-   * not keep every other candidate of the lane from being queued.
+   * Candidates that could not be queued: their bucket's extractor kind or
+   * version was refused by the job store, one of their own fields was, or
+   * routing them threw. Counted, never thrown: one bad item or bucket must not
+   * keep every other candidate of the lane from being queued.
    */
   jobsRefused: number;
+  // jobsRefused split by categorical reason, one of the PLAN_REFUSED constants. Present only when non-zero.
+  jobsRefusedByReason?: Readonly<Record<string, number>>;
+  /**
+   * Still images not queued because their picture content has no Private
+   * store to land in.
+   */
+  jobsSkippedImageNotPrivate?: number;
   extractorKinds: readonly string[];
   nextCursor?: string;
   done: boolean;
@@ -595,6 +616,10 @@ export function createFileExtractionRunner(
      * A candidate the registry cannot route is COUNTED, never thrown on: an
      * unroutable media type in one row is a fact about that row, and a plan
      * pass that died on it would keep an entire corpus from ever being queued.
+     * The same holds for a candidate or bucket the job store refuses, and for
+     * a routing throw: counted in jobsRefused with a categorical reason and
+     * one bounded log line per bucket, never thrown (2026-10-07: one refused
+     * photo version stopped every extraction pass of a source for 77 minutes).
      */
     async plan(request: ExtractionPlanRequest): Promise<ExtractionPlanResult> {
       const corpus = requireCorpus(request.corpusId);
@@ -611,13 +636,31 @@ export function createFileExtractionRunner(
       // that media type.
       const byKind = new Map<string, { kind: string; version: string; refs: ExtractionItemRef[] }>();
       let jobsUnroutable = 0;
+      let jobsSkippedImageNotPrivate = 0;
+      const refused = new Map<string, number>();
+      const refuse = (reason: string, count: number): void => {
+        refused.set(reason, (refused.get(reason) ?? 0) + count);
+      };
       for (const ref of page.candidates) {
-        const extractor = registry.select(ref, request.extractorKind);
-        if (!extractor) {
-          jobsUnroutable += 1;
+        if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
+          jobsSkippedImageNotPrivate += 1;
           continue;
         }
-        const version = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
+        let extractor: Extractor | undefined;
+        let version: string;
+        try {
+          extractor = registry.select(ref, request.extractorKind);
+          if (!extractor) {
+            jobsUnroutable += 1;
+            continue;
+          }
+          version = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
+        } catch (error) {
+          // Routing is code, and a throw in it is about this one candidate.
+          refuse(PLAN_REFUSED_ROUTING_FAILED, 1);
+          logPlanRefusal(request.corpusId, extractor?.kind ?? 'unrouted', PLAN_REFUSED_ROUTING_FAILED, 1, error);
+          continue;
+        }
         const key = `${extractor.kind}\u0000${version}`;
         const bucket = byKind.get(key);
         if (bucket) bucket.refs.push(ref);
@@ -628,45 +671,67 @@ export function createFileExtractionRunner(
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
-      let jobsRefused = 0;
       for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
-        let result: ReturnType<typeof jobs.enqueue>;
+        const enqueue = (bucketRefs: readonly ExtractionItemRef[]): ReturnType<typeof jobs.enqueue> => jobs.enqueue({
+          refs: bucketRefs,
+          extractorKind,
+          extractorVersion,
+          // Omitted means "this pass has nothing to say about policy", which the
+          // store keeps distinct from asserting the permissive value: a re-plan
+          // that names no decision must not rewrite a stored needs_review.
+          ...(request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {}),
+          ...(request.priority !== undefined ? { priority: request.priority } : {}),
+          ...(request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {}),
+          ...(request.force !== undefined ? { force: request.force } : {}),
+        });
+        const results: Array<ReturnType<typeof jobs.enqueue>> = [];
         try {
-          result = jobs.enqueue({
-            refs,
-            extractorKind,
-            extractorVersion,
-            // Omitted means "this pass has nothing to say about policy", which the
-            // store keeps distinct from asserting the permissive value: a re-plan
-            // that names no decision must not rewrite a stored needs_review.
-            ...(request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {}),
-            ...(request.priority !== undefined ? { priority: request.priority } : {}),
-            ...(request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {}),
-            ...(request.force !== undefined ? { force: request.force } : {}),
-          });
+          results.push(enqueue(refs));
         } catch (error) {
-          // A bucket refused for its own extractor kind or version is counted
-          // and reported, and the rest of the pass goes on. Anything else (a
-          // request-wide value such as priority, or a database fault) is not one
-          // bucket's fault: it still fails the plan.
-          if (!(error instanceof ExtractionJobFieldError)
-            || (error.field !== 'extractorKind' && error.field !== 'extractorVersion')) throw error;
-          jobsRefused += refs.length;
-          console.error(
-            `[olympus:file-extraction] plan_bucket_refused corpus_id=${request.corpusId} extractor_kind=${extractorKind} `
-            + `candidates=${refs.length} reason=${boundedErrorMessage(error)}`,
-          );
-          continue;
+          // A refusal of the bucket's own extractor kind or version is that
+          // bucket's alone: count it, report it, and go on. A refusal of one
+          // item's field rolls the whole bucket's transaction back, so retry
+          // the bucket's refs one at a time and count only the refs that are
+          // still refused. Anything else (a request-wide value such as
+          // priority, or a database fault) is no bucket's fault: it still
+          // fails the plan.
+          const reason = planRefusalReason(error);
+          if (reason === undefined) throw error;
+          if (reason !== PLAN_REFUSED_ITEM_FIELD) {
+            refuse(reason, refs.length);
+            logPlanRefusal(request.corpusId, extractorKind, reason, refs.length, error);
+            continue;
+          }
+          let refusedRefs = 0;
+          let firstRefusal: unknown;
+          for (const ref of refs) {
+            try {
+              results.push(enqueue([ref]));
+            } catch (refError) {
+              if (planRefusalReason(refError) !== PLAN_REFUSED_ITEM_FIELD) throw refError;
+              refusedRefs += 1;
+              firstRefusal ??= refError;
+            }
+          }
+          if (refusedRefs > 0) {
+            refuse(PLAN_REFUSED_ITEM_FIELD, refusedRefs);
+            logPlanRefusal(request.corpusId, extractorKind, PLAN_REFUSED_ITEM_FIELD, refusedRefs, firstRefusal);
+          }
         }
-        jobsQueued += result.jobsQueued;
+        for (const result of results) {
+          jobsQueued += result.jobsQueued;
+          jobsExisting += result.jobsExisting;
+          jobsForced += result.jobsForced;
+          jobsSkippedTooLarge += result.jobsSkippedTooLarge;
+        }
         // Newly catalogued items for a lane whose reader is not installed
         // yet (for example the first audio file in the owner's chosen
         // sources): start getting it ready now, not when a job is leased.
-        if (result.jobsQueued > 0) prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
-        jobsExisting += result.jobsExisting;
-        jobsForced += result.jobsForced;
-        jobsSkippedTooLarge += result.jobsSkippedTooLarge;
+        if (results.some((result) => result.jobsQueued > 0)) {
+          prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
+        }
       }
+      const jobsRefused = [...refused.values()].reduce((total, count) => total + count, 0);
 
       return {
         kind: 'file_extraction_plan',
@@ -678,6 +743,8 @@ export function createFileExtractionRunner(
         jobsSkippedTooLarge,
         jobsUnroutable,
         jobsRefused,
+        ...(refused.size > 0 ? { jobsRefusedByReason: Object.fromEntries(refused) } : {}),
+        ...(jobsSkippedImageNotPrivate > 0 ? { jobsSkippedImageNotPrivate } : {}),
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
         done: page.done,
@@ -868,12 +935,30 @@ interface SettleOneJobInput {
  */
 async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
   const staged: { media?: ExtractedMedia } = {};
+  let outcome: JobOutcome;
   try {
-    return await settleOneJobHeld(input, staged);
-  } finally {
+    outcome = await settleOneJobHeld(input, staged);
+  } catch (error) {
+    // Every expected failure above already settles as a value. A throw that
+    // still escapes is a defect in this job's path, and it settles THIS job
+    // retryable so the rest of the batch runs (the lane's breaker still sees it).
+    console.error(
+      `[olympus:file-extraction] job_internal_error job_id=${input.job.jobId} extractor_kind=${input.job.extractorKind} `
+      + `reason=${boundedLogErrorMessage(error)}`,
+    );
+    outcome = retryable(EXTRACTION_ERROR_KIND_INTERNAL_ERROR, error);
+  }
+  try {
     const media = staged.media;
     if (media?.stagingHolder) releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname(media.path));
+  } catch (error) {
+    // The job's outcome is already decided; a hold that could not be released
+    // is left for the media-cache sweep, which removes stale staging holds.
+    console.error(
+      `[olympus:file-extraction] media_release_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error)}`,
+    );
   }
+  return outcome;
 }
 
 async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: ExtractedMedia }): Promise<JobOutcome> {
@@ -1147,18 +1232,57 @@ async function recordOutcome(
       ...(outcome.leaseExpired ? { leaseLost: true } : {}),
     };
   } catch (error) {
-    if (!isLostLeaseRecordError(error)) throw error;
-    // Somebody else holds this job now. Report it as retryable WITHOUT another
-    // write: the current holder owns the row, and a second attempt here would
-    // overwrite their result with ours.
-    return {
-      ...base,
-      status: 'failed_retryable',
-      attempts: job.attempts,
-      errorKind: EXTRACTION_ERROR_KIND_LEASE_LOST,
-      leaseLost: true,
-    };
+    if (isLostLeaseRecordError(error)) return lostLeaseRecord(base, job);
+    // The store refused this outcome as written (an extractor-supplied error
+    // kind that is not a safe token, a derivation it will not take). That is
+    // this job's problem, not the batch's: record it once more as a plain
+    // retryable failure. A second refusal is the store itself failing, and
+    // that still propagates.
+    console.error(
+      `[olympus:file-extraction] record_refused job_id=${job.jobId} extractor_kind=${job.extractorKind} `
+      + `status=${outcome.status} reason=${boundedLogErrorMessage(error)}`,
+    );
+    try {
+      const result = jobs.record({
+        jobId: job.jobId,
+        workerId,
+        leaseToken: job.leaseToken,
+        status: 'failed_retryable',
+        errorKind: EXTRACTION_ERROR_KIND_RECORD_REFUSED,
+        errorHash: hashError(error),
+        tempBytesCleaned: true,
+      });
+      return {
+        ...base,
+        status: result.status,
+        attempts: result.attempts,
+        errorKind: EXTRACTION_ERROR_KIND_RECORD_REFUSED,
+        ...(result.nextRetryAt !== undefined ? { nextRetryAt: result.nextRetryAt } : {}),
+        artifactsRecorded: result.artifactsRecorded,
+      };
+    } catch (fallbackError) {
+      if (isLostLeaseRecordError(fallbackError)) return lostLeaseRecord(base, job);
+      throw fallbackError;
+    }
   }
+}
+
+/**
+ * Somebody else holds this job now. Report it as retryable WITHOUT another
+ * write: the current holder owns the row, and a second attempt here would
+ * overwrite their result with ours.
+ */
+function lostLeaseRecord(
+  base: Pick<ExtractionRunRecord, 'jobId' | 'extractorKind' | 'extractorVersion'>,
+  job: LeasedExtractionJob,
+): ExtractionRunRecord {
+  return {
+    ...base,
+    status: 'failed_retryable',
+    attempts: job.attempts,
+    errorKind: EXTRACTION_ERROR_KIND_LEASE_LOST,
+    leaseLost: true,
+  };
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -1332,13 +1456,37 @@ function summarizeEgressDestinations(
   return { egressDestination: 'venice_mixed_approved' };
 }
 
+// Plan refusal reasons, the keys of ExtractionPlanResult.jobsRefusedByReason.
+export const PLAN_REFUSED_EXTRACTOR_KIND = 'extractor_kind_refused';
+export const PLAN_REFUSED_EXTRACTOR_VERSION = 'extractor_version_refused';
+export const PLAN_REFUSED_ITEM_FIELD = 'item_field_refused';
+export const PLAN_REFUSED_ROUTING_FAILED = 'routing_failed';
+
 /**
- * An error's message for an operator log line: one line, at most 200
- * characters.
+ * Fields of one candidate's ref. A refusal of one of these is about that item
+ * alone; a refusal of any other field (priority, maxBytesPerFile, policy) is
+ * request-wide and fails the plan.
  */
-function boundedErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return JSON.stringify(message.split('\n').join(' ').slice(0, 200));
+const ITEM_REF_FIELDS: ReadonlySet<string> = new Set([
+  'corpusId', 'provider', 'accountScope', 'approvedScopeKey', 'providerItemId', 'localItemId',
+  'sourceVersion', 'contentHash', 'name', 'mimeType', 'sizeBytes',
+]);
+
+function planRefusalReason(error: unknown): string | undefined {
+  if (!(error instanceof ExtractionJobFieldError)) return undefined;
+  if (error.field === 'extractorKind') return PLAN_REFUSED_EXTRACTOR_KIND;
+  if (error.field === 'extractorVersion') return PLAN_REFUSED_EXTRACTOR_VERSION;
+  if (ITEM_REF_FIELDS.has(error.field)) return PLAN_REFUSED_ITEM_FIELD;
+  return undefined;
+}
+
+function logPlanRefusal(corpusId: string, extractorKind: string, reason: string, count: number, error: unknown): void {
+  // The field name is code-authored; the message is bounded and redacted.
+  const field = error instanceof ExtractionJobFieldError ? ` field=${error.field}` : '';
+  console.error(
+    `[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} `
+    + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error)}`,
+  );
 }
 
 function hashToken(value: string): string {
@@ -1485,3 +1633,16 @@ const PDF_DRAIN_PLAN_PAGE = 500;
 // One job per lease: a scan can take a text pass plus an OCR pass, so the
 // deadline is checked between single jobs rather than after a long batch.
 const PDF_DRAIN_BATCH = 1;
+
+/**
+ * Whether the corpus's sink would refuse this item's picture content. A
+ * check that throws is about this one item and leaves it to the sink, which
+ * refuses it there just the same.
+ */
+function refusesImageContent(corpus: ExtractionRunnerCorpus, ref: ExtractionItemRef): boolean {
+  try {
+    return corpus.refusesImageContent?.(ref) === true;
+  } catch {
+    return false;
+  }
+}

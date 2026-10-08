@@ -70,6 +70,11 @@ import {
   workerAuthTokenFromEnv,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
+import {
+  builtInTranscriptionDashboardState,
+  builtInTranscriptionEnabled,
+  readBuiltInTranscriptionStatusFile,
+} from '../source-index/built-in-reasoning/transcription-model.ts';
 import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscriptionAtBoot } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
   answerPrivately,
@@ -130,6 +135,7 @@ import {
   createGmailDailyRequestBudget,
   createGoogleDriveConnectorStoreSyncHandler,
   createGoogleDriveDailyRequestBudget,
+  createGoogleDriveLaneTierSet,
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
   defaultGmailSecureConnectorStoreDbPath,
@@ -2656,20 +2662,51 @@ export async function main(): Promise<void> {
     }
     fileSourceScopeAuthority.assertCurrent(ref);
   };
+  // The Drive lane's pictures are read by the factory, not its listing: the
+  // factory lands their content by the same routing as the lane's sync, over
+  // the same stores and ledger. The sync's own set stays the one the ledger's
+  // background passes find.
+  const googleDriveExtractionTierSet = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+    ? createGoogleDriveLaneTierSet({
+        setId: 'google_drive.extraction',
+        internalStore: googleDriveInternalConnectorStore,
+        secureStore: googleDriveSecureConnectorStore,
+        ...(googleDriveTierLane?.publicStore
+          ? {
+              publicLeg: {
+                corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+                open: () => googleDriveTierLane.publicStore!.open(),
+                exists: () => googleDriveTierLane.publicStore!.exists(),
+              },
+            }
+          : {}),
+        ...(googleDriveTierLane?.secrets ? { secretLocations: googleDriveTierLane.secrets } : {}),
+        registerWithLedger: false,
+      })
+    : undefined;
+  const fileExtractionTierSets = new Map<string, TieredStoreSet>([
+    // The Dropbox lane reads and lands text across its tier stores.
+    ...(dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set] as const] : []),
+    // Each Drive store's corpus lists its own store (and the Private one the
+    // routed-only Public store too).
+    ...(googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+      ? [
+          [googleDriveInternalConnectorStore.corpusId, googleDriveExtractionTierSet] as const,
+          [googleDriveSecureConnectorStore.corpusId, googleDriveExtractionTierSet] as const,
+        ]
+      : []),
+  ]);
   const fileExtractionRuntime = createFileExtractionRuntime({
     env: process.env,
     enabled: fileExtractionCorpora.length > 0,
     connectorStores,
     corpora: fileExtractionCorpora,
-    // The Dropbox lane reads and lands text across its tier stores.
-    ...(dropboxTierLane
-      ? { tierSets: new Map([[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]]) }
-      : {}),
+    ...(fileExtractionTierSets.size > 0 ? { tierSets: fileExtractionTierSets } : {}),
     scopeGuard: {
       assertAuthorized({ config }) {
         assertFileSourceScopeCurrent(config.provider);
       },
-      allowsRef({ config, store, ref }) {
+      allowsRef({ config, reader, ref }) {
         const sourceId = config.provider === 'dropbox'
           ? 'dropbox.files' as const
           : config.provider === 'google_drive'
@@ -2679,10 +2716,7 @@ export async function main(): Promise<void> {
         const approval = fileSourceScopeAuthority?.snapshot(sourceId);
         if (!approval) return false;
         const scope = fileSourceScopeContentFilters(approval);
-        // A Dropbox file's row may sit in any of the lane's tier stores.
-        const reader = sourceId === 'dropbox.files' && store === dropboxConnectorStore && dropboxExtractionView
-          ? dropboxExtractionView
-          : store;
+        // The row may sit in any of the lane's tier stores: the corpus reads it through its view.
         return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
       },
     },
@@ -4241,9 +4275,19 @@ export async function main(): Promise<void> {
             modelInstalls: () => {
               const embedding = chatgptEmbeddingState();
               const privateModel = chatgptPrivateModelState();
-              return { ...(embedding ? { embedding } : {}), ...(privateModel ? { privateModel } : {}) };
+              const transcription = dashboardTranscriptionState();
+              return {
+                ...(embedding ? { embedding } : {}),
+                ...(privateModel ? { privateModel } : {}),
+                ...(transcription ? { transcription } : {}),
+              };
             },
             retryModel: (model) => chatgptSetup.retryModel(model),
+            downloadTranscriptionModel: () => {
+              const engine = process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env);
+              const state = engine?.downloadNow?.() ?? 'unavailable';
+              return state === 'pending' ? 'started' : state;
+            },
             stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
@@ -4691,6 +4735,20 @@ export async function main(): Promise<void> {
       bytesTotal: status.bytesTotal,
       ...(status.state === 'failed' ? { failedReason: modelInstallFailedReason(status.failure) } : {}),
     };
+  };
+  // The built-in transcription model, where it is this machine's transcriber
+  // (no owner command, enabled here): its status file, read without starting
+  // anything. A model never started reads "not needed" (no audio chosen).
+  const dashboardTranscriptionState = () => {
+    if (process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || !builtInTranscriptionEnabled(process.env)) return undefined;
+    try {
+      const engine = sharedBuiltInTranscriber(process.env);
+      return builtInTranscriptionDashboardState(readBuiltInTranscriptionStatusFile(process.env), {
+        installing: engine?.installing?.() === true,
+      });
+    } catch {
+      return undefined;
+    }
   };
   const chatgptEmbeddingState = () => {
     const builtIn = (['public_safe', 'internal', 'secure_local'] as const)
