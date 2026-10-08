@@ -471,7 +471,7 @@ describe('writer outcomes and the gate', () => {
     expect(h.orchestrator.recentQuestions).toEqual([]);
   });
 
-  test('the owner\'s own question reaches the gate apart from the snapshot: a place the owner typed may go out at the unnamed level, one the owner did not type may not', async () => {
+  test('the question ChatGPT sent reaches the gate apart from the snapshot: a place in it may go out at the unnamed level, one not in it (or past the writer\'s cut) may not', async () => {
     const evidence = [{ title: 'Letter of intent', trust_domain: 'secure_local', chunks: ['The buyer will sign the deed before the notary in Catalonia.'] }];
     const asked = 'Who usually pays the notary fees in Catalonia?';
     const run = async (ownerQuestion: string) => {
@@ -487,6 +487,11 @@ describe('writer outcomes and the gate', () => {
     const untyped = await run('How are notary fees usually split between buyer and seller?');
     expect(untyped.transport.sessions[0]!.sends).toEqual([]);
     expect(untyped.logs.some((line) => line.includes('outcome=gate_refused code=snapshot_name'))).toBe(true);
+    // Past the writer's 1,000-character cut, the place is not exempt; the copy check still reads it.
+    const long = await run(`${'Please answer carefully. '.repeat(45)}How are notary fees split in Catalonia?`);
+    expect(long.writer.calls[0]!.question).not.toContain('Catalonia');
+    expect(long.transport.sessions[0]!.sends).toEqual([]);
+    expect(long.logs.some((line) => line.includes('outcome=gate_refused code=snapshot_name'))).toBe(true);
   });
 
   test('a skipped, declined, killed or failed writer ends the consult without a send', async () => {

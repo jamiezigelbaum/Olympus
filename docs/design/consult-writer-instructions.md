@@ -416,34 +416,38 @@ through"); the full list is the comment on
   Tanneurs", "Grace called"), a capitalized label or quoted value
   ("Reporter: 'Fenwick'"), and a word of a title, path, author or account
   value stay protected;
-- the owner's own words (owner ruling, 2026-10-08): a word or phrase that
-  appears in the owner's own question is not private evidence, since the
-  owner already sent it to ChatGPT. The orchestrator passes that question to
-  the gate apart from the snapshot (`ownerQuestionTexts`), and at this level
-  only its words are exempt from the name, place and figure rules:
-  "Catalonia" typed by the owner may go out even though the documents also
-  name it. Only the exact words count, never their neighbours: typing
-  "Lopez" does not unlock "Maria Lopez", and a name pair is exempt only if
-  the owner wrote it side by side. The owner's wording is not exempt: the
-  zkAPI model's provider also sees the owner's ChatGPT conversation, so a
-  copied sentence would link the anonymous request to the owner. At both
-  levels a request repeating four consecutive words of the owner's question
-  (two of them content words), or four consecutive content words, is refused
-  (`owner_question_copy`), and the other copy rules compare against the
-  owner's question as before. A figure the owner typed may be repeated when it has at most
-  three digits, or when the request writes it with its currency or unit
-  every time ("450 euros"); a number inside a phone, account or ID-like digit
-  run gives no exemption. The full rule is the comment on
-  `CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS`.
+- words of the question ChatGPT sent (owner ruling, 2026-10-08): that
+  question is ChatGPT's tool argument, which OpenAI already holds, so a word
+  of it is not private evidence. The orchestrator passes it to the gate apart
+  from the snapshot: the part the writer saw (`askedQuestionTexts`, cut at
+  1,000 characters) for the exemptions, and the whole retained question
+  (`askedQuestionFullTexts`) for the copy check. At this level only, its
+  words are exempt from the name, place and figure rules: "Catalonia" in the
+  question may go out even though the documents also name it. Only the exact
+  words count, never their neighbours: "Lopez" does not unlock "Maria Lopez",
+  and a name pair is exempt only if the question has it side by side.
+  Its wording is not exempt: the zkAPI model's provider also sees the ChatGPT
+  conversation, so a copied phrase would link the anonymous request to the
+  owner. At both levels a request is refused (`owner_question_copy`) when it
+  repeats, in any order, four consecutive words of the question with two or
+  more content words, or four consecutive content words, reading number
+  words as digits on both sides; the other copy rules compare against the
+  question as before. A figure from the question may be repeated only as an
+  amount: at most three digits, or written with its currency or unit next to
+  it both in the question and in the request every time ("450 euros"); never
+  a year-like 19xx or 20xx, and never a number inside a phone, account or
+  ID-like digit run or glued to letters. The joint-digit rule always
+  applies. The full rule is the comment on
+  `CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS`.
 
-Personal names outside the dictionaries (unless the owner typed them), exact
-dates and years, ages, exact amounts, account, phone and ID numbers,
-addresses, mail addresses and handles are refused exactly as at the general
-level. Typed by the owner or not, these stay refused at both levels: mail
+Personal names outside the dictionaries (unless the question ChatGPT sent
+holds them), exact dates and years, ages, exact amounts, account, phone and
+ID numbers, addresses, mail addresses and handles are refused exactly as at
+the general level. In the question or not, these stay refused at both levels: mail
 addresses, phone numbers, account, IBAN and ID numbers, street addresses,
 exact dates and bare years, secrets and handles, and whole identifier values
 such as references. The writer's rules above are unchanged: it should still
-leave out a place the answer does not need, even one the owner typed. Addresses are also protected
+leave out a place the answer does not need, even one the question names. Addresses are also protected
 as spans at both levels, whatever their capitalization (review round 2): a
 house number within five words of a street word ("7 Park street", "Rua da
 Rosa 12", "7 rue des Tanneurs") refuses a question that repeats the number

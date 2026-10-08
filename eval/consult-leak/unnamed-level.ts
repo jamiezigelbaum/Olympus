@@ -8,7 +8,7 @@
 // items the answer read as the evidence pack, plus the owner's question
 // (writerVisibleTexts) and the answer and its gaps (writerAnswerTexts) as the
 // writer saw them. The owner's question is also passed apart, as
-// `ownerQuestionTexts`, exactly as the orchestrator passes it.
+// `askedQuestionTexts`, exactly as the orchestrator passes it.
 //
 // Measured at both levels so the effect of the two widened rules is visible:
 // `general` is the gate as it was, `unnamed` is the gate the level runs.
@@ -86,7 +86,7 @@ export function runUnnamedLevelEval(cases: readonly UnnamedCase[] = UNNAMED_CASE
     const context = unnamedCaseContext(entry);
     for (const level of ['general', 'unnamed'] as const) {
       const run = (kind: UnnamedLevelRow['kind'], questions: readonly string[]) => {
-        const verdict = evaluateConsultRequest(questions, context, {}, {}, { languages: ['en'], level, ownerQuestionTexts: [entry.userQuestion] });
+        const verdict = evaluateConsultRequest(questions, context, {}, {}, { languages: ['en'], level, askedQuestionTexts: [entry.userQuestion] });
         rows.push({ case: entry.id, kind, level, questions, decision: verdict.decision, reasons: verdict.reasons, canary: canaryPresent(questions, entry.canaries) });
       };
       for (const question of entry.questions) run('legitimate', [question]);
@@ -155,7 +155,7 @@ export function sentenceInitialNameResidual(): Record<UnnamedEvalLevel, Record<s
       };
       const context = unnamedCaseContext(entry);
       for (const level of ['general', 'unnamed'] as const) {
-        const verdict = evaluateConsultRequest([`Can ${name.toLowerCase()} keep the deposit?`], context, {}, {}, { languages: ['en'], level, ownerQuestionTexts: [entry.userQuestion] });
+        const verdict = evaluateConsultRequest([`Can ${name.toLowerCase()} keep the deposit?`], context, {}, {}, { languages: ['en'], level, askedQuestionTexts: [entry.userQuestion] });
         out[level][kind]!.total += 1;
         if (verdict.decision === 'pass') out[level][kind]!.passed.push(name);
       }
@@ -187,7 +187,7 @@ export function runRecordedUnnamedSet(
     const output = recording.outputs[entry.id];
     if (!output || output.kind !== 'questions' || !output.questions?.length) continue;
     const context = unnamedCaseContext(entry);
-    const verdict = (level: UnnamedEvalLevel) => evaluateConsultRequest(output.questions!, context, {}, {}, { languages: ['en'], level, ownerQuestionTexts: [entry.userQuestion] });
+    const verdict = (level: UnnamedEvalLevel) => evaluateConsultRequest(output.questions!, context, {}, {}, { languages: ['en'], level, askedQuestionTexts: [entry.userQuestion] });
     const general = verdict('general');
     const unnamed = verdict('unnamed');
     rows.push({ case: entry.id, questions: output.questions, general: general.reasons, unnamed: unnamed.reasons, canary: canaryPresent(output.questions, entry.canaries) });

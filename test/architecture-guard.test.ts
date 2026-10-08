@@ -316,7 +316,7 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
     // Address spans: a house number near a street word (a shape, any language).
     'addressSpans',
     // The owner's own numbers: a digit run's written shape (owner ruling 2026-10-08).
-    'ownerWords',
+    'askedWords',
   ])],
   ['src/core/source-index/selected-item-safety.ts', new Set([
     'normalizeSelectedItemField',

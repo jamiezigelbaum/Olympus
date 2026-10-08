@@ -126,7 +126,7 @@ export function scoreReidOutput(entry: ReidCase, output: ReidOutput | undefined)
   let gate: ReidScore['gate'] = 'not_sent';
   let gateReasons: readonly ConsultGateReason[] = [];
   if (questions.length > 0) {
-    const verdict = evaluateConsultRequest(questions, reidCaseContext(entry), {}, {}, { languages: ['en'], level: 'unnamed', ownerQuestionTexts: [entry.userQuestion] });
+    const verdict = evaluateConsultRequest(questions, reidCaseContext(entry), {}, {}, { languages: ['en'], level: 'unnamed', askedQuestionTexts: [entry.userQuestion] });
     gate = verdict.decision;
     gateReasons = verdict.reasons;
   }

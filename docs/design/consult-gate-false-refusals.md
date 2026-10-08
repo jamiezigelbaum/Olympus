@@ -141,17 +141,19 @@ a zero fraction ("2,400.00") was keyed only as "240000" and "24", so "2,400"
 in a question was not matched; it now also keys as "2400" and is refused.
 This tightens the general level too.
 
-**The owner's own words (2026-10-08, unnamed level only).** A live consult
-was refused for "Catalonia", a place the owner had typed in the question
-ChatGPT already received. Owner ruling: a word or phrase of the owner's own
-question is exempt from the name and figure rules at the unnamed level;
-hard identifiers stay refused at both levels, and copying the owner's
-wording is refused at both levels as `owner_question_copy` (four
-consecutive words, two of them content words, or four consecutive content
-words), since the provider also sees the owner's conversation (rule:
-`CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS` in
-`src/core/consult-gate.ts`). The evals now pass the owner's question to the
-gate as the orchestrator does (`ownerQuestionTexts`).
+**Words of the question ChatGPT sent (2026-10-08, unnamed level only).** A
+live consult was refused for "Catalonia", a place named in the question
+ChatGPT already sent. Owner ruling: a word of that question is exempt from
+the name and figure rules at the unnamed level; hard identifiers stay
+refused at both levels, and copying its wording is refused at both levels as
+`owner_question_copy` (any four-word window with two content words, or four
+content words, in any order, number words read as digits), since the
+provider also sees the conversation (rule:
+`CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS` in
+`src/core/consult-gate.ts`). The evals now pass the question to the gate as
+the orchestrator does (`askedQuestionTexts`). Review round 1 (account numbers
+as amounts, number words, reordering, the whole retained question) left
+every number below unchanged.
 
 | unnamed level | before | after |
 |---|---|---|

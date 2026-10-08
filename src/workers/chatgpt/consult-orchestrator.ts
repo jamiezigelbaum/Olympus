@@ -329,10 +329,16 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question], writerAnswerTexts: [bounded.answer, ...bounded.gaps] }),
       {},
       { recentApprovedQuestions: [...recent] },
-      // The owner's own question, named apart from the snapshot: at the
-      // unnamed level a word the owner typed may go out (consult-gate.ts,
-      // CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS).
-      { ...consultGateOptionsFromSettings(settingsAtGate.settings), level: scheduled.policy.level, ownerQuestionTexts: [bounded.question] },
+      // The question ChatGPT sent, named apart from the snapshot
+      // (consult-gate.ts, CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS):
+      // the part the writer saw for the unnamed level's word exemptions, and
+      // the whole retained question for the copy check at both levels.
+      {
+        ...consultGateOptionsFromSettings(settingsAtGate.settings),
+        level: scheduled.policy.level,
+        askedQuestionTexts: [bounded.question],
+        askedQuestionFullTexts: [current.question],
+      },
     );
     if (verdict.decision !== 'pass') {
       await closeSession();

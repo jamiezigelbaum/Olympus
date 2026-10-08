@@ -60379,10 +60379,15 @@ function evaluateCheckedRequest(subQuestions, context, limits, history, options)
   const model = questionModel(subQuestions);
   const languageOnly = unnamed ? consultVocabulary({ languages: options?.languages ?? [], domains: { units: false, countries: true, places: false, technical: false, medicines: false, medicineBrands: false } }) : null;
   const ordinaryWord = languageOnly ? (token) => languageOnly.has(token) : undefined;
-  const owner = ownerWords(options?.ownerQuestionTexts);
-  if (owner && copiesOwnerQuestion(model, owner))
-    reasons.add("owner_question_copy");
-  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, unnamed ? owner : undefined))
+  const copySource = options?.askedQuestionFullTexts ?? options?.askedQuestionTexts;
+  if (copySource !== undefined) {
+    if (!askedTextsValid(copySource))
+      return refuse2(["writer_context_malformed"]);
+    if (copiesAskedQuestion(model, copySource))
+      reasons.add("owner_question_copy");
+  }
+  const asked = unnamed ? askedWords(options?.askedQuestionTexts) : undefined;
+  for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked))
     reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent))
     reasons.add(reason);
@@ -61119,23 +61124,23 @@ function runMatcher(question, minLength, minContent) {
     }
   };
 }
-function compareWithSnapshot(model, context, unnamed, ordinaryWord, owner) {
+function compareWithSnapshot(model, context, unnamed, ordinaryWord, asked) {
   const reasons = new Set;
   const runTokens = unnamed ? CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS : CONSULT_GATE_SHARED_RUN_TOKENS;
   const contentTokens = model.tokens.filter(isContent);
   const fullRun = runMatcher(model.tokens, runTokens, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
   const contentRun = runMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS, 0);
   const contentSpan = spanMatcher(contentTokens, CONSULT_GATE_CONTENT_RUN_TOKENS);
-  const askedTokens = new Set(model.tokens);
-  const ownerToken = (token) => owner !== undefined && owner.tokens.has(token) && askedTokens.has(token);
-  const ownerFigures = new Set;
-  if (owner) {
+  const requestTokens = new Set(model.tokens);
+  const askedToken = (token) => asked !== undefined && asked.tokens.has(token) && requestTokens.has(token);
+  const askedFigures = new Set;
+  if (asked) {
     for (const key of model.numberKeys) {
-      if (!owner.figures.has(key))
+      if (!asked.figures.has(key) || YEAR_LIKE.test(key))
         continue;
       const seen = model.figureSeen.get(key);
       if (key.length <= 3 || seen !== undefined && seen.unit && !seen.bare)
-        ownerFigures.add(key);
+        askedFigures.add(key);
     }
   }
   const longestCompact = Math.max(...model.compactViews.map((view) => view.length));
@@ -61205,7 +61210,7 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, owner) {
     }
     for (const run of normalized.match(/\d(?:[\d]|[\s.\-/_](?=\d))*/gu) ?? []) {
       const digits = run.replace(/\D/gu, "");
-      if (digits.length >= CONSULT_GATE_MIN_JOINT_DIGITS && model.digitConcat.includes(digits) && !ownerFigures.has(digits))
+      if (digits.length >= CONSULT_GATE_MIN_JOINT_DIGITS && model.digitConcat.includes(digits))
         reasons.add("snapshot_figure");
     }
     if (model.dates.full.size > 0 || model.dates.monthDay.size > 0) {
@@ -61225,9 +61230,9 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, owner) {
       }
     }
     for (const span of addressSpans(normalized)) {
-      const asked = new Set(model.tokens.map((token) => token.replace(/^0+(?=\d)/u, "")));
-      const sameNumber = asked.has(span.number) && (span.words.some((word) => asked.has(word)) || asked.has(span.suffix));
-      const sameName = asked.has(span.suffix) && span.words.every((word) => asked.has(word));
+      const asked2 = new Set(model.tokens.map((token) => token.replace(/^0+(?=\d)/u, "")));
+      const sameNumber = asked2.has(span.number) && (span.words.some((word) => asked2.has(word)) || asked2.has(span.suffix));
+      const sameName = asked2.has(span.suffix) && span.words.every((word) => asked2.has(word));
       if (sameNumber || sameName)
         reasons.add("snapshot_identifier");
     }
@@ -61369,7 +61374,7 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, owner) {
     return reasons;
   for (const key of figureRefused) {
     const seen = figureSeen.get(key);
-    const exempt = ownerFigures.has(key) || seen !== undefined && seen.rule && !seen.bare && !seen.other && key.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key);
+    const exempt = askedFigures.has(key) || seen !== undefined && seen.rule && !seen.bare && !seen.other && key.length <= CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS && model.ruleOnlyKeys.has(key);
     if (!exempt) {
       reasons.add("snapshot_figure");
       return reasons;
@@ -61395,7 +61400,7 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, owner) {
         continue;
     }
     const pairSource = model.forms.get(pair.left + pair.right) ?? model.forms.get(pair.right + pair.left);
-    if (owner && ownerPair(owner, model, pair.left, pair.right))
+    if (asked && askedPair(asked, model, pair.left, pair.right))
       continue;
     if (pairSource)
       nameHit(pairSource);
@@ -61403,14 +61408,14 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, owner) {
       continue;
     for (const part of [pair.left, pair.right]) {
       const partSource = model.forms.get(part);
-      if (partSource && part.length >= 3 && neverLower(part) && !ownerToken(part))
+      if (partSource && part.length >= 3 && neverLower(part) && !askedToken(part))
         nameHit(partSource);
     }
   }
   for (const [token, single] of singleCandidates) {
     if (!single.strongLabel && ordinary(token) && statOf(token).lower + statOf(token).lowerAnywhere > 0)
       continue;
-    if (ownerToken(token))
+    if (askedToken(token))
       continue;
     const stat3 = statOf(token);
     const dominatedByLower = stat3.lower >= 3 && stat3.lower >= 3 * stat3.capitalized;
@@ -61418,61 +61423,66 @@ function compareWithSnapshot(model, context, unnamed, ordinaryWord, owner) {
       nameHit(single.source);
   }
   for (const [token, source] of componentCandidates)
-    if (statOf(token).lowerAnywhere === 0 && !ownerToken(token))
+    if (statOf(token).lowerAnywhere === 0 && !askedToken(token))
       identifierHit(source);
   return reasons;
 }
-function ownerWords(texts) {
-  if (!Array.isArray(texts) || texts.length === 0 || texts.length > CONSULT_GATE_OWNER_WORDS_MAX_TEXTS)
-    return;
-  if (texts.some((text) => typeof text !== "string"))
-    return;
-  if (texts.reduce((total, text) => total + utf8Bytes(text), 0) > CONSULT_GATE_OWNER_WORDS_MAX_BYTES)
+function askedTextsValid(texts) {
+  return Array.isArray(texts) && texts.length <= CONSULT_GATE_ASKED_WORDS_MAX_TEXTS && texts.every((text) => typeof text === "string") && texts.reduce((total, text) => total + utf8Bytes(text), 0) <= CONSULT_GATE_ASKED_WORDS_MAX_BYTES;
+}
+function askedWords(texts) {
+  if (!askedTextsValid(texts) || texts.length === 0)
     return;
   const tokens = new Set;
   const pairs = new Set;
-  const figures = new Set;
-  const sequences = [];
-  const contentSequences = [];
+  const seen = new Map;
   for (const text of texts) {
     const folded = foldText(text);
     const sequence = wordsOf(folded);
-    const content = sequence.filter(isContent);
     sequence.forEach((token, index) => {
       tokens.add(token);
       if (index > 0)
         pairs.add(`${sequence[index - 1]}${SEP}${token}`);
     });
-    sequences.push(sequence);
-    contentSequences.push(content);
-    const standalone = caseFold(folded).replace(/\d(?:\d|[\s.\-/_](?=\d))*/gu, (run) => run.replace(/\D/gu, "").length > CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS || /\d[\s\-/]+\d/u.test(run) ? " " : run);
-    for (const key of figureKeys(standalone, false).keys())
-      figures.add(key);
-    for (const key of figureKeys(numberWordsToDigits(wordsOf(standalone)).join(" "), false).keys())
-      figures.add(key);
+    const normalized = caseFold(folded);
+    const standalone = normalized.replace(/\d(?:\d|[\s.\-/_](?=\d))*/gu, (run, offset) => {
+      const glued = /[\p{L}]/u.test(normalized[offset - 1] ?? "") || /[\p{L}]/u.test(normalized[offset + run.length] ?? "");
+      return glued || run.replace(/\D/gu, "").length > CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS || /\d[\s\-/]+\d/u.test(run) ? " " : run;
+    });
+    for (const form of [figureKeys(standalone, true), figureKeys(numberWordsToDigits(wordsOf(standalone)).join(" "), true)]) {
+      for (const [key, value] of form)
+        seen.set(key, mergeFigureSeen(seen.get(key), value));
+    }
   }
-  return { tokens, sequences, contentSequences, pairs, figures };
+  const figures = new Set([...seen].filter(([key, value]) => !YEAR_LIKE.test(key) && (key.length <= 3 || value.unit && !value.bare)).map(([key]) => key));
+  return { tokens, pairs, figures };
 }
-function copiesOwnerQuestion(model, owner) {
-  const tokenRun = runMatcher(model.tokens, CONSULT_GATE_OWNER_QUESTION_COPY_TOKENS, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS);
-  const contentRun = runMatcher(model.tokens.filter(isContent), CONSULT_GATE_OWNER_QUESTION_COPY_TOKENS, 0);
-  for (const sequence of owner.sequences) {
-    tokenRun.reset();
-    for (const token of sequence)
-      if (tokenRun.feed(token))
-        return true;
-  }
-  for (const sequence of owner.contentSequences) {
-    contentRun.reset();
-    for (const token of sequence)
-      if (contentRun.feed(token))
-        return true;
+function copiesAskedQuestion(model, texts) {
+  const size = CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS;
+  const windows = (sequence, minContent) => {
+    const keys = [];
+    for (let start = 0;start + size <= sequence.length; start += 1) {
+      const window2 = sequence.slice(start, start + size);
+      if (window2.filter(isContent).length >= minContent)
+        keys.push([...window2].sort().join(SEP));
+    }
+    return keys;
+  };
+  const request = numberWordsToDigits(model.tokens);
+  const tokenWindows = new Set(windows(request, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS));
+  const contentWindows = new Set(windows(request.filter(isContent), 0));
+  for (const text of texts) {
+    const sequence = numberWordsToDigits(wordsOf(foldText(text)));
+    if (windows(sequence, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS).some((key) => tokenWindows.has(key)))
+      return true;
+    if (windows(sequence.filter(isContent), 0).some((key) => contentWindows.has(key)))
+      return true;
   }
   return false;
 }
-function ownerPair(owner, model, left, right) {
-  const asked = (a, b) => model.tokenKeys[0].includes(`${SEP}${a}${SEP}${b}${SEP}`);
-  return owner.pairs.has(`${left}${SEP}${right}`) && asked(left, right) || owner.pairs.has(`${right}${SEP}${left}`) && asked(right, left);
+function askedPair(asked, model, left, right) {
+  const written = (a, b) => model.tokenKeys[0].includes(`${SEP}${a}${SEP}${b}${SEP}`);
+  return asked.pairs.has(`${left}${SEP}${right}`) && written(left, right) || asked.pairs.has(`${right}${SEP}${left}`) && written(right, left);
 }
 function spanMatcher(question, size) {
   const key = (tokens) => [...tokens].sort().join(" ");
@@ -61706,7 +61716,7 @@ function figureKeys(normalized, needUnits) {
   }
   return keys;
 }
-var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS = 7, CONSULT_GATE_OWNER_QUESTION_COPY_TOKENS = 4, CONSULT_GATE_OWNER_WORDS_MAX_TEXTS = 4, CONSULT_GATE_OWNER_WORDS_MAX_BYTES = 16384, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS, STREET_SUFFIXES;
+var CONSULT_GATE_SHARED_RUN_TOKENS = 4, CONSULT_GATE_RUN_MIN_CONTENT_TOKENS = 2, CONSULT_GATE_CONTENT_RUN_TOKENS = 4, CONSULT_GATE_MAX_QUESTION_BYTES = 600, CONSULT_GATE_MAX_QUESTION_TOKENS = 80, CONSULT_GATE_MAX_SUB_QUESTIONS = 3, CONSULT_GATE_SENTENCE_OVERLAP_WORDS = 5, CONSULT_GATE_RARE_WORD_OCCURRENCES = 2, SENTENCE_OVERLAP_SPAN_TOKENS = 40, CONSULT_GATE_MAX_PREAMBLE_SENTENCES = 1, CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION = 12, CONSULT_GATE_MAX_CONTENT_WORDS_PER_UNNAMED_QUESTION = 18, CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS = 3, CONSULT_GATE_UNNAMED_MAX_PREAMBLE_SENTENCES = 2, CONSULT_GATE_UNNAMED_SHARED_RUN_TOKENS = 5, CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS = 7, CONSULT_GATE_ASKED_QUESTION_COPY_TOKENS = 4, CONSULT_GATE_ASKED_WORDS_MAX_TEXTS = 4, CONSULT_GATE_ASKED_WORDS_MAX_BYTES = 16384, CONSULT_GATE_MIN_DISTINCTIVE_IDENTIFIER_CHARS = 6, CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES = 1048576, CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES = 20000, CONSULT_GATE_MAX_WRITER_CONTEXT_NODES = 200000, MAX_WALK_DEPTH = 24, CONSULT_GATE_MIN_IDENTIFIER_CHARS = 2, CONSULT_GATE_COMPACT_WINDOW_TOKENS = 32, CONSULT_GATE_COMPACT_WINDOW_CHARS = 64, CONSULT_GATE_MIN_FIGURE_DIGITS = 3, CONSULT_GATE_MIN_JOINT_DIGITS = 4, CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE = 8, CONSULT_GATE_ENCODED_MIXED_RUN_CHARS = 8, CONSULT_GATE_ENCODED_RUN_CHARS = 16, CONSULT_GATE_MAX_COMBINING_MARKS_PER_BASE = 2, CONSULT_GATE_MAX_RECENT_CONSULTS = 20, DEFAULT_CONSULT_GATE_LIMITS, PACK_PATH_KINDS, PROVENANCE_PATH_KINDS, PROVENANCE_ROOTS, MAP_KEYS, PRODUCT_DEFAULT_SCOPES, SOURCE_INSTRUCTION_FLAGS, CLOSED_VALUES, EXTENSIBLE_CLOSED_KEYS, NUMBER_PATHS, BOOLEAN_PATHS, SCHEMA_FIELD_NAMES, WRITER_CONTEXT_KINDS, CURATED_VOCABULARY, CONSULT_VOCABULARY_PACKS, CONSULT_LANGUAGE_PACKS, DEFAULT_CONSULT_DOMAIN_PACKS, DOMAIN_PACK_IDS, DEFAULT_CONSULT_LANGUAGES, VOCABULARY_DIR, CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES, CONSULT_VOCABULARY_MAX_EXPANDED_BYTES, CONSULT_VOCABULARY_MAX_WORD_BYTES = 64, CONSULT_VOCABULARY_MAX_USER_PACKS = 8, vocabularyCache, evaluationVocabulary, VOCABULARY_LETTER_FOLDS, LOOKALIKES, LEET, FUNCTION_WORDS, NAME_STOPWORDS, NUMBER_WORDS, SCALE_WORDS, NUMBER_CONNECTORS, SCALE_ARTICLES, DECIMAL_WORDS, NUMBER_PARTS, WRITER_ANSWER_PATH = "writerAnswer[]", PROSE_PATHS, SEP, YEAR_LIKE, NUMBER_WORD_PREFIX, MONTH_NAMES, ROMAN_MONTHS, DATE_JOINERS, UNIT_WORDS, RULE_UNIT_WORDS, FIGURE_PREFIX_SYMBOLS, STREET_SUFFIXES;
 var init_consult_gate = __esm(() => {
   init_opsec();
   init_types();
@@ -62861,6 +62871,7 @@ var init_consult_gate = __esm(() => {
   NUMBER_PARTS = [...NUMBER_WORDS.keys(), ...SCALE_WORDS.keys(), "en", "und", "e"].sort((a, b) => b.length - a.length);
   PROSE_PATHS = new Set(["candidates[].chunks[]", "candidates[].facts[].claim", "writerVisible[]", WRITER_ANSWER_PATH]);
   SEP = String.fromCharCode(1);
+  YEAR_LIKE = /^(?:19|20)\d\d$/u;
   MONTH_NAMES = buildMonthNames();
   ROMAN_MONTHS = new Map(["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"].map((numeral, index) => [numeral, index + 1]));
   DATE_JOINERS = new Set(["of", "de", "del", "van", "in", "the", "du", "des", "le", "el", "em", "op", "am", "den", "il", "di", "da", "do"]);
@@ -128622,7 +128633,12 @@ function createConsultOrchestrator(options) {
       record4(jobId, "error", startedAt, "snapshot_gone");
       return;
     }
-    const verdict = evaluateConsultRequest(written.questions, consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question], writerAnswerTexts: [bounded.answer, ...bounded.gaps] }), {}, { recentApprovedQuestions: [...recent] }, { ...consultGateOptionsFromSettings(settingsAtGate.settings), level: scheduled.policy.level, ownerQuestionTexts: [bounded.question] });
+    const verdict = evaluateConsultRequest(written.questions, consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question], writerAnswerTexts: [bounded.answer, ...bounded.gaps] }), {}, { recentApprovedQuestions: [...recent] }, {
+      ...consultGateOptionsFromSettings(settingsAtGate.settings),
+      level: scheduled.policy.level,
+      askedQuestionTexts: [bounded.question],
+      askedQuestionFullTexts: [current.question]
+    });
     if (verdict.decision !== "pass") {
       await closeSession();
       fail(jobId);

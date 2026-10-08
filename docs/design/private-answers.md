@@ -50,19 +50,29 @@ Two levels:
   behaviour, optionally with ask-before-send; this merges with the planned
   strict mode (stage C6).
 
-Words the owner typed (owner ruling, 2026-10-08). At Standard, a word or
-phrase from the owner's own question may go out even when the private
-documents also contain it: the owner already sent it to ChatGPT, so it is
-not private evidence ("fees in Catalonia" when the owner asked about
-Catalonia). Only the exact words the owner typed count, not the document
-words around them, and never the owner's wording: a run of four words copied
-from the owner's question is refused at both levels, because the zkAPI
-model's provider also sees the ChatGPT conversation and could link the
-two. Hard identifiers stay blocked at both levels
-even when the owner typed them: mail addresses, phone, account, IBAN and ID
-numbers, street addresses, exact dates and years, secrets and handles.
-Typing an IBAN into ChatGPT never lets it go out to zkAPI. Strict is
-unchanged. Rule: `docs/design/consult-writer-instructions.md`, "Level: your
+Words of the question ChatGPT sent (owner ruling, 2026-10-08). At Standard, a
+word from the question ChatGPT sent may go out even when the private
+documents also contain it: OpenAI already holds that question, so the word
+is not private evidence ("fees in Catalonia" when the question named
+Catalonia). Only the exact words count, not the document words around them,
+and never the question's wording: four words copied from it, in any order,
+are refused at both levels, because the zkAPI model's provider also sees the
+ChatGPT conversation and could link the two. Hard identifiers stay blocked at
+both levels even when the question holds them: mail addresses, phone,
+account, IBAN and ID numbers, street addresses, exact dates and years,
+secrets and handles. Typing an IBAN into ChatGPT never lets it go out to
+zkAPI, not even dressed as an amount. Strict has no exemption. Rule:
+`docs/design/consult-writer-instructions.md`, "Level: your situation,
+without names".
+
+Accepted residual (2026-10-08 review): the question is ChatGPT's tool
+argument (`question` in `src/workers/chatgpt/mcp-surface.ts`), not a
+verified copy of what the owner typed, and an MCP server cannot read the raw
+user message. Whatever ChatGPT puts there is already known to OpenAI:
+Private-tier content never reaches ChatGPT, and Personal-tier cloud use is by
+design. So exempting those words exposes nothing new to OpenAI; to a
+different zkAPI provider it exposes at most single Personal-tier words,
+never Private ones.
 situation, without names".
 
 Both are always selectable. Sending needs the six cost-and-risk statements

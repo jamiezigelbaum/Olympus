@@ -1,8 +1,10 @@
-// Words the owner typed (owner ruling 2026-10-08): at the "unnamed"
-// (Standard) level a word or phrase of the owner's own question is exempt
-// from the snapshot name, copy and figure rules; hard identifiers stay
-// refused at both levels, and the "general" (Strict) level is unchanged.
-// The rule: consult-gate.ts, CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS.
+// Words of the question ChatGPT sent (owner ruling 2026-10-08; called "the
+// owner's" question below): at the "unnamed" (Standard) level a word, name,
+// place or amount of it is exempt from the snapshot name and figure rules;
+// its wording is never sent (`owner_question_copy`, both levels); hard
+// identifiers stay refused at both levels; the "general" (Strict) level has
+// no exemption. The rule: consult-gate.ts,
+// CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS.
 
 import { describe, expect, test } from 'bun:test';
 import type { EvidencePack } from '../src/core/contracts.ts';
@@ -36,10 +38,10 @@ function context(owner: string = OWNER, documents: string[] = [DOCUMENT]) {
 
 const DEFAULTS = consultGateOptionsFromSettings(DEFAULT_CONSULT_SETTINGS);
 
-// `owner`: the owner's question (in the snapshot as always); `exempt`: whether it is also passed as ownerQuestionTexts.
-function verdict(questions: string[], level: ConsultLevel, owner: string = OWNER, exempt = true) {
-  const options: ConsultGateOptions = { ...DEFAULTS, level, ...(exempt ? { ownerQuestionTexts: [owner] } : {}) };
-  return evaluateConsultRequest(questions, context(owner), {}, {}, options);
+// `owner`: the owner's question (in the snapshot as always); `exempt`: whether it is also passed as askedQuestionTexts.
+function verdict(questions: string[], level: ConsultLevel, owner: string = OWNER, exempt = true, documents?: string[]) {
+  const options: ConsultGateOptions = { ...DEFAULTS, level, ...(exempt ? { askedQuestionTexts: [owner] } : {}) };
+  return evaluateConsultRequest(questions, context(owner, documents), {}, {}, options);
 }
 
 const PASS: ConsultGateVerdict = { decision: 'pass', reasons: [] };
@@ -152,12 +154,52 @@ describe('the exemption covers exactly what the owner typed', () => {
     expect(verdict(['Who pays the notary fees in Catalonias?'], 'unnamed').decision).toBe('refuse');
   });
 
-  test('a malformed owner field only removes the exemption', () => {
+  test('an empty asked field gives no exemption; a malformed one refuses the request, since the copy check cannot run', () => {
     const asked = ['Who usually pays the notary fees in Catalonia?'];
     const built = context();
-    for (const ownerQuestionTexts of [[], ['a', 'b', 'c', 'd', 'e'], ['x'.repeat(20_000)], [42], 'Catalonia']) {
-      const options = { ...DEFAULTS, level: 'unnamed', ownerQuestionTexts } as unknown as ConsultGateOptions;
-      expect(evaluateConsultRequest(asked, built, {}, {}, options).reasons).toContain('snapshot_name');
+    const run = (extra: Record<string, unknown>) => evaluateConsultRequest(asked, built, {}, {}, { ...DEFAULTS, level: 'unnamed', ...extra } as unknown as ConsultGateOptions);
+    expect(run({ askedQuestionTexts: [] }).reasons).toContain('snapshot_name');
+    for (const value of [['a', 'b', 'c', 'd', 'e'], ['x'.repeat(20_000)], [42], 'Catalonia']) {
+      expect(run({ askedQuestionTexts: value })).toEqual({ decision: 'refuse', reasons: ['writer_context_malformed'] });
+      expect(run({ askedQuestionTexts: [OWNER], askedQuestionFullTexts: value })).toEqual({ decision: 'refuse', reasons: ['writer_context_malformed'] });
     }
+  });
+});
+
+describe('review round 1 (2026-10-08)', () => {
+  test('an account number the owner typed cannot go out dressed as an amount', () => {
+    const owner = 'Is account 123456 valid?';
+    const documents = ['Account 123456 is in arrears.'];
+    for (const level of ['unnamed', 'general'] as const) {
+      expect(verdict(['Would 123456 euros cover the cost?'], level, owner, true, documents).reasons).toContain('snapshot_figure');
+    }
+    // Glued to letters, or a year, it is never an amount either.
+    expect(verdict(['Would 1234 euros cover the cost?'], 'unnamed', 'Is policy AB1234 still valid?', true, ['Policy AB1234 lapsed.']).reasons).toContain('snapshot_figure');
+    expect(verdict(['Would 2024 euros cover the cost?'], 'unnamed', 'Is a fee of 2024 euros fair?', true, ['The fee is 2024 euros.']).reasons).toContain('snapshot_figure');
+    // Written with its unit on both sides, a short amount still may.
+    expect(verdict(['Would 950 euros cover the cost?'], 'unnamed', 'Is a fee of 950 euros fair?', true, ['The fee is 950 euros.'])).toEqual(PASS);
+  });
+
+  test('number words do not hide a copy of the owner\'s wording', () => {
+    for (const level of ['unnamed', 'general'] as const) {
+      expect(verdict(['Can someone leave with 2 days notice?'], level, 'Can I leave with two days notice?').reasons).toContain('owner_question_copy');
+      expect(verdict(['Can someone leave with two days notice?'], level, 'Can I leave with 2 days notice?').reasons).toContain('owner_question_copy');
+    }
+  });
+
+  test('reordering does not hide a copy of the owner\'s wording', () => {
+    for (const level of ['unnamed', 'general'] as const) {
+      expect(verdict(['Does the seller pay the buyer a notary fee?'], level, 'Should the buyer pay the seller the notary fee?').reasons).toContain('owner_question_copy');
+    }
+  });
+
+  test('the copy check reads the whole question; the exemptions only the part the writer saw', () => {
+    const tail = 'How are notary fees split in Catalonia?';
+    const full = `${'Please answer carefully. '.repeat(45)}${tail}`;
+    const bounded = full.slice(0, 1_000);
+    expect(bounded).not.toContain('Catalonia');
+    const run = (questions: string[]) => evaluateConsultRequest(questions, context(full), {}, {}, { ...DEFAULTS, level: 'unnamed', askedQuestionTexts: [bounded], askedQuestionFullTexts: [full] });
+    expect(run(['How are notary fees divided in a region?']).reasons).toContain('owner_question_copy');
+    expect(run(['Who usually pays the notary fees in Catalonia?']).reasons).toContain('snapshot_name');
   });
 });
