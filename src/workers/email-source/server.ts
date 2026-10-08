@@ -130,6 +130,7 @@ import {
   createGmailDailyRequestBudget,
   createGoogleDriveConnectorStoreSyncHandler,
   createGoogleDriveDailyRequestBudget,
+  createGoogleDriveLaneTierSet,
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
   defaultGmailSecureConnectorStoreDbPath,
@@ -2656,15 +2657,46 @@ export async function main(): Promise<void> {
     }
     fileSourceScopeAuthority.assertCurrent(ref);
   };
+  // The Drive lane's pictures are read by the factory, not its listing: the
+  // factory lands their content by the same routing as the lane's sync, over
+  // the same stores and ledger. The sync's own set stays the one the ledger's
+  // background passes find.
+  const googleDriveExtractionTierSet = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+    ? createGoogleDriveLaneTierSet({
+        setId: 'google_drive.extraction',
+        internalStore: googleDriveInternalConnectorStore,
+        secureStore: googleDriveSecureConnectorStore,
+        ...(googleDriveTierLane?.publicStore
+          ? {
+              publicLeg: {
+                corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+                open: () => googleDriveTierLane.publicStore!.open(),
+                exists: () => googleDriveTierLane.publicStore!.exists(),
+              },
+            }
+          : {}),
+        ...(googleDriveTierLane?.secrets ? { secretLocations: googleDriveTierLane.secrets } : {}),
+        registerWithLedger: false,
+      })
+    : undefined;
+  const fileExtractionTierSets = new Map<string, TieredStoreSet>([
+    // The Dropbox lane reads and lands text across its tier stores.
+    ...(dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set] as const] : []),
+    // Each Drive store's corpus lists its own store (and the Private one the
+    // routed-only Public store too).
+    ...(googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+      ? [
+          [googleDriveInternalConnectorStore.corpusId, googleDriveExtractionTierSet] as const,
+          [googleDriveSecureConnectorStore.corpusId, googleDriveExtractionTierSet] as const,
+        ]
+      : []),
+  ]);
   const fileExtractionRuntime = createFileExtractionRuntime({
     env: process.env,
     enabled: fileExtractionCorpora.length > 0,
     connectorStores,
     corpora: fileExtractionCorpora,
-    // The Dropbox lane reads and lands text across its tier stores.
-    ...(dropboxTierLane
-      ? { tierSets: new Map([[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]]) }
-      : {}),
+    ...(fileExtractionTierSets.size > 0 ? { tierSets: fileExtractionTierSets } : {}),
     scopeGuard: {
       assertAuthorized({ config }) {
         assertFileSourceScopeCurrent(config.provider);

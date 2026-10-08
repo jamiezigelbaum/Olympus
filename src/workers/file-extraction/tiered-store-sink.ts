@@ -185,7 +185,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
 
-      const placement = set.placementFor(decision);
+      // Every routed item whose text this sink lands is one whose text arrives
+      // after listing, also in a lane where only some items' does.
+      const placement = set.placementFor(decision, { contentArrivesLater: true });
       const contentCopy = placement.copies.find((copy) => copy.layers !== 'metadata');
       const contentStore = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
