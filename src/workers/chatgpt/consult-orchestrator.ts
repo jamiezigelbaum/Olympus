@@ -334,7 +334,8 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     if (verdict.decision !== 'pass') {
       await closeSession();
       fail(jobId);
-      record(jobId, 'gate_refused', startedAt, String(verdict.reasons.length));
+      // Reason codes are a closed enum and carry no question text.
+      record(jobId, 'gate_refused', startedAt, [...verdict.reasons].sort().join(','));
       return;
     }
     const opened = await opening.catch(() => undefined);

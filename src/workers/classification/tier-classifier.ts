@@ -205,23 +205,44 @@ export interface TierClassificationInput {
   namesOnly?: boolean;
   /**
    * The item's media type. A still image's content (its picture, and any
-   * text read off it) rests Private by default (IMAGE_PRIVATE_DEFAULT_REASON).
+   * text read off it) rests Private unless the photo judge found the picture
+   * ordinary (`imageJudgment`).
    */
   mimeType?: string;
+  /** The photo judge's verdict on a still image's picture (media-judge.ts). Absent: unjudged. */
+  imageJudgment?: ImageJudgmentSignal;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
 
 /**
- * Photo content is Private by default, whatever text was read off it: no
- * judge yet looks at a picture (docs/design/photo-embeddings.md, owner
- * decision 2026-10-07). The names keep their own tier; only Secrets (a
- * secret read in the picture's text) and the owner's per-item override
- * decide otherwise.
+ * The photo judge's verdict on a still image's picture, as this classifier
+ * reads it (the judge itself is source-index/media-judge.ts).
+ */
+export interface ImageJudgmentSignal {
+  verdict: 'sensitive' | 'ordinary' | 'unjudged';
+  category?: string;
+}
+
+/**
+ * An UNJUDGED photo's content is Private, whatever text was read off it
+ * (docs/design/photo-embeddings.md, owner decisions 2026-10-07 and
+ * 2026-10-08): a picture no judge has looked at, or one that could not be
+ * judged (no image encoder, off macOS, the judge failed), stays Private. The
+ * names keep their own tier; only Secrets (a secret read in the picture's
+ * text) and the owner's per-item override decide otherwise.
  */
 export const IMAGE_PRIVATE_DEFAULT_REASON = 'content:image_private_default';
+/** A photo the judge found sensitive is Private: `content:image_sensitive:<category>`. */
+export const IMAGE_SENSITIVE_REASON_PREFIX = 'content:image_sensitive:';
+/**
+ * A photo the judge found ordinary is judged like any other file: its text
+ * (OCR) through the usual rules, Personal by default. This reason marks that
+ * the picture was judged.
+ */
+export const IMAGE_ORDINARY_REASON = 'content:image_ordinary';
 
-/** Whether a media type is a still image, whose content rests Private by default. */
+/** Whether a media type is a still image, whose content rests Private unless its picture is judged ordinary. */
 export function isImageMediaType(mimeType: string | undefined): boolean {
   return (mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? '').startsWith('image/');
 }
@@ -377,6 +398,7 @@ function classifyItemTiersWithPublic(
     text,
     ...(input.namesOnly ? { namesOnly: true } : {}),
     ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
+    ...(input.imageJudgment ? { imageJudgment: input.imageJudgment } : {}),
     matchInput,
     names: snifferNames(signals),
     metadata,
@@ -433,8 +455,10 @@ export interface ContentTierInput {
   title?: string;
   path?: string;
   sender?: string;
-  /** The item's media type: a still image's content rests Private by default. */
+  /** The item's media type: a still image's content rests Private unless judged ordinary. */
   mimeType?: string;
+  /** The photo judge's verdict on a still image's picture. Absent: unjudged. */
+  imageJudgment?: ImageJudgmentSignal;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
@@ -474,6 +498,7 @@ export function classifyContentTier(
     signals: {},
     text,
     ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
+    ...(input.imageJudgment ? { imageJudgment: input.imageJudgment } : {}),
     matchInput: namesMatchInput({
       ...(input.title?.trim() ? { title: input.title } : {}),
       ...(input.path?.trim() ? { path: input.path } : {}),
@@ -674,8 +699,9 @@ function contentPass(args: {
   text: string | undefined;
   /** The owner keeps the content unread (TierClassificationInput.namesOnly). */
   namesOnly?: boolean;
-  /** The item is a still image: its content rests Private by default. */
+  /** The item is a still image: its content rests Private unless its picture was judged ordinary. */
   image?: boolean;
+  imageJudgment?: ImageJudgmentSignal;
   matchInput: NamesMatchInput;
   /** The item's names (title, folder path, sender), bounded: they travel with the excerpt. */
   names: string;
@@ -716,10 +742,22 @@ function contentPass(args: {
     }
   }
 
-  // A still image's content is Private by default, whatever its text says
-  // and whatever rule set the names (only Secrets, above, and the per-item
-  // override, before either pass, decide otherwise).
-  if (args.image) {
+  // A still image's content is Private unless the photo judge found its
+  // picture ordinary: an unjudged picture, and a sensitive one, rest Private
+  // whatever their text says and whatever rule set the names (only Secrets,
+  // above, and the per-item override, before either pass, decide otherwise).
+  // An ordinary picture's text goes through the usual rules below, so an
+  // account or card number read off it still makes it Private.
+  const imageOrdinary = args.image === true && args.imageJudgment?.verdict === 'ordinary';
+  if (args.image && args.imageJudgment?.verdict === 'sensitive') {
+    return {
+      tier: maxTier(metadata.tier, 'secure'),
+      decidedBy: 'default',
+      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`],
+      pending: false,
+    };
+  }
+  if (args.image && !imageOrdinary) {
     return { tier: maxTier(metadata.tier, 'secure'), decidedBy: 'default', reasons: [IMAGE_PRIVATE_DEFAULT_REASON], pending: false };
   }
 
@@ -804,7 +842,15 @@ function contentPass(args: {
     }
   }
   if (reasons.length === 0) reasons.push('content:no_raise');
+  if (imageOrdinary) reasons.unshift(IMAGE_ORDINARY_REASON);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+
+/** A category code safe in a reason string (the judge's own codes pass unchanged). */
+function imageCategoryCode(category: string | undefined): string {
+  const allowed = 'abcdefghijklmnopqrstuvwxyz0123456789_';
+  const code = [...(category ?? '').toLowerCase()].filter((char) => allowed.includes(char)).join('');
+  return code || 'unspecified';
 }
 
 // --- Helpers ------------------------------------------------------------------

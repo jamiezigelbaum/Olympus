@@ -3,7 +3,8 @@
 // ledger and each copy's stored media type.
 //
 // A still image's text (OCR) that a set already holds in a Personal or Public
-// store is moved to the Private store: its content decision is raised to
+// store, and whose picture the photo judge has not found ordinary
+// (tier-media-judgment-sweep.ts), is moved to the Private store: its content decision is raised to
 // Private with the image reason and the move is queued exactly as an owner
 // rule's raise is (`recordRoutedPlacement`, hidden first). An item the owner
 // placed by a per-item override stays where the owner put it. Items in those
@@ -76,6 +77,8 @@ function raiseIfImage(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   if (!exported || exported.chunks.length === 0) return false;
   const mimeType = exported.columns['mime_type'];
   if (typeof mimeType !== 'string' || !isImageMediaType(mimeType)) return false;
+  // A picture the photo judge found ordinary rests where its tier puts it.
+  if (exported.chunks.some((chunk) => chunk.mediaJudgment?.verdict === 'ordinary')) return false;
   const decision: TierDecision = {
     metadataTier: record.metadataTier,
     contentTier: maxTier(record.contentTier, 'secure'),

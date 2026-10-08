@@ -94,7 +94,15 @@ owner-only cache, `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/media-cach
 picture together with the photo's title and any text read off it, about
 1.4 s per photo on an M3's GPU. Its image encoder is on from the start and
 leaves text vectors unchanged, so this needs no re-embed. Other embedding
-providers embed a photo's text alone. A photo's content rests Private.
+providers embed a photo's text alone. Ordinary photos are Personal like your
+other files; only sensitive ones (nudity or intimate images, identity
+documents, bank or credit cards, pictures of financial or medical documents)
+are Private (owner decision 2026-10-08). The built-in model judges each
+picture on the Mac when it embeds it; a photo it cannot judge (no image
+encoder, another embedding provider, off macOS) stays Private. Text read off
+an ordinary photo is still judged like any other text, and a per-item tier
+override still wins. Cloud models only ever receive a photo's text, never
+its picture.
 
 The profile is:
 

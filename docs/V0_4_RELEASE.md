@@ -142,6 +142,18 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-08 — Ordinary photos are Personal; only sensitive photos are
+  Private.** Owner decision, replacing the 2026-10-07 interim rule below.
+  Sensitive: nudity or intimate images, identity documents, bank or credit
+  cards, and pictures of financial or medical documents. A photo that cannot
+  be judged (no image encoder, off macOS, the judge failed) stays Private; a
+  missed sensitive photo is worse than a wrongly Private one. The judge is
+  zero-shot on EmbeddingGemma 2 (image-only vector against six descriptions;
+  margin 0.04, intimate 0.025, the owner's medium setting): 22 of 22 public
+  specimens caught, 8 of the owner's 116 photos flagged (7 near "intimate",
+  mostly beach photos; 1 lab result). Text read off an ordinary photo still goes through the usual rules.
+  Design: `docs/design/photo-embeddings.md` (photo judge).
+
 - **2026-10-07 — Photos are searchable by content.** Owner decision: photos
   first (video stays names-only), Mac first, and a photo's content rests
   Private until a media judge exists. Still images are extracted by default;

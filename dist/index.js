@@ -7671,11 +7671,11 @@ var init_vocabulary = __esm(() => {
     senderDuplicate: "That sender is already private.",
     section: "Privacy",
     row: {
-      none: "Your description · no always-private rules",
-      one: "Your description · {n} always-private rule",
-      many: "Your description · {n} always-private rules"
+      none: "Uses your description. No always-private rules.",
+      one: "Uses your description and {n} always-private rule.",
+      many: "Uses your description and {n} always-private rules."
     },
-    rowNoCount: "Your description and always-private rules",
+    rowNoCount: "Uses your description and always-private rules.",
     edit: "Edit",
     editLabel: "Edit what's private",
     dashboardPending: {
@@ -9651,6 +9651,24 @@ var init_embeddings = __esm(() => {
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
 
+// src/workers/source-index/media-judge.ts
+var MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
+var init_media_judge = __esm(() => {
+  MEDIA_JUDGE_PROMPTS = Object.freeze({
+    id_document: "a photo of a passport, national identity card or driving licence",
+    bank_card: "a photo of a credit card, debit card or bank card",
+    financial_document: "a bank statement, payslip or document showing account numbers",
+    medical_document: "a medical report or lab test results document",
+    intimate: "a nude, intimate or sexually explicit photo",
+    ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
+  });
+  MEDIA_JUDGE_THRESHOLDS = Object.freeze({
+    margin: 0.04,
+    intimateMargin: 0.025
+  });
+  promptVectorCache = new Map;
+});
+
 // src/workers/connector-store/local-index.ts
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
@@ -9672,6 +9690,7 @@ var init_local_index = __esm(() => {
   init_file_lease();
   init_embeddings();
   init_manifest();
+  init_media_judge();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
@@ -10259,6 +10278,11 @@ var init_tier_image_content_sweep = __esm(() => {
   init_tier_ledger();
 });
 
+// src/workers/connector-store/tier-media-judgment-sweep.ts
+var init_tier_media_judgment_sweep = __esm(() => {
+  init_tier_rejudge();
+});
+
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -10271,6 +10295,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_row_rehome();
   init_tier_rules_sweep();
   init_tier_image_content_sweep();
+  init_tier_media_judgment_sweep();
 });
 
 // src/workers/readwise/live-sync.ts

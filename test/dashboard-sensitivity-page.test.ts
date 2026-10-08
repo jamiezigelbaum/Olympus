@@ -22,7 +22,7 @@ describe('dashboard sensitivity privacy', () => {
       fixtureView(),
       { privacy: { configured: true, pendingCount: 4, ruleCount: 3 } },
     );
-    expect(configured).toContain('Your description · 3 always-private rules');
+    expect(configured).toContain('Uses your description and 3 always-private rules.');
     expect(configured).toContain('4 items waiting to be checked');
     expect(configured).toContain('<a class="btn" href="/dashboard?privacy">Edit</a>');
 
