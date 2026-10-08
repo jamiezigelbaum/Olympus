@@ -52292,7 +52292,9 @@ var init_vocabulary = __esm(() => {
     modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
     modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
     modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
-    modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+    modelNames: { ...DASHBOARD_CHATGPT_PAGE_COPY.modelNames, transcription: "the transcription model" },
+    modelTranscription: "Transcription",
+    modelNotNeededNoAudio: "Not needed: no audio in your chosen folders",
     modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
     modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
     modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
@@ -90700,6 +90702,13 @@ async function installBuiltInTranscription(options = {}) {
     gpu: installed.gpu
   };
 }
+function readBuiltInTranscriptionStatus(env = process.env, model = QWEN3_ASR_06B) {
+  try {
+    return readPinnedModelStatus(builtInTranscriptionLayout(model, env).statusPath, model.modelId, BUILT_IN_TRANSCRIPTION_NOUN);
+  } catch {
+    return readPinnedModelStatus("", model.modelId, BUILT_IN_TRANSCRIPTION_NOUN);
+  }
+}
 function reportBuiltInTranscriptionState(env, model, state, failure2) {
   try {
     reportPinnedModelState({
@@ -90718,6 +90727,19 @@ function builtInTranscriptionEnabled(env = process.env, platform2 = currentPlatf
   if (raw === "on" || raw === "true" || raw === "1" || raw === "yes")
     return true;
   return platform2 === "darwin-arm64";
+}
+function builtInTranscriptionDashboardState(status) {
+  if (status.state === "not_started")
+    return { state: "not_needed" };
+  if (status.state === "ready" || status.state === "loading")
+    return { state: "ready" };
+  if (status.state === "failed")
+    return { state: "failed", failedReason: modelInstallFailedReason(status.failure) };
+  return {
+    state: status.state === "verifying" ? "verifying" : "downloading",
+    percent: status.percent,
+    ...status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {}
+  };
 }
 var BUILT_IN_TRANSCRIPTION_DIR_ENV = "OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR", BUILT_IN_TRANSCRIPTION_ENV = "OLYMPUS_BUILT_IN_TRANSCRIPTION", BUILT_IN_TRANSCRIPTION_NOUN = "built-in transcription model";
 var init_transcription_model = __esm(() => {
@@ -102622,6 +102644,7 @@ function dashboardSourceStates(view, options = {}) {
   return {
     rows,
     models: v1.models,
+    ...options.modelInstalls?.transcription ? { transcription: options.modelInstalls.transcription } : {},
     ...v1.progress ? { progress: v1.progress } : {},
     otherNeeds: v1.needsYou.filter((item) => !item.id.startsWith("source:"))
   };
@@ -103025,10 +103048,17 @@ function modelStateWord2(state) {
     return DASHBOARD_LOCAL_COPY.modelChecking;
   return DASHBOARD_LOCAL_COPY.modelGettingReady;
 }
+function modelInstallLines(states) {
+  return [
+    installLine("search", states.models.embedding),
+    installLine("answers", states.models.answers?.install),
+    installLine("transcription", states.transcription)
+  ].filter((line) => line !== undefined);
+}
 function dashboardModelsSummary(states, view) {
   const models = states.models;
   const kind = models.embedding.kind === "built_in" ? DASHBOARD_LOCAL_COPY.modelBuiltIn : DASHBOARD_LOCAL_COPY.modelCustom;
-  const installs = [installLine("search", models.embedding), installLine("answers", models.answers?.install)].filter((line) => line !== undefined);
+  const installs = modelInstallLines(states);
   let overall = DASHBOARD_LOCAL_COPY.modelReady;
   if (installs.some((line) => line.state === "failed") || view.model_setup !== undefined && !view.model_setup.ready || models.embedding.state === "failed") {
     overall = DASHBOARD_LOCAL_COPY.modelNeedsYou;
@@ -103039,12 +103069,13 @@ function dashboardModelsSummary(states, view) {
 }
 function dashboardModelsSection(states, view) {
   const models = states.models;
-  const installs = [installLine("search", models.embedding), installLine("answers", models.answers?.install)].filter((line) => line !== undefined);
+  const installs = modelInstallLines(states);
   const summary = dashboardModelsSummary(states, view);
   const open7 = view.model_setup !== undefined && !view.model_setup.ready;
   const search = `${models.embedding.kind === "built_in" ? DASHBOARD_LOCAL_COPY.modelBuiltIn : DASHBOARD_LOCAL_COPY.modelCustom} · ${modelStateWord2(models.embedding.state)}`;
   const answers = models.answers ? `${models.answers.label} · ${models.answers.ready ? DASHBOARD_LOCAL_COPY.modelReady : models.answers.install ? modelStateWord2(models.answers.install.state) : DASHBOARD_LOCAL_COPY.modelNotReady}` : "";
-  const body = `<ul class="mlist"><li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelSearch}: ${search}`)}</li>` + (answers ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelAnswers}: ${answers}`)}</li>` : "") + `</ul>${renderModelSetup(view.model_setup, { heading: false })}`;
+  const transcription = states.transcription ? states.transcription.state === "not_needed" ? DASHBOARD_LOCAL_COPY.modelNotNeededNoAudio : `${DASHBOARD_LOCAL_COPY.modelBuiltIn} · ${modelStateWord2(states.transcription.state)}` : "";
+  const body = `<ul class="mlist"><li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelSearch}: ${search}`)}</li>` + (answers ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelAnswers}: ${answers}`)}</li>` : "") + (transcription ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelTranscription}: ${transcription}`)}</li>` : "") + `</ul>${renderModelSetup(view.model_setup, { heading: false })}`;
   return `<section class="modelsrow" id="models" aria-label="${escapeHtml2(DASHBOARD_LOCAL_COPY.models)}">` + `<details class="models" data-poll-key="models"${open7 ? " open" : ""}><summary>${escapeHtml2(summary)}</summary>` + `<div class="modelsbody">${body}</div></details>` + (installs.length > 0 ? `<div class="minstalls">${installs.map(installHtml).join("")}</div>` : "") + `</section>`;
 }
 var DEFAULT_BASE_PATH3 = "/dashboard", TONE;
@@ -131055,7 +131086,12 @@ async function main() {
         modelInstalls: () => {
           const embedding = chatgptEmbeddingState();
           const privateModel = chatgptPrivateModelState();
-          return { ...embedding ? { embedding } : {}, ...privateModel ? { privateModel } : {} };
+          const transcription = dashboardTranscriptionState();
+          return {
+            ...embedding ? { embedding } : {},
+            ...privateModel ? { privateModel } : {},
+            ...transcription ? { transcription } : {}
+          };
         },
         retryModel: (model) => chatgptSetup.retryModel(model),
         stopMessagingCapture,
@@ -131381,6 +131417,15 @@ async function main() {
       bytesTotal: status.bytesTotal,
       ...status.state === "failed" ? { failedReason: modelInstallFailedReason(status.failure) } : {}
     };
+  };
+  const dashboardTranscriptionState = () => {
+    if (process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || !builtInTranscriptionEnabled(process.env))
+      return;
+    try {
+      return builtInTranscriptionDashboardState(readBuiltInTranscriptionStatus(process.env));
+    } catch {
+      return;
+    }
   };
   const chatgptEmbeddingState = () => {
     const builtIn = ["public_safe", "internal", "secure_local"].map((domain) => sovereigntyEngine.resolveEmbeddingProfile(domain)?.profile).find((profile) => profile?.provider === "built-in");
@@ -132010,6 +132055,7 @@ var init_server5 = __esm(async () => {
   init_status();
   init_http();
   init_analyst();
+  init_transcription_model();
   init_built_in_transcriber();
   init_analyst_built_in();
   init_analyst_delphi();

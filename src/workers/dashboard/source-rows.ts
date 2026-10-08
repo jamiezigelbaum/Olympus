@@ -24,6 +24,7 @@
  * local pages print them and which local control fixes each row.
  */
 import type { BuiltInPrivateModelView } from '../chatgpt/dashboard-view-model.ts';
+import type { BuiltInTranscriptionDashboardState } from '../source-index/built-in-reasoning/transcription-model.ts';
 import { buildChatGptDashboardViewModel } from '../chatgpt/dashboard-view-model.ts';
 import type { DashboardViewModelV1, ModelInstall, SourceProgress } from '../chatgpt/dashboard-contract.ts';
 import type { DashboardSourceAction, DashboardSourceCard, SourceDashboardViewModel } from '../source-dashboard.ts';
@@ -66,6 +67,8 @@ export interface DashboardModelInstalls {
   embedding?: DashboardViewModelV1['models']['embedding'];
   /** The built-in private (answer) model, when it is on for this machine. */
   privateModel?: BuiltInPrivateModelView;
+  /** The built-in transcription model, when it is the transcriber on this machine. */
+  transcription?: BuiltInTranscriptionDashboardState;
 }
 
 /** The owner's privacy settings, counts only (the same counts ChatGPT reads). */
@@ -110,6 +113,8 @@ export interface DashboardSourceStates {
   progress?: DashboardViewModelV1['progress'];
   /** The engine's items that are not about a source (models, privacy). */
   otherNeeds: DashboardViewModelV1['needsYou'];
+  /** The built-in transcription model, when it is the transcriber here (Mac dashboard only). */
+  transcription?: BuiltInTranscriptionDashboardState;
 }
 
 const DEFAULT_BASE_PATH = '/dashboard';
@@ -175,6 +180,7 @@ export function dashboardSourceStates(view: SourceDashboardViewModel, options: D
   return {
     rows,
     models: v1.models,
+    ...(options.modelInstalls?.transcription ? { transcription: options.modelInstalls.transcription } : {}),
     ...(v1.progress ? { progress: v1.progress } : {}),
     otherNeeds: v1.needsYou.filter((item) => !item.id.startsWith('source:')),
   };
@@ -736,7 +742,7 @@ export function dashboardPrivacySection(options: DashboardRowOptions | undefined
 }
 
 interface InstallLine {
-  which: 'search' | 'answers';
+  which: 'search' | 'answers' | 'transcription';
   state: 'downloading' | 'verifying' | 'failed';
   percent?: number;
   bytesDone?: number;
@@ -744,7 +750,10 @@ interface InstallLine {
   reason: keyof typeof C.modelInstallReasons;
 }
 
-function installLine(which: InstallLine['which'], install: ModelInstall | DashboardViewModelV1['models']['embedding'] | undefined): InstallLine | undefined {
+function installLine(
+  which: InstallLine['which'],
+  install: ModelInstall | DashboardViewModelV1['models']['embedding'] | BuiltInTranscriptionDashboardState | undefined,
+): InstallLine | undefined {
   if (!install) return undefined;
   if (install.state !== 'downloading' && install.state !== 'verifying' && install.state !== 'failed') return undefined;
   const reason = install.failedReason && install.failedReason in C.modelInstallReasons ? install.failedReason : 'unknown';
@@ -790,12 +799,20 @@ function modelStateWord(state: ModelInstall['state']): string {
   return C.modelGettingReady;
 }
 
+/** The install lines under Models: search, answers, then transcription. */
+function modelInstallLines(states: DashboardSourceStates): InstallLine[] {
+  return [
+    installLine('search', states.models.embedding),
+    installLine('answers', states.models.answers?.install),
+    installLine('transcription', states.transcription),
+  ].filter((line): line is InstallLine => line !== undefined);
+}
+
 /** "Models — Built-in · Ready", "… · Getting ready" or "… · Needs you". */
 export function dashboardModelsSummary(states: DashboardSourceStates, view: SourceDashboardViewModel): string {
   const models = states.models;
   const kind = models.embedding.kind === 'built_in' ? C.modelBuiltIn : C.modelCustom;
-  const installs = [installLine('search', models.embedding), installLine('answers', models.answers?.install)]
-    .filter((line): line is InstallLine => line !== undefined);
+  const installs = modelInstallLines(states);
   let overall: string = C.modelReady;
   if (installs.some((line) => line.state === 'failed') || (view.model_setup !== undefined && !view.model_setup.ready)
     || models.embedding.state === 'failed') {
@@ -814,16 +831,21 @@ export function dashboardModelsSummary(states: DashboardSourceStates, view: Sour
  */
 export function dashboardModelsSection(states: DashboardSourceStates, view: SourceDashboardViewModel): string {
   const models = states.models;
-  const installs = [installLine('search', models.embedding), installLine('answers', models.answers?.install)]
-    .filter((line): line is InstallLine => line !== undefined);
+  const installs = modelInstallLines(states);
   const summary = dashboardModelsSummary(states, view);
   const open = view.model_setup !== undefined && !view.model_setup.ready;
   const search = `${models.embedding.kind === 'built_in' ? C.modelBuiltIn : C.modelCustom} · ${modelStateWord(models.embedding.state)}`;
   const answers = models.answers
     ? `${models.answers.label} · ${models.answers.ready ? C.modelReady : models.answers.install ? modelStateWord(models.answers.install.state) : C.modelNotReady}`
     : '';
+  const transcription = states.transcription
+    ? states.transcription.state === 'not_needed'
+      ? C.modelNotNeededNoAudio
+      : `${C.modelBuiltIn} · ${modelStateWord(states.transcription.state)}`
+    : '';
   const body = `<ul class="mlist"><li>${escapeHtml(`${C.modelSearch}: ${search}`)}</li>`
     + (answers ? `<li>${escapeHtml(`${C.modelAnswers}: ${answers}`)}</li>` : '')
+    + (transcription ? `<li>${escapeHtml(`${C.modelTranscription}: ${transcription}`)}</li>` : '')
     + `</ul>${renderModelSetup(view.model_setup, { heading: false })}`;
   return `<section class="modelsrow" id="models" aria-label="${escapeHtml(C.models)}">`
     + `<details class="models" data-poll-key="models"${open ? ' open' : ''}><summary>${escapeHtml(summary)}</summary>`

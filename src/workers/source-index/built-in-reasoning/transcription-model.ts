@@ -6,6 +6,7 @@
 // sends audio anywhere; this module only fetches the pinned model files.
 
 import { isAbsolute, join } from 'node:path';
+import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
 import {
   currentPlatform,
   installPinnedModel,
@@ -129,4 +130,29 @@ export function builtInTranscriptionEnabled(
   if (!runtimeArchiveFor(platform)) return false;
   if (raw === 'on' || raw === 'true' || raw === '1' || raw === 'yes') return true;
   return platform === 'darwin-arm64';
+}
+
+/**
+ * What the dashboard shows for the built-in transcription model. Its install
+ * starts only when the owner's chosen sources contain audio, so a model never
+ * started reads `not_needed`. Downloading and checking read as such; a model
+ * on disk whose server is starting reads ready.
+ */
+export interface BuiltInTranscriptionDashboardState {
+  state: 'not_needed' | 'downloading' | 'verifying' | 'ready' | 'failed';
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  failedReason?: ModelInstallFailedReason;
+}
+
+export function builtInTranscriptionDashboardState(status: BuiltInReasoningStatus): BuiltInTranscriptionDashboardState {
+  if (status.state === 'not_started') return { state: 'not_needed' };
+  if (status.state === 'ready' || status.state === 'loading') return { state: 'ready' };
+  if (status.state === 'failed') return { state: 'failed', failedReason: modelInstallFailedReason(status.failure) };
+  return {
+    state: status.state === 'verifying' ? 'verifying' : 'downloading',
+    percent: status.percent,
+    ...(status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {}),
+  };
 }

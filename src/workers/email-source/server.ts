@@ -70,6 +70,11 @@ import {
   workerAuthTokenFromEnv,
 } from '../http.ts';
 import { createAnalyst } from '../../core/analyst.ts';
+import {
+  builtInTranscriptionDashboardState,
+  builtInTranscriptionEnabled,
+  readBuiltInTranscriptionStatus,
+} from '../source-index/built-in-reasoning/transcription-model.ts';
 import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscriptionAtBoot } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
   answerPrivately,
@@ -4241,7 +4246,12 @@ export async function main(): Promise<void> {
             modelInstalls: () => {
               const embedding = chatgptEmbeddingState();
               const privateModel = chatgptPrivateModelState();
-              return { ...(embedding ? { embedding } : {}), ...(privateModel ? { privateModel } : {}) };
+              const transcription = dashboardTranscriptionState();
+              return {
+                ...(embedding ? { embedding } : {}),
+                ...(privateModel ? { privateModel } : {}),
+                ...(transcription ? { transcription } : {}),
+              };
             },
             retryModel: (model) => chatgptSetup.retryModel(model),
             stopMessagingCapture,
@@ -4691,6 +4701,17 @@ export async function main(): Promise<void> {
       bytesTotal: status.bytesTotal,
       ...(status.state === 'failed' ? { failedReason: modelInstallFailedReason(status.failure) } : {}),
     };
+  };
+  // The built-in transcription model, where it is this machine's transcriber
+  // (no owner command, enabled here): its status file, read without starting
+  // anything. A model never started reads "not needed" (no audio chosen).
+  const dashboardTranscriptionState = () => {
+    if (process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || !builtInTranscriptionEnabled(process.env)) return undefined;
+    try {
+      return builtInTranscriptionDashboardState(readBuiltInTranscriptionStatus(process.env));
+    } catch {
+      return undefined;
+    }
   };
   const chatgptEmbeddingState = () => {
     const builtIn = (['public_safe', 'internal', 'secure_local'] as const)

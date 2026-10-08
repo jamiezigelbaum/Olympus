@@ -1780,7 +1780,11 @@ export const DASHBOARD_LOCAL_COPY = {
   modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
   modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
   modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
-  modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+  modelNames: { ...DASHBOARD_CHATGPT_PAGE_COPY.modelNames, transcription: 'the transcription model' },
+  /** The built-in transcription model's line in Models (Mac dashboard only). */
+  modelTranscription: 'Transcription',
+  /** Not installed because the chosen sources hold no audio: nothing to download. */
+  modelNotNeededNoAudio: 'Not needed: no audio in your chosen folders',
   modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
   modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
   modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,

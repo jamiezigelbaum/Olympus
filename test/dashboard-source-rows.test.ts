@@ -6,6 +6,7 @@ import {
   DASHBOARD_PREVIEW_NOW,
 } from '../scripts/dashboard-preview.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { builtInTranscriptionDashboardState } from '../src/workers/source-index/built-in-reasoning/transcription-model.ts';
 import { renderDashboardDetailPage } from '../src/workers/dashboard/pages/detail.ts';
 import { renderDashboardHomePage } from '../src/workers/dashboard/pages/home.ts';
 import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
@@ -341,6 +342,34 @@ describe('rule 5: the Models row', () => {
     expect(failed).toContain('Couldn&#39;t download the private model: the disk is full');
     const ready = render({ state: 'ready' });
     expect(ready).toContain('<summary>Models — Built-in · Ready</summary>');
+    expect(ready).not.toContain('class="minstall');
+  });
+
+  test('the built-in transcription model: not needed without audio, its download, and ready', () => {
+    const view = buildDashboardPreviewView('review');
+    const render = (transcription: NonNullable<DashboardRowOptions['modelInstalls']>['transcription']) => dashboardModelsSection(
+      dashboardSourceStates(view, { now: NOW, modelInstalls: { embedding: { kind: 'built_in', state: 'ready' }, ...(transcription ? { transcription } : {}) } }),
+      view,
+    );
+    const none = render(undefined);
+    expect(none).not.toContain('Transcription:');
+    const notNeeded = render(builtInTranscriptionDashboardState({ state: 'not_started', modelId: 'm', percent: 0, label: '', bytesDone: 0, bytesTotal: 0, updatedAt: '' }));
+    expect(notNeeded).toContain('<li>Transcription: Not needed: no audio in your chosen folders</li>');
+    expect(notNeeded).toContain('<summary>Models — Built-in · Ready</summary>');
+    const downloading = render(builtInTranscriptionDashboardState({
+      state: 'downloading', modelId: 'm', percent: 42, label: '', bytesDone: 428_000_000, bytesTotal: 1_019_141_728, updatedAt: '',
+    }));
+    expect(downloading).toContain('<summary>Models — Built-in · Getting ready</summary>');
+    expect(downloading).toContain('<li>Transcription: Built-in · Getting ready</li>');
+    expect(downloading).toContain('<p class="sline">Downloading the transcription model · 42% · 0.4 of 1.0 GB</p>');
+    const failed = render(builtInTranscriptionDashboardState({
+      state: 'failed', modelId: 'm', percent: 10, label: '', bytesDone: 0, bytesTotal: 0, updatedAt: '',
+      failure: { reason: 'insufficient_space', message: 'x', bytesNeeded: 3, bytesFree: 1, retryAfter: '' },
+    }));
+    expect(failed).toContain('<summary>Models — Built-in · Needs you</summary>');
+    expect(failed).toContain('Couldn&#39;t download the transcription model: the disk is full');
+    const ready = render(builtInTranscriptionDashboardState({ state: 'loading', modelId: 'm', percent: 100, label: '', bytesDone: 0, bytesTotal: 0, updatedAt: '' }));
+    expect(ready).toContain('<li>Transcription: Built-in · Ready</li>');
     expect(ready).not.toContain('class="minstall');
   });
 
