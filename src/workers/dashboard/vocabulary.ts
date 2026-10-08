@@ -361,7 +361,7 @@ export function dashboardSubLine(
     case 'Waiting':
       return waitingLine(source);
     case 'Fresh':
-      return freshLine(source);
+      return freshLine(source, options?.now ?? new Date());
     case 'Off':
       return source.connection.label;
   }
@@ -413,7 +413,12 @@ export function dashboardAttentionLine(
     default:
       break;
   }
-  if (source.answer_readiness.state === 'needs_attention') return `paused — ${pausedReason(source)}`;
+  // "Paused" is said only of a real pause — Olympus parked the lane on a budget
+  // or a rate limit (owner ruling, 2026-10-08). A broken file, a stale sync or
+  // a failing task is stated as itself.
+  if (source.answer_readiness.state === 'needs_attention') {
+    return dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source);
+  }
   // Owner ruling, 2026-08-24: NO ERROR COUNTS ANYWHERE. This line used to end
   // "3 items need attention · 1 task retrying", which is a number about queue
   // depth dressed as a number about the reader's data — and the reader can do
@@ -454,11 +459,19 @@ function pausedReason(source: DashboardSourceCard): string {
   return relative ? `last synced ${relative}, later than expected` : 'it has not synced when expected';
 }
 
+/**
+ * The readiness label source-dashboard.ts raises when more than
+ * DASHBOARD_UNREADABLE_ALARM_SHARE of a source's in-scope files can't be read:
+ * past that, it is an extractor regression, not a few damaged files.
+ */
+export const DASHBOARD_MANY_UNREADABLE_LABEL = 'Many files cannot be read';
+
 /** The view model's readiness labels that name a cause, in the owner's words. */
 const READINESS_REASONS: Readonly<Record<string, string>> = {
   'Reauthenticate this source': DASHBOARD_SIGNED_OUT,
   'Embedding lane needs attention': 'indexing has stopped',
   'Content extraction is stalled': 'reading files has stalled',
+  [DASHBOARD_MANY_UNREADABLE_LABEL]: "many files can't be read",
 };
 
 /** The view model's catch-all readiness label, which names no cause. */
@@ -827,6 +840,11 @@ export interface DashboardWorkingSummary {
   in_scope_items: number;
   /** Of those, how many have their text extracted. */
   read_items: number;
+  /**
+   * Of those, how many extraction gave up on for good. Settled, not pending:
+   * they finish the stage without ever counting as read.
+   */
+  unreadable_items?: number;
   /** Percent of in-scope files whose text is extracted, 0..100. */
   read_percent: number;
   /**
@@ -859,6 +877,7 @@ export function dashboardWorkingSummary(
   if (inScope <= 0) return undefined;
   const read = Math.max(0, Math.min(inScope, source.coverage.content_ready_items));
   const readPercent = clampPercent((read / inScope) * 100);
+  const unreadable = Math.max(0, Math.min(inScope - read, Math.trunc(source.coverage.unreadable_items ?? 0)));
   const backlog = source.embedding_backlog;
   // Parity counts chunks, so it can only ever qualify the headline — never
   // become it. `chunks` is documented as always > 0 where a backlog exists.
@@ -871,9 +890,10 @@ export function dashboardWorkingSummary(
   return {
     in_scope_items: inScope,
     read_items: read,
+    ...(unreadable > 0 ? { unreadable_items: unreadable } : {}),
     read_percent: readPercent,
     ...(searchablePercent !== undefined ? { searchable_percent: searchablePercent } : {}),
-    fully_working: read >= inScope && !parityShort,
+    fully_working: read + unreadable >= inScope && !parityShort,
   };
 }
 
@@ -886,6 +906,12 @@ export function dashboardWorkingSummary(
  */
 export function dashboardWorkingHeadline(summary: DashboardWorkingSummary): string {
   if (summary.fully_working) {
+    const unreadable = summary.unreadable_items ?? 0;
+    if (unreadable > 0) {
+      return `everything readable is working — ${dashboardCount(summary.read_items)} of`
+        + ` ${dashboardCount(summary.in_scope_items)} ${plural(summary.in_scope_items, 'file')}`
+        + ` · ${dashboardCount(unreadable)} can't be read`;
+    }
     return `everything in scope is working — ${dashboardCount(summary.in_scope_items)}`
       + ` ${plural(summary.in_scope_items, 'file')}`;
   }
@@ -908,18 +934,131 @@ export function dashboardCount(value: number): string {
   return rounded < 0 ? `-${digits}` : digits;
 }
 
-function freshLine(source: DashboardSourceCard): string {
+function freshLine(source: DashboardSourceCard, now: Date): string {
   // The answer lane has nothing to sync, and its freshness label is the only
   // field that says so.
   if (source.freshness.label.startsWith('Answer lane:')) return 'answers questions directly';
+  const unreadable = dashboardUnreadablePhrase(source);
+  // The owner's own Sync now press, while it is the latest word, says what it
+  // found in place of the bare sync time.
+  const manual = dashboardManualSyncLine(source, now);
+  if (manual) return unreadable ? `${manual} · ${unreadable}` : manual;
   const hours = source.freshness.hours;
-  if (typeof hours !== 'number' || !Number.isFinite(hours)) return '';
+  if (typeof hours !== 'number' || !Number.isFinite(hours)) return unreadable ?? '';
   const relative = dashboardRelativeFromHours(hours);
-  if (!relative) return '';
+  if (!relative) return unreadable ?? '';
   // A lane Olympus parked is calm, not idle by accident. Saying so keeps this
   // line from implying the sync is still running, and matches the detail
   // page's paused sentence for the same marker.
-  return dashboardOperatorPaused(source) ? `synced ${relative} · sync paused` : `synced ${relative}`;
+  const synced = dashboardOperatorPaused(source) ? `synced ${relative} · sync paused` : `synced ${relative}`;
+  return unreadable ? `${synced} · ${unreadable}` : synced;
+}
+
+/**
+ * The noun a source's items go by (owner note, 2026-09-01: "the units need to
+ * be correct for each bar" — Gmail was counting "files"). Off the card's
+ * family, which is the one field that says what kind of thing an item is.
+ */
+export function dashboardItemNoun(source: Pick<DashboardSourceCard, 'family'>): string {
+  switch (source.family) {
+    case 'email':
+    case 'chat':
+      return 'messages';
+    // Readwise indexes Reader documents and highlights alike, so neither word
+    // alone names what is counted (owner review, 2026-09-24).
+    case 'readwise':
+      return 'items';
+    case 'x':
+      return 'posts';
+    case 'file':
+      return 'files';
+    default:
+      return 'items';
+  }
+}
+
+/** "1 file", "2 files", "12 new files": the item noun at a count. */
+function itemsPhrase(source: Pick<DashboardSourceCard, 'family'>, count: number, adjective = ''): string {
+  const noun = dashboardItemNoun(source);
+  return `${dashboardCount(count)} ${adjective ? `${adjective} ` : ''}${count === 1 ? noun.replace(/s$/, '') : noun}`;
+}
+
+/**
+ * "2 files can't be read", or undefined when nothing is unreadable.
+ *
+ * Owner ruling, 2026-10-08: a damaged file, or one in a format nothing reads,
+ * is a fact the row states beside its normal line — never a pause and never a
+ * Needs you of its own (the readiness guard re-alarms past
+ * DASHBOARD_UNREADABLE_ALARM_SHARE). Counts only; no file is ever named.
+ */
+export function dashboardUnreadablePhrase(source: DashboardSourceCard): string | undefined {
+  const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0));
+  return count > 0 ? `${itemsPhrase(source, count)} can't be read` : undefined;
+}
+
+/** A finished phase that left some files unread for good: "Done · 252 read · 2 can't be read". */
+export function dashboardPhaseUnreadableWords(read: number, unreadable: number): string {
+  return `Done · ${dashboardCount(read)} read · ${dashboardCount(unreadable)} can't be read`;
+}
+
+/**
+ * The detail page's plain reason for those files (2026-10-08). Never a file
+ * name: the reason is the same for every one of them.
+ */
+export function dashboardUnreadableSentence(source: DashboardSourceCard): string | undefined {
+  const phrase = dashboardUnreadablePhrase(source);
+  if (!phrase) return undefined;
+  const lead = `${phrase[0]!.toUpperCase()}${phrase.slice(1)}: extraction failed permanently — the file is damaged`
+    + " or in a format Olympus can't read.";
+  // Past the alarm share the row says Needs you, so this sentence must not say
+  // nothing is waiting — and the rest of the source still answers.
+  return source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL
+    ? `${lead} That is more than a healthy source has, so it may be a problem in Olympus rather than your files.`
+      + ' The other files still answer questions.'
+    : `${lead} Olympus does not retry these, and nothing is waiting on you.`;
+}
+
+/** A Sync now that could not run, in plain words; the provider's own text stays in the log. */
+export function dashboardManualSyncFailedLine(label: string): string {
+  return `Couldn't check ${label} just now — Olympus will try again on its own`;
+}
+
+/** While a Sync now press is outstanding: "Checking Dropbox…". */
+export function dashboardManualSyncPendingLine(label: string): string {
+  return `Checking ${label}…`;
+}
+
+/**
+ * What the last Sync now press found, while the card still carries it
+ * (DASHBOARD_MANUAL_SYNC_SHOWN_MS): "Checked just now — no new files",
+ * "Checked 3m ago — 12 new files, reading them now". Never provider text.
+ */
+export function dashboardManualSyncLine(
+  source: Pick<DashboardSourceCard, 'label' | 'family' | 'last_manual_sync'>,
+  now: Date,
+): string | undefined {
+  const sync = source.last_manual_sync;
+  if (!sync) return undefined;
+  const at = Date.parse(sync.at);
+  if (!Number.isFinite(at)) return undefined;
+  const elapsed = now.getTime() - at;
+  const when = elapsed < 60_000 ? 'just now' : dashboardRelativeFromMs(elapsed);
+  switch (sync.outcome) {
+    case 'busy':
+      return `Already checking ${source.label}`;
+    case 'failed':
+      return when === 'just now'
+        ? dashboardManualSyncFailedLine(source.label)
+        : `Couldn't check ${source.label} ${when} — Olympus will try again on its own`;
+    case 'checked': {
+      const found = sync.new_items;
+      if (found === undefined) return `Checked ${when}`;
+      if (found <= 0) return `Checked ${when} — no new ${dashboardItemNoun(source)}`;
+      return `Checked ${when} — ${itemsPhrase(source, found, 'new')}, reading them now`;
+    }
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -998,6 +1137,8 @@ function workingLine(source: DashboardSourceCard): string {
   if (typeof eta === 'number' && Number.isFinite(eta) && eta > 0) {
     parts.push(`~${dashboardDuration(eta * 60)} left`);
   }
+  const unreadable = dashboardUnreadablePhrase(source);
+  if (unreadable) parts.push(unreadable);
   return parts.join(' · ');
 }
 

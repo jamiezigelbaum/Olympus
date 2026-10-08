@@ -197,7 +197,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'connect_api_key': return 'Key accepted. This card updates when Olympus confirms the connection.';
       case 'start_oauth': return 'Waiting for authorization. This card updates when the connection completes.';
       case 'cancel_oauth': return 'Connection attempt cancelled. Press Connect when you are ready to start a new one.';
-      case 'sync_now': return 'Sync started. This card updates when it finishes.';
+      // The route answers once the check has run, with its result as
+      // status_message; this is only the fallback for a reply without one.
+      case 'sync_now': return 'Checked. This card shows what was found.';
       case 'set_embedding_priority': return 'Saved.';
       case 'disconnect': return 'Disconnected. This card updates when Olympus confirms it.';
       case 'unpair': return 'Unpaired on this computer.';
@@ -451,7 +453,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
     }
     if (params.action === 'start_oauth') clearAuthorizationFallback(form);
-    setFormPending(form, true, pendingMessage(params));
+    // A form that words its own wait ("Checking Dropbox…") says that instead.
+    setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result: OlympusDashboardControlResult;
     try {
       result = await options.transport.control(params);

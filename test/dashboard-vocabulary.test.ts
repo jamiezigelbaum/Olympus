@@ -671,7 +671,7 @@ describe('attention lines', () => {
 
   test('carry the machine failure the readiness label names', () => {
     const source = card({ answer_readiness: { state: 'needs_attention', label: 'Content extraction is stalled' } });
-    expect(dashboardAttentionLine(source)).toBe('paused — reading files has stalled');
+    expect(dashboardAttentionLine(source)).toBe('reading files has stalled');
   });
 
   // Was: "count the stuck work when nothing names a cause", pinning "3 items

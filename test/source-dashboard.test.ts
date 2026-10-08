@@ -1716,6 +1716,66 @@ describe('multi-source source dashboard', () => {
     ]);
   });
 
+  // Owner ruling, 2026-10-08: the press answers with what it found, the card
+  // keeps that line through the refresh, and a provider's words never reach it.
+  test('Sync now answers with what it found and the card keeps the line', async () => {
+    const worker = createEmailSourceWorker({
+      sourceIndexStatus: { status: async () => fixtureStatus() },
+      sourceDashboard: {
+        sovereigntyEngine: fixtureSovereigntyEngine(),
+        history: inMemoryHistory(),
+        registryPath: '/tmp/olympus-source-dashboard-test-missing-handles.json',
+        fileSourceScopes: approvedFolderScopesFixture(),
+        async triggerSourceSync() {
+          return { status: 'idle', counts: { items_seen: 254, items_changed: 0 } };
+        },
+      },
+    });
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+    const response = await fetch(new Request('http://worker.test/dashboard/sync-now', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer dashboard-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'readwise' }),
+    }));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.last_manual_sync).toMatchObject({ outcome: 'checked', new_items: 0 });
+    expect(body.status_message).toBe('Checked just now — no new items');
+
+    const view = await fetch(new Request('http://worker.test/dashboard.json', {
+      headers: { Authorization: 'Bearer dashboard-secret' },
+    }));
+    expect(view.status).toBe(200);
+    const readwise = (await view.json()).sources.find((source: { source_id: string }) => source.source_id === 'readwise.library');
+    expect(readwise.last_manual_sync).toMatchObject({ outcome: 'checked', new_items: 0 });
+  });
+
+  test('a Sync now the provider breaks reads one plain line, never the provider text', async () => {
+    const worker = createEmailSourceWorker({
+      sourceDashboard: {
+        sovereigntyEngine: fixtureSovereigntyEngine(),
+        fileSourceScopes: approvedFolderScopesFixture(),
+        async triggerSourceSync() {
+          throw new Error('upstream 503: <html>provider maintenance page for jamie@example.test</html>');
+        },
+      },
+    });
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+    const response = await fetch(new Request('http://worker.test/dashboard/sync-now', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer dashboard-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'readwise' }),
+    }));
+    const text = await response.text();
+    expect(response.status).toBe(502);
+    expect(JSON.parse(text).error).toEqual({
+      code: 'sync_failed',
+      message: "Couldn't check Readwise just now — Olympus will try again on its own",
+    });
+    expect(text).not.toContain('upstream');
+    expect(text).not.toContain('example.test');
+  });
+
   // The host's triggerSourceSync is ONE callback for every source, and the
   // product server wires it for Dropbox alone. When it was promoted ahead of
   // the connector-store fallbacks, Readwise and X sync-now stopped reaching

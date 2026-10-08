@@ -74,6 +74,8 @@ import {
   dashboardRelativeFromHours,
   dashboardRelativeFromMs,
   dashboardNotReadByPolicyPhrase,
+  dashboardUnreadableSentence,
+  DASHBOARD_MANY_UNREADABLE_LABEL,
   dashboardOperatorPaused,
   dashboardSourceById,
   dashboardStatus,
@@ -443,6 +445,10 @@ function renderProgress(
     notes.push(`${dashboardCount(backlog.missing_chunks)} chunks are waiting to be embedded`
       + ` (${embeddingCostPhrase(backlog.estimate)}). Keyword search answers from them meanwhile.`);
   }
+  // Why the extraction row stopped short of its total, in one plain sentence
+  // (owner ruling, 2026-10-08). The count only: no file is named here.
+  const unreadable = dashboardUnreadableSentence(source);
+  if (unreadable) notes.push(unreadable);
   if (progress.phases.some((phase) => phase.unmeasured === true)) {
     notes.push('This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.');
   }
@@ -808,6 +814,10 @@ function detailChecks(
 function withConsequence(check: DetailCheck, source: DashboardSourceCard): DetailCheck {
   if (check.ok) return check;
   if (check.name === 'LEDGER') return { ...check, consequence: ledgerConsequence(check.observed) };
+  // The unreadable-share alarm holds no answers back: the readable files serve.
+  if (check.name === 'ANSWER_LANE' && source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL) {
+    return { ...check, consequence: "answers use the files that could be read; the rest can't be searched" };
+  }
   const marker = guardMarkerFor(check, source);
   const consequence = (marker ? DETAIL_GUARD_CONSEQUENCES[marker] : undefined)
     ?? DETAIL_CHECK_CONSEQUENCES[check.name];

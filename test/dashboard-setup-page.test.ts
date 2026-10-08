@@ -439,7 +439,7 @@ describe('dashboard first-run page', () => {
     expect(segmentFor(html, 'Gmail')).toContain('class="dot tone-warn"');
     expect(html).not.toContain('— Fresh');
     expect(segmentFor(html, 'Dropbox')).toContain("Can&#39;t sign in");
-    expect(segmentFor(html, 'Gmail')).toContain('Paused — indexing has stopped');
+    expect(segmentFor(html, 'Gmail')).toContain('Indexing has stopped');
   });
 });
 

@@ -59,6 +59,8 @@ import {
 import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
 import {
   dashboardDuration,
+  dashboardItemNoun,
+  dashboardPhaseUnreadableWords,
   dashboardRelativeFromMs,
   dashboardWorkingSummary,
   type DashboardWorkingSummary,
@@ -143,6 +145,13 @@ export interface DashboardPhase {
    * apply, the row says so, and it counts as complete for settling.
    */
   not_applicable?: boolean;
+  /**
+   * In-scope items this phase will never reach because extraction gave up on
+   * them (owner ruling, 2026-10-08). Present only on a corpus-scoped ratio:
+   * the numerator stays honest ("252 of 254") and the bar is complete once
+   * done + unreadable covers the total.
+   */
+  unreadable?: number;
 }
 
 export interface DashboardProgress {
@@ -325,9 +334,9 @@ export function dashboardFirstSyncClock(source: DashboardSourceCard, now: Date):
 }
 
 /** A phase with nothing left to do. An indeterminate phase never qualifies. */
-export function dashboardPhaseComplete(phase: Pick<DashboardPhase, 'measure'>): boolean {
+export function dashboardPhaseComplete(phase: Pick<DashboardPhase, 'measure' | 'unreadable'>): boolean {
   const measure = phase.measure;
-  if (measure.kind === 'ratio') return measure.done >= measure.total;
+  if (measure.kind === 'ratio') return measure.done + (phase.unreadable ?? 0) >= measure.total;
   if (measure.kind === 'remaining') return measure.remaining <= 0;
   return false;
 }
@@ -337,28 +346,9 @@ function measureDone(measure: DashboardPhaseMeasure): number {
   return measure.kind === 'remaining' ? 0 : measure.done;
 }
 
-/**
- * The noun a source's items go by (owner note, 2026-09-01: "the units need to
- * be correct for each bar" — Gmail was counting "files"). Off the card's
- * family, which is the one field that says what kind of thing an item is.
- */
-export function dashboardItemNoun(source: Pick<DashboardSourceCard, 'family'>): string {
-  switch (source.family) {
-    case 'email':
-    case 'chat':
-      return 'messages';
-    // Readwise indexes Reader documents and highlights alike, so neither word
-    // alone names what is counted (owner review, 2026-09-24).
-    case 'readwise':
-      return 'items';
-    case 'x':
-      return 'posts';
-    case 'file':
-      return 'files';
-    default:
-      return 'items';
-  }
-}
+// The item noun is wording, so it lives in vocabulary.ts (which also needs
+// it for the can't-be-read clause); re-exported here for existing callers.
+export { dashboardItemNoun } from './vocabulary.ts';
 
 /**
  * How much of the provider Olympus has actually looked at.
@@ -432,6 +422,7 @@ function extractionPhase(
     summary.in_scope_items,
     settledPass,
     source.movement?.extraction_settled_value,
+    summary.unreadable_items,
   );
 }
 
@@ -471,6 +462,8 @@ function embeddingPhase(
   }
   const measured = source.coverage.embedded_files;
   if (measured !== undefined) {
+    // Files extraction gave up on have no text to embed, so they are not
+    // waited on here either.
     return ratioPhase(
       'embedding',
       noun,
@@ -478,6 +471,7 @@ function embeddingPhase(
       total,
       settledPass,
       source.movement?.embedding_settled_value,
+      summary?.unreadable_items,
     );
   }
   if (total === 0) return ratioPhase('embedding', noun, 0, 0, false);
@@ -517,6 +511,10 @@ function withState(
     const due = nextSyncDue(source, phase.id, now);
     if (phase.id === 'metadata_sync' && due !== undefined) {
       return { ...phase, state: 'done', state_words: `Complete · next check in ${due}` };
+    }
+    const unreadable = phase.unreadable ?? 0;
+    if (unreadable > 0 && phase.measure.kind === 'ratio') {
+      return { ...phase, state: 'done', state_words: dashboardPhaseUnreadableWords(phase.measure.done, unreadable) };
     }
     return { ...phase, state: 'done', state_words: 'Done' };
   }
@@ -644,12 +642,16 @@ function ratioPhase(
   rawTotal: number,
   settledPass: boolean,
   settledBaseline?: number,
+  rawUnreadable?: number,
 ): BarePhase {
   const total = Math.max(0, Math.round(rawTotal));
   const done = Math.max(0, Math.min(total, Math.round(rawDone)));
-  const remaining = total - done;
+  // Unreadable files are settled, not remaining: they never turn a finished
+  // corpus into a perpetual delta. The ratio itself keeps them in the total.
+  const unreadable = Math.max(0, Math.min(total - done, Math.round(rawUnreadable ?? 0)));
+  const remaining = total - done - unreadable;
   if (settledPass && remaining > 0) {
-    const batch = deltaMeasure(done, total, settledBaseline);
+    const batch = deltaMeasure(done, total - unreadable, settledBaseline);
     if (batch) {
       return {
         id,
@@ -678,6 +680,7 @@ function ratioPhase(
     measure: { kind: 'ratio', done, total, percent: percentOf(done, total) },
     scope: 'corpus',
     denominator_unavailable: false,
+    ...(unreadable > 0 ? { unreadable } : {}),
   };
 }
 

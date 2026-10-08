@@ -41,6 +41,7 @@ import {
   DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
+  DASHBOARD_MANY_UNREADABLE_LABEL,
 } from '../dashboard/vocabulary.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
@@ -121,6 +122,7 @@ const KNOWN_READINESS_LABELS = new Set([
   'Syncing now',
   'Preparing answer-ready text',
   'Waiting for the first sync',
+  DASHBOARD_MANY_UNREADABLE_LABEL,
 ]);
 
 /** Provider refusal codes the vocabulary words on their own; any other reads as a generic refusal. */
@@ -193,7 +195,7 @@ export function buildChatGptDashboardViewModel(
 
   const sources: DashboardSource[] = rows
     .map(({ definition, card, status, actionKind, connecting, progress }, index) => ({
-      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress),
+      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now),
       index,
     }))
     .sort((a, b) => groupRank(a.entry.group) - groupRank(b.entry.group) || a.index - b.index)
@@ -310,13 +312,16 @@ function sourceEntry(
   degraded: WorkerCredentialDegradation[] | undefined,
   connecting: Connecting | undefined,
   progress: SourceProgress | undefined,
+  now: Date,
 ): DashboardSource {
   const inFlight = progress && progress.stage !== 'done' && status !== 'Needs you' && status !== 'Failing';
   const detail = connecting
     ? CONNECTING_DETAIL
     : inFlight
       ? STAGE_DETAIL[progress.stage as Exclude<SourceProgress['stage'], 'done'>]
-      : dashboardSubLine(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) });
+      : dashboardSubLine(card, { surface: 'chatgpt', now, ...(degraded ? { degradedCredentials: degraded } : {}) });
+  const unreadable = card.coverage.unreadable_items ?? 0;
+  const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = credentialProblem(card, degraded) || progress?.stalledReason === 'waiting_for_credentials'
     ? reconnectFix(definition)
@@ -350,6 +355,17 @@ function sourceEntry(
     ...(connecting ? { connecting: { expiresAt: connecting.expiresAt } } : {}),
     ...(progress ? { progress } : {}),
     ...(menu.length > 0 ? { menu } : {}),
+    // Counts only, the same facts the row's words come from; never a file name.
+    ...(unreadable > 0 ? { unreadable } : {}),
+    ...(manual
+      ? {
+          lastManualSync: {
+            at: manual.at,
+            outcome: manual.outcome,
+            ...(manual.new_items !== undefined ? { newItems: manual.new_items } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -790,6 +806,9 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ...(finite(card.coverage.answer_ready_eligible_items)
         ? { answer_ready_eligible_items: count(card.coverage.answer_ready_eligible_items) }
         : {}),
+      ...(finite(card.coverage.unreadable_items)
+        ? { unreadable_items: count(card.coverage.unreadable_items) }
+        : {}),
     },
     ingestion_health: {
       coverage_percent: finite(card.ingestion_health.coverage_percent) ? card.ingestion_health.coverage_percent : 0,
@@ -858,8 +877,20 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
         }
       : {}),
     ...(isoOrUndefined(card.last_sync_at) ? { last_sync_at: isoOrUndefined(card.last_sync_at)! } : {}),
+    ...(card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at)
+      && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome)
+      ? {
+          last_manual_sync: {
+            at: isoOrUndefined(card.last_manual_sync.at)!,
+            outcome: card.last_manual_sync.outcome,
+            ...(finite(card.last_manual_sync.new_items) ? { new_items: count(card.last_manual_sync.new_items) } : {}),
+          },
+        }
+      : {}),
   };
 }
+
+const MANUAL_SYNC_OUTCOMES: ReadonlySet<string> = new Set(['checked', 'failed', 'busy']);
 
 /** Degradations reduced to what status matching reads; the name is matched, never printed. */
 function scrubDegradations(input: readonly WorkerCredentialDegradation[] | undefined): WorkerCredentialDegradation[] | undefined {

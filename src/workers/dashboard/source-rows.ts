@@ -38,12 +38,14 @@ import {
   dashboardAttentionLine,
   dashboardCount,
   dashboardEtaWords,
+  dashboardManualSyncLine,
   dashboardProviderRefusalDetail,
   dashboardProviderRefusalSentence,
   dashboardScopePending,
   dashboardStatus,
   dashboardSubLine,
   type DashboardStatus,
+  type DashboardVocabularyOptions,
 } from './vocabulary.ts';
 import {
   DASHBOARD_CONTROL_GATE_ID,
@@ -522,8 +524,26 @@ function dot(tone: string): string {
 /** The lines under a row's name: one sentence, then the progress block when there is one. */
 function rowBody(state: DashboardSourceRowState, options: DashboardRowOptions | undefined): string {
   const source = state.source;
-  const vocabulary = options?.degradedCredentials ? { degradedCredentials: options.degradedCredentials } : {};
+  const now = options?.now ?? new Date();
+  const vocabulary: DashboardVocabularyOptions = {
+    now,
+    ...(options?.degradedCredentials ? { degradedCredentials: options.degradedCredentials } : {}),
+  };
   if (state.connecting) return `<p class="sline">${escapeHtml(dashboardConnectingLine(state))}</p>`;
+  // What the owner's last Sync now found, kept on the card so it outlives the
+  // refresh that follows the press (2026-10-08). A fresh row already says it in
+  // its own line; any other row carries it above whatever else it says.
+  const manual = dashboardManualSyncLine(source, now);
+  const body = rowBodyLines(state, options, vocabulary);
+  return manual && !body.includes(escapeHtml(manual)) ? `<p class="sline">${escapeHtml(manual)}</p>${body}` : body;
+}
+
+function rowBodyLines(
+  state: DashboardSourceRowState,
+  options: DashboardRowOptions | undefined,
+  vocabulary: DashboardVocabularyOptions,
+): string {
+  const source = state.source;
   const progress = state.progress;
   if (progress) {
     const name = source.label;

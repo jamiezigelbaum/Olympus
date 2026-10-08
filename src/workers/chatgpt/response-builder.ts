@@ -224,8 +224,20 @@ function copySource(source: DashboardSource): DashboardSource {
   if (connectingUntil) out.connecting = { expiresAt: connectingUntil };
   if (source.progress) out.progress = copySourceProgress(source.progress);
   if (source.menu && source.menu.length > 0) out.menu = source.menu.map(copyFix);
+  if (whole(source.unreadable) > 0) out.unreadable = whole(source.unreadable);
+  const manual = source.lastManualSync;
+  const manualAt = iso(manual?.at);
+  if (manual && manualAt && MANUAL_SYNC_OUTCOMES.has(manual.outcome)) {
+    out.lastManualSync = {
+      at: manualAt,
+      outcome: manual.outcome,
+      ...(manual.newItems !== undefined ? { newItems: whole(manual.newItems) } : {}),
+    };
+  }
   return out;
 }
+
+const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync']>['outcome']>(['checked', 'failed', 'busy']);
 
 const SOURCE_STAGES = new Set<SourceProgress['stage']>(['listing', 'reading', 'indexing', 'done']);
 const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'provider_unavailable', 'model_downloading']);

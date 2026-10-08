@@ -7269,7 +7269,7 @@ var init_answer_ready_coverage = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
-var DASHBOARD_UNCONNECTED_STATES, REDIRECT_REFUSAL_CODES, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -7278,6 +7278,12 @@ var init_vocabulary = __esm(() => {
     "not_connected",
     "needs_setup"
   ]);
+  READINESS_REASONS = {
+    "Reauthenticate this source": DASHBOARD_SIGNED_OUT,
+    "Embedding lane needs attention": "indexing has stopped",
+    "Content extraction is stalled": "reading files has stalled",
+    [DASHBOARD_MANY_UNREADABLE_LABEL]: "many files can't be read"
+  };
   REDIRECT_REFUSAL_CODES = new Set([
     "redirect_uri_mismatch",
     "invalid_redirect_uri",
@@ -7826,6 +7832,7 @@ var init_vocabulary = __esm(() => {
 // src/workers/dashboard/phases.ts
 var init_phases = __esm(() => {
   init_source_dashboard();
+  init_vocabulary();
   init_vocabulary();
 });
 
@@ -11365,7 +11372,7 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir12(), ".local", "share");
   return join19(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
-var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_privacy_language();
   init_sqlite_migrations();
@@ -11383,6 +11390,7 @@ var init_source_dashboard = __esm(() => {
     "credential_refresh_busy",
     "credential_session_latched"
   ]);
+  DASHBOARD_MANUAL_SYNC_SHOWN_MS = 10 * 60000;
   MIN_PROGRESS_WINDOW_MS = 5 * 60000;
   SAMPLE_RETENTION_MS = 24 * 60 * 60000;
   DASHBOARD_SENSITIVITY_TIERS = {
