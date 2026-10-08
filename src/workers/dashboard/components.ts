@@ -336,6 +336,11 @@ export interface DashboardActionInput {
    */
   providerLinkLabel?: string;
   /**
+   * What the form says while its request is outstanding ("Checking Dropbox…"),
+   * worded here so the browser script carries no source names of its own.
+   */
+  pendingMessage?: string;
+  /**
    * Why this control cannot be used right now. Set, the button renders
    * visibly disabled with the reason beside it, and submits nothing — a
    * blocked control never looks like a working one.
@@ -389,7 +394,8 @@ export function actionButton(input: DashboardActionInput | undefined): string {
   const source = `<input type="hidden" name="source" value="${escapeHtml(action.source ?? '')}">`;
   const message = `<span class="actmsg" data-action-message role="status"></span>`;
   if (action.kind === 'sync_now') {
-    return `<form class="rowform" data-sync-kind="sync_now">${source}${button}${message}</form>`;
+    const pending = action.pendingMessage ? ` data-pending-message="${escapeHtml(action.pendingMessage)}"` : '';
+    return `<form class="rowform" data-sync-kind="sync_now"${pending}>${source}${button}${message}</form>`;
   }
   // A built-in model's failed install, started again; `source` names the model.
   if (action.kind === 'model_retry') {

@@ -24,6 +24,7 @@ import type { ConnectedHandleRegistry, ConnectedCredentialHandle } from './crede
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './dashboard/scheduler-markers.ts';
 import {
   ITEMS_WITH_TEXT_COUNT_KEY,
+  UNREADABLE_ITEMS_COUNT_KEY,
   answerReadyEligibleFromCounts,
   answerReadyEligibleItems,
   answerReadyPercent,
@@ -33,6 +34,7 @@ import {
 // view-model imports are all `import type` — so the page's one wording source
 // is reachable from the builder without a cycle.
 import {
+  DASHBOARD_MANY_UNREADABLE_LABEL,
   DASHBOARD_NONE_READ_BY_POLICY,
 } from './dashboard/vocabulary.ts';
 // The phase model's own test for a finished pass, so the sample history and
@@ -611,6 +613,104 @@ export interface DashboardUnpairAction {
   provider_unlink_label: string;
 }
 
+/**
+ * What one Sync now press found, counts only. `new_items` is the run's own
+ * changed-item count and is absent where the lane reports none; `busy` means a
+ * sync was already running, so the press started nothing new.
+ */
+export interface DashboardManualSync {
+  at: string;
+  outcome: 'checked' | 'failed' | 'busy';
+  new_items?: number;
+}
+
+/**
+ * How long a Sync now result stays on the row: long enough to survive the page
+ * refresh and a glance back, short enough that "checked just now" never
+ * outlives the check (2026-10-08). A later sync supersedes it sooner.
+ */
+export const DASHBOARD_MANUAL_SYNC_SHOWN_MS = 10 * 60_000;
+
+/** The press result while it is still the latest word on this source, else undefined. */
+export function dashboardLiveManualSync(
+  sync: DashboardManualSync | undefined,
+  lastSyncAt: string | undefined,
+  now: Date,
+): DashboardManualSync | undefined {
+  if (!sync) return undefined;
+  const at = Date.parse(sync.at);
+  if (!Number.isFinite(at)) return undefined;
+  const age = now.getTime() - at;
+  if (age < -60_000 || age > DASHBOARD_MANUAL_SYNC_SHOWN_MS) return undefined;
+  // A scheduled sync that finished after the press is the newer word. A
+  // minute's grace: the press's own run stamps last_sync_at around `at`.
+  const last = Date.parse(lastSyncAt ?? '');
+  if (Number.isFinite(last) && last > at + 60_000) return undefined;
+  return sync;
+}
+
+/**
+ * What a Sync now run found, read off whatever the dispatch returned — counts
+ * only, never a provider's words, and no source named.
+ *
+ * `items_changed` is the one count every lane uses for "new or changed since
+ * last time" (`items_indexed` counts writes, which a lane re-upserting rows it
+ * already had inflates). A run that reports none but settled `idle` changed
+ * nothing; otherwise the number is unknown and stays absent.
+ *
+ * Through the scheduler, the tasks the press actually ran are the ones whose
+ * `last_attempt_at` moved since `before`; none moved while one was running is
+ * a press that joined a sync already under way.
+ */
+export function dashboardManualSyncOutcome(input: {
+  result: unknown;
+  before?: SourceSchedulerStatus;
+  schedulerSourceId?: string;
+  at: Date;
+}): DashboardManualSync {
+  const at = input.at.toISOString();
+  const result = input.result;
+  if (isRecord(result) && result.kind === 'source_scheduler_status' && Array.isArray(result.sources)) {
+    const matches = (source: SourceSchedulerSourceStatus) => input.schedulerSourceId !== undefined
+      && (source.source_id === input.schedulerSourceId || source.corpus_id === input.schedulerSourceId);
+    const previous = new Map<string, string | undefined>();
+    for (const source of input.before?.sources ?? []) {
+      if (!matches(source)) continue;
+      for (const task of source.tasks) previous.set(task.id, task.last_attempt_at);
+    }
+    const tasks = (result.sources as SourceSchedulerSourceStatus[]).filter(matches).flatMap((source) => source.tasks);
+    const ran = tasks.filter((task) => task.last_attempt_at !== undefined && task.last_attempt_at !== previous.get(task.id));
+    if (ran.length === 0) return { at, outcome: tasks.some((task) => task.running) ? 'busy' : 'failed' };
+    if (ran.some((task) => task.last_result?.status === 'failed')) return { at, outcome: 'failed' };
+    const syncs = ran.filter((task) => task.kind === 'sync');
+    const newItems = changedItems((syncs.length > 0 ? syncs : ran).map((task) => task.last_result));
+    return { at, outcome: 'checked', ...(newItems === undefined ? {} : { new_items: newItems }) };
+  }
+  const newItems = isRecord(result) ? changedItems([result]) : undefined;
+  return { at, outcome: 'checked', ...(newItems === undefined ? {} : { new_items: newItems }) };
+}
+
+function changedItems(results: ReadonlyArray<unknown>): number | undefined {
+  let total: number | undefined;
+  for (const result of results) {
+    if (!isRecord(result)) return undefined;
+    const counts = isRecord(result.counts) ? result.counts : undefined;
+    const changed = counts?.items_changed;
+    if (typeof changed === 'number' && Number.isFinite(changed)) {
+      total = (total ?? 0) + Math.max(0, Math.trunc(changed));
+    } else if (result.status === 'idle') {
+      total = total ?? 0;
+    } else {
+      return undefined;
+    }
+  }
+  return total;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export interface DashboardSourceCard {
   corpus_id: string;
   source_id: string;
@@ -675,6 +775,14 @@ export interface DashboardSourceCard {
      * subtraction remains the answer.
      */
     answer_ready_eligible_items?: number;
+    /**
+     * In-scope items extraction gave up on for good — a damaged file, or a
+     * format nothing reads — with nothing left to retry. Owner ruling,
+     * 2026-10-08: a fact the row states ("2 files can't be read"), never a
+     * pause; they stay in the eligible denominator and leave the queue's
+     * needs-attention count. Absent when the corpus publishes no such count.
+     */
+    unreadable_items?: number;
   };
   /** File populations the user deliberately added to Olympus. Excluded files are omitted. */
   ingestion_selection?: {
@@ -805,6 +913,8 @@ export interface DashboardSourceCard {
   last_run?: DashboardSourceRun;
   /** Absolute last sync, from the ingestion ledger. `freshness` carries only relative prose. */
   last_sync_at?: string;
+  /** The owner's last Sync now press, while it is still news; see DASHBOARD_MANUAL_SYNC_SHOWN_MS. */
+  last_manual_sync?: DashboardManualSync;
   schedule?: DashboardSourceSchedule;
   embedding_backlog?: DashboardEmbeddingBacklog;
   /**
@@ -1032,6 +1142,11 @@ export interface SourceDashboardHistorySample {
    */
   in_scope_items?: number;
   /**
+   * In-scope items extraction gave up on. A phase whose only remainder is
+   * these is complete, so the baseline is taken there too.
+   */
+  unreadable_items?: number;
+  /**
    * Whether this card had finished at least one full pass when the sample was
    * taken. A phase reaching parity mid-crawl is not a settled corpus, so the
    * baseline that separates "the first crawl is nearly done" from "a settled
@@ -1079,6 +1194,11 @@ export interface SourceDashboardBuildOptions {
    * unpaired state over a session file that is still there.
    */
   unpairedSources?: readonly DashboardUnpairedSourceState[];
+  /**
+   * The last Sync now result per source id, kept by the worker that ran it.
+   * Stamped on the card only while dashboardLiveManualSync says it is news.
+   */
+  manualSyncs?: Readonly<Record<string, DashboardManualSync>>;
   credentialHealth?: CredentialHealthReport;
   oauthClientIds?: Partial<Record<DashboardOAuthSource | 'google', string>>;
   oauthClientSecretAvailability?: Partial<Record<DashboardOAuthSource | 'google', boolean>>;
@@ -1543,11 +1663,15 @@ function phaseAtParity(sample: SourceDashboardHistorySample, counter: string, va
   if (sample.settled_pass !== true) return false;
   const inScope = sample.in_scope_items;
   if (inScope === undefined || !Number.isFinite(inScope) || inScope <= 0) return false;
-  if (counter === 'content_ready_items') return value >= inScope;
+  // Unreadable files never become text or vectors, so they count as settled.
+  const unreadable = Math.max(0, sample.unreadable_items ?? 0);
+  if (counter === 'content_ready_items') return value + unreadable >= inScope;
   // Embedding is complete only where extraction is: the bar clamps its
   // numerator to what has been read, so a store that has run ahead of
   // extraction is not at parity however many files it reports.
-  if (counter === 'embedded_files') return value >= inScope && sample.content_ready_items >= inScope;
+  if (counter === 'embedded_files') {
+    return value + unreadable >= inScope && sample.content_ready_items + unreadable >= inScope;
+  }
   return false;
 }
 
@@ -1921,7 +2045,12 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // Four-tier facts, stamped like sync_now below: counts from the card's own
     // corpora, and the migration only when its plan touches one of them.
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
-    const card: DashboardSourceCard = tierClassification ? { ...built, tier_classification: tierClassification } : built;
+    const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
+    const card: DashboardSourceCard = {
+      ...built,
+      ...(tierClassification ? { tier_classification: tierClassification } : {}),
+      ...(manualSync ? { last_manual_sync: { ...manualSync } } : {}),
+    };
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
     // to sync is a fact about the card.
@@ -1964,6 +2093,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       card.coverage.not_read_by_policy_items,
       card.coverage.answer_ready_eligible_items,
     ),
+    ...(card.coverage.unreadable_items === undefined ? {} : { unreadable_items: card.coverage.unreadable_items }),
     settled_pass: dashboardHasSettledPass(card),
   }));
   options.history?.record(samples);
@@ -2767,6 +2897,10 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     const value = card.coverage.answer_ready_eligible_items;
     return value === undefined ? sum : (sum ?? 0) + value;
   }, undefined);
+  const unreadable = cards.reduce<number | undefined>((sum, card) => {
+    const value = card.coverage.unreadable_items;
+    return value === undefined ? sum : (sum ?? 0) + value;
+  }, undefined);
   // The per-file embedding count is present on the card only when EVERY
   // corpus holding items measures it. A partial sum over the card's whole
   // in-scope population would print an exact percentage the unmeasured
@@ -2790,6 +2924,7 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     needs_review_items: 0,
     ...(notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {}),
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
+    ...(unreadable !== undefined ? { unreadable_items: unreadable } : {}),
   });
 }
 
@@ -4013,6 +4148,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
   const needsReviewItems = sumCounts(counts, DASHBOARD_NEEDS_REVIEW_REASONS.map((reason) => reason.count_key));
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
   const eligibleItems = answerReadyEligibleFromCounts(counts);
+  const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
     indexed_items: indexedItems,
     content_ready_items: contentReadyItems,
@@ -4021,6 +4157,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
     needs_review_items: needsReviewItems,
     ...(notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {}),
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
+    ...(unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}),
   };
 }
 
@@ -4252,6 +4389,9 @@ function answerReadinessFrom(
   if (staleUnexplained || queue.needs_attention > 0 || failingUnexplained) {
     return { state: 'needs_attention', label: 'Needs attention before answers' };
   }
+  if (unreadableShareTooHigh(coverage)) {
+    return { state: 'needs_attention', label: DASHBOARD_MANY_UNREADABLE_LABEL };
+  }
   if (coverage.content_ready_items > 0 || coverage.embedded_items > 0) {
     return operatorPaused
       ? { state: 'ready', label: 'Ready for questions; sync paused' }
@@ -4260,6 +4400,24 @@ function answerReadinessFrom(
   if (queue.waiting > 0 || queue.active > 0) return { state: 'syncing', label: 'Syncing now' };
   if (coverage.indexed_items > 0) return { state: 'syncing', label: 'Preparing answer-ready text' };
   return { state: 'empty', label: 'Waiting for the first sync' };
+}
+
+/**
+ * Above this share of the in-scope population, unreadable files stop being a
+ * footnote and the card asks for attention again: a few damaged files are
+ * life, a twentieth of a corpus is an extractor that broke (2026-10-08).
+ */
+export const DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05;
+
+function unreadableShareTooHigh(coverage: DashboardSourceCard['coverage']): boolean {
+  const unreadable = coverage.unreadable_items ?? 0;
+  if (unreadable <= 0) return false;
+  const eligible = answerReadyEligibleItems(
+    coverage.indexed_items,
+    coverage.not_read_by_policy_items,
+    coverage.answer_ready_eligible_items,
+  );
+  return eligible > 0 && unreadable > eligible * DASHBOARD_UNREADABLE_ALARM_SHARE;
 }
 
 function unassignedCorporaFrom(

@@ -112,6 +112,18 @@ export interface DashboardSource {
   progress?: SourceProgress;
   /** Secondary actions for the ⋯ menu. */
   menu?: DashboardFix[];
+  /**
+   * In-scope items extraction gave up on for good (damaged, or a format
+   * nothing reads). A fact, not a problem: `detail` already says it in words.
+   * Count only; absent when zero.
+   */
+  unreadable?: number;
+  /**
+   * The owner's last Sync now press, while it is still news (about ten
+   * minutes, and only until a later sync). `newItems` is absent when the lane
+   * reports no changed-item count. Counts and a closed outcome only.
+   */
+  lastManualSync?: { at: string; outcome: 'checked' | 'failed' | 'busy'; newItems?: number };
 }
 
 export interface DashboardViewModelV1 {

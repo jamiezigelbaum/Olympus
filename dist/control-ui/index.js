@@ -123,7 +123,7 @@ function mountDashboardController(options) {
       case "cancel_oauth":
         return "Connection attempt cancelled. Press Connect when you are ready to start a new one.";
       case "sync_now":
-        return "Sync started. This card updates when it finishes.";
+        return "Checked. This card shows what was found.";
       case "set_embedding_priority":
         return "Saved.";
       case "disconnect":
@@ -352,7 +352,7 @@ function mountDashboardController(options) {
     }
     if (params.action === "start_oauth")
       clearAuthorizationFallback(form);
-    setFormPending(form, true, pendingMessage(params));
+    setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result;
     try {
       result = await options.transport.control(params);

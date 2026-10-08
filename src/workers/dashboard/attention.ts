@@ -44,7 +44,7 @@ import {
   dashboardSourceProgress,
   type DashboardPhaseId,
 } from './phases.ts';
-import { dashboardCount, dashboardDuration, dashboardSyncKeepsFailing } from './vocabulary.ts';
+import { dashboardCount, dashboardDuration, dashboardManualSyncPendingLine, dashboardSyncKeepsFailing } from './vocabulary.ts';
 
 export type DashboardAttentionKind = 'credential' | 'scope' | 'terminal_extraction' | 'sync_failing' | 'lane_stuck';
 
@@ -220,7 +220,13 @@ export function dashboardSyncNowAction(
   if (syncSource === undefined) return undefined;
   return options.readOnly === true
     ? { label: 'Sync now', kind: 'link', href: `${options.setupPath}#dashboard-controls`, hint: 'unlock controls in Setup' }
-    : { label: 'Sync now', kind: 'sync_now', source: syncSource, primary: true };
+    : {
+        label: 'Sync now',
+        kind: 'sync_now',
+        source: syncSource,
+        primary: true,
+        pendingMessage: dashboardManualSyncPendingLine(source.label),
+      };
 }
 
 function scopeApprovalBanner(source: DashboardSourceCard, options: DashboardAttentionOptions): DashboardAttentionBanner | undefined {

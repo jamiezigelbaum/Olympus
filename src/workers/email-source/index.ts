@@ -156,6 +156,7 @@ import {
 } from '../google-connectors/corpora.ts';
 import { dashboardHtmlRoutePage, renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
 import type { DashboardModelInstalls } from '../dashboard/source-rows.ts';
+import { dashboardManualSyncFailedLine, dashboardManualSyncLine } from '../dashboard/vocabulary.ts';
 import type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 import type { DashboardConsultBackend } from './dashboard-consult.ts';
 
@@ -196,6 +197,8 @@ import {
   DASHBOARD_SAVED_SECRET_FIELD_VALUE,
   DASHBOARD_SUPPORTED_SOURCES,
   buildSourceDashboardViewModel,
+  dashboardManualSyncOutcome,
+  type DashboardManualSync,
   type DashboardApiKeySource,
   type DashboardConnectSource,
   type DashboardOAuthSource,
@@ -815,6 +818,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // fixtures in the same test process never share a bucket.
   const dashboardOAuthCallbackRateLimiter = createDashboardOAuthCallbackRateLimiter();
   const dashboardDisconnectedSources = new Set<V04PublicSourceId>();
+  // The last Sync now result per dashboard source id, so the row can say what
+  // the press found after the page refreshes (2026-10-08). In memory beside
+  // the Disconnect latch: the line lives ten minutes, a restart may drop it.
+  const dashboardManualSyncs = new Map<string, DashboardManualSync>();
   // Paired-session sources this worker has unpaired. Separate from the
   // Disconnect latch because it answers a different question: Disconnect's
   // latch gates manual reads for broker sources, while this one is the explicit
@@ -1323,6 +1330,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               dashboardUnpairedSources,
               sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
             ),
+            manualSyncs: Object.fromEntries(dashboardManualSyncs),
             ...(credentialHealth ? { credentialHealth } : {}),
             oauthClientIds: dashboardClientIdSets.all,
             oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
@@ -2019,15 +2027,43 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const record = await parseObjectBody(request);
           const source = parseDashboardSyncSource(record.source);
           assertDashboardSourceMayRead(source, sourceDashboard, dashboardDisconnectedSources);
-          const result = await runDashboardSourceSync({
-            source,
-            reason: 'manual',
-          });
+          const schedulerSourceId = dashboardSchedulerSourceId(source);
+          const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === schedulerSourceId);
+          const before = sourceScheduler?.status();
+          let result: unknown;
+          try {
+            result = await runDashboardSourceSync({
+              source,
+              reason: 'manual',
+            });
+          } catch (error) {
+            // Our own refusals (scope not approved, worker stopping, no lane)
+            // are sentences written for the owner and pass through. Anything
+            // else came from a provider or a connector and is never relayed.
+            if (error instanceof EmailSourceWorkerError) throw error;
+            if (error instanceof OperationError
+              && (error.code === 'source_index_policy_violation' || error.code === 'invalid_params')) throw error;
+            logSourceWorkerInternalError(request, error);
+            if (schedulerSourceId) dashboardManualSyncs.set(schedulerSourceId, { at: new Date().toISOString(), outcome: 'failed' });
+            throw new EmailSourceWorkerError(502, 'sync_failed', dashboardManualSyncFailedLine(definition?.label ?? 'this source'));
+          }
           assertNoRawEmailFields(result);
+          const lastManualSync = dashboardManualSyncOutcome({
+            result,
+            ...(before ? { before } : {}),
+            ...(schedulerSourceId ? { schedulerSourceId } : {}),
+            at: new Date(),
+          });
+          if (schedulerSourceId) dashboardManualSyncs.set(schedulerSourceId, lastManualSync);
+          const statusMessage = definition
+            ? dashboardManualSyncLine({ label: definition.label, family: definition.family, last_manual_sync: lastManualSync }, new Date())
+            : undefined;
           return json({
             ok: true,
             source,
             result,
+            last_manual_sync: lastManualSync,
+            ...(statusMessage ? { status_message: statusMessage } : {}),
             policy: {
               raw_runtime_secrets_exposed: false,
               source_text_returned: false,

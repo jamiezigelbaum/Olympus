@@ -74,6 +74,7 @@ import {
   dashboardRelativeFromHours,
   dashboardRelativeFromMs,
   dashboardNotReadByPolicyPhrase,
+  dashboardUnreadableSentence,
   dashboardOperatorPaused,
   dashboardSourceById,
   dashboardStatus,
@@ -443,6 +444,10 @@ function renderProgress(
     notes.push(`${dashboardCount(backlog.missing_chunks)} chunks are waiting to be embedded`
       + ` (${embeddingCostPhrase(backlog.estimate)}). Keyword search answers from them meanwhile.`);
   }
+  // Why the extraction row stopped short of its total, in one plain sentence
+  // (owner ruling, 2026-10-08). The count only: no file is named here.
+  const unreadable = dashboardUnreadableSentence(source);
+  if (unreadable) notes.push(unreadable);
   if (progress.phases.some((phase) => phase.unmeasured === true)) {
     notes.push('This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.');
   }
