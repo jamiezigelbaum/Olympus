@@ -471,6 +471,24 @@ describe('writer outcomes and the gate', () => {
     expect(h.orchestrator.recentQuestions).toEqual([]);
   });
 
+  test('the owner\'s own question reaches the gate apart from the snapshot: a place the owner typed may go out at the unnamed level, one the owner did not type may not', async () => {
+    const evidence = [{ title: 'Letter of intent', trust_domain: 'secure_local', chunks: ['The buyer will sign the deed before the notary in Catalonia.'] }];
+    const asked = 'Who usually pays the notary fees in Catalonia?';
+    const run = async (ownerQuestion: string) => {
+      const h = harness({ writerOutcome: { kind: 'questions', questions: [asked], promptTokens: 900, ms: 10 } });
+      const jobId = h.jobs.begin({ question: ownerQuestion, count: 1, evidence, refresh: async () => evidence, caller: ownerQuestion }).jobId!;
+      await deliver(h, jobId, await generatePanelKeyPair());
+      await h.orchestrator.idle();
+      return h;
+    };
+    const typed = await run('How are notary fees usually split between buyer and seller in Catalonia?');
+    expect(typed.writer.levels).toEqual(['unnamed']);
+    expect(typed.transport.sessions[0]!.sends.map((send) => send.question)).toEqual([asked]);
+    const untyped = await run('How are notary fees usually split between buyer and seller?');
+    expect(untyped.transport.sessions[0]!.sends).toEqual([]);
+    expect(untyped.logs.some((line) => line.includes('outcome=gate_refused code=snapshot_name'))).toBe(true);
+  });
+
   test('a skipped, declined, killed or failed writer ends the consult without a send', async () => {
     for (const outcome of [
       { kind: 'skipped', reason: 'memory_low' },

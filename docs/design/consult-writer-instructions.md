@@ -415,11 +415,30 @@ through"); the full list is the comment on
   probation"). A dictionary word the snapshot only ever capitalizes ("rue des
   Tanneurs", "Grace called"), a capitalized label or quoted value
   ("Reporter: 'Fenwick'"), and a word of a title, path, author or account
-  value stay protected.
+  value stay protected;
+- the owner's own words (owner ruling, 2026-10-08): a word or phrase that
+  appears in the owner's own question is not private evidence, since the
+  owner already sent it to ChatGPT. The orchestrator passes that question to
+  the gate apart from the snapshot (`ownerQuestionTexts`), and at this level
+  only it is exempt from the name, place, copy and figure rules: "Catalonia"
+  typed by the owner may go out even though the documents also name it.
+  Only the exact tokens and phrases count, never their neighbours: typing
+  "Lopez" does not unlock "Maria Lopez", and a copied run is exempt only
+  when, less function words at its ends, it is a phrase of the owner's
+  question. A figure the owner typed may be repeated when it has at most
+  three digits, or when the request writes it with its currency or unit
+  every time ("450 euros"); a number inside a phone, account or ID-like digit
+  run gives no exemption. The full rule is the comment on
+  `CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS`.
 
-Personal names outside the dictionaries, exact dates and years, ages, exact
-amounts, account, phone and ID numbers, addresses, mail addresses and handles
-are refused exactly as at the general level. Addresses are also protected
+Personal names outside the dictionaries (unless the owner typed them), exact
+dates and years, ages, exact amounts, account, phone and ID numbers,
+addresses, mail addresses and handles are refused exactly as at the general
+level. Typed by the owner or not, these stay refused at both levels: mail
+addresses, phone numbers, account, IBAN and ID numbers, street addresses,
+exact dates and bare years, secrets and handles, and whole identifier values
+such as references. The writer's rules above are unchanged: it should still
+leave out a place the answer does not need, even one the owner typed. Addresses are also protected
 as spans at both levels, whatever their capitalization (review round 2): a
 house number within five words of a street word ("7 Park street", "Rua da
 Rosa 12", "7 rue des Tanneurs") refuses a question that repeats the number

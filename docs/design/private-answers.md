@@ -50,6 +50,18 @@ Two levels:
   behaviour, optionally with ask-before-send; this merges with the planned
   strict mode (stage C6).
 
+Words the owner typed (owner ruling, 2026-10-08). At Standard, a word or
+phrase from the owner's own question may go out even when the private
+documents also contain it: the owner already sent it to ChatGPT, so it is
+not private evidence ("fees in Catalonia" when the owner asked about
+Catalonia). Only the exact words and phrases the owner typed count, not the
+document words around them. Hard identifiers stay blocked at both levels
+even when the owner typed them: mail addresses, phone, account, IBAN and ID
+numbers, street addresses, exact dates and years, secrets and handles.
+Typing an IBAN into ChatGPT never lets it go out to zkAPI. Strict is
+unchanged. Rule: `docs/design/consult-writer-instructions.md`, "Level: your
+situation, without names".
+
 Both are always selectable. Sending needs the six cost-and-risk statements
 (acknowledgement version 5) accepted, so while they are not, choosing Standard
 shows them inline with one "Accept and save", and outside help stays paused.

@@ -141,5 +141,26 @@ a zero fraction ("2,400.00") was keyed only as "240000" and "24", so "2,400"
 in a question was not matched; it now also keys as "2400" and is refused.
 This tightens the general level too.
 
+**The owner's own words (2026-10-08, unnamed level only).** A live consult
+was refused for "Catalonia", a place the owner had typed in the question
+ChatGPT already received. Owner ruling: a word or phrase of the owner's own
+question is exempt from the name, copy and figure rules at the unnamed
+level; hard identifiers stay refused at both levels (rule:
+`CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS` in
+`src/core/consult-gate.ts`). The evals now pass the owner's question to the
+gate as the orchestrator does (`ownerQuestionTexts`).
+
+| unnamed level | before | after |
+|---|---|---|
+| legitimate refused (this set) | 16 / 30 | 14 / 30 |
+| leak variants passed | 0 / 67 | 0 / 67 |
+| leak corpus: canary leaks | 0 | 0 |
+| leak corpus clean set refused | 22.6% | 19.4% |
+| leak corpus: copies of the owner's question passed | 0 / 3 | 3 / 3 (by ruling; reported, not counted as leaks) |
+| held-out sets, real-writer recording, soft residuals | unchanged | unchanged |
+| re-identification set: pass the gate / narrow / canary | 3 / 0 / 0 | 4 / 0 / 0 |
+
+The general level and the false-refusal set (general level) are unchanged.
+
 The unnamed false-refusal rate is held by a regression ceiling at the
-measured 16 of 30 (`UNNAMED_LEVEL_GATES`), not a usability target.
+measured 14 of 30 (`UNNAMED_LEVEL_GATES`), not a usability target.

@@ -329,7 +329,10 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       consultWriterContextFromPack(current.pack, { writerVisibleTexts: [bounded.question], writerAnswerTexts: [bounded.answer, ...bounded.gaps] }),
       {},
       { recentApprovedQuestions: [...recent] },
-      { ...consultGateOptionsFromSettings(settingsAtGate.settings), level: scheduled.policy.level },
+      // The owner's own question, named apart from the snapshot: at the
+      // unnamed level a word the owner typed may go out (consult-gate.ts,
+      // CONSULT_GATE_OWNER_WORDS_MAX_FIGURE_RUN_DIGITS).
+      { ...consultGateOptionsFromSettings(settingsAtGate.settings), level: scheduled.policy.level, ownerQuestionTexts: [bounded.question] },
     );
     if (verdict.decision !== 'pass') {
       await closeSession();
