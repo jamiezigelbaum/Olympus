@@ -10010,7 +10010,7 @@ class HelperProcess {
       return;
     }
     if (message.error || !message.vectors || !message.dimension) {
-      pending.reject(new Error(message.error ?? "The built-in search model returned no vectors."));
+      pending.reject(message.error && message.pictures ? new LiteRtPictureEngineFaultError(message.error) : new Error(message.error ?? "The built-in search model returned no vectors."));
       if (message.native) {
         this.exited = true;
         this.child.kill("SIGKILL");
@@ -10063,7 +10063,7 @@ function resolveBun() {
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
-var LiteRtImagesUnavailableError, REQUEST_TIMEOUT_MS;
+var LiteRtImagesUnavailableError, LiteRtPictureEngineFaultError, REQUEST_TIMEOUT_MS;
 var init_litert_runtime = __esm(() => {
   LiteRtImagesUnavailableError = class LiteRtImagesUnavailableError extends Error {
     indexes;
@@ -10071,6 +10071,12 @@ var init_litert_runtime = __esm(() => {
       super("The built-in search model is running without its image encoder.");
       this.name = "LiteRtImagesUnavailableError";
       this.indexes = indexes;
+    }
+  };
+  LiteRtPictureEngineFaultError = class LiteRtPictureEngineFaultError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "LiteRtPictureEngineFaultError";
     }
   };
   REQUEST_TIMEOUT_MS = 3 * 60000;
@@ -10083,7 +10089,7 @@ var init_runtime = () => {};
 var init_wordpiece = () => {};
 
 // src/workers/source-index/built-in-embedding/provider.ts
-var RETRY_AFTER_FAILURE_MS;
+var RETRY_AFTER_FAILURE_MS, PICTURE_HOLD_MS;
 var init_provider = __esm(() => {
   init_operation_error();
   init_embedding_identity();
@@ -10095,6 +10101,7 @@ var init_provider = __esm(() => {
   init_runtime();
   init_wordpiece();
   RETRY_AFTER_FAILURE_MS = 2 * 60000;
+  PICTURE_HOLD_MS = 60 * 60000;
 });
 
 // src/workers/embedding-ledger.ts
@@ -11435,6 +11442,7 @@ var init_drive_live_control = __esm(() => {
 // src/workers/google-connectors/drive-live-sync.ts
 var init_drive_live_sync = __esm(() => {
   init_tiered_store_set();
+  init_tier_classifier();
   init_embeddings();
   init_drive();
   init_drive_live_control();

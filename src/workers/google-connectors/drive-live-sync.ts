@@ -27,6 +27,7 @@ import {
 } from '../connector-store/index.ts';
 import {
   createLaneTieredStoreSet,
+  type LaneTieredStoreSetOptions,
   tieredLaneReceiptCounts,
   type TieredLaneReceiptCounts,
   type TieredStoreRoutingCounts,
@@ -34,6 +35,7 @@ import {
   type TieredStoreSetRun,
 } from '../connector-store/tiered-store-set.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import { isImageMediaType } from '../classification/tier-classifier.ts';
 import {
   isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
@@ -194,6 +196,25 @@ export interface GoogleDriveConnectorStoreSyncOptions extends GoogleDriveSourceC
   onTierLegOpened?: (store: LocalConnectorStore) => void;
 }
 
+/**
+ * The Drive lane's tier set. The listing reads documents itself, but never a
+ * picture: the shared extraction factory reads that later. A NEW still image
+ * is therefore routed as in a lane whose text arrives later
+ * (`contentArrivesLaterFor`): its names go to their metadata tier's store at
+ * listing, and its content lands where its content tier decides (Private by
+ * default) when the factory reads it. Everything else keeps the lane's rules.
+ * The sync and the extraction factory both build the set here, so they route
+ * alike.
+ */
+export function createGoogleDriveLaneTierSet(
+  options: Omit<LaneTieredStoreSetOptions, 'contentArrivesLaterFor'>,
+): TieredStoreSet {
+  return createLaneTieredStoreSet({
+    ...options,
+    contentArrivesLaterFor: (item) => isImageMediaType(item.mimeType),
+  });
+}
+
 export function createGoogleDriveConnectorStoreSyncHandler(
   options: GoogleDriveConnectorStoreSyncOptions,
 ): GoogleDriveConnectorStoreSyncHandler {
@@ -227,7 +248,7 @@ export function createGoogleDriveConnectorStoreSyncHandler(
     provenance: sourceInvocationProvenance(overrides.provenance),
   });
 
-  const tierSet = options.tierSet ?? createLaneTieredStoreSet({
+  const tierSet = options.tierSet ?? createGoogleDriveLaneTierSet({
     setId: connectorId,
     internalStore: options.internalStore,
     secureStore: options.secureStore,

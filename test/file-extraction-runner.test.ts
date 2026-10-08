@@ -520,6 +520,36 @@ describe('extraction runner: one refused bucket never fails a plan pass', () => 
     }
   });
 
+  test('a still image whose picture has no Private store to land in is never queued', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return {
+                candidates: [
+                  ref(1),
+                  ref(2, { mimeType: 'image/jpeg', name: 'photo.jpg' }),
+                  ref(3, { mimeType: 'image/heic', name: 'routed.heic' }),
+                ],
+                done: true,
+              };
+            },
+          }),
+          refusesImageContent: (itemRef) => itemRef.providerItemId !== 'item-3',
+        },
+      });
+      const plan = await runner.plan({ ...LANE, limit: 10, extractorKind: FAKE_KIND });
+      expect(plan).toMatchObject({ candidates: 3, jobsQueued: 2, jobsSkippedImageNotPrivate: 1 });
+      const leased = jobs.lease({ ...LANE, workerId: 'w', limit: 10 }).leasedJobs.map((job) => job.ref.providerItemId).sort();
+      expect(leased).toEqual(['item-1', 'item-3']);
+    } finally {
+      jobs.close();
+    }
+  });
+
   test('a request-wide invalid value fails the plan instead of counting every bucket as refused', async () => {
     const jobs = jobStore();
     try {

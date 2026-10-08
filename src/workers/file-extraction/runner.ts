@@ -57,6 +57,7 @@ import { isFileExtractionSourceError } from '../../core/file-extraction-source.t
 import {
   ExtractionCommandTimeoutError,
 } from './extractors/command-runner.ts';
+import { isImageMediaType } from '../classification/tier-classifier.ts';
 import { resolveExtractionMimeType } from './extractors/bounded-text.ts';
 import type {
   ExtractionLaneKey,
@@ -248,6 +249,13 @@ export interface ExtractionRunnerCorpus {
   authorization?: {
     assertCurrent(ref: ExtractionItemRef): void | Promise<void>;
   };
+  /**
+   * Whether the sink would refuse this item's picture content (a still image
+   * whose content can only land in a store that is not Private). Such an item
+   * is not queued at all: refusing it at the sink would cost the download and
+   * the reading first. The sink still refuses it either way.
+   */
+  refusesImageContent?: (ref: ExtractionItemRef) => boolean;
 }
 
 export interface FileExtractionRunnerOptions {
@@ -301,6 +309,11 @@ export interface ExtractionPlanResult {
   jobsRefused: number;
   // jobsRefused split by categorical reason, one of the PLAN_REFUSED constants. Present only when non-zero.
   jobsRefusedByReason?: Readonly<Record<string, number>>;
+  /**
+   * Still images not queued because their picture content has no Private
+   * store to land in.
+   */
+  jobsSkippedImageNotPrivate?: number;
   extractorKinds: readonly string[];
   nextCursor?: string;
   done: boolean;
@@ -623,11 +636,16 @@ export function createFileExtractionRunner(
       // that media type.
       const byKind = new Map<string, { kind: string; version: string; refs: ExtractionItemRef[] }>();
       let jobsUnroutable = 0;
+      let jobsSkippedImageNotPrivate = 0;
       const refused = new Map<string, number>();
       const refuse = (reason: string, count: number): void => {
         refused.set(reason, (refused.get(reason) ?? 0) + count);
       };
       for (const ref of page.candidates) {
+        if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
+          jobsSkippedImageNotPrivate += 1;
+          continue;
+        }
         let extractor: Extractor | undefined;
         let version: string;
         try {
@@ -726,6 +744,7 @@ export function createFileExtractionRunner(
         jobsUnroutable,
         jobsRefused,
         ...(refused.size > 0 ? { jobsRefusedByReason: Object.fromEntries(refused) } : {}),
+        ...(jobsSkippedImageNotPrivate > 0 ? { jobsSkippedImageNotPrivate } : {}),
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
         done: page.done,
@@ -1614,3 +1633,16 @@ const PDF_DRAIN_PLAN_PAGE = 500;
 // One job per lease: a scan can take a text pass plus an OCR pass, so the
 // deadline is checked between single jobs rather than after a long batch.
 const PDF_DRAIN_BATCH = 1;
+
+/**
+ * Whether the corpus's sink would refuse this item's picture content. A
+ * check that throws is about this one item and leaves it to the sink, which
+ * refuses it there just the same.
+ */
+function refusesImageContent(corpus: ExtractionRunnerCorpus, ref: ExtractionItemRef): boolean {
+  try {
+    return corpus.refusesImageContent?.(ref) === true;
+  } catch {
+    return false;
+  }
+}
