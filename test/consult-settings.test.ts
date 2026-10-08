@@ -96,15 +96,15 @@ describe('parseConsultSettings', () => {
     expect(parseConsultSettings({ ...VALID, domains: { ...oldDomains, places: 'yes' } })).toBeUndefined();
   });
 
-  test('level: a file written before it reads as "general" (never widened silently); only the two values are accepted', () => {
+  test('level: a file without it reads as "unnamed", the recommended default (sending still needs the current statements); only the two values are accepted', () => {
     const { level: _level, ...old } = VALID;
-    expect(parseConsultSettings(old)?.level).toBe('general');
+    expect(parseConsultSettings(old)?.level).toBe('unnamed');
     expect(parseConsultSettings({ ...VALID, level: 'general' })?.level).toBe('general');
     expect(parseConsultSettings({ ...VALID, level: 'unnamed' })?.level).toBe('unnamed');
     for (const level of [null, '', 'Unnamed', 'names', 1, true, ['unnamed']]) expect(parseConsultSettings({ ...VALID, level })).toBeUndefined();
     // No file at all: outside help off, and a first write records the new-setup level.
     expect(DEFAULT_CONSULT_SETTINGS.level).toBe('unnamed');
-    expect(consultGateOptionsFromSettings(parseConsultSettings(old)!).level).toBe('general');
+    expect(consultGateOptionsFromSettings(parseConsultSettings(old)!).level).toBe('unnamed');
     expect(consultGateOptionsFromSettings(parseConsultSettings(VALID)!).level).toBe('unnamed');
   });
 
@@ -352,10 +352,14 @@ describe('per-job binding', () => {
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
     placeSettings(home, { ...VALID, revision: 4, level: 'unnamed' });
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
-    // A file without the key reads as general, so a job bound to it still authorizes.
+    // A file without the key reads as unnamed (Standard): a job bound to general refuses, one bound to unnamed authorizes.
     const { level: _level, ...old } = VALID;
     placeSettings(home, old);
-    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
+    expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: false, reason: 'settings_stale' });
+    placeSettings(home, { ...VALID, level: 'unnamed' });
+    const unnamed = bindConsultJobPolicy(readConsultSettings(location));
+    placeSettings(home, old);
+    expect(recheckConsultJobPolicy(unnamed, readConsultSettings(location))).toEqual({ ok: true });
   });
 
   test('turning outside help off and on again between bind and recheck refuses', () => {

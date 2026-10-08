@@ -7,7 +7,7 @@
 // prompt. Olympus may therefore use it only to carry a consult (one question a
 // local model wrote, with no evidence), never as an analyst, embedder, vision
 // extractor or classifier. This module holds the data side only: the settings
-// shape, the six risk statements an owner must acknowledge, and the loopback
+// shape, the risk statements an owner must acknowledge, and the loopback
 // port rule. It holds no credential that can move funds and calls nothing.
 
 import { readFileSync, statSync } from 'node:fs';
@@ -56,49 +56,44 @@ const DEFAULTS = {
 export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
 
 /**
- * The six statements of design §Z.3 plus the per-consult cost and the absence
- * of a default limit (owner ruling, 2026-10-05), and what the "Your situation,
- * without names" level sends (owner decision 2026-10-07; version 4), in plain
- * words. The version moves when the wording or the set changes, which voids
- * every earlier acknowledgement.
+ * What an owner accepts before any question is sent, in plain words (owner
+ * rewrite 2026-10-08, version 5: six calm statements replacing the nine of
+ * version 4). The substance of the dropped ones is folded in here and in the
+ * card's fuller "Everything to know first" list: there is no daily limit
+ * unless one is set, there is no top-up, the expiry date is an estimate,
+ * one party ran the proof setup. The version moves when the wording or the
+ * set changes, which voids every earlier acknowledgement; the transport sends
+ * nothing until the current set is accepted (zkapiMoneyStatus).
+ *
+ * `expiry` says "Olympus shows the date on this page": Olympus computes the
+ * estimated date and shows it on the card (and in doctor), but sends no
+ * reminder of its own, so the statement does not promise one.
  */
-export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 4;
+export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 5;
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   {
-    id: 'per_consult_cost',
-    statement: 'Each consult authorizes up to the chosen model\'s per-request allowance, currently $1 to $6 depending on the model. Olympus counts every consult at $6, the worst case.',
+    id: 'automatic',
+    statement: 'Questions go out automatically when the answer from your Mac is missing something. You can turn this off at any time.',
   },
   {
-    id: 'no_default_limit',
-    statement: 'There is no limit on the number of consults or on daily spending unless you set one (dailyRequestCap, dailySpendCapUsd).',
+    id: 'provider_reads',
+    statement: 'The AI provider reads each question. Olympus removes names and identifying details first, but an unusual situation could still hint at who you are.',
   },
   {
-    id: 'deposit_fee',
-    statement: 'Depositing is an expensive on-chain transaction, paid separately from consults. Its fee can be larger than a small deposit.',
+    id: 'cost',
+    statement: 'Each question usually costs a few cents. While it runs, up to $6 is held from your balance; the rest comes back.',
   },
   {
-    id: 'withdrawal_fee',
-    statement: 'Getting unspent money back is a second expensive on-chain transaction, paid separately, and may require sending additional ETH for its fee.',
+    id: 'fees',
+    statement: 'Adding money and taking it out are Ethereum transactions, each with its own network fee.',
   },
   {
-    id: 'note_expiry_30_days',
-    statement: 'Unused balance that is not withdrawn within about 30 days becomes claimable in full by the operator. Olympus only estimates that date from the funding date you confirm; the real one is set on-chain by the deposit block.',
+    id: 'expiry',
+    statement: 'Money left unused for about 30 days can be claimed by the zkAPI operator. Olympus shows the date on this page.',
   },
   {
-    id: 'no_top_up',
-    statement: 'There is no top-up. Each deposit is a new note with its own fee and its own 30-day clock.',
-  },
-  {
-    id: 'operator_risk',
-    statement: 'One operator account can pause deposits and withdrawals while the expiry clock keeps running, and one party ran the proof setup. Funds could be frozen or lost.',
-  },
-  {
-    id: 'local_files_risk',
-    statement: 'The balance is controlled by files on this computer. Losing them loses the money.',
-  },
-  {
-    id: 'situation_disclosure',
-    statement: 'With "Your situation, without names", the AI provider reads your actual situation, with names, places, exact dates, amounts and account numbers removed. An unusual situation could still hint at who you are.',
+    id: 'new_service',
+    statement: 'zkAPI is new. Your balance is kept in files on this Mac, and its operator can pause deposits and withdrawals. Only add what you\'re comfortable losing.',
   },
 ] as const;
 

@@ -1898,26 +1898,28 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     invalid: 'Anonymous answers (zkAPI): off · settings file damaged',
     route_not_configured: 'Anonymous answers (zkAPI): off · not set up',
     fence_held: 'Anonymous answers (zkAPI): paused · unfinished payment',
+    needs_acceptance: 'Anonymous answers (zkAPI): paused · accept the updated statements',
   },
   /** The honesty label: the network route is not verified on macOS, said plainly. */
   experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
   /** What outside help is, before anything technical (owner, 2026-10-07). */
   intro: 'When the answer from your Mac is missing something, Olympus can ask a top AI model a short question through zkAPI. Payment is anonymous, and with Tor on the provider can\'t see where the question came from. Olympus blocks names and other identifying words before sending, but the provider reads the question.',
-  /** What zkAPI may send (owner decision 2026-10-07; mockup copy). */
+  /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'). */
   levelTitle: 'What may zkAPI send?',
   levels: {
     unnamed: {
-      title: 'Your situation, without names (recommended)',
-      body: 'Sends your actual problem with names, places, exact dates, amounts and account numbers removed. Gets real answers.',
+      title: 'Standard (recommended)',
+      body: 'Sends your actual question with names, places, exact dates, amounts and account numbers removed. Gets real answers.',
     },
     general: {
-      title: 'General questions only (strict)',
-      body: 'Sends only textbook questions; nothing about your situation leaves. Safest, but rarely helpful.',
+      title: 'Strict',
+      body: 'Sends only general questions; nothing about your situation leaves. Safest, but rarely helpful.',
     },
   },
   levelSave: 'Save',
-  /** Choosing the unnamed level needs the acknowledgement that states what it sends. */
-  levelNeedsAcks: 'Tick every statement below, including what "Your situation, without names" sends, before choosing it.',
+  /** Standard chosen while the statements are not accepted: they show inline with one action. */
+  levelAcceptSave: 'Accept and save',
+  levelAcceptIntro: 'Nothing is sent until you accept these:',
   /** The public privacy line, in plain words (design §2, §A.10). */
   privacy: 'Your files and private answer stay on this Mac. The outside model sees only the short question, and that question could still hint at private things.',
   state: {
@@ -1926,6 +1928,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     invalid: 'Anonymous answers are off: the settings file on this computer is damaged.',
     route_not_configured: 'Anonymous answers are off: zkAPI is not set up yet.',
     fence_held: 'Paused: an earlier question has not finished paying yet.',
+    needs_acceptance: 'Paused until you accept the updated statements below.',
   },
   /** Said only when a saved change needs a restart this worker could not do itself. */
   restartPending: 'Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.',
@@ -1935,6 +1938,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** Said beside Ready when Tor is off, in plain words (Details names Tor). */
   addressVisible: 'Your network address will be visible to the provider.',
   routeNotReady: 'Not ready: {reason}',
+  /** Only the statements are missing: everything else is ready, said without repeating them. */
+  routeReadyButStatements: 'Everything else is ready.',
   routeMore: '(+{n} more below)',
   routeUnknown: 'Olympus could not check zkAPI right now.',
   routeMissingShort: 'Not ready: zkAPI is not set up yet.',
@@ -1950,28 +1955,33 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   usageExpiry: 'balance expires about {date} ({days} days left)',
   usageExpired: 'balance past its estimated expiry',
   usageExpiryUnknown: 'balance expiry unknown',
-  /** How cost works, real cost first (owner, 2026-10-07); the acknowledgements carry the recorded wording. */
-  costLines: [
-    'Each question usually costs a few cents or less.',
-    'While it runs, up to $6 is held from your balance; the unused part comes back.',
-    'Olympus counts each question as the full $6 when checking your limits.',
-  ],
+  /** How cost works, real cost first, in one line (owner, 2026-10-08); the statements carry the recorded wording. */
+  costLine: 'A question usually costs a few cents. Up to $6 is held while it runs, and the rest comes back.',
   problemsTitle: 'To fix',
   disclosureTitle: 'Before you turn this on',
-  /** At most three short lines at first view; the full statements sit behind disclosureMore. */
+  /** Two short lines at first view; the fuller detail sits behind disclosureMore. */
   disclosureShort: [
-    'It asks automatically: when a private answer in ChatGPT is missing something, Olympus may send one short question. There is no approval step.',
-    'Each question usually costs a few cents or less; up to $6 is held while it runs, and the unused part comes back.',
-    'The outside model reads the question; zkAPI hides who paid.',
+    'It asks on its own: when an answer from your Mac is missing something, Olympus may send one short question. You can turn it off at any time.',
+    'The provider reads the question, with names and identifying details removed; zkAPI hides who paid.',
   ],
   disclosureMore: 'Everything to know first',
+  /**
+   * The fuller detail, in calm words (owner, 2026-10-08). It keeps what the
+   * shorter statements leave out: the timing window, the $6 counted against
+   * limits, no default limit, deposit fees and no top-up, the estimated
+   * expiry date, the fee buffer, the API key and key reuse, the operator
+   * and the proof setup, and that the route is not verified on macOS.
+   */
   disclosure: [
-    'When a private answer shown in ChatGPT is incomplete, Olympus may automatically send one outside question for it, within about five minutes of the answer appearing. A short question usually costs a few cents or less. While it runs, up to $6 of your zkAPI balance is held and the unused part comes back when it settles; Olympus counts the full $6 against your limits.',
-    'A question is sent only if the panel was recently active, but closing the panel does not guarantee nothing is sent in that window.',
-    'There is no daily limit unless you set one. Your deposit is the hard limit.',
-    'Depositing and withdrawing are each an expensive on-chain transaction (about $7 at review), paid separately. An unwithdrawn balance becomes claimable by the operator after about 30 days. There is no top-up: each deposit is a new note with its own fee and clock.',
-    'The outside provider reads the question; zkAPI hides who paid. The route is experimental and its network path is not verified on macOS.',
-    'There is no approval step: consults are automatic while this is on. Turn it off here at any time.',
+    'Olympus sends a question only within about five minutes of a private answer appearing in ChatGPT, and only if the panel was recently active. Closing the panel does not guarantee nothing is sent in that window.',
+    'A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question as $6 when checking the daily limits you set.',
+    'There is no daily limit unless you set one under Balance and limits. Your balance is the most that can be spent.',
+    'Adding money and taking it out are each an Ethereum transaction with its own network fee (about $7 each when Olympus last checked). There is no top-up: each deposit starts a new balance with its own fee and its own 30-day clock.',
+    'Olympus estimates the 30-day date from the funding date you enter; the exact date is set on-chain when the deposit is confirmed.',
+    'When you add money, send one transfer with the deposit plus the fee buffer zkapi-clientd shows. Network fees move, so the buffer can fall short and need a second transfer.',
+    'Set zkapi-clientd to require an API key, so only Olympus on this Mac can spend the balance. Olympus refuses to send while key reuse is on, so separate questions are not linked by a shared payment key.',
+    'One operator account can pause deposits and withdrawals while the 30-day clock keeps running, and one party ran zkAPI\'s proof setup. Your balance lives in files on this Mac; losing them loses the money.',
+    'The provider reads the question; zkAPI hides who paid. On macOS, Olympus cannot yet confirm the network route is anonymous.',
   ],
   routeMissing: 'zkAPI is not set up. Add it, then follow Set up zkAPI below.',
   policyNotFile: 'Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.',
@@ -2002,7 +2012,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     daemon_version_unsupported: 'This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6: see Set up zkAPI.',
     tor_not_found: 'The program that hides your network address is not installed. See Set up zkAPI.',
     daemon_api_key_missing: 'Olympus does not have your zkAPI access key yet. See Set up zkAPI.',
-    acknowledgements_incomplete: 'The cost and risk statements are not all accepted. Tick them under Cost and risk.',
+    acknowledgements_incomplete: 'The statements on this page are not accepted yet. Nothing is sent until they are.',
     funding_date_missing: 'Enter the day you paid in under Balance and limits, so Olympus can tell when the balance expires.',
     funding_date_invalid: 'The day you paid in is in the future. Fix it under Balance and limits.',
     note_expired: 'Your balance is past its estimated 30-day expiry.',
@@ -2021,7 +2031,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   stepsIntro: 'Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.',
   steps: [
     'Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). If you installed them yourself, zkapi-clientd must be version 0.1.5 or 0.1.6.',
-    'Run: zkapi-clientd config --usd N. Send ONE transfer in total: the deposit plus the fee buffer the tool shows. Gas prices move, so the buffer can fall short; a shortfall means another transfer.',
+    'Run: zkapi-clientd config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.',
     'Wait until the tool prints "Private inference balance activated".',
     'Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050',
     'Run: zkapi-clientd config --require-api-key',
@@ -2029,10 +2039,10 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     'Run: zkapi-clientd config --key-reuse-window-seconds 0. Olympus refuses to send while the key-reuse window is on.',
   ],
   costTitle: 'Cost and risk',
-  costIntro: 'Tick each statement once. They are recorded with the route; if the wording changes, you are asked again.',
+  costIntro: 'Nothing is sent until you accept these. If the wording changes, you are asked again.',
+  accept: 'Accept',
   acknowledged: 'You accepted the {n} cost and risk statements.',
   acknowledgedReview: 'Review',
-  notAcknowledged: 'Not yet accepted.',
   limitsTitle: 'Balance and limits',
   limitsNone: 'No daily limit',
   limitsRequests: '{n} questions a day',
@@ -2044,7 +2054,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   fundingDate: 'Funding date: the day your deposit was confirmed (YYYY-MM-DD)',
   capRequests: 'Daily question limit (optional)',
   capUsd: 'Daily spending limit in dollars, counted at $6 per question (optional)',
-  noLimitIntro: 'There is no default limit: your deposit is the hard limit.',
+  noLimitIntro: 'There is no daily limit unless you set one. Your balance is the most that can be spent.',
   removeLimits: 'No daily limit',
   removeLimitsHint: 'Clears both limits.',
   saveRestarts: 'Saving restarts Olympus to apply it.',
@@ -2078,11 +2088,15 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   turnOff: 'Turn off anonymous answers',
   replaceFile: 'Replace the damaged settings file (anonymous answers stay off)',
   enableBlockedRoute: 'Add zkAPI first.',
-  enableBlockedAcks: 'Accept the cost and risk statements first.',
+  enableBlockedAcks: 'Accept the statements on this page first.',
   edit: 'Edit',
   setUp: 'Set up',
   saving: 'Saving…',
   saveFailed: 'Olympus could not save this. Try again.',
+  /** A refusal that carried no words of its own: the HTTP status at least. */
+  saveFailedStatus: 'Olympus could not save this (error {status}). Try again.',
+  /** No answer at all, usually because Olympus is restarting. */
+  saveUnreachable: 'Olympus did not answer. If it is restarting, wait a moment and try again.',
   restarting: 'Restarting Olympus to apply it…',
   locked: 'Unlock dashboard controls in Setup to see and change anonymous answers.',
   unlockIntro: 'Changing anonymous answers needs a session opened on this Mac itself, not one an agent or the launch link opened. One click, in this browser.',

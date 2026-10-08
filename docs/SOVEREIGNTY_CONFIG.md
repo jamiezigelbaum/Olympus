@@ -533,7 +533,7 @@ loopback address there forwards to the cloud.
     "torSocksPort": 19050,
     "fundingDate": "2026-10-01",
     "depositUsd": 20,
-    "acknowledgements": { "version": 3, "accepted": ["per_consult_cost", "no_default_limit", "deposit_fee", "withdrawal_fee", "note_expiry_30_days", "no_top_up", "operator_risk", "local_files_risk"] }
+    "acknowledgements": { "version": 5, "accepted": ["automatic", "provider_reads", "cost", "fees", "expiry", "new_service"] }
   }
 }
 ```
@@ -560,35 +560,41 @@ network; Olympus cannot read that setting, so it cannot confirm this. This
 sequence follows the reference wrapper scripts in `ethereum/zkapi` pull
 request #16.
 
-**The money, plainly.** Turning this on requires accepting nine statements
-(acknowledgement version 4; version 4 added the last one, so earlier
-acknowledgements must be given again):
+**The money, plainly.** Turning this on requires accepting six statements
+(acknowledgement version 5, the owner's calmer rewrite of 2026-10-08; any
+earlier acknowledgement must be given again, and nothing is sent until it is):
 
-- Each consult authorizes up to the chosen model's per-request allowance,
-  currently $1 to $6 depending on the model. Olympus counts every consult at
-  $6, the worst case.
-- There is no limit on the number of consults or on daily spending unless you
-  set one. Ten consults in a day can authorize up to $60.
-- Depositing is an expensive on-chain transaction, paid separately from
-  consults; the fee can exceed a small deposit.
-- Withdrawing unspent money is a second expensive on-chain transaction, paid
-  separately, and may require sending additional ETH for its fee.
-- Unused balance not withdrawn within about 30 days becomes claimable in full by the operator.
-- There is no top-up; each deposit is a new note with its own fee and 30-day clock.
-- One operator account can pause deposits and withdrawals while the clock keeps running, and one party ran the proof setup; funds could be frozen or lost.
-- The balance is controlled by files on this computer; losing them loses the money.
-- With "Your situation, without names", the AI provider reads your actual
-  situation, with names, places, exact dates, amounts and account numbers
-  removed; an unusual situation could still hint at who you are.
+- Questions go out automatically when the answer from your Mac is missing
+  something. You can turn this off at any time.
+- The AI provider reads each question. Olympus removes names and identifying
+  details first, but an unusual situation could still hint at who you are.
+- Each question usually costs a few cents. While it runs, up to $6 is held
+  from your balance; the rest comes back.
+- Adding money and taking it out are Ethereum transactions, each with its own
+  network fee.
+- Money left unused for about 30 days can be claimed by the zkAPI operator.
+  Olympus shows the date on this page.
+- zkAPI is new. Your balance is kept in files on this Mac, and its operator
+  can pause deposits and withdrawals. Only add what you're comfortable losing.
+
+The card's "Everything to know first" list keeps the fuller detail: each
+question counts as $6 against any daily limit you set, and there is no daily
+limit unless you set one; there is no top-up (each deposit is a new note with
+its own fee and 30-day clock); the expiry date is an estimate from the funding
+date you confirm; the fee buffer; the required API key and key reuse off; the
+operator's pause power and the single-party proof setup.
 
 **What may be sent.** `~/.olympus/consult.json` carries `level`:
-`"unnamed"` ("Your situation, without names", the default for a new setup)
-lets the local writer describe the situation and ask for a verdict, with
-identifying details removed; `"general"` ("General questions only") sends
-textbook questions only. A file written before `level` existed reads as
-`"general"`, so the scope never widens by itself; the card offers the switch.
-Choosing `"unnamed"` needs every statement above accepted at version 4. The
-outbound check runs at both levels (`docs/design/consult-writer-instructions.md`,
+`"unnamed"` (**Standard (recommended)**, the default) lets the local writer
+describe the situation and ask for a verdict, with identifying details
+removed; `"general"` (**Strict**) sends general questions only. A file without
+`level` reads as `"unnamed"`: that is safe because nothing is sent until the
+statements above are accepted at the current version, and they say what
+Standard sends. Choosing a level is never refused; while the statements are
+not accepted, the card shows them beside Standard with one "Accept and save",
+and outside help stays paused. Replacing a damaged settings file without a
+choice writes `"general"` (and leaves outside help off). The outbound check
+runs at both levels (`docs/design/consult-writer-instructions.md`,
 `docs/design/consult-gate-false-refusals.md`).
 
 Deposits are in ETH, so their dollar value moves with the ETH price. The

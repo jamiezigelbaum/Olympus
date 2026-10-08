@@ -18,9 +18,11 @@
 //   2026-10-07): "unnamed" (the user's situation with names and other
 //   identifying details removed) or "general" (textbook questions only, the
 //   writer's original rules). The key is optional for the reader: a file
-//   written before it existed reads as "general", so an owner who turned
-//   outside help on under the general rules never has the scope widened
-//   silently. The writer always writes it; a new file defaults to "unnamed".
+//   written before it existed reads as "unnamed", the recommended level and
+//   the default everywhere (owner decision 2026-10-08). That is safe because
+//   nothing is sent until the owner has accepted the current statements,
+//   which say what this level sends (zkapi-consult-settings.ts, enforced at
+//   send time by the transport). The writer always writes the key.
 //
 // This module only reads. The compare-and-swap writer lands with its first
 // caller, the Mac dashboard enable path (stage C5), in its own module; the
@@ -47,10 +49,20 @@ export const CONSULT_SETTINGS_VERSION = 1;
 export const CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 
 export const CONSULT_LEVELS: readonly ConsultLevel[] = Object.freeze(['unnamed', 'general']);
-/** The level of a file written before `level` existed: the original, narrower rules. */
-export const CONSULT_LEVEL_WHEN_UNSET: ConsultLevel = 'general';
-/** The level a new settings file is written with (no file yet). */
-export const CONSULT_LEVEL_FOR_NEW_SETUP: ConsultLevel = 'unnamed';
+/**
+ * The level of a file without the `level` key: the recommended level
+ * (owner decision 2026-10-08). Sending still needs the current statements
+ * accepted, and they state what this level sends.
+ */
+export const CONSULT_LEVEL_WHEN_UNSET: ConsultLevel = 'unnamed';
+/** The level a new settings file is written with (no file yet): the same default. */
+export const CONSULT_LEVEL_FOR_NEW_SETUP: ConsultLevel = CONSULT_LEVEL_WHEN_UNSET;
+/**
+ * The level a damaged file is rewritten with when the owner chose none: the
+ * narrower one, so a repair never widens what is sent. A repair always
+ * leaves outside help off.
+ */
+export const CONSULT_LEVEL_FOR_REPAIR: ConsultLevel = 'general';
 
 export interface ConsultSettings {
   readonly v: typeof CONSULT_SETTINGS_VERSION;
@@ -141,7 +153,7 @@ export const __consultSettingsTestHooks: {
  * level, a version other than 1, a revision that is not a non-negative safe
  * integer, non-boolean flags, an empty, duplicated or unknown language list,
  * a level other than "unnamed" or "general". `level` alone may be absent: a
- * file written before it reads as "general" (CONSULT_LEVEL_WHEN_UNSET).
+ * file without it reads as "unnamed" (CONSULT_LEVEL_WHEN_UNSET).
  */
 export function parseConsultSettings(value: unknown): ConsultSettings | undefined {
   if (!isPlainObject(value)) return undefined;
