@@ -22854,6 +22854,17 @@ var init_server = __esm(() => {
   init_model_transport();
 });
 
+// src/core/log-redaction.ts
+function redactLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function boundedLogErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const oneLine = message.replace(/\s+/g, " ").trim();
+  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
+
 // src/workers/dashboard/answer-ready-coverage.ts
 var init_answer_ready_coverage = () => {};
 
@@ -26380,6 +26391,19 @@ var SINK_SKIP_SETTLEMENTS = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only",
   [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: "metadata_only"
 });
+var ITEM_REF_FIELDS = new Set([
+  "corpusId",
+  "provider",
+  "accountScope",
+  "approvedScopeKey",
+  "providerItemId",
+  "localItemId",
+  "sourceVersion",
+  "contentHash",
+  "name",
+  "mimeType",
+  "sizeBytes"
+]);
 var PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 
 // src/workers/file-extraction/tiered-store-sink.ts
@@ -28310,7 +28334,7 @@ class SourceScheduler {
         this.applyInMemoryFailure(state, completedAt, errorKind, errorHash, warnings, retryAt, failureCounts);
       }
       state.nextRunAt = Date.parse(notBeforeAt);
-      console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}`);
+      console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind, error)}`);
     }
   }
   applyPendingUnparks(dueAt) {
@@ -28795,8 +28819,15 @@ function safeNormalizeFailureRetryAt(error, completedAt, fallbackRetryAfterMs) {
     return;
   }
 }
+var EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused";
+var VERBATIM_SCHEDULER_WARNINGS = new Set([EXTRACTION_JOBS_REFUSED_WARNING]);
+function untypedFailureMessage(errorKind, error) {
+  return errorKind === "task_failed" ? ` error_message=${boundedLogErrorMessage(error)}` : "";
+}
 function sanitizeSchedulerWarnings(warnings) {
   return [...new Set(warnings.map((warning) => {
+    if (VERBATIM_SCHEDULER_WARNINGS.has(warning))
+      return warning;
     if (/^x_(?:head|reconcile)_[a-z0-9_]+$/.test(warning))
       return warning;
     if (/vlm_backend_unavailable/i.test(warning))

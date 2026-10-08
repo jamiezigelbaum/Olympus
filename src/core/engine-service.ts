@@ -28,6 +28,7 @@ import {
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
 import { engineChildrenPath, reapRecordedEngineChildren, type EngineChildReapDeps, type EngineChildReapResult } from './engine-children.ts';
+import { redactLogLine } from './log-redaction.ts';
 import { OperationError } from './operation-error.ts';
 import { olympusPackageRoot } from './package-root.ts';
 import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
@@ -1238,11 +1239,7 @@ function tailLines(path: string, lines: number): string[] {
   }
 }
 
-export function redactLogLine(line: string): string {
-  return line
-    .replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, '$1$2[redacted]')
-    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '[redacted]');
-}
+export { redactLogLine };
 
 /** Other hosts of the same worker on this Mac: they would compete for its port. */
 export function engineConflictWarnings(homeDir: string): string[] {
