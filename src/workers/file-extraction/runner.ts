@@ -301,7 +301,10 @@ export interface ExtractionPlanResult {
    * not keep every other candidate of the lane from being queued.
    */
   jobsRefused: number;
-  /** Still images not queued because their picture content has no Private store to land in. */
+  /**
+   * Still images not queued because their picture content has no Private
+   * store to land in.
+   */
   jobsSkippedImageNotPrivate?: number;
   extractorKinds: readonly string[];
   nextCursor?: string;
