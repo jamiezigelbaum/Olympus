@@ -8098,6 +8098,14 @@ export class LocalConnectorStore {
         priorCounts.chunksSeen - priorCounts.chunksEmbedded,
       );
     }
+    // In a limited pass, a picture that will be held anyway (the image encoder
+    // is not running, or the picture is backing off) takes no place in the
+    // window: a store whose backlog starts with photos still embeds its text.
+    let readsImages: boolean | undefined;
+    if (limit !== undefined && provider.imageSupport && rows.some((row) => row.media_sha256)) {
+      readsImages = await provider.imageSupport();
+    }
+    let heldPictures = 0;
     const pending: typeof rows = [];
     let skipped = 0;
     for (const row of rows) {
@@ -8109,6 +8117,11 @@ export class LocalConnectorStore {
         skipped += 1;
         continue;
       }
+      if (limit !== undefined && row.media_sha256
+        && (readsImages === false || this.chunkMediaBackingOff(row.media_sha256))) {
+        heldPictures += 1;
+        continue;
+      }
       pending.push(row);
     }
 
@@ -8116,8 +8129,7 @@ export class LocalConnectorStore {
     // Chunks a concurrent writer removed or re-chunked while their vectors
     // were in flight. They were seen and not embedded, so they are reported as
     // skipped rather than silently dropped out of the counts.
-    let staleSkipped = 0;
-    let readsImages: boolean | undefined;
+    let staleSkipped = heldPictures;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();

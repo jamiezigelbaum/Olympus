@@ -834,6 +834,22 @@ describe('a prepared picture through runner, sink and store', () => {
     }
   });
 
+  test('in a limited pass, held photos take no place in the window, so text behind them embeds', async () => {
+    const dbPath = join(temporaryDir(), 'store.sqlite');
+    const store = await photoStore(dbPath, ['photo-1', 'photo-2']);
+    try {
+      await landPicture(store);
+      await sinkFor(store).accept(request(undefined, 'A note', 'photo-2'));
+      const blind = new PictureProvider(false);
+      // The photo's chunk comes first; a window of one still reaches the note.
+      expect((await store.embedChunks({ provider: blind, limit: 1 })).chunksEmbedded).toBe(1);
+      expect(blind.inputs.some((input) => input.image)).toBe(false);
+      expect((await store.embedChunks({ provider: new PictureProvider(true), limit: 1 })).chunksEmbedded).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
   test('an unreadable picture backs off, never holds up the rest, and after three tries embeds as text', async () => {
     const dbPath = join(temporaryDir(), 'store.sqlite');
     let clock = Date.parse('2026-10-08T00:00:00.000Z');

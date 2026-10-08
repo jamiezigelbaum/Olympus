@@ -69,7 +69,7 @@ import {
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
 import { closeSqliteStore } from './core/sqlite-store.ts';
-import { isMediaCachePath, mediaCacheDir, releaseMediaCacheFile } from './core/media-cache.ts';
+import { isMediaCachePath, mediaCacheDir, mediaHolderName, releaseMediaCacheFile } from './core/media-cache.ts';
 import type { ConnectedHandleRegistry } from './workers/credential-broker/connected-handles.ts';
 
 export interface LifecyclePathContext {
@@ -609,12 +609,15 @@ export function deleteOlympusData(options: {
   for (const target of uniqueDeleteTargets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
-  // A source's photo copies live in the shared media cache: each one its
-  // stores held is released before the stores go, and removed unless another
-  // source's store still holds it.
-  if (selectedSource) {
-    removed.push(...releaseSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [], options, options.dryRun === true));
-  }
+  // A source's photo copies live in the shared media cache. Every store's
+  // references are read before anything is deleted; each copy is released
+  // only once its stores are gone, and removed unless another source's store
+  // still holds it. A store that survives (a failed removal) keeps its holds;
+  // one interrupted after deletion leaves markers the cache sweep drops,
+  // because their holder is gone.
+  const sourceMedia = selectedSource
+    ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [])
+    : [];
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
@@ -625,6 +628,7 @@ export function deleteOlympusData(options: {
       rmSync(target.path, { recursive: target.allowRecursive, force: true });
     }
   }
+  removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
 
   return {
     ok: true,
@@ -861,12 +865,17 @@ function mediaCacheDeleteTargets(context: LifecyclePathContext): DeleteTarget[] 
  * checked to be a media-cache file by its shape, not against this process's
  * configured cache directory, which may differ from the worker's.
  *
- * Every store is read before any marker is released: a later store that
- * cannot be read stops the delete with every earlier store's markers still
- * in place.
+ * Every store is read before anything is deleted or released: a store that
+ * cannot be read stops the delete with every marker still in place.
  */
-function releaseSourceMedia(storePaths: readonly string[], _context: LifecyclePathContext, dryRun: boolean): string[] {
-  const held: Array<{ storePath: string; rows: Array<{ media_path: string; media_sha256: string }> }> = [];
+type SourceMediaHolds = Array<{
+  storePath: string;
+  holder: string;
+  rows: Array<{ media_path: string; media_sha256: string }>;
+}>;
+
+function readSourceMedia(storePaths: readonly string[]): SourceMediaHolds {
+  const held: SourceMediaHolds = [];
   for (const storePath of storePaths) {
     if (storePath === ':memory:' || !existsSync(storePath)) continue;
     // A file that is not SQLite at all holds no references. One that is, and
@@ -900,16 +909,27 @@ function releaseSourceMedia(storePaths: readonly string[], _context: LifecyclePa
     } finally {
       closeSqliteStore(db);
     }
-    held.push({ storePath, rows });
+    // Named now, while the store exists: its real path is its marker's name,
+    // and a deleted file has none.
+    held.push({ storePath, holder: mediaHolderName(storePath), rows });
   }
+  return held;
+}
+
+function releaseSourceMedia(held: SourceMediaHolds, dryRun: boolean): string[] {
   const released: string[] = [];
-  for (const { storePath, rows } of held) {
+  for (const { storePath, holder, rows } of held) {
     for (const row of rows) {
       if (!isMediaCachePath(row.media_path, row.media_sha256)) continue;
       if (dryRun) {
         if (existsSync(row.media_path)) released.push(row.media_path);
-      } else if (releaseMediaCacheFile(row.media_path, row.media_sha256, storePath)) {
-        released.push(row.media_path);
+      } else {
+        // Under its real path, and under the path as given for a marker an
+        // earlier build named by its spelling.
+        const removedByHolder = releaseMediaCacheFile(row.media_path, row.media_sha256, holder);
+        const removedBySpelling = holder !== storePath
+          && releaseMediaCacheFile(row.media_path, row.media_sha256, storePath);
+        if (removedByHolder || removedBySpelling) released.push(row.media_path);
       }
     }
   }

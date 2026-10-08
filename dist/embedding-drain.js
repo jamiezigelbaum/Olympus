@@ -17510,6 +17510,11 @@ var init_local_index = __esm(() => {
       if (priorJournal?.status === "completed" && priorCounts) {
         return connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, priorCounts.chunksSeen, priorCounts.chunksEmbedded, priorCounts.chunksSeen - priorCounts.chunksEmbedded);
       }
+      let readsImages;
+      if (limit !== undefined && provider.imageSupport && rows.some((row) => row.media_sha256)) {
+        readsImages = await provider.imageSupport();
+      }
+      let heldPictures = 0;
       const pending = [];
       let skipped = 0;
       for (const row of rows) {
@@ -17520,11 +17525,14 @@ var init_local_index = __esm(() => {
           skipped += 1;
           continue;
         }
+        if (limit !== undefined && row.media_sha256 && (readsImages === false || this.chunkMediaBackingOff(row.media_sha256))) {
+          heldPictures += 1;
+          continue;
+        }
         pending.push(row);
       }
       let embedded = priorCounts?.chunksEmbedded ?? 0;
-      let staleSkipped = 0;
-      let readsImages;
+      let staleSkipped = heldPictures;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();

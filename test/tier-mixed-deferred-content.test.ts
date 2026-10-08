@@ -211,6 +211,26 @@ describe('a lane where only pictures arrive later', () => {
     expect(view.refusesImageContent(localId('photo-secure'))).toBe(false);
   });
 
+  test('an unrouted item held by both stores lands in, and is judged by, the asking corpus\'s store', async () => {
+    const { set, stores } = openSet();
+    const both: FixtureSpec = { id: 'photo-both', name: 'IMG_0003.jpg' };
+    MIME['photo-both'] = 'image/jpeg';
+    await stores.internal!.syncFromConnector(lane([both]), { fetchContent: false, placement: FIXTURE_PLACEMENT });
+    await stores.secure_local!.syncFromConnector(lane([{ ...both, legacyDomain: 'secure_local' }]), { fetchContent: false, placement: FIXTURE_PLACEMENT });
+    expect(tieredExtractionView(set, { home: 'internal' }).refusesImageContent(localId('photo-both'))).toBe(true);
+    expect(tieredExtractionView(set, { home: 'secure_local' }).refusesImageContent(localId('photo-both'))).toBe(false);
+    const sink = createTieredStoreExtractionSink({
+      set,
+      home: 'secure_local',
+      syncConnectorId: 'extraction',
+      ownerConnectorId: 'fixture-connector',
+      ownershipKind: 'observed',
+    });
+    expect((await sink.accept(request(CORPORA.secure_local, 'photo-both', 'Photo\nBOARDING PASS'))).accepted).toBe(true);
+    expect(chunkText(stores.secure_local, 'photo-both')).toContain('BOARDING PASS');
+    expect(chunkText(stores.internal, 'photo-both')).not.toContain('BOARDING PASS');
+  });
+
   test('without an item, a decision whose text has not landed is placed as one arriving later', () => {
     const { set } = openSet(false);
     const base = { metadataTier: 'private', contentTier: 'private', state: 'current', metadataPending: false, contentPending: false } as const;

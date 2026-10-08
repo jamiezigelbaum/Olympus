@@ -2701,7 +2701,7 @@ export async function main(): Promise<void> {
       assertAuthorized({ config }) {
         assertFileSourceScopeCurrent(config.provider);
       },
-      allowsRef({ config, store, ref }) {
+      allowsRef({ config, reader, ref }) {
         const sourceId = config.provider === 'dropbox'
           ? 'dropbox.files' as const
           : config.provider === 'google_drive'
@@ -2711,10 +2711,7 @@ export async function main(): Promise<void> {
         const approval = fileSourceScopeAuthority?.snapshot(sourceId);
         if (!approval) return false;
         const scope = fileSourceScopeContentFilters(approval);
-        // A Dropbox file's row may sit in any of the lane's tier stores.
-        const reader = sourceId === 'dropbox.files' && store === dropboxConnectorStore && dropboxExtractionView
-          ? dropboxExtractionView
-          : store;
+        // The row may sit in any of the lane's tier stores: the corpus reads it through its view.
         return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
       },
     },

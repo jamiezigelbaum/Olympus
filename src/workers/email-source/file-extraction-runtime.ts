@@ -171,6 +171,8 @@ export interface FileExtractionRuntimeOptions {
     allowsRef(input: {
       config: FileExtractionCorpusConfig;
       store: LocalConnectorStore;
+      /** Where the item's row is found: the corpus's view across its tier stores, else its store. */
+      reader: Pick<LocalConnectorStore, 'itemMatchesSearchFilters'>;
       ref: ExtractionItemRef;
     }): boolean;
   };
@@ -272,12 +274,12 @@ export function createFileExtractionRuntime(
             const page = await source.listCandidates(listOptions);
             return {
               ...page,
-              candidates: page.candidates.filter((ref) => guard.allowsRef({ config, store, ref })),
+              candidates: page.candidates.filter((ref) => guard.allowsRef({ config, store, reader: view ?? store, ref })),
             };
           },
           async fetch(ref, fetchOptions) {
             guard.assertAuthorized({ config, store });
-            if (!guard.allowsRef({ config, store, ref })) {
+            if (!guard.allowsRef({ config, store, reader: view ?? store, ref })) {
               throw new FileExtractionSourceError('source_permission_denied');
             }
             return source.fetch(ref, fetchOptions);
@@ -290,6 +292,7 @@ export function createFileExtractionRuntime(
       sink: tierSet
         ? createTieredStoreExtractionSink({
             set: tierSet,
+            home: store.trustDomain,
             syncConnectorId: FILE_EXTRACTION_SYNC_CONNECTOR_ID,
             ownerConnectorId: config.ownerConnectorId ?? `${config.provider}-connector`,
             ownershipKind: 'observed',
@@ -334,7 +337,7 @@ export function createFileExtractionRuntime(
             authorization: {
               assertCurrent(ref) {
                 options.scopeGuard!.assertAuthorized({ config, store });
-                if (!options.scopeGuard!.allowsRef({ config, store, ref })) {
+                if (!options.scopeGuard!.allowsRef({ config, store, reader: view ?? store, ref })) {
                   throw new FileExtractionSourceError('source_permission_denied');
                 }
               },

@@ -23776,6 +23776,11 @@ var init_local_index = __esm(() => {
       if (priorJournal?.status === "completed" && priorCounts) {
         return connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, priorCounts.chunksSeen, priorCounts.chunksEmbedded, priorCounts.chunksSeen - priorCounts.chunksEmbedded);
       }
+      let readsImages;
+      if (limit !== undefined && provider.imageSupport && rows.some((row) => row.media_sha256)) {
+        readsImages = await provider.imageSupport();
+      }
+      let heldPictures = 0;
       const pending = [];
       let skipped = 0;
       for (const row of rows) {
@@ -23786,11 +23791,14 @@ var init_local_index = __esm(() => {
           skipped += 1;
           continue;
         }
+        if (limit !== undefined && row.media_sha256 && (readsImages === false || this.chunkMediaBackingOff(row.media_sha256))) {
+          heldPictures += 1;
+          continue;
+        }
         pending.push(row);
       }
       let embedded = priorCounts?.chunksEmbedded ?? 0;
-      let staleSkipped = 0;
-      let readsImages;
+      let staleSkipped = heldPictures;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
@@ -93033,7 +93041,7 @@ function createTieredStoreExtractionSink(options) {
       const identity = stored ?? { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId };
       const ledger = set2.ledger;
       if (!ledger.isRouted(identity)) {
-        const legacy = legacyStoreFor(set2, ref.localItemId);
+        const legacy = legacyStoreFor(set2, ref.localItemId, options.home);
         if (!legacy)
           return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
         return sinkFor(legacy, true, classificationNow()).accept(request);
@@ -93108,7 +93116,7 @@ function createTieredStoreExtractionSink(options) {
         });
         return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
-      const placement = set2.placementFor(decision, { contentArrivesLater: true });
+      const placement = set2.placementFor(decision, record3.contentRead ? {} : { contentArrivesLater: true });
       const contentCopy = placement.copies.find((copy) => copy.layers !== "metadata");
       const contentStore = contentCopy ? set2.store(contentCopy.trustDomain, { create: true }) : undefined;
       if (!contentCopy || !contentStore)
@@ -93163,7 +93171,10 @@ function createTieredStoreExtractionSink(options) {
 function skipped(skippedReason) {
   return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
 }
-function legacyStoreFor(set2, localItemId) {
+function legacyStoreFor(set2, localItemId, home) {
+  const homeStore = home !== undefined && set2.legSpec(home)?.legacy === true ? set2.store(home) : undefined;
+  if (homeStore?.activeLocalItemRow(localItemId))
+    return homeStore;
   const legacy = TIER_DOMAIN_ORDER.filter((domain) => set2.legSpec(domain)?.legacy === true).flatMap((domain) => {
     const store = set2.store(domain);
     return store ? [store] : [];
@@ -93338,7 +93349,8 @@ function tieredExtractionView(set2, options = {}) {
       const first = holders[0]?.activeLocalItemRow(localItemId);
       if (!first || set2.ledger.isRouted(first.identity))
         return false;
-      const landing = holders.find((store) => set2.legSpec(store.trustDomain)?.legacy === true);
+      const legacyHolders = holders.filter((store) => set2.legSpec(store.trustDomain)?.legacy === true);
+      const landing = legacyHolders.find((store) => store.trustDomain === options.home) ?? legacyHolders[0];
       return landing !== undefined && landing.trustDomain !== "secure_local";
     }
   };
@@ -93433,12 +93445,12 @@ function createFileExtractionRuntime(options) {
             const page = await source.listCandidates(listOptions);
             return {
               ...page,
-              candidates: page.candidates.filter((ref) => guard.allowsRef({ config: config2, store, ref }))
+              candidates: page.candidates.filter((ref) => guard.allowsRef({ config: config2, store, reader: view ?? store, ref }))
             };
           },
           async fetch(ref, fetchOptions) {
             guard.assertAuthorized({ config: config2, store });
-            if (!guard.allowsRef({ config: config2, store, ref })) {
+            if (!guard.allowsRef({ config: config2, store, reader: view ?? store, ref })) {
               throw new FileExtractionSourceError("source_permission_denied");
             }
             return source.fetch(ref, fetchOptions);
@@ -93448,6 +93460,7 @@ function createFileExtractionRuntime(options) {
       },
       sink: tierSet ? createTieredStoreExtractionSink({
         set: tierSet,
+        home: store.trustDomain,
         syncConnectorId: FILE_EXTRACTION_SYNC_CONNECTOR_ID,
         ownerConnectorId: config2.ownerConnectorId ?? `${config2.provider}-connector`,
         ownershipKind: "observed",
@@ -93477,7 +93490,7 @@ function createFileExtractionRuntime(options) {
         authorization: {
           assertCurrent(ref) {
             options.scopeGuard.assertAuthorized({ config: config2, store });
-            if (!options.scopeGuard.allowsRef({ config: config2, store, ref })) {
+            if (!options.scopeGuard.allowsRef({ config: config2, store, reader: view ?? store, ref })) {
               throw new FileExtractionSourceError("source_permission_denied");
             }
           }
@@ -130160,7 +130173,7 @@ async function main() {
       assertAuthorized({ config: config2 }) {
         assertFileSourceScopeCurrent(config2.provider);
       },
-      allowsRef({ config: config2, store, ref }) {
+      allowsRef({ config: config2, reader, ref }) {
         const sourceId = config2.provider === "dropbox" ? "dropbox.files" : config2.provider === "google_drive" ? "google_drive.docs" : undefined;
         if (!sourceId)
           return true;
@@ -130168,7 +130181,6 @@ async function main() {
         if (!approval)
           return false;
         const scope = fileSourceScopeContentFilters(approval);
-        const reader = sourceId === "dropbox.files" && store === dropboxConnectorStore && dropboxExtractionView ? dropboxExtractionView : store;
         return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
       }
     },
@@ -132869,9 +132881,7 @@ function deleteOlympusData(options) {
     if (existsSync26(target.path))
       assertDeleteTargetSafe(target);
   }
-  if (selectedSource) {
-    removed.push(...releaseSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [], options, options.dryRun === true));
-  }
+  const sourceMedia = selectedSource ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? []) : [];
   for (const target of uniqueDeleteTargets) {
     if (!existsSync26(target.path)) {
       missing.push(target.path);
@@ -132882,6 +132892,7 @@ function deleteOlympusData(options) {
       rmSync9(target.path, { recursive: target.allowRecursive, force: true });
     }
   }
+  removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
   return {
     ok: true,
     mode: options.all === true ? "all" : "source",
@@ -132991,7 +133002,7 @@ function mediaCacheDeleteTargets(context) {
     return [];
   }
 }
-function releaseSourceMedia(storePaths, _context, dryRun) {
+function readSourceMedia(storePaths) {
   const held = [];
   for (const storePath of storePaths) {
     if (storePath === ":memory:" || !existsSync26(storePath))
@@ -133020,18 +133031,24 @@ function releaseSourceMedia(storePaths, _context, dryRun) {
     } finally {
       closeSqliteStore(db);
     }
-    held.push({ storePath, rows });
+    held.push({ storePath, holder: mediaHolderName(storePath), rows });
   }
+  return held;
+}
+function releaseSourceMedia(held, dryRun) {
   const released = [];
-  for (const { storePath, rows } of held) {
+  for (const { storePath, holder, rows } of held) {
     for (const row of rows) {
       if (!isMediaCachePath(row.media_path, row.media_sha256))
         continue;
       if (dryRun) {
         if (existsSync26(row.media_path))
           released.push(row.media_path);
-      } else if (releaseMediaCacheFile(row.media_path, row.media_sha256, storePath)) {
-        released.push(row.media_path);
+      } else {
+        const removedByHolder = releaseMediaCacheFile(row.media_path, row.media_sha256, holder);
+        const removedBySpelling = holder !== storePath && releaseMediaCacheFile(row.media_path, row.media_sha256, storePath);
+        if (removedByHolder || removedBySpelling)
+          released.push(row.media_path);
       }
     }
   }

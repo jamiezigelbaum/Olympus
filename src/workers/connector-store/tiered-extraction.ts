@@ -197,8 +197,10 @@ export function tieredExtractionView(
       const first = holders[0]?.activeLocalItemRow(localItemId);
       // Unknown here: the sink decides, as it always did.
       if (!first || set.ledger.isRouted(first.identity)) return false;
-      // The store the sink lands it in: the first legacy store holding it.
-      const landing = holders.find((store) => set.legSpec(store.trustDomain)?.legacy === true);
+      // The store the sink lands it in: this corpus's home store when it holds
+      // it, else the first legacy store holding it (tiered-store-sink.ts).
+      const legacyHolders = holders.filter((store) => set.legSpec(store.trustDomain)?.legacy === true);
+      const landing = legacyHolders.find((store) => store.trustDomain === options.home) ?? legacyHolders[0];
       return landing !== undefined && landing.trustDomain !== 'secure_local';
     },
   };
