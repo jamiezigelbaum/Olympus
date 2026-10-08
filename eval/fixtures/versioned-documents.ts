@@ -1,7 +1,7 @@
 // Synthetic multi-version documents for the version-consistency eval: a
 // fictional purchase offer saved as a first draft, a revision and a signed
 // final copy (each later version changes the price, the deposit or the
-// deadline), a later contract for the same deal that sets a different
+// deadline), a scanned copy of the final, a later contract for the same deal that sets a different
 // deposit, an older offer for another buyer on the same template wording,
 // and an unrelated lease. No real person, property or value.
 //
@@ -48,6 +48,14 @@ export const VERSIONED_FIXTURE_ITEMS: readonly VersionedFixtureItem[] = [
     saved: '2025-12-03T09:05:00Z',
     folder: '/Home/Sale/Offer',
     text: offerBody({ buyer: 'Kim Okafor', price: '€620,000', deposit: '€6,000', deadline: '19 December 2025', status: 'signed by both parties' }),
+  },
+  {
+    // A scan of the signed offer, saved under another name the same morning: a near-exact copy.
+    id: 'offer-v3-scan',
+    title: 'Scan 2025-12-03 Larch Court offer.pdf',
+    saved: '2025-12-03T08:40:00Z',
+    folder: '/Home/Scans',
+    text: `${offerBody({ buyer: 'Kim Okafor', price: '€620,000', deposit: '€6,000', deadline: '19 December 2025', status: 'signed by both parties' })} Scanned page 1 of 1.`,
   },
   {
     id: 'contract',

@@ -30626,8 +30626,20 @@ var init_source_model_policy = __esm(() => {
 });
 
 // src/core/evidence-versions.ts
-function evidenceVersionGroups(items) {
-  const shingles = items.map((item) => shingleSet(item.text));
+function evidenceVersions(items) {
+  const shingles = items.map((item) => item.family === undefined || DOCUMENT_FAMILIES.has(item.family) ? shingleSet(item.text) : new Set);
+  const memo = new Map;
+  const similarity = (a, b) => {
+    if (a === b)
+      return 1;
+    const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+    let value = memo.get(key);
+    if (value === undefined) {
+      value = jaccard(shingles[a], shingles[b]);
+      memo.set(key, value);
+    }
+    return value;
+  };
   const parent = items.map((_, index) => index);
   const find = (index) => {
     while (parent[index] !== index) {
@@ -30638,7 +30650,7 @@ function evidenceVersionGroups(items) {
   };
   for (let left = 0;left < items.length; left += 1) {
     for (let right = left + 1;right < items.length; right += 1) {
-      if (overlap(shingles[left], shingles[right]) < EVIDENCE_VERSION_OVERLAP)
+      if (similarity(left, right) < EVIDENCE_VERSION_SIMILARITY)
         continue;
       const a = find(left);
       const b = find(right);
@@ -30651,8 +30663,12 @@ function evidenceVersionGroups(items) {
     const root = find(index);
     byRoot.set(root, [...byRoot.get(root) ?? [], index]);
   });
-  const times = items.map((item) => dateValue(item.date));
-  return [...byRoot.values()].filter((members) => members.length > 1).map((members) => [...members].sort((a, b) => newerFirst(times[a], times[b]) || a - b)).sort((a, b) => Math.min(...a) - Math.min(...b));
+  const times = items.map((item) => evidenceDateValue(item.date));
+  const groups = [...byRoot.values()].filter((members) => members.length > 1).map((members) => [...members].sort((a, b) => newerFirst(times[a], times[b]) || a - b)).sort((a, b) => Math.min(...a) - Math.min(...b));
+  return { groups, similarity };
+}
+function evidenceVersionGroups(items) {
+  return evidenceVersions(items).groups;
 }
 function evidenceVersionIndex(items) {
   const index = items.map(() => {
@@ -30665,7 +30681,11 @@ function evidenceVersionIndex(items) {
   return index;
 }
 function evidenceVersionsDated(items, group) {
-  return group.every((member) => Number.isFinite(dateValue(items[member]?.date)));
+  return group.every((member) => Number.isFinite(evidenceDateValue(items[member]?.date)));
+}
+function evidenceDateValue(date) {
+  const value = date ? Date.parse(date) : Number.NaN;
+  return Number.isFinite(value) ? value : Number.NaN;
 }
 function shingleSet(text) {
   const words = text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
@@ -30675,7 +30695,7 @@ function shingleSet(text) {
   }
   return set;
 }
-function overlap(a, b) {
+function jaccard(a, b) {
   if (a.size < MIN_SHINGLES || b.size < MIN_SHINGLES)
     return 0;
   const [small, large] = a.size <= b.size ? [a, b] : [b, a];
@@ -30683,11 +30703,7 @@ function overlap(a, b) {
   for (const shingle of small)
     if (large.has(shingle))
       shared += 1;
-  return shared / small.size;
-}
-function dateValue(date) {
-  const value = date ? Date.parse(date) : Number.NaN;
-  return Number.isFinite(value) ? value : Number.NaN;
+  return shared / (a.size + b.size - shared);
 }
 function newerFirst(a, b) {
   const aDated = Number.isFinite(a);
@@ -30698,7 +30714,10 @@ function newerFirst(a, b) {
     return aDated ? -1 : 1;
   return 0;
 }
-var EVIDENCE_VERSION_OVERLAP = 0.6, MIN_SHINGLES = 20, SHINGLE_WORDS = 3;
+var EVIDENCE_VERSION_SIMILARITY = 0.5, EVIDENCE_COPY_SIMILARITY = 0.9, DOCUMENT_FAMILIES, MIN_SHINGLES = 60, SHINGLE_WORDS = 3;
+var init_evidence_versions = __esm(() => {
+  DOCUMENT_FAMILIES = new Set(["file", "note"]);
+});
 
 // src/core/analyst.ts
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -31025,7 +31044,7 @@ function candidateVersionNotes(pack) {
   const items = pack.candidates.map((candidate) => {
     const date = candidateDate(candidate);
     return { text: candidate.chunks.join(`
-`), ...date ? { date } : {} };
+`), family: candidate.provenance.sourceItem.family, ...date ? { date } : {} };
   });
   const groups = evidenceVersionIndex(items);
   return groups.map((group, index) => {
@@ -31039,9 +31058,9 @@ function candidateVersionNotes(pack) {
     const label = (member) => `[${member + 1}] ${when.get(items[member].date)}`;
     const newest = group[0];
     if (index === newest) {
-      return `version group: newest of ${group.length} versions of one document, dated ${when.get(items[index].date)} (older: ${others.map(label).join(", ")})`;
+      return `version group: newest of ${group.length} likely versions of one document, dated ${when.get(items[index].date)} (older: ${others.map(label).join(", ")})`;
     }
-    return `version group: older version, dated ${when.get(items[index].date)}; the newest version is ${label(newest)}`;
+    return `version group: likely an older version, dated ${when.get(items[index].date)}; the newest version is ${label(newest)}`;
   });
 }
 function versionInstruction(notes) {
@@ -31422,13 +31441,14 @@ function coerceCitation(value) {
 function stripCodeFences(text) {
   return text.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line are versions of one document. Answer from the newest version unless the question asks about an earlier one, and say which version the value comes from by its date. Where versions differ, give the newest value and the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, promptEncoder, ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, promptEncoder, ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
   init_source_model_policy();
   init_types();
   init_operation_error();
+  init_evidence_versions();
   analystAbortSignalStorage = new AsyncLocalStorage;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
@@ -113616,7 +113636,7 @@ function privateEvidencePack(question, evidence) {
   const candidates = evidence.map((item) => ({
     provenance: {
       sourceItem: {
-        family: "file",
+        family: item.family ?? "file",
         provider: "private-answer",
         accountScope: "local",
         providerItemId: item.id,
@@ -127701,8 +127721,11 @@ function createBuiltInPrivateAnswerModel(options) {
           deepItems.set(entry.index, entry.item);
       }
       const hadReadable = read.items.length > 0;
+      const siblings = unreadVersions(live, picked, (index) => read.items[index]);
+      let eligibleSiblings = [];
       {
-        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...unreadableHits]);
+        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...siblings.map(hitOf), ...unreadableHits]);
+        eligibleSiblings = siblings.filter((_, position) => ok[picked.length + position]);
         picked = picked.filter((_, position) => ok[position]);
         unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
       }
@@ -127788,7 +127811,7 @@ function createBuiltInPrivateAnswerModel(options) {
       if (unreadable > 0)
         unanswered.push(unreadableNote(unreadable));
       const answerText = withoutEvidenceMarkers(result.answer);
-      const versionNote = citedVersionNote(live.map((index) => read.items[index]), result.citations.map((citation) => citation.id));
+      const versionNote = citedVersionNote([...picked, ...eligibleSiblings].map((index) => read.items[index]), result.citations.map((citation) => citation.id));
       return {
         answer: versionNote ? `${answerText} ${versionNote}` : answerText,
         citations,
@@ -127802,12 +127825,12 @@ function createBuiltInPrivateAnswerModel(options) {
   };
 }
 function citedVersionNote(items, citedIds) {
-  const groups = evidenceVersionGroups(items.map((item) => ({ text: item.text, ...item.date ? { date: item.date } : {} })));
+  const groups = evidenceVersionGroups(items.map(versionText));
   const cited = new Set(citedIds);
   for (const group of groups) {
     const members = group.map((index) => items[index]);
     const used = members.filter((item) => cited.has(item.id));
-    if (used.length === 0 || members.some((item) => !item.date))
+    if (used.length === 0 || members.some((item) => !Number.isFinite(evidenceDateValue(item.date))))
       continue;
     const label = versionDateLabel(members.map((item) => item.date));
     const newest = members[0];
@@ -127817,6 +127840,22 @@ function citedVersionNote(items, citedIds) {
     return `This answer uses an older version of ${quoteTitle(used[0])}, saved ${label(used[0].date)}; the newest version was saved ${label(newest.date)}.`;
   }
   return;
+}
+function versionText(item) {
+  return { text: item.text, ...item.date ? { date: item.date } : {}, ...item.family ? { family: item.family } : {} };
+}
+function unreadVersions(live, picked, itemAt) {
+  const chosen = new Set(picked);
+  const out = [];
+  for (const group of evidenceVersionGroups(live.map((index) => versionText(itemAt(index))))) {
+    const members = group.map((position) => live[position]);
+    if (!members.some((index) => chosen.has(index)))
+      continue;
+    for (const index of members)
+      if (!chosen.has(index))
+        out.push(index);
+  }
+  return out;
 }
 function quoteTitle(item) {
   return item.title ? `“${item.title}”` : "this document";
@@ -127853,6 +127892,7 @@ function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
     const locator = string4(hit.locator) ?? string4(citation?.uri) ?? string4(content?.url);
     const source = string4(citation?.sourceLabel) ?? string4(sourceItem?.provider);
     const date4 = string4(citation?.authoredAt) ?? string4(content?.authoredAt) ?? string4(citation?.updatedAt);
+    const family = string4(sourceItem?.family);
     sources.push(index);
     items.push({
       id: items.some((item) => item.id === id) ? `${id}#${index + 1}` : id,
@@ -127860,7 +127900,8 @@ function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
       ...title ? { title } : {},
       ...locator ? { locator } : {},
       ...source ? { source } : {},
-      ...date4 ? { date: date4 } : {}
+      ...date4 ? { date: date4 } : {},
+      ...family ? { family } : {}
     });
   });
   return { items, unreadable, sources };
@@ -127884,33 +127925,43 @@ async function panelSelection(question, read, limits, relevance, signal) {
       scores = undefined;
     }
   }
-  const versions2 = new Map;
-  for (const group of evidenceVersionGroups(read.items.map((item) => ({ text: item.text, ...item.date ? { date: item.date } : {} })))) {
+  const versions2 = evidenceVersions(read.items.map(versionText));
+  const groupOf2 = new Map;
+  for (const group of versions2.groups) {
     for (const member of group)
-      versions2.set(member, group);
+      groupOf2.set(member, group);
   }
   const units = (ranked2) => {
-    const seen = new Set;
+    const placed = new Set;
+    const copies = new Set;
     const out = [];
     for (const index of ranked2) {
-      const group = versions2.get(index);
-      if (!group) {
-        out.push([index]);
+      if (placed.has(index) || copies.has(index))
         continue;
+      const unit = [index];
+      const group = groupOf2.get(index);
+      if (group) {
+        const newest = group[0];
+        if (newest !== index && !placed.has(newest))
+          unit.push(newest);
+        for (const member of group) {
+          if (!unit.includes(member) && unit.some((kept) => versions2.similarity(kept, member) >= EVIDENCE_COPY_SIMILARITY))
+            copies.add(member);
+        }
       }
-      if (seen.has(group))
-        continue;
-      seen.add(group);
-      out.push(group[0] === index ? [index] : [index, group[0]]);
+      for (const member of unit)
+        placed.add(member);
+      out.push(unit);
     }
     return out;
   };
   const flatten = (picked2) => {
     const items = [];
     for (const unit of picked2) {
-      if (items.length > 0 && items.length + unit.length > max)
+      const room = max - items.length;
+      if (room <= 0)
         break;
-      items.push(...unit);
+      items.push(...unit.length <= room ? unit : unit.slice(-room));
     }
     return items;
   };
@@ -128049,6 +128100,7 @@ function string4(value) {
 var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MAX_PASSAGE_CHARS = 6000;
 var init_private_answer_model = __esm(() => {
   init_source_model_policy();
+  init_evidence_versions();
   init_private_answer_contract();
   PANEL_ANSWER_LIMITS = {
     maxItems: 4,

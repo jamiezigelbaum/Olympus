@@ -25,6 +25,7 @@ import {
   type AnalystModelUsage,
 } from './analyst.ts';
 import type { Analyst, EvidenceCandidate, EvidencePack } from './contracts.ts';
+import type { SourceFamily } from './source-index/types.ts';
 import { OperationError } from './operation-error.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
 import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
@@ -436,6 +437,8 @@ export interface PrivateEvidenceItem {
   source?: string;
   /** ISO date the item was written. */
   date?: string;
+  /** The item's source family ("file", "email"…); "file" when absent. */
+  family?: SourceFamily;
 }
 
 export interface PrivateAnswerCitation {
@@ -791,7 +794,7 @@ export function privateEvidencePack(question: string, evidence: readonly Private
   const candidates: EvidenceCandidate[] = evidence.map((item) => ({
     provenance: {
       sourceItem: {
-        family: 'file',
+        family: item.family ?? 'file',
         provider: 'private-answer',
         accountScope: 'local',
         providerItemId: item.id,

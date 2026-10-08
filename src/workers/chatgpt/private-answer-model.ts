@@ -33,7 +33,8 @@ import type {
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { AnalystModelRequest } from '../../core/analyst.ts';
 import { SourceModelPolicyDeniedError } from '../../core/source-model-policy.ts';
-import { evidenceVersionGroups } from '../../core/evidence-versions.ts';
+import { EVIDENCE_COPY_SIMILARITY, evidenceDateValue, evidenceVersionGroups, evidenceVersions } from '../../core/evidence-versions.ts';
+import type { SourceFamily } from '../../core/source-index/types.ts';
 import {
   NoPrivateEvidenceError,
   checkPrivateEvidence,
@@ -270,10 +271,15 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       // Readable items there were, but none may be read now: no evidence.
       const hadReadable = read.items.length > 0;
+      // Other versions of the items read, not read themselves: only their
+      // dates may reach the answer's version note, and only if eligible now.
+      const siblings = unreadVersions(live, picked, (index) => read.items[index]!);
+      let eligibleSiblings: number[] = [];
       // Immediately before the answer: only items still eligible now (and
       // only still-eligible unreadable items are counted), in one lookup.
       {
-        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...unreadableHits]);
+        const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...siblings.map(hitOf), ...unreadableHits]);
+        eligibleSiblings = siblings.filter((_, position) => ok[picked.length + position]);
         picked = picked.filter((_, position) => ok[position]);
         unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
       }
@@ -363,10 +369,11 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       // The consult snapshot (verdict and the fitted pack) rides along for
       // the jobs engine; it is never part of what the panel decrypts.
       const answerText = withoutEvidenceMarkers(result.answer);
-      // Versions are judged over every readable match still eligible, with
-      // the search-time text the selection grouped them by, so the note also
-      // says so when only the newest version was read.
-      const versionNote = citedVersionNote(live.map((index) => read.items[index]!), result.citations.map((citation) => citation.id));
+      // Versions are judged with the search-time text the selection grouped
+      // them by, over the items read and their other versions that passed the
+      // final eligibility check, so the note also says so when only the
+      // newest version was read.
+      const versionNote = citedVersionNote([...picked, ...eligibleSiblings].map((index) => read.items[index]!), result.citations.map((citation) => citation.id));
       return {
         answer: versionNote ? `${answerText} ${versionNote}` : answerText,
         citations,
@@ -387,12 +394,12 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
  * answer's text is not consulted.
  */
 export function citedVersionNote(items: readonly BuiltInEvidenceItem[], citedIds: readonly string[]): string | undefined {
-  const groups = evidenceVersionGroups(items.map((item) => ({ text: item.text, ...(item.date ? { date: item.date } : {}) })));
+  const groups = evidenceVersionGroups(items.map(versionText));
   const cited = new Set(citedIds);
   for (const group of groups) {
     const members = group.map((index) => items[index]!);
     const used = members.filter((item) => cited.has(item.id));
-    if (used.length === 0 || members.some((item) => !item.date)) continue;
+    if (used.length === 0 || members.some((item) => !Number.isFinite(evidenceDateValue(item.date)))) continue;
     const label = versionDateLabel(members.map((item) => item.date!));
     const newest = members[0]!;
     if (used.includes(newest)) {
@@ -401,6 +408,22 @@ export function citedVersionNote(items: readonly BuiltInEvidenceItem[], citedIds
     return `This answer uses an older version of ${quoteTitle(used[0]!)}, saved ${label(used[0]!.date!)}; the newest version was saved ${label(newest.date!)}.`;
   }
   return undefined;
+}
+
+function versionText(item: BuiltInEvidenceItem): { text: string; date?: string; family?: string } {
+  return { text: item.text, ...(item.date ? { date: item.date } : {}), ...(item.family ? { family: item.family } : {}) };
+}
+
+/** Indexes in `live`, not in `picked`, that are other versions of a picked item. */
+function unreadVersions(live: readonly number[], picked: readonly number[], itemAt: (index: number) => BuiltInEvidenceItem): number[] {
+  const chosen = new Set(picked);
+  const out: number[] = [];
+  for (const group of evidenceVersionGroups(live.map((index) => versionText(itemAt(index))))) {
+    const members = group.map((position) => live[position]!);
+    if (!members.some((index) => chosen.has(index))) continue;
+    for (const index of members) if (!chosen.has(index)) out.push(index);
+  }
+  return out;
 }
 
 function quoteTitle(item: BuiltInEvidenceItem): string {
@@ -453,6 +476,7 @@ export function privateEvidence(
     const locator = string(hit.locator) ?? string(citation?.uri) ?? string(content?.url);
     const source = string(citation?.sourceLabel) ?? string(sourceItem?.provider);
     const date = string(citation?.authoredAt) ?? string(content?.authoredAt) ?? string(citation?.updatedAt);
+    const family = string(sourceItem?.family) as SourceFamily | undefined;
     sources.push(index);
     items.push({
       id: items.some((item) => item.id === id) ? `${id}#${index + 1}` : id,
@@ -461,6 +485,7 @@ export function privateEvidence(
       ...(locator ? { locator } : {}),
       ...(source ? { source } : {}),
       ...(date ? { date } : {}),
+      ...(family ? { family } : {}),
     });
   });
   return { items, unreadable, sources };
@@ -489,12 +514,13 @@ export async function panelItems(
  * (leadingCount), or the only readable item. Leading items are read alone,
  * in depth; an item merely within the relevance floor of them is left out.
  *
- * Versions of one document (evidence-versions.ts: nearly the same text) take
- * one place in the ranking, at their most relevant member's score: that
- * member is read, and so is the group's newest version when it is another
- * one, whatever their own scores or retrieval order. Other versions are left
- * out, so copies cannot crowd out other documents, and every run over the
- * same matches reads the same newest version (owner report 2026-10-08).
+ * Versions of one document (evidence-versions.ts: nearly the same text):
+ * when any version is read, the group's newest version is read right after
+ * it, whatever its own score or retrieval order, so every run over the same
+ * matches reads the same newest version (owner report 2026-10-08). Near-exact
+ * copies of an item read are left out, so copies cannot crowd out other
+ * documents; other versions keep their own place in the ranking (a question
+ * may ask about an earlier one, or about one of several look-alike items).
  */
 export async function panelSelection(
   question: string,
@@ -516,32 +542,42 @@ export async function panelSelection(
       scores = undefined;
     }
   }
-  const versions = new Map<number, number[]>();
-  for (const group of evidenceVersionGroups(read.items.map((item) => ({ text: item.text, ...(item.date ? { date: item.date } : {}) })))) {
-    for (const member of group) versions.set(member, group);
+  const versions = evidenceVersions(read.items.map(versionText));
+  const groupOf = new Map<number, readonly number[]>();
+  for (const group of versions.groups) {
+    for (const member of group) groupOf.set(member, group);
   }
-  // Ranked items as units: an item alone, or a version group's most
-  // relevant member followed by the group's newest.
+  // Ranked items as units: an item alone, or a version followed by its
+  // group's newest when that is not placed yet. Near-exact copies of a
+  // placed item are left out.
   const units = (ranked: readonly number[]): number[][] => {
-    const seen = new Set<readonly number[]>();
+    const placed = new Set<number>();
+    const copies = new Set<number>();
     const out: number[][] = [];
     for (const index of ranked) {
-      const group = versions.get(index);
-      if (!group) {
-        out.push([index]);
-        continue;
+      if (placed.has(index) || copies.has(index)) continue;
+      const unit = [index];
+      const group = groupOf.get(index);
+      if (group) {
+        const newest = group[0]!;
+        if (newest !== index && !placed.has(newest)) unit.push(newest);
+        for (const member of group) {
+          if (!unit.includes(member) && unit.some((kept) => versions.similarity(kept, member) >= EVIDENCE_COPY_SIMILARITY)) copies.add(member);
+        }
       }
-      if (seen.has(group)) continue;
-      seen.add(group);
-      out.push(group[0] === index ? [index] : [index, group[0]!]);
+      for (const member of unit) placed.add(member);
+      out.push(unit);
     }
     return out;
   };
+  // Units in order up to `max` items; a unit that does not fit whole keeps
+  // its last members (a version's newest).
   const flatten = (picked: readonly number[][]): number[] => {
     const items: number[] = [];
     for (const unit of picked) {
-      if (items.length > 0 && items.length + unit.length > max) break;
-      items.push(...unit);
+      const room = max - items.length;
+      if (room <= 0) break;
+      items.push(...(unit.length <= room ? unit : unit.slice(-room)));
     }
     return items;
   };

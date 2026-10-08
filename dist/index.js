@@ -10319,6 +10319,13 @@ var init_readwise = __esm(() => {
 var init_opsec = __esm(() => {
   init_types();
 });
+
+// src/core/evidence-versions.ts
+var DOCUMENT_FAMILIES;
+var init_evidence_versions = __esm(() => {
+  DOCUMENT_FAMILIES = new Set(["file", "note"]);
+});
+
 // src/core/analyst.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
@@ -10328,6 +10335,7 @@ var init_analyst = __esm(() => {
   init_source_model_policy();
   init_types();
   init_operation_error();
+  init_evidence_versions();
   analystAbortSignalStorage = new AsyncLocalStorage2;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",

@@ -109,7 +109,7 @@ export function currentAnalystAbortSignal(): AbortSignal | undefined {
 const CONFLICT_RULE =
   '- If items give different values for the same thing, give each value with its item\'s name and date; never pick one silently.';
 const VERSION_INSTRUCTION =
-  'Items with a "version group:" line are versions of one document. Answer from the newest version unless the question asks about an earlier one, and say which version the value comes from by its date. Where versions differ, give the newest value and the older value with its date.';
+  'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.';
 
 const ANALYST_SYSTEM = [
   'You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.',
@@ -683,7 +683,7 @@ function candidateLabel(candidate: EvidenceCandidate): string {
 function candidateVersionNotes(pack: EvidencePack): Array<string | undefined> {
   const items: VersionedEvidenceText[] = pack.candidates.map((candidate) => {
     const date = candidateDate(candidate);
-    return { text: candidate.chunks.join('\n'), ...(date ? { date } : {}) };
+    return { text: candidate.chunks.join('\n'), family: candidate.provenance.sourceItem.family, ...(date ? { date } : {}) };
   });
   const groups = evidenceVersionIndex(items);
   return groups.map((group, index) => {
@@ -696,9 +696,9 @@ function candidateVersionNotes(pack: EvidencePack): Array<string | undefined> {
     const label = (member: number) => `[${member + 1}] ${when.get(items[member]!.date!)}`;
     const newest = group[0]!;
     if (index === newest) {
-      return `version group: newest of ${group.length} versions of one document, dated ${when.get(items[index]!.date!)} (older: ${others.map(label).join(', ')})`;
+      return `version group: newest of ${group.length} likely versions of one document, dated ${when.get(items[index]!.date!)} (older: ${others.map(label).join(', ')})`;
     }
-    return `version group: older version, dated ${when.get(items[index]!.date!)}; the newest version is ${label(newest)}`;
+    return `version group: likely an older version, dated ${when.get(items[index]!.date!)}; the newest version is ${label(newest)}`;
   });
 }
 
