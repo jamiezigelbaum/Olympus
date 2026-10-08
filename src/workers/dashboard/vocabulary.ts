@@ -1785,6 +1785,8 @@ export const DASHBOARD_LOCAL_COPY = {
   modelTranscription: 'Transcription',
   /** Not installed because the chosen sources hold no audio: nothing to download. */
   modelNotNeededNoAudio: 'Not needed: no audio in your chosen folders',
+  /** Starts the transcription model's download ahead of any audio, or again after a failure. */
+  modelDownloadNow: 'Download now',
   modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
   modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
   modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,

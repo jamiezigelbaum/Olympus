@@ -249,6 +249,8 @@ export function createBuiltInTranscriber(options: BuiltInTranscriberOptions = {}
   let installing: Promise<void> | undefined;
   let failedAt: number | undefined;
   let consecutiveFailures = 0;
+  // The failure whose backoff an owner's click already skipped.
+  let manualSkipFor: number | undefined;
   const readyListeners: Array<() => void> = [];
   let server: LlamaServerHandle | undefined;
 
@@ -323,6 +325,13 @@ export function createBuiltInTranscriber(options: BuiltInTranscriberOptions = {}
 
   return {
     prepare,
+    downloadNow() {
+      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing && !installed && !unavailable) {
+        manualSkipFor = failedAt;
+        failedAt = undefined;
+      }
+      return prepare();
+    },
     onReady(listener) {
       readyListeners.push(listener);
     },

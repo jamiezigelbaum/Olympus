@@ -52295,6 +52295,7 @@ var init_vocabulary = __esm(() => {
     modelNames: { ...DASHBOARD_CHATGPT_PAGE_COPY.modelNames, transcription: "the transcription model" },
     modelTranscription: "Transcription",
     modelNotNeededNoAudio: "Not needed: no audio in your chosen folders",
+    modelDownloadNow: "Download now",
     modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
     modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
     modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
@@ -90942,6 +90943,7 @@ function createBuiltInTranscriber(options = {}) {
   let installing;
   let failedAt;
   let consecutiveFailures = 0;
+  let manualSkipFor;
   const readyListeners = [];
   let server;
   const prepare = () => {
@@ -91007,6 +91009,13 @@ function createBuiltInTranscriber(options = {}) {
   };
   return {
     prepare,
+    downloadNow() {
+      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing && !installed && !unavailable) {
+        manualSkipFor = failedAt;
+        failedAt = undefined;
+      }
+      return prepare();
+    },
     onReady(listener) {
       readyListeners.push(listener);
     },
@@ -96485,7 +96494,7 @@ function mountDashboardController(options) {
     }
     if (form.hasAttribute("data-model-retry")) {
       const model = form.dataset.modelRetry;
-      return model === "embedding" || model === "answers" ? { action: "retry_model", model } : undefined;
+      return model === "embedding" || model === "answers" || model === "transcription" ? { action: "retry_model", model } : undefined;
     }
     if (form.hasAttribute("data-disconnect-kind")) {
       return {
@@ -103048,6 +103057,12 @@ function modelStateWord2(state) {
     return DASHBOARD_LOCAL_COPY.modelChecking;
   return DASHBOARD_LOCAL_COPY.modelGettingReady;
 }
+function transcriptionDownloadNow(states, options) {
+  const state = states.transcription?.state;
+  if (state !== "not_needed" && state !== "failed")
+    return "";
+  return ` ${actionButton(dashboardControlsAvailable(options) ? { label: DASHBOARD_LOCAL_COPY.modelDownloadNow, kind: "model_retry", source: "transcription" } : lockedAction(DASHBOARD_LOCAL_COPY.modelDownloadNow, options?.basePath))}`;
+}
 function modelInstallLines(states) {
   return [
     installLine("search", states.models.embedding),
@@ -103067,7 +103082,7 @@ function dashboardModelsSummary(states, view) {
   }
   return `${DASHBOARD_LOCAL_COPY.models} — ${kind} · ${overall}`;
 }
-function dashboardModelsSection(states, view) {
+function dashboardModelsSection(states, view, options) {
   const models = states.models;
   const installs = modelInstallLines(states);
   const summary = dashboardModelsSummary(states, view);
@@ -103075,7 +103090,7 @@ function dashboardModelsSection(states, view) {
   const search = `${models.embedding.kind === "built_in" ? DASHBOARD_LOCAL_COPY.modelBuiltIn : DASHBOARD_LOCAL_COPY.modelCustom} · ${modelStateWord2(models.embedding.state)}`;
   const answers = models.answers ? `${models.answers.label} · ${models.answers.ready ? DASHBOARD_LOCAL_COPY.modelReady : models.answers.install ? modelStateWord2(models.answers.install.state) : DASHBOARD_LOCAL_COPY.modelNotReady}` : "";
   const transcription = states.transcription ? states.transcription.state === "not_needed" ? DASHBOARD_LOCAL_COPY.modelNotNeededNoAudio : `${DASHBOARD_LOCAL_COPY.modelBuiltIn} · ${modelStateWord2(states.transcription.state)}` : "";
-  const body = `<ul class="mlist"><li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelSearch}: ${search}`)}</li>` + (answers ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelAnswers}: ${answers}`)}</li>` : "") + (transcription ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelTranscription}: ${transcription}`)}</li>` : "") + `</ul>${renderModelSetup(view.model_setup, { heading: false })}`;
+  const body = `<ul class="mlist"><li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelSearch}: ${search}`)}</li>` + (answers ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelAnswers}: ${answers}`)}</li>` : "") + (transcription ? `<li>${escapeHtml2(`${DASHBOARD_LOCAL_COPY.modelTranscription}: ${transcription}`)}${transcriptionDownloadNow(states, options)}</li>` : "") + `</ul>${renderModelSetup(view.model_setup, { heading: false })}`;
   return `<section class="modelsrow" id="models" aria-label="${escapeHtml2(DASHBOARD_LOCAL_COPY.models)}">` + `<details class="models" data-poll-key="models"${open7 ? " open" : ""}><summary>${escapeHtml2(summary)}</summary>` + `<div class="modelsbody">${body}</div></details>` + (installs.length > 0 ? `<div class="minstalls">${installs.map(installHtml).join("")}</div>` : "") + `</section>`;
 }
 var DEFAULT_BASE_PATH3 = "/dashboard", TONE;
@@ -104919,7 +104934,7 @@ function renderDashboardSetupPage(view, options) {
     }),
     dashboardPrivacySection(rowOptions),
     options?.controlMode === "native" ? "" : renderOutsideHelpSection(options?.outsideHelpSummary, basePath),
-    dashboardModelsSection(states, view),
+    dashboardModelsSection(states, view, rowOptions),
     ...options?.agents ? [renderDashboardAgentsSection({ view: options.agents, now: new Date(view.generated_at) })] : []
   ].filter((block) => block !== "").join(`
 `);
@@ -108595,14 +108610,24 @@ function createEmailSourceWorker(options = {}) {
           });
         }
         if (request.method === "POST" && url.pathname === "/dashboard/models/retry") {
-          if (!sourceDashboard?.retryModel) {
+          if (!sourceDashboard?.retryModel && !sourceDashboard?.downloadTranscriptionModel) {
             throw new EmailSourceWorkerError(501, "model_setup_not_supported", "This worker does not support restarting a model download.");
           }
           const record3 = await parseObjectBody(request);
+          if (record3.model === "transcription") {
+            const outcome = sourceDashboard.downloadTranscriptionModel?.() ?? "unavailable";
+            if (outcome === "unavailable") {
+              throw new EmailSourceWorkerError(409, "model_not_configured", "The built-in transcription model is not used on this computer.");
+            }
+            return json({
+              ok: true,
+              status_message: outcome === "ready" ? "Already downloaded." : "Downloading. This row updates as it goes."
+            });
+          }
           const model = record3.model === "embedding" || record3.model === "answers" ? record3.model : undefined;
           if (!model)
-            throw new EmailSourceWorkerError(400, "invalid_request", "model must be embedding or answers.");
-          if (!sourceDashboard.retryModel(model)) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "model must be embedding, answers or transcription.");
+          if (!sourceDashboard.retryModel?.(model)) {
             throw new EmailSourceWorkerError(409, "model_not_configured", "That model is not the built-in one on this computer.");
           }
           return json({ ok: true, status_message: "Downloading again. This row updates as it goes." });
@@ -131094,6 +131119,11 @@ async function main() {
           };
         },
         retryModel: (model) => chatgptSetup.retryModel(model),
+        downloadTranscriptionModel: () => {
+          const engine = process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env);
+          const state = engine?.downloadNow?.() ?? "unavailable";
+          return state === "pending" ? "started" : state;
+        },
         stopMessagingCapture,
         corpusRegistry: sourceCorpusRegistry2,
         registryPath: handleRegistryPathFromEnv(process.env, true),

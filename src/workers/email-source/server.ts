@@ -4254,6 +4254,11 @@ export async function main(): Promise<void> {
               };
             },
             retryModel: (model) => chatgptSetup.retryModel(model),
+            downloadTranscriptionModel: () => {
+              const engine = process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env);
+              const state = engine?.downloadNow?.() ?? 'unavailable';
+              return state === 'pending' ? 'started' : state;
+            },
             stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,

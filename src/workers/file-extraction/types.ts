@@ -538,6 +538,12 @@ export interface BuiltInTranscriptionEngine {
    * ready, so the wiring layer can wake the work that waited for it.
    */
   onReady?(listener: () => void): void;
+  /**
+   * The owner asked for the model now (the dashboard's Download now): start
+   * the install whether or not any audio waits for it. The memory and disk
+   * gates still apply; a failed install's backoff is skipped once per failure.
+   */
+  downloadNow?(): 'ready' | 'pending' | 'unavailable';
 }
 
 // --- Seam 3: the sink ------------------------------------------------------

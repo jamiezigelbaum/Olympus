@@ -24483,6 +24483,7 @@ var init_vocabulary = __esm(() => {
     modelNames: { ...DASHBOARD_CHATGPT_PAGE_COPY.modelNames, transcription: "the transcription model" },
     modelTranscription: "Transcription",
     modelNotNeededNoAudio: "Not needed: no audio in your chosen folders",
+    modelDownloadNow: "Download now",
     modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
     modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
     modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,

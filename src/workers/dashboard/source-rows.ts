@@ -799,6 +799,19 @@ function modelStateWord(state: ModelInstall['state']): string {
   return C.modelGettingReady;
 }
 
+/**
+ * Download now beside the transcription line, while it is not needed (no
+ * audio chosen yet: the owner may add some later) or its download failed.
+ * The same control route and session checks as Try again on a model.
+ */
+function transcriptionDownloadNow(states: DashboardSourceStates, options: DashboardRowOptions | undefined): string {
+  const state = states.transcription?.state;
+  if (state !== 'not_needed' && state !== 'failed') return '';
+  return ` ${actionButton(dashboardControlsAvailable(options)
+    ? { label: C.modelDownloadNow, kind: 'model_retry', source: 'transcription' }
+    : lockedAction(C.modelDownloadNow, options?.basePath))}`;
+}
+
 /** The install lines under Models: search, answers, then transcription. */
 function modelInstallLines(states: DashboardSourceStates): InstallLine[] {
   return [
@@ -829,7 +842,11 @@ export function dashboardModelsSummary(states: DashboardSourceStates, view: Sour
  * entered in the setup inside, as before). Open by itself while models need
  * the owner.
  */
-export function dashboardModelsSection(states: DashboardSourceStates, view: SourceDashboardViewModel): string {
+export function dashboardModelsSection(
+  states: DashboardSourceStates,
+  view: SourceDashboardViewModel,
+  options?: DashboardRowOptions,
+): string {
   const models = states.models;
   const installs = modelInstallLines(states);
   const summary = dashboardModelsSummary(states, view);
@@ -845,7 +862,7 @@ export function dashboardModelsSection(states: DashboardSourceStates, view: Sour
     : '';
   const body = `<ul class="mlist"><li>${escapeHtml(`${C.modelSearch}: ${search}`)}</li>`
     + (answers ? `<li>${escapeHtml(`${C.modelAnswers}: ${answers}`)}</li>` : '')
-    + (transcription ? `<li>${escapeHtml(`${C.modelTranscription}: ${transcription}`)}</li>` : '')
+    + (transcription ? `<li>${escapeHtml(`${C.modelTranscription}: ${transcription}`)}${transcriptionDownloadNow(states, options)}</li>` : '')
     + `</ul>${renderModelSetup(view.model_setup, { heading: false })}`;
   return `<section class="modelsrow" id="models" aria-label="${escapeHtml(C.models)}">`
     + `<details class="models" data-poll-key="models"${open ? ' open' : ''}><summary>${escapeHtml(summary)}</summary>`

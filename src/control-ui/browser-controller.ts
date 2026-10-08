@@ -357,7 +357,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (form.hasAttribute('data-model-retry')) {
       const model = form.dataset.modelRetry;
-      return model === 'embedding' || model === 'answers' ? { action: 'retry_model', model } : undefined;
+      return model === 'embedding' || model === 'answers' || model === 'transcription'
+        ? { action: 'retry_model', model }
+        : undefined;
     }
     if (form.hasAttribute('data-disconnect-kind')) {
       return {

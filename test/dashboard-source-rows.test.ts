@@ -354,7 +354,7 @@ describe('rule 5: the Models row', () => {
     const none = render(undefined);
     expect(none).not.toContain('Transcription:');
     const notNeeded = render(builtInTranscriptionDashboardState({ state: 'not_started', modelId: 'm', percent: 0, label: '', bytesDone: 0, bytesTotal: 0, updatedAt: '' }));
-    expect(notNeeded).toContain('<li>Transcription: Not needed: no audio in your chosen folders</li>');
+    expect(notNeeded).toContain('<li>Transcription: Not needed: no audio in your chosen folders ');
     expect(notNeeded).toContain('<summary>Models — Built-in · Ready</summary>');
     const downloading = render(builtInTranscriptionDashboardState({
       state: 'downloading', modelId: 'm', percent: 42, label: '', bytesDone: 428_000_000, bytesTotal: 1_019_141_728, updatedAt: '',
