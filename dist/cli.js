@@ -17531,7 +17531,7 @@ var init_media_judge = __esm(() => {
   });
   MEDIA_JUDGE_THRESHOLDS = Object.freeze({
     margin: 0.04,
-    intimateMargin: 0.02
+    intimateMargin: 0.025
   });
   promptVectorCache = new Map;
 });

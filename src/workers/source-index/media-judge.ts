@@ -63,18 +63,18 @@ export interface MediaJudgeThresholds {
  *   lab-result picture: medical, correctly sensitive), next 0.040 (a family
  *   beach photo, near "intimate").
  * - margin 0.04: all 22 specimens caught, 2 of 116 owner photos flagged.
- * - intimateMargin 0.02: no real intimate picture was available to measure,
- *   so the intimate rule is deliberately more cautious than the general one.
- *   Among ordinary photos the intimate description's margin peaks on beach
- *   and swimwear pictures (owner photos: median -0.016, highest 0.040), and
- *   on non-intimate sensitive specimens it stays below 0.015. Half the
- *   general margin flags every picture the model places nearer "intimate"
- *   than a typical ordinary photo, at the cost of some beach photos resting
- *   Private.
+ * - intimateMargin 0.025 (owner's choice, 2026-10-08: medium, not maximally
+ *   strict): no real intimate picture was available to measure, so the
+ *   intimate rule is more cautious than the general one. Among ordinary
+ *   photos the intimate description's margin peaks on beach and swimwear
+ *   pictures (owner photos: median -0.016, highest 0.040), and on
+ *   non-intimate sensitive specimens it stays below 0.015. At 0.025, 8 of
+ *   116 owner photos rest Private (7 beach or family shots, plus the medical
+ *   one the general margin holds); 0.02 held 12.
  */
 export const MEDIA_JUDGE_THRESHOLDS: Readonly<MediaJudgeThresholds> = Object.freeze({
   margin: 0.04,
-  intimateMargin: 0.02,
+  intimateMargin: 0.025,
 });
 
 export interface MediaJudgment {

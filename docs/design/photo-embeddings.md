@@ -151,7 +151,7 @@ Shared and source-neutral (`src/workers/source-index/media-judge.ts`,
   financial_document, medical_document, intimate, and ordinary. The margin is
   the best sensitive score minus the ordinary score. Sensitive when the margin
   is at least 0.04, or when the intimate score alone beats ordinary by at
-  least 0.02; otherwise ordinary. Missing or non-finite scores: unjudged. The
+  least 0.025; otherwise ordinary. Missing or non-finite scores: unjudged. The
   description vectors are made once per model and process; the prompt set is
   versioned (`photo-judge-2026-10-08`) and each judgment records it with the
   model.
@@ -181,10 +181,11 @@ Shared and source-neutral (`src/workers/source-index/media-judge.ts`,
   bank cards, bank statements, payslips): all 22 sensitive (10 id_document,
   9 financial_document, 2 bank_card, 1 medical_document), margins 0.052 to
   0.181, median 0.108. The owner's 116 Dropbox photos: median margin -0.010;
-  13 flagged: his lab-result picture (medical, 0.129) and 12 near "intimate"
-  (beach and family photos, a book cover; intimate margins 0.021 to 0.041).
-  The intimate rule could not be measured on real intimate pictures, so it is
-  deliberately cautious and costs some beach photos a Private tier.
+  at the owner's chosen intimate bar of 0.025, 8 flagged: the owner's
+  lab-result picture (medical, 0.129) and 7 near "intimate" (beach and family
+  photos, a book cover; intimate margins 0.025 to 0.041). The intimate rule
+  could not be measured on real intimate pictures, so it stays more cautious
+  than the general one and costs a few beach photos a Private tier.
 
 ## Not in this step
 
