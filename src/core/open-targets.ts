@@ -107,5 +107,22 @@ export function openTargetTokenPattern(): string {
   return `^(?:${tokens.map((token) => token.replace('.', '\\.')).join('|')})$`;
 }
 
+/**
+ * The targets the computer's Keys page opens something for: Connect for a
+ * source set up on the computer, and the model fixes (Models). Every other
+ * target (the dashboard, a ChatGPT connect or reconnect fix) lands on the
+ * plain dashboard.
+ */
+export function isKeysOpenTarget(target: OpenTarget): boolean {
+  return target.kind === 'connect'
+    || (target.kind === 'fix' && (target.section === 'models' || target.section === 'answers' || target.section === 'search'));
+}
+
+/** The Keys targets' tokens, as one anchored pattern source (see openTargetTokenPattern). */
+export function keysOpenTargetTokenPattern(): string {
+  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token): token is string => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace('.', '\\.')).join('|')})$`;
+}
+
 export const DASHBOARD_OPEN_FRAGMENT_KEY = 'olympus-open';
 export const DASHBOARD_LAUNCH_OPEN_KEY = 'olympus_open';

@@ -7272,7 +7272,7 @@ var init_answer_ready_coverage = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -7780,76 +7780,6 @@ var init_vocabulary = __esm(() => {
       pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
       unreadable: "Olympus could not read your privacy settings."
     }
-  };
-  DASHBOARD_LOCAL_PRIVACY_COPY = {
-    crumb: "Privacy",
-    back: "Back to Setup",
-    title: DASHBOARD_CHATGPT_PRIVACY_COPY.title,
-    intro: "Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.",
-    descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
-    descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
-    questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
-    rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
-    rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
-    kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
-    kindLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.kindLabel,
-    kindSender: DASHBOARD_CHATGPT_PRIVACY_COPY.kindSender,
-    unnamedFolder: "A folder",
-    remove: DASHBOARD_CHATGPT_PRIVACY_COPY.remove,
-    removeFor: DASHBOARD_CHATGPT_PRIVACY_COPY.removeFor,
-    removed: DASHBOARD_CHATGPT_PRIVACY_COPY.removed,
-    undo: DASHBOARD_CHATGPT_PRIVACY_COPY.undo,
-    addFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.addFolder,
-    addLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.addLabel,
-    addSender: DASHBOARD_CHATGPT_PRIVACY_COPY.addSender,
-    needFolderSource: DASHBOARD_CHATGPT_PRIVACY_COPY.needFolderSource,
-    needGmail: DASHBOARD_CHATGPT_PRIVACY_COPY.needGmail,
-    folderIntro: "Open a folder to look inside it. Make private covers everything in the folder.",
-    folderUp: "Back",
-    folderOpen: "Open",
-    folderEmpty: "No folders here.",
-    folderMore: "Load more folders",
-    loading: "Loading…",
-    loadFailed: "Olympus could not load this list. Try again.",
-    makePrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.makePrivate,
-    alreadyPrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.alreadyPrivate,
-    labelIntro: "Mail with a private label is answered only on this computer.",
-    noLabels: DASHBOARD_CHATGPT_PRIVACY_COPY.noLabels,
-    senderIntro: "Mail from this sender is answered only on this computer.",
-    senderLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.senderLabel,
-    senderPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.senderPlaceholder,
-    senderAdd: DASHBOARD_CHATGPT_PRIVACY_COPY.senderAdd,
-    senderInvalid: DASHBOARD_CHATGPT_PRIVACY_COPY.senderInvalid,
-    senderDuplicate: DASHBOARD_CHATGPT_PRIVACY_COPY.senderDuplicate,
-    close: "Done",
-    pending: {
-      one: "{n} item is waiting to be checked on this computer.",
-      many: "{n} items are waiting to be checked on this computer."
-    },
-    nothingPending: "Nothing is waiting to be checked.",
-    save: DASHBOARD_CHATGPT_PRIVACY_COPY.save,
-    saving: DASHBOARD_CHATGPT_PRIVACY_COPY.saving,
-    cancel: DASHBOARD_CHATGPT_PRIVACY_COPY.cancel,
-    saveFailed: DASHBOARD_CHATGPT_PRIVACY_COPY.saveFailed,
-    saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
-    unchanged: "No changes to save.",
-    locked: "Unlock dashboard controls in Setup to see and change what is private.",
-    readOnly: "Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.",
-    counts: "Your description and {n} always-private rules are set.",
-    countsOne: "Your description and 1 always-private rule are set.",
-    countsUnset: "Nothing is set as private yet.",
-    unavailable: "Privacy settings are not available from this worker.",
-    confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
-    confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
-    confirm: DASHBOARD_CHATGPT_PRIVACY_COPY.confirm,
-    conflict: DASHBOARD_CHATGPT_PRIVACY_COPY.conflict,
-    conflictNow: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNow,
-    conflictDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictDescription,
-    conflictNoDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNoDescription,
-    applyAgain: DASHBOARD_CHATGPT_PRIVACY_COPY.applyAgain,
-    discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
-    folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
-    undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
   };
 });
 
@@ -15787,6 +15717,13 @@ function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
+function isKeysOpenTarget(target) {
+  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function keysOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
 var DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open";
 var DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 
@@ -15873,6 +15810,7 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
       (function () {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -15898,9 +15836,10 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
           if (response.ok) {
-            // A target lands on Keys, where the computer's setup sheets and Models live; it
-            // only opens a panel there, never submits anything.
-            window.location.replace(open ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
+            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -21014,6 +20953,7 @@ var DASHBOARD_TOOL_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 var DASHBOARD_TOOL_REQUEST_MAX_BYTES = 256 * 1024;
 var DASHBOARD_CONTROL_RESPONSE_MAX_BYTES = 256 * 1024;
 var DASHBOARD_PANEL_MAX_BYTES = 2 * 1024 * 1024;
+var DASHBOARD_PANEL_FAILURE_CACHE_MS = 5000;
 var DASHBOARD_PANEL_CACHE_MS = 5 * 60000;
 var OAUTH_CALLBACK_URL_MAX_BYTES = 16 * 1024;
 var DASHBOARD_TIMEOUT_MAX_MS = 180000;
@@ -21106,6 +21046,21 @@ function registerPanelRoute(api, config, fetchImpl) {
   if (!api.registerHttpRoute)
     return;
   let cached;
+  let failedAt;
+  let pending;
+  async function readPanel() {
+    const authToken = requireWorkerAuthToken(config);
+    const { response: worker, text } = await boundedWorkerRequest({
+      fetchImpl,
+      url: workerRootUrl(config, "/dashboard/panel"),
+      init: { method: "GET", headers: workerHeaders(authToken), redirect: "error" },
+      timeoutMs: dashboardTimeoutMs(config),
+      maxResponseBytes: DASHBOARD_PANEL_MAX_BYTES
+    });
+    if (worker.status !== 200 || !text.startsWith("<!doctype html>"))
+      throw new DashboardGatewayUnavailableError("panel unavailable");
+    return text;
+  }
   api.registerHttpRoute({
     path: OLYMPUS_DASHBOARD_PANEL_PATH,
     auth: "plugin",
@@ -21118,17 +21073,20 @@ function registerPanelRoute(api, config, fetchImpl) {
       }
       try {
         if (!cached || Date.now() - cached.at > DASHBOARD_PANEL_CACHE_MS) {
-          const authToken = requireWorkerAuthToken(config);
-          const { response: worker, text } = await boundedWorkerRequest({
-            fetchImpl,
-            url: workerRootUrl(config, "/dashboard/panel"),
-            init: { method: "GET", headers: workerHeaders(authToken), redirect: "error" },
-            timeoutMs: dashboardTimeoutMs(config),
-            maxResponseBytes: DASHBOARD_PANEL_MAX_BYTES
-          });
-          if (worker.status !== 200 || !text.startsWith("<!doctype html>"))
+          if (failedAt !== undefined && Date.now() - failedAt < DASHBOARD_PANEL_FAILURE_CACHE_MS) {
             throw new DashboardGatewayUnavailableError("panel unavailable");
-          cached = { html: text, at: Date.now() };
+          }
+          const read = pending ?? (pending = readPanel());
+          try {
+            cached = { html: await read, at: Date.now() };
+            failedAt = undefined;
+          } catch (error) {
+            failedAt = Date.now();
+            throw error;
+          } finally {
+            if (pending === read)
+              pending = undefined;
+          }
         }
         response.statusCode = 200;
         response.setHeader("Content-Type", "text/html; charset=utf-8");

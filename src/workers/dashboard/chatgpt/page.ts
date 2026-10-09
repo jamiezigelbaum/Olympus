@@ -22,6 +22,7 @@ import {
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
   INDEX_FASTER_TOOL_NAME,
+  UNPAIR_SOURCE_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
   SYNC_SOURCE_TOOL_NAME,
 } from '../../chatgpt/dashboard-contract.ts';
@@ -335,6 +336,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
       contextKey: OLYMPUS_HOST_CONTEXT_KEY,
       computerMetaKey: COMPUTER_META_KEY,
       indexFasterTool: INDEX_FASTER_TOOL_NAME,
+      unpairTool: UNPAIR_SOURCE_TOOL_NAME,
       copy: DASHBOARD_COMPUTER_PANEL_COPY,
     },
   };

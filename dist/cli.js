@@ -7849,15 +7849,12 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/control/launch/redeem" },
     { method: "POST", path: "/dashboard/control/session" },
     { method: "POST", path: "/dashboard/control/session/local" },
-    { method: "GET", path: "/dashboard/dispositions.json" },
     { method: "POST", path: "/dashboard/dispositions" },
     { method: "GET", path: "/oauth/callback/", prefix: true },
     { method: "POST", path: "/dashboard/connect/oauth/start" },
     { method: "POST", path: "/dashboard/connect/oauth/cancel" },
     { method: "POST", path: "/dashboard/connect/api-key" },
     { method: "POST", path: "/dashboard/models/check" },
-    { method: "POST", path: "/dashboard/models/retry" },
-    { method: "POST", path: "/dashboard/privacy" },
     { method: "POST", path: "/dashboard/sync-now" },
     { method: "POST", path: "/dashboard/embedding-priority" },
     { method: "POST", path: "/dashboard/tools/call" },
@@ -10882,6 +10879,9 @@ function openTargetPath(target) {
     return `fix/${target.section}`;
   return "dashboard";
 }
+function olympusOpenUrl(target) {
+  return `${OLYMPUS_URL_SCHEME}://open/${openTargetPath(target)}`;
+}
 function openPageUrl(target) {
   return `${OPEN_PAGE_BASE_URL}${openTargetPath(target)}/`;
 }
@@ -10911,6 +10911,13 @@ function openTargetToken(target) {
 }
 function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isKeysOpenTarget(target) {
+  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function keysOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
@@ -11019,6 +11026,7 @@ var init_dashboard_launch = __esm(() => {
       (function () {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -11044,9 +11052,10 @@ var init_dashboard_launch = __esm(() => {
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
           if (response.ok) {
-            // A target lands on Keys, where the computer's setup sheets and Models live; it
-            // only opens a panel there, never submits anything.
-            window.location.replace(open ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
+            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -52520,7 +52529,7 @@ function degradedInput(degraded) {
 function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -52759,10 +52768,13 @@ var init_vocabulary = __esm(() => {
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
   DASHBOARD_HOST_GATE_COPY = {
-    title: "Open dashboard controls",
-    line: "Ask your agent for a fresh opening link. No token copying needed.",
-    button: "Get opening link",
-    how: "Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.",
+    title: "Dashboard controls are locked",
+    open: "Open dashboard controls",
+    fallbackBefore: "or run ",
+    fallbackCommand: "olympus dashboard",
+    fallbackAfter: " in a terminal",
+    button: "Other ways",
+    how: "Ask your agent for a fresh opening link: copy this request to it, then open the link it gives you. The link works once and expires after fifteen minutes.",
     copy: "Copy prompt",
     copied: "Copied",
     copyFailed: "Select the text and copy it.",
@@ -53179,76 +53191,6 @@ var init_vocabulary = __esm(() => {
       pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
       unreadable: "Olympus could not read your privacy settings."
     }
-  };
-  DASHBOARD_LOCAL_PRIVACY_COPY = {
-    crumb: "Privacy",
-    back: "Back to Setup",
-    title: DASHBOARD_CHATGPT_PRIVACY_COPY.title,
-    intro: "Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.",
-    descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
-    descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
-    questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
-    rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
-    rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
-    kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
-    kindLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.kindLabel,
-    kindSender: DASHBOARD_CHATGPT_PRIVACY_COPY.kindSender,
-    unnamedFolder: "A folder",
-    remove: DASHBOARD_CHATGPT_PRIVACY_COPY.remove,
-    removeFor: DASHBOARD_CHATGPT_PRIVACY_COPY.removeFor,
-    removed: DASHBOARD_CHATGPT_PRIVACY_COPY.removed,
-    undo: DASHBOARD_CHATGPT_PRIVACY_COPY.undo,
-    addFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.addFolder,
-    addLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.addLabel,
-    addSender: DASHBOARD_CHATGPT_PRIVACY_COPY.addSender,
-    needFolderSource: DASHBOARD_CHATGPT_PRIVACY_COPY.needFolderSource,
-    needGmail: DASHBOARD_CHATGPT_PRIVACY_COPY.needGmail,
-    folderIntro: "Open a folder to look inside it. Make private covers everything in the folder.",
-    folderUp: "Back",
-    folderOpen: "Open",
-    folderEmpty: "No folders here.",
-    folderMore: "Load more folders",
-    loading: "Loading…",
-    loadFailed: "Olympus could not load this list. Try again.",
-    makePrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.makePrivate,
-    alreadyPrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.alreadyPrivate,
-    labelIntro: "Mail with a private label is answered only on this computer.",
-    noLabels: DASHBOARD_CHATGPT_PRIVACY_COPY.noLabels,
-    senderIntro: "Mail from this sender is answered only on this computer.",
-    senderLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.senderLabel,
-    senderPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.senderPlaceholder,
-    senderAdd: DASHBOARD_CHATGPT_PRIVACY_COPY.senderAdd,
-    senderInvalid: DASHBOARD_CHATGPT_PRIVACY_COPY.senderInvalid,
-    senderDuplicate: DASHBOARD_CHATGPT_PRIVACY_COPY.senderDuplicate,
-    close: "Done",
-    pending: {
-      one: "{n} item is waiting to be checked on this computer.",
-      many: "{n} items are waiting to be checked on this computer."
-    },
-    nothingPending: "Nothing is waiting to be checked.",
-    save: DASHBOARD_CHATGPT_PRIVACY_COPY.save,
-    saving: DASHBOARD_CHATGPT_PRIVACY_COPY.saving,
-    cancel: DASHBOARD_CHATGPT_PRIVACY_COPY.cancel,
-    saveFailed: DASHBOARD_CHATGPT_PRIVACY_COPY.saveFailed,
-    saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
-    unchanged: "No changes to save.",
-    locked: "Unlock dashboard controls in Setup to see and change what is private.",
-    readOnly: "Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.",
-    counts: "Your description and {n} always-private rules are set.",
-    countsOne: "Your description and 1 always-private rule are set.",
-    countsUnset: "Nothing is set as private yet.",
-    unavailable: "Privacy settings are not available from this worker.",
-    confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
-    confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
-    confirm: DASHBOARD_CHATGPT_PRIVACY_COPY.confirm,
-    conflict: DASHBOARD_CHATGPT_PRIVACY_COPY.conflict,
-    conflictNow: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNow,
-    conflictDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictDescription,
-    conflictNoDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNoDescription,
-    applyAgain: DASHBOARD_CHATGPT_PRIVACY_COPY.applyAgain,
-    discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
-    folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
-    undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
   };
   DASHBOARD_OUTSIDE_HELP_COPY = {
     crumb: "Anonymous answers",
@@ -97194,7 +97136,7 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],form[data-model-retry]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-agent-kind]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
@@ -97235,47 +97177,21 @@ function mountDashboardController(options) {
     applyWriteCapability();
   }
   function pendingMessage(params) {
-    const action = params.action;
-    if (params.action === "retry_model" && params.model === "transcription")
-      return "Starting…";
-    switch (action) {
+    switch (params.action) {
       case "start_oauth":
         return "Connecting…";
       case "connect_api_key":
         return "Validating the key…";
-      case "cancel_oauth":
-        return "Cancelling…";
-      case "sync_now":
-        return "Starting sync…";
-      case "set_embedding_priority":
-        return "Saving…";
-      case "retry_model":
-        return "Starting the download again…";
       default:
         return "Working…";
     }
   }
   function successMessage(params) {
-    const action = params.action;
-    if (params.action === "retry_model" && params.model === "transcription")
-      return "Started. This row updates as it goes.";
-    switch (action) {
+    switch (params.action) {
       case "connect_api_key":
         return "Key accepted. This card updates when Olympus confirms the connection.";
       case "start_oauth":
         return "Waiting for authorization. This card updates when the connection completes.";
-      case "cancel_oauth":
-        return "Connection attempt cancelled. Press Connect when you are ready to start a new one.";
-      case "sync_now":
-        return "Checking. This card shows what was found.";
-      case "set_embedding_priority":
-        return "Saved.";
-      case "disconnect":
-        return "Disconnected. This card updates when Olympus confirms it.";
-      case "unpair":
-        return "Unpaired on this computer.";
-      case "retry_model":
-        return "Downloading again. This row updates as it goes.";
       default:
         return "Saved.";
     }
@@ -97389,44 +97305,11 @@ function mountDashboardController(options) {
         ...body.client_secret ? { client_secret: body.client_secret } : {}
       };
     }
-    if (connect === "oauth_cancel") {
-      return {
-        action: "cancel_oauth",
-        source: body.source
-      };
-    }
     if (connect === "api_key") {
       return {
         action: "connect_api_key",
         source: body.source,
         api_key: body.api_key || ""
-      };
-    }
-    if (form.hasAttribute("data-sync-kind")) {
-      return {
-        action: "sync_now",
-        source: body.source
-      };
-    }
-    if (form.hasAttribute("data-embedding-kind")) {
-      return { action: "set_embedding_priority", on: body.on === "true" };
-    }
-    if (form.hasAttribute("data-model-retry")) {
-      const model = form.dataset.modelRetry;
-      return model === "embedding" || model === "answers" || model === "transcription" ? { action: "retry_model", model } : undefined;
-    }
-    if (form.hasAttribute("data-disconnect-kind")) {
-      return {
-        action: "disconnect",
-        source_id: body.source_id,
-        acknowledge: true
-      };
-    }
-    if (form.hasAttribute("data-unpair-kind")) {
-      return {
-        action: "unpair",
-        source_id: body.source_id,
-        acknowledge: true
       };
     }
     return;
@@ -97486,13 +97369,6 @@ function mountDashboardController(options) {
     if (pendingForms.has(form) || form.dataset.keyAccepted === "true") {
       closeAuthorizationTab(authorizationTab);
       return;
-    }
-    if (params.action === "disconnect" || params.action === "unpair") {
-      const fallback = params.action === "unpair" ? "Unpair this source?" : "Disconnect this source?";
-      if (!window.confirm(form.dataset.confirmation || fallback)) {
-        closeAuthorizationTab(authorizationTab);
-        return;
-      }
     }
     if (params.action === "start_oauth")
       clearAuthorizationFallback(form);
@@ -97558,8 +97434,6 @@ function mountDashboardController(options) {
       });
       applyWriteCapability();
     }
-    if (params.action === "cancel_oauth")
-      awaitingAuthorizationReturn = false;
     say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params) : unreleasedMessage(params.action));
     await refreshNow(false, released);
   }
@@ -97743,7 +97617,7 @@ function mountDashboardController(options) {
       return "";
     if (node.id)
       return `#${node.id}`;
-    const action = node.getAttribute("data-connect-kind") || node.getAttribute("data-sync-kind") || node.getAttribute("data-embedding-kind") || node.getAttribute("data-model-retry") || node.getAttribute("data-disconnect-kind") || node.getAttribute("data-unpair-kind");
+    const action = node.getAttribute("data-connect-kind");
     if (action)
       return `${node.tagName}:${action}`;
     return node.textContent?.trim().slice(0, 120) || "";
@@ -97862,7 +97736,7 @@ function mountDashboardController(options) {
       submitAgentControl(form);
       return;
     }
-    if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-model-retry],[data-disconnect-kind],[data-unpair-kind],[data-model-check]"))
+    if (!form.matches("[data-connect-kind],[data-model-check]"))
       return;
     event.preventDefault();
     const submittedValues = formRecord(form);
@@ -97949,18 +97823,6 @@ function mountDashboardController(options) {
       }).catch(() => {
         announceCopy(copy, "Clipboard unavailable — select the text and copy it with your keyboard.");
       });
-      return;
-    }
-    const controlLink = target.closest("[data-control-link]");
-    if (controlLink) {
-      event.preventDefault();
-      if (!canWrite && !csrfToken) {
-        say(controlLink.closest(".rowlink") || controlLink, "Your OpenClaw connection has read-only access.");
-        return;
-      }
-      const href2 = controlLink.dataset.controlLink;
-      if (href2)
-        options.navigate(href2);
       return;
     }
     const anchor = target.closest("a[href]");
@@ -98565,7 +98427,7 @@ function statusGlyph(status, fraction) {
 }
 function actionButton(input) {
   const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
-  if (action?.blockedReason !== undefined && action.kind !== "link" && (action.kind !== "none" || action.sheet !== undefined)) {
+  if (action?.blockedReason !== undefined && (action.kind !== "none" || action.sheet !== undefined)) {
     return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml2(action.label)}</button>` + `<span class="hint">${escapeHtml2(action.blockedReason)}</span></span>`;
   }
   if (action === undefined || action.kind === "none") {
@@ -98574,36 +98436,9 @@ function actionButton(input) {
     const sheetId = safeId2(action.sheet);
     return `<button class="btn${action.primary ? " primary" : ""}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml2(action.label)}</button>`;
   }
-  if (action.kind === "link") {
-    const href = safeHref(action.href);
-    if (href === undefined)
-      return "";
-    const hint = (action.hint ?? "").trim();
-    return `<span class="rowlink"><a class="btn" href="${escapeHtml2(href)}">${escapeHtml2(action.label)}</a>` + `${hint === "" ? "" : `<span class="hint">${escapeHtml2(hint)}</span>`}</span>`;
-  }
-  if (action.kind === "control_link") {
-    const href = safeHref(action.href);
-    if (href === undefined || !href.startsWith("/") || href.startsWith("//"))
-      return "";
-    const hint = (action.hint ?? "").trim();
-    return `<span class="rowlink"><button class="btn${action.primary ? " primary" : ""}" type="button" data-control-link="${escapeHtml2(href)}">${escapeHtml2(action.label)}</button>` + `${hint === "" ? "" : `<span class="hint">${escapeHtml2(hint)}</span>`}` + `<span class="actmsg" data-action-message role="status"></span></span>`;
-  }
-  const button = `<button class="btn${action.primary ? " primary" : ""}${action.quiet ? " quiet" : ""}" type="submit">${escapeHtml2(action.label)}</button>`;
+  const button = `<button class="btn${action.primary ? " primary" : ""}" type="submit">${escapeHtml2(action.label)}</button>`;
   const source = `<input type="hidden" name="source" value="${escapeHtml2(action.source ?? "")}">`;
   const message = `<span class="actmsg" data-action-message role="status"></span>`;
-  if (action.kind === "sync_now") {
-    const pending = action.pendingMessage ? ` data-pending-message="${escapeHtml2(action.pendingMessage)}"` : "";
-    return `<form class="rowform" data-sync-kind="sync_now"${pending}>${source}${button}${message}</form>`;
-  }
-  if (action.kind === "model_retry") {
-    return `<form class="rowform" data-model-retry="${escapeHtml2(action.source ?? "")}">${button}${message}</form>`;
-  }
-  if (action.kind === "disconnect" || action.kind === "unpair") {
-    const revocationUrl = safeExternalHref(action.providerRevocationUrl);
-    const providerLink = revocationUrl ? `<a class="hint" href="${escapeHtml2(revocationUrl)}" target="_blank" rel="noreferrer">${escapeHtml2(action.providerLinkLabel ?? "Provider access")}</a>` : "";
-    const kindAttribute = action.kind === "unpair" ? 'data-unpair-kind="unpair"' : 'data-disconnect-kind="disconnect"';
-    return `<form class="rowform" ${kindAttribute} data-confirmation="${escapeHtml2(action.confirmation ?? "")}">` + `<input type="hidden" name="source_id" value="${escapeHtml2(action.source ?? "")}">` + `${button}${providerLink}${message}</form>`;
-  }
   const key = action.kind === "api_key" ? `<input class="keyfield" type="password" name="api_key" required placeholder="API key" aria-label="API key">` : "";
   return `<form class="rowform" data-connect-kind="${action.kind}">${source}${key}${button}${message}</form>`;
 }
@@ -98765,14 +98600,8 @@ function standaloneDashboardControllerScript(input) {
       function route(params) {
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
-        if (action === 'cancel_oauth') return ['/dashboard/connect/oauth/cancel', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
-        if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
-        if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
-        if (action === 'retry_model') return ['/dashboard/models/retry', withoutAction(params)];
-        if (action === 'disconnect') return ['/dashboard/disconnect', withoutAction(params)];
-        if (action === 'unpair') return ['/dashboard/unpair', withoutAction(params)];
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
         if (action === 'create_agent_key') return ['/dashboard/agents/keys', withoutAction(params)];
         if (action === 'revoke_agent_connection') return ['/dashboard/agents/revoke', withoutAction(params)];
@@ -99476,7 +99305,7 @@ var init_outside_help = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -99490,7 +99319,7 @@ var init_dashboard_contract = __esm(() => {
     "olympus_privacy_set",
     SYNC_SOURCE_TOOL_NAME
   ];
-  COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME];
+  COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
 });
 
 // src/workers/dashboard/chatgpt/client.ts
@@ -99671,11 +99500,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     return false;
   }
-  function inlineError(result) {
+  function inlineError(result, name) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config2.inlineErrorCodes.indexOf(code) < 0)
+    if (config2.inlineErrorCodes.indexOf(code) < 0 && !(name && name === H.unpairTool))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -99695,7 +99524,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         redraw();
         return;
       }
-      const failed = inlineError(result);
+      const failed = inlineError(result, name);
       if (failed) {
         if (name === config2.syncTool) {
           state.syncPressed = {};
@@ -99704,6 +99533,14 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         }
         state.actionError = { key, text: failed };
         render(key);
+        return;
+      }
+      if (name === H.unpairTool) {
+        const parts = result && Array.isArray(result.content) ? result.content : [];
+        const said = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+        refresh();
+        state.notice = said ? String(said.text) : "";
+        redraw();
         return;
       }
       if (acceptResult(result, false))
@@ -99897,6 +99734,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return "";
     return (C2[current] || C2.relay_unavailable).disabledReason;
   }
+  function rowReason(text) {
+    if (state.hostReadOnly && state.hostKind === "computer")
+      return null;
+    return el("span", "reason", text);
+  }
   function compact2() {
     return state.displayMode !== "" && state.displayMode !== "fullscreen";
   }
@@ -99906,7 +99748,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key, null, style), el("span", "reason", blocked || String(fix.disabledReason)));
+      add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
       if (!blocked)
         add(wrap, howLink(fix, key));
       return wrap;
@@ -99948,7 +99790,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (state.confirming === key) {
         const run = action;
         wrap.className = "fix confirm";
-        add(wrap, el("span", "reason strong", P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
+        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
           state.confirming = "";
           render(key);
         }, "plain"));
@@ -100135,6 +99977,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (checking)
       add(controls, checkingControl("primary:" + id));
     const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const unpair = unpairEntry(id);
+    if (unpair)
+      menu.push(unpair);
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -100310,7 +100155,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const blocked = globalReason();
       const edit = button(W.edit, "privacy:edit", blocked ? null : () => openPrivacy("privacy:edit"), "plain");
       edit.setAttribute("aria-label", W.editLabel);
-      add(row, blocked ? add(el("span", "fix"), edit, el("span", "reason", blocked)) : edit);
+      add(row, blocked ? add(el("span", "fix"), edit, rowReason(blocked)) : edit);
     }
     return add(section, add(el("ul", "rows"), row));
   }
@@ -100373,6 +100218,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const progress = sourceProgress(source);
       return !!progress && progress.stage === "indexing" && !progress.stalled;
     });
+  }
+  function unpairEntry(id) {
+    const meta2 = state.computerMeta;
+    if (!onComputer() || !meta2 || !Array.isArray(meta2.unpair))
+      return null;
+    const entry = meta2.unpair.filter((item) => item && item.sourceId === id)[0];
+    if (!entry || typeof entry.label !== "string" || typeof entry.confirmation !== "string")
+      return null;
+    return { label: entry.label, tool: H.unpairTool, args: { source_id: id }, destructive: true, confirmText: entry.confirmation };
   }
   function indexFasterShown() {
     const meta2 = state.computerMeta;
@@ -103273,6 +103127,7 @@ function chatgptDashboardPageHtml(options = {}) {
       contextKey: OLYMPUS_HOST_CONTEXT_KEY,
       computerMetaKey: COMPUTER_META_KEY,
       indexFasterTool: INDEX_FASTER_TOOL_NAME,
+      unpairTool: UNPAIR_SOURCE_TOOL_NAME,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
   };
@@ -103556,6 +103411,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 function dashboardHostBridge(config2, io) {
   const view = io.frame.ownerDocument.defaultView || window;
   const media = typeof view.matchMedia === "function" ? view.matchMedia("(prefers-color-scheme: dark)") : null;
+  let readOnly = config2.readOnly;
   function theme() {
     return media && media.matches ? "dark" : "light";
   }
@@ -103565,7 +103421,7 @@ function dashboardHostBridge(config2, io) {
       displayMode: "fullscreen",
       availableDisplayModes: ["fullscreen"]
     };
-    context[config2.contextKey] = { kind: config2.kind, readOnly: config2.readOnly, links: config2.links };
+    context[config2.contextKey] = { kind: config2.kind, readOnly, links: config2.links };
     return context;
   }
   function post(message) {
@@ -103615,7 +103471,7 @@ function dashboardHostBridge(config2, io) {
       reply(id, refused("This tool is not available here."));
       return;
     }
-    if (config2.readOnly && name !== config2.readTool) {
+    if (readOnly && name !== config2.readTool) {
       reply(id, refused("Open dashboard controls first."));
       return;
     }
@@ -103666,6 +103522,12 @@ function dashboardHostBridge(config2, io) {
   if (media && typeof media.addEventListener === "function")
     media.addEventListener("change", onTheme);
   return {
+    lock() {
+      if (readOnly)
+        return;
+      readOnly = true;
+      onTheme();
+    },
     dispose() {
       view.removeEventListener("message", onMessage);
       if (media && typeof media.removeEventListener === "function")
@@ -103688,7 +103550,7 @@ function computerOpenTargets(origin, token) {
     const path = openTargetPath(target);
     if (target.kind === "dashboard")
       out[path] = `${origin}${dashboardHomeHref(token)}`;
-    else if (target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search")) {
+    else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref("keys", token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     }
   }
@@ -103703,9 +103565,9 @@ function text(value) {
 function scriptJson2(value) {
   return JSON.stringify(value).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026").replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
 }
-function lockedGate() {
+function lockedGate(hidden) {
   const C2 = DASHBOARD_HOST_GATE_COPY;
-  return `<section class="gate" data-dashboard-control-gate data-state="locked" aria-label="${attribute(C2.title)}">` + `<div class="row"><div class="grow"><p class="title">${text(C2.title)}</p><p class="line">${text(C2.line)}</p></div>` + `<button class="btn" type="button" data-gate-toggle aria-controls="gate-how" aria-expanded="false">${text(C2.button)}</button></div>` + `<div class="how" id="gate-how" hidden><p class="line">${text(C2.how)}</p>` + `<p class="prompt" id="gate-prompt">${text(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</p>` + `<button class="btn" type="button" data-gate-copy>${text(C2.copy)}</button> <span class="status" data-gate-copy-status aria-live="polite"></span>` + `<details><summary>${text(C2.advanced)}</summary>` + `<form data-gate-unlock><input type="password" required autocomplete="off" placeholder="${attribute(C2.tokenField)}" aria-label="${attribute(C2.tokenField)}">` + `<button class="btn" type="submit">${text(C2.unlock)}</button><span class="status" data-gate-status role="status"></span></form>` + `</details></div></section>`;
+  return `<section class="gate" data-dashboard-control-gate data-state="locked" aria-label="${attribute(C2.title)}"${hidden ? " hidden" : ""}>` + `<div class="row"><div class="grow"><p class="title">${text(C2.title)}</p>` + `<p class="line"><a class="btn primary" href="${attribute(olympusOpenUrl({ kind: "dashboard" }))}" data-gate-open>${text(C2.open)}</a> ` + `${text(C2.fallbackBefore)}<code>${text(C2.fallbackCommand)}</code>${text(C2.fallbackAfter)}</p></div>` + `<button class="btn plain" type="button" data-gate-toggle aria-controls="gate-how" aria-expanded="false">${text(C2.button)}</button></div>` + `<div class="how" id="gate-how" hidden><p class="line">${text(C2.how)}</p>` + `<p class="prompt" id="gate-prompt">${text(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</p>` + `<button class="btn" type="button" data-gate-copy>${text(C2.copy)}</button> <span class="status" data-gate-copy-status aria-live="polite"></span>` + `<details><summary>${text(C2.advanced)}</summary>` + `<form data-gate-unlock><input type="password" required autocomplete="off" placeholder="${attribute(C2.tokenField)}" aria-label="${attribute(C2.tokenField)}">` + `<button class="btn" type="submit">${text(C2.unlock)}</button><span class="status" data-gate-status role="status"></span></form>` + `</details></div></section>`;
 }
 function hostProgram(input, bridge) {
   const frame = document.getElementById("olympus-panel");
@@ -103714,7 +103576,32 @@ function hostProgram(input, bridge) {
   function failed() {
     throw new Error("tool call failed");
   }
+  let lastRead;
+  let expired = false;
+  let handle;
+  function remember(name, result) {
+    if (name === input.bridge.readTool)
+      lastRead = result;
+    return result;
+  }
+  function lockPage() {
+    if (input.hasReadToken) {
+      window.location.assign(input.lockedUrl);
+      return;
+    }
+    if (expired)
+      return;
+    expired = true;
+    const gate = document.querySelector("[data-dashboard-control-gate]");
+    if (gate)
+      gate.hidden = false;
+    document.body.setAttribute("data-locked", "true");
+    if (handle)
+      handle.lock();
+  }
   function callTool(name, args) {
+    if (expired)
+      return lastRead !== undefined && name === input.bridge.readTool ? Promise.resolve(lastRead) : Promise.reject(new Error("locked"));
     if (!input.csrfToken) {
       return fetch(input.readUrl, { cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : failed());
     }
@@ -103726,13 +103613,15 @@ function hostProgram(input, bridge) {
       body: JSON.stringify({ name, arguments: args })
     }).then((response) => {
       if (response.status === 401 || response.status === 403) {
-        window.location.reload();
+        lockPage();
+        if (lastRead !== undefined && name === input.bridge.readTool)
+          return lastRead;
         return failed();
       }
-      return response.ok ? response.json() : failed();
+      return response.ok ? response.json().then((result) => remember(name, result)) : failed();
     });
   }
-  bridge(input.bridge, {
+  handle = bridge(input.bridge, {
     frame,
     callTool,
     openUrl(url) {
@@ -103823,6 +103712,8 @@ function renderComputerHostPage(input) {
     bridge,
     csrfToken: input.csrfToken ?? "",
     readUrl,
+    lockedUrl: dashboardHomeHref(token),
+    hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     words: DASHBOARD_HOST_GATE_COPY
   })}, ${dashboardHostBridge.toString()});`.replaceAll("</script", "<\\/script");
@@ -103836,7 +103727,7 @@ function renderComputerHostPage(input) {
     `<style>${HOST_CSS}</style>`,
     "</head>",
     `<body data-olympus-host="computer" data-locked="${locked ? "true" : "false"}">`,
-    locked ? lockedGate() : "",
+    lockedGate(!locked),
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,
     `<script>${program}</script>`,
     "</body>",
@@ -103858,16 +103749,22 @@ var init_host_page = __esm(() => {
     connector: "connector"
   };
   HOST_CSS = `
-:root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};color-scheme:light dark}
-@media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus}}}
+:root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};--accent:${CHATGPT_DASHBOARD_LIGHT.accent};--on-accent:${CHATGPT_DASHBOARD_LIGHT.onAccent};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus};--accent:${CHATGPT_DASHBOARD_DARK.accent};--on-accent:${CHATGPT_DASHBOARD_DARK.onAccent}}}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
+.gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
 .gate p{margin:0}
 .gate .title{font-weight:600}
 .gate .line{color:var(--muted);font-size:0.875rem}
+.gate .line .btn{margin-right:0.25rem}
+.gate code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;color:var(--text);white-space:nowrap}
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.plain{background:transparent}
 .gate .row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem}
 .gate .grow{flex:1 1 14rem;min-width:0}
 .gate .how{margin-top:0.75rem}
@@ -105060,16 +104957,6 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return remoteAccessToggleLimitedResponse();
       return fetchHandler(isGatewayPublicOriginContextRoute(request) ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin) : request);
     }
-    if (isDashboardControlReadRoute(request)) {
-      const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false);
-      if (authorization.status === "allowed") {
-        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
-        return withRenewedDashboardControlCookie(response, authorization, now());
-      }
-      if (authorization.status === "origin_mismatch") {
-        return dashboardControlForbiddenResponse(authorization.status);
-      }
-    }
     if (isDashboardHtmlNavigationRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false, true);
       if (authorization.status === "allowed") {
@@ -105102,12 +104989,6 @@ function withWorkerBearerAuth(fetchHandler, options) {
     }
     return unauthorizedWorkerResponse();
   };
-}
-function isDashboardControlReadRoute(request) {
-  if (request.method !== "GET")
-    return false;
-  const path = new URL(request.url).pathname;
-  return path === "/dashboard/dispositions.json";
 }
 function isDashboardHtmlNavigationRoute(request) {
   if (request.method !== "GET")
@@ -105317,8 +105198,6 @@ function isDashboardControlRoute(request) {
     "/dashboard/connect/oauth/cancel",
     "/dashboard/connect/api-key",
     "/dashboard/models/check",
-    "/dashboard/models/retry",
-    "/dashboard/privacy",
     "/dashboard/sync-now",
     "/dashboard/embedding-priority",
     "/dashboard/disconnect",
@@ -105701,38 +105580,6 @@ function sourceDispositionStateFor(disposition) {
 function sourceDispositionRuleMode(state) {
   return state === "ingest" ? undefined : state;
 }
-function emptyCounts2() {
-  return {
-    items: 0,
-    items_with_content: 0,
-    excluded_items: 0,
-    excluded_items_would_purge: 0,
-    metadata_only_items: 0,
-    metadata_only_items_with_content: 0,
-    metadata_only_content_would_strip: 0,
-    unevaluable_items: 0
-  };
-}
-function addCounts(target, source) {
-  target.items += source.items;
-  target.items_with_content += source.items_with_content;
-  target.excluded_items += source.excluded_items;
-  target.excluded_items_would_purge += source.excluded_items_would_purge;
-  target.metadata_only_items += source.metadata_only_items;
-  target.metadata_only_items_with_content += source.metadata_only_items_with_content;
-  target.metadata_only_content_would_strip += source.metadata_only_content_would_strip;
-  target.unevaluable_items += source.unevaluable_items;
-}
-function displaySegmentsFor(raw, normalizedSegments) {
-  const candidate = raw.normalize("NFC").trim().split("\\").join("/").split("/").filter((segment) => segment.length > 0);
-  if (candidate.length !== normalizedSegments.length)
-    return [...normalizedSegments];
-  for (let index = 0;index < candidate.length; index += 1) {
-    if (candidate[index].toLowerCase() !== normalizedSegments[index])
-      return [...normalizedSegments];
-  }
-  return candidate;
-}
 function normalizedSegmentsFor(normalizedPath) {
   return normalizedPath.split("/").filter((segment) => segment.length > 0);
 }
@@ -105748,138 +105595,6 @@ function explicitPrefixes(matcher) {
       byPrefix.set(criterion.prefix, [criterion.ruleId]);
   }
   return byPrefix;
-}
-function buildSourceDispositionTree(options) {
-  const { matcher } = options;
-  const maxDepth = Math.max(1, options.maxDepth ?? DEFAULT_MAX_DEPTH);
-  const maxNodes = Math.max(1, options.maxNodes ?? DEFAULT_MAX_NODES);
-  const roots = new Map;
-  const totals = emptyCounts2();
-  let unplacedItems = 0;
-  const walk = (normalizedSegments, displaySegments, displayFromItem, leaf) => {
-    let level = roots;
-    for (let index = 0;index < normalizedSegments.length; index += 1) {
-      const key = normalizedSegments[index];
-      let child = level.get(key);
-      if (!child) {
-        child = {
-          path: `/${normalizedSegments.slice(0, index + 1).join("/")}`,
-          segments: normalizedSegments.slice(0, index + 1),
-          displaySegments: displaySegments.slice(0, index + 1),
-          displayFromItem,
-          counts: emptyCounts2(),
-          children: new Map
-        };
-        level.set(key, child);
-      } else if (displayFromItem && !child.displayFromItem) {
-        child.displaySegments = displaySegments.slice(0, index + 1);
-        child.displayFromItem = true;
-      }
-      if (leaf)
-        addCounts(child.counts, leaf);
-      level = child.children;
-    }
-  };
-  for (const prefix of explicitPrefixes(matcher).keys()) {
-    const segments = normalizedSegmentsFor(prefix);
-    if (segments.length > 0)
-      walk(segments, segments, false);
-  }
-  for (const item of options.items) {
-    const raw = typeof item.locator === "string" ? item.locator : undefined;
-    const normalized = raw === undefined ? undefined : normalizeSourceExclusionPath(raw);
-    const decision = matcher.evaluatePath(item.locator);
-    const unevaluable = sourceExclusionOutcomeIsUnevaluable(decision.outcome);
-    const hasContent = item.hasContent === true;
-    const leaf = emptyCounts2();
-    leaf.items = 1;
-    if (hasContent)
-      leaf.items_with_content = 1;
-    if (unevaluable)
-      leaf.unevaluable_items = 1;
-    if (decision.disposition === "exclude") {
-      leaf.excluded_items = 1;
-      if (!unevaluable)
-        leaf.excluded_items_would_purge = 1;
-    }
-    if (decision.disposition === "metadata_only") {
-      leaf.metadata_only_items = 1;
-      if (hasContent) {
-        leaf.metadata_only_items_with_content = 1;
-        if (!unevaluable)
-          leaf.metadata_only_content_would_strip = 1;
-      }
-    }
-    addCounts(totals, leaf);
-    if (normalized === undefined) {
-      unplacedItems += 1;
-      continue;
-    }
-    const normalizedSegments = normalizedSegmentsFor(normalized);
-    const folderSegments = normalizedSegments.slice(0, -1);
-    if (folderSegments.length === 0)
-      continue;
-    const displaySegments = displaySegmentsFor(raw, normalizedSegments).slice(0, -1);
-    walk(folderSegments, displaySegments, true, leaf);
-  }
-  let truncatedNodes = 0;
-  let renderedNodes = 0;
-  const explicit = explicitPrefixes(matcher);
-  const render = (node, depth) => {
-    renderedNodes += 1;
-    const decision = matcher.evaluatePath(node.path);
-    const state = sourceDispositionStateFor(decision.disposition);
-    const isExplicit = explicit.has(node.path);
-    const ancestor = isExplicit ? undefined : nearestExplicitAncestor(node.segments, explicit);
-    const origin = isExplicit ? "explicit" : ancestor !== undefined ? "inherited" : "default";
-    const childNodes = [];
-    const sortedChildren = [...node.children.values()].sort((left, right) => left.path.localeCompare(right.path));
-    for (const child of sortedChildren) {
-      const mandatory = explicit.has(child.path) || childHoldsExplicitDescendant(child, explicit);
-      if (!mandatory && (depth + 1 > maxDepth || renderedNodes >= maxNodes)) {
-        truncatedNodes += 1 + countDescendants(child);
-        continue;
-      }
-      childNodes.push(render(child, depth + 1));
-    }
-    const mixedBelow = childNodes.some((child) => child.state !== state || child.mixed_below);
-    return {
-      path: node.path,
-      name: node.displaySegments[node.displaySegments.length - 1] ?? node.path,
-      display_path: `/${node.displaySegments.join("/")}`,
-      depth,
-      state,
-      origin,
-      ...decision.ruleId !== undefined ? { rule_id: decision.ruleId } : {},
-      ...decision.reason !== undefined ? { reason: decision.reason } : {},
-      ...ancestor !== undefined ? { inherited_from: ancestor } : {},
-      unevaluable: sourceExclusionOutcomeIsUnevaluable(decision.outcome),
-      mixed_below: mixedBelow,
-      truncated: childNodes.length < sortedChildren.length,
-      counts: { ...node.counts },
-      children: childNodes
-    };
-  };
-  const rendered = [...roots.values()].sort((left, right) => left.path.localeCompare(right.path)).map((node) => render(node, 1));
-  return {
-    roots: rendered,
-    counts: totals,
-    unplaced_items: unplacedItems,
-    truncated_nodes: truncatedNodes
-  };
-}
-function countDescendants(node) {
-  let total = 0;
-  for (const child of node.children.values())
-    total += 1 + countDescendants(child);
-  return total;
-}
-function childHoldsExplicitDescendant(node, explicit) {
-  for (const prefix of explicit.keys()) {
-    if (prefix === node.path || prefix.startsWith(`${node.path}/`))
-      return true;
-  }
-  return false;
 }
 function nearestExplicitAncestor(segments, explicit) {
   for (let depth = segments.length - 1;depth >= 1; depth -= 1) {
@@ -106093,60 +105808,7 @@ function uniqueRuleId(path, taken) {
   }
   throw new Error("Could not mint a unique rule id for this folder.");
 }
-function sourceDispositionNonFolderRules(document2, source) {
-  const wanted = source?.trim().toLowerCase();
-  const out = [];
-  for (const rule of document2.rules) {
-    if (!sourceExclusionRuleAppliesToSource(rule, wanted))
-      continue;
-    const state = sourceDispositionStateFor(rule.mode);
-    if (rule.media) {
-      out.push({
-        rule_id: rule.id,
-        state,
-        kind: "media",
-        criterion: mediaCriterionText(rule.media),
-        reason: rule.reason,
-        sources: [...rule.sources]
-      });
-    }
-    for (const folder of rule.folder_ids) {
-      out.push({
-        rule_id: rule.id,
-        state,
-        kind: "folder_id",
-        criterion: `folder identity: ${folder.name}`,
-        reason: rule.reason,
-        sources: [...rule.sources]
-      });
-    }
-  }
-  return out;
-}
-function mediaCriterionText(media) {
-  const parts = [];
-  if (media.extensions.length > 0)
-    parts.push(media.extensions.join(", "));
-  if (media.mime_prefixes.length > 0)
-    parts.push(media.mime_prefixes.join(", "));
-  if (media.min_bytes !== undefined)
-    parts.push(`at least ${formatBytes(media.min_bytes)}`);
-  if (media.max_bytes !== undefined)
-    parts.push(`at most ${formatBytes(media.max_bytes)}`);
-  return parts.join(" · ");
-}
-function formatBytes(bytes) {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const rounded2 = unit === 0 ? value : Math.round(value * 10) / 10;
-  return `${rounded2} ${units[unit]}`;
-}
-var DEFAULT_MAX_DEPTH = 5, DEFAULT_MAX_NODES = 4000, SOURCE_DISPOSITION_STATE_LABELS, DEFAULT_EDIT_REASONS;
+var SOURCE_DISPOSITION_STATE_LABELS, DEFAULT_EDIT_REASONS;
 var init_source_disposition_tree = __esm(() => {
   init_source_ingestion_exclusions();
   SOURCE_DISPOSITION_STATE_LABELS = {
@@ -106163,58 +105825,6 @@ var init_source_disposition_tree = __esm(() => {
 // src/workers/source-dispositions.ts
 import { chmodSync as chmodSync24, copyFileSync, existsSync as existsSync50, lstatSync as lstatSync22, mkdirSync as mkdirSync42, readFileSync as readFileSync49 } from "node:fs";
 import { dirname as dirname58 } from "node:path";
-function buildSourceDispositionsView(options) {
-  const now = options.now ?? new Date;
-  const scopeSourceIds = new Set((options.folderScopes ?? []).map((source) => source.disposition_source_id));
-  const sources = options.sources.filter((source) => !scopeSourceIds.has(source.source_id)).map((source) => {
-    const tree = buildSourceDispositionTree({
-      matcher: source.matcher,
-      items: source.items?.() ?? [],
-      ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
-      ...options.maxNodes !== undefined ? { maxNodes: options.maxNodes } : {}
-    });
-    return {
-      source_id: source.source_id,
-      label: source.label,
-      corpus_ids: [...source.corpus_ids],
-      store_present: source.store_present,
-      editable_by_path: source.error === undefined && source.enforceable.includes("path_prefix"),
-      unenforceable_rule_ids: [...source.matcher.unenforceableRuleIds],
-      tree,
-      non_folder_rules: sourceDispositionNonFolderRules(options.document, source.source_id),
-      ...source.error !== undefined ? { error: source.error } : {}
-    };
-  });
-  const totals = sources.reduce((sum2, source) => ({
-    purge: sum2.purge + source.tree.counts.excluded_items_would_purge,
-    strip: sum2.strip + source.tree.counts.metadata_only_content_would_strip,
-    unevaluable: sum2.unevaluable + source.tree.counts.unevaluable_items
-  }), { purge: 0, strip: 0, unevaluable: 0 });
-  return {
-    kind: "source_dispositions",
-    generated_at: now.toISOString(),
-    rules_path: options.rulesPath ?? defaultSourceIngestionExclusionsPath(),
-    rules_present: options.rulesPresent ?? true,
-    schema_version: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION,
-    rule_count: options.document.rules.length,
-    sources,
-    ...options.folderScopes ? { folder_scopes: [...options.folderScopes] } : {},
-    cleanup: {
-      dry_run_command: SOURCE_DISPOSITIONS_DRY_RUN_COMMAND,
-      purge_command: SOURCE_DISPOSITIONS_PURGE_COMMAND,
-      strip_command: SOURCE_DISPOSITIONS_STRIP_COMMAND,
-      items_would_purge: totals.purge,
-      items_would_strip: totals.strip,
-      items_unevaluable: totals.unevaluable
-    },
-    policy: {
-      folder_paths_returned: true,
-      writes_config_only: !options.folderScopes?.length,
-      deletes_store_content: false,
-      runs_purge_or_strip: false
-    }
-  };
-}
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
 }
@@ -106308,7 +105918,6 @@ function saveSourceDispositions(path, request) {
   });
   return { ...result, write, noop: false };
 }
-var SOURCE_DISPOSITIONS_DRY_RUN_COMMAND = "bun run source-exclusions:purge -- --dry-run", SOURCE_DISPOSITIONS_PURGE_COMMAND = "bun run source-exclusions:purge -- --purge", SOURCE_DISPOSITIONS_STRIP_COMMAND = "bun run source-exclusions:purge -- --strip-metadata-only";
 var init_source_dispositions = __esm(() => {
   init_atomic_file();
   init_source_disposition_tree();
@@ -106819,12 +106428,12 @@ function createEmailSourceWorker(options = {}) {
         if (request.method === "GET" && url.pathname === "/dashboard/auth-check") {
           return json({ ok: true });
         }
-        if (request.method === "GET" && url.pathname === "/dashboard/dispositions.json" || request.method === "POST" && url.pathname === "/dashboard/dispositions") {
+        if (request.method === "POST" && url.pathname === "/dashboard/dispositions") {
           if (!sourceDashboard?.ingestionDispositions) {
             throw new EmailSourceWorkerError(501, "ingestion_dispositions_not_supported", "Private source worker does not have the ingestion-dispositions picker configured.");
           }
-          const postBody = request.method === "POST" ? await parseObjectBody(request) : undefined;
-          if (postBody?.action === "browse_folder_scope") {
+          const postBody = await parseObjectBody(request);
+          if (postBody.action === "browse_folder_scope") {
             if (!sourceDashboard.fileSourceScopes) {
               throw new EmailSourceWorkerError(501, "source_index_not_enabled", "Folder scope browsing is not configured.");
             }
@@ -106848,7 +106457,7 @@ function createEmailSourceWorker(options = {}) {
               scope_browser: scopeBrowser
             });
           }
-          if (postBody?.action === "browse_mail_scope") {
+          if (postBody.action === "browse_mail_scope") {
             if (!sourceDashboard.fileSourceScopes?.browseMail) {
               throw new EmailSourceWorkerError(501, "source_index_not_enabled", "The mail scope picker is not configured.");
             }
@@ -106857,7 +106466,7 @@ function createEmailSourceWorker(options = {}) {
             }
             return json(await sourceDashboard.fileSourceScopes.browseMail({ draft: parseMailScopeDraft(postBody.draft) }));
           }
-          if (postBody?.action === "approve_mail_scope_and_start") {
+          if (postBody.action === "approve_mail_scope_and_start") {
             assertDashboardModelsReady();
             if (!sourceDashboard.fileSourceScopes?.approveMailAndStart) {
               throw new EmailSourceWorkerError(501, "source_index_not_enabled", "Mail scope approval is not configured.");
@@ -106876,7 +106485,7 @@ function createEmailSourceWorker(options = {}) {
               draft: parseMailScopeDraft(postBody.scope)
             }));
           }
-          if (postBody?.action === "approve_source_scope_and_start") {
+          if (postBody.action === "approve_source_scope_and_start") {
             assertDashboardModelsReady();
             if (!sourceDashboard.fileSourceScopes) {
               throw new EmailSourceWorkerError(501, "source_index_not_enabled", "Folder scope approval is not configured.");
@@ -106899,36 +106508,24 @@ function createEmailSourceWorker(options = {}) {
           const runtime = await sourceDashboard.ingestionDispositions();
           try {
             const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
-            if (request.method === "POST") {
-              const body = postBody ?? await parseObjectBody(request);
-              const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(body, runtime.sources));
-              return json({
-                ok: true,
-                kind: "source_dispositions_save",
-                result: {
-                  changed: save.changed,
-                  noop: save.noop,
-                  applied: save.applied,
-                  refused: save.refused,
-                  untouched_rule_ids: save.untouched_rule_ids,
-                  ...save.write ? { write: save.write } : {}
-                },
-                policy: {
-                  writes_config_only: true,
-                  deletes_store_content: false,
-                  runs_purge_or_strip: false
-                }
-              });
-            }
-            const file = readSourceIngestionExclusionsFile(rulesPath);
-            const view = buildSourceDispositionsView({
-              sources: runtime.sources,
-              folderScopes: sourceDashboard.fileSourceScopes?.summaries() ?? [],
-              document: file.document,
-              rulesPath,
-              rulesPresent: file.present
+            const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(postBody, runtime.sources));
+            return json({
+              ok: true,
+              kind: "source_dispositions_save",
+              result: {
+                changed: save.changed,
+                noop: save.noop,
+                applied: save.applied,
+                refused: save.refused,
+                untouched_rule_ids: save.untouched_rule_ids,
+                ...save.write ? { write: save.write } : {}
+              },
+              policy: {
+                writes_config_only: true,
+                deletes_store_content: false,
+                runs_purge_or_strip: false
+              }
             });
-            return json(view);
           } finally {
             runtime.close?.();
           }
@@ -107294,25 +106891,6 @@ function createEmailSourceWorker(options = {}) {
           });
           return json({ ok: true, status_message: "Readiness check requested. See the Models cards above for the result." });
         }
-        if (request.method === "POST" && url.pathname === "/dashboard/privacy") {
-          if (!sourceDashboard?.privacy) {
-            throw new EmailSourceWorkerError(501, "privacy_not_supported", "This worker does not support privacy settings.");
-          }
-          const record3 = await parseObjectBody(request);
-          const outcome = await sourceDashboard.privacy.save(record3);
-          if (!outcome.ok) {
-            const status = outcome.code === "invalid_params" ? 400 : outcome.code === "privacy_owner_only" ? 409 : 500;
-            return json({ ok: false, error: { code: outcome.code, message: outcome.message } }, status);
-          }
-          if (outcome.status === "conflict") {
-            return json({
-              ok: false,
-              error: { code: "conflict", message: "These privacy settings were changed somewhere else. Your changes are still here." },
-              settings: outcome.settings
-            }, 409);
-          }
-          return json({ ok: true, settings: outcome.settings, status_message: "Privacy saved." });
-        }
         if (request.method === "POST" && DASHBOARD_CONSULT_CONTROL_PATHS.includes(url.pathname)) {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
             return json({ ok: false, error: { code: "mac_dashboard_only", message: "Outside help can be changed only from the dashboard on this computer, in an unlocked browser." } }, 403);
@@ -107332,29 +106910,6 @@ function createEmailSourceWorker(options = {}) {
             ...outcome.restarting !== undefined ? { restarting: outcome.restarting } : {},
             ...outcome.revision !== undefined ? { revision: outcome.revision } : {}
           });
-        }
-        if (request.method === "POST" && url.pathname === "/dashboard/models/retry") {
-          if (!sourceDashboard?.retryModel && !sourceDashboard?.downloadTranscriptionModel) {
-            throw new EmailSourceWorkerError(501, "model_setup_not_supported", "This worker does not support restarting a model download.");
-          }
-          const record3 = await parseObjectBody(request);
-          if (record3.model === "transcription") {
-            const outcome = sourceDashboard.downloadTranscriptionModel?.() ?? "unavailable";
-            if (outcome === "unavailable") {
-              throw new EmailSourceWorkerError(409, "model_not_configured", "The built-in transcription model is not used on this computer.");
-            }
-            return json({
-              ok: true,
-              status_message: outcome === "ready" ? "Already downloaded." : outcome === "loading" ? "Starting the transcription model again. This row updates as it goes." : "Downloading the transcription model. This row updates as it goes."
-            });
-          }
-          const model = record3.model === "embedding" || record3.model === "answers" ? record3.model : undefined;
-          if (!model)
-            throw new EmailSourceWorkerError(400, "invalid_request", "model must be embedding, answers or transcription.");
-          if (!sourceDashboard.retryModel?.(model)) {
-            throw new EmailSourceWorkerError(409, "model_not_configured", "That model is not the built-in one on this computer.");
-          }
-          return json({ ok: true, status_message: "Downloading again. This row updates as it goes." });
         }
         if (request.method === "POST" && url.pathname === "/dashboard/connect/api-key") {
           return await withDashboardGrantMutation(async () => {
@@ -118092,9 +117647,6 @@ function errorCode2(error2) {
     return error2.code;
   return "internal";
 }
-function errorMessage3(error2) {
-  return ERROR_TEXT[errorCode2(error2)];
-}
 function dashboardToolMeta() {
   return {
     ui: { resourceUri: DASHBOARD_RESOURCE_VERSIONED_URI },
@@ -123997,93 +123549,6 @@ var init_setup_backend = __esm(() => {
   };
 });
 
-// src/workers/email-source/dashboard-privacy.ts
-var exports_dashboard_privacy = {};
-__export(exports_dashboard_privacy, {
-  createDashboardPrivacyAdapter: () => createDashboardPrivacyAdapter,
-  DASHBOARD_PRIVACY_PENDING_TTL_MS: () => DASHBOARD_PRIVACY_PENDING_TTL_MS
-});
-function createDashboardPrivacyAdapter(options) {
-  const now = options.now ?? Date.now;
-  const ttl = options.pendingTtlMs ?? DASHBOARD_PRIVACY_PENDING_TTL_MS;
-  let cached2;
-  const pending = () => {
-    const at = now();
-    if (!cached2 || at - cached2.at >= ttl) {
-      let count2 = 0;
-      try {
-        count2 = Math.max(0, Math.floor(options.pendingCount()));
-      } catch {
-        count2 = 0;
-      }
-      cached2 = { at, count: count2 };
-    }
-    return cached2.count;
-  };
-  const failure2 = (error2) => ({
-    ok: false,
-    code: error2 instanceof ChatGptSurfaceError ? error2.code : "unavailable",
-    message: errorMessage3(error2)
-  });
-  const visible = () => visiblePrivacy(options.readSettings(pending()), options.backend.secretLocations());
-  return {
-    async summary() {
-      try {
-        const settings = visible();
-        return { ok: true, summary: { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length } };
-      } catch (error2) {
-        return failure2(error2);
-      }
-    },
-    async read() {
-      try {
-        return { ok: true, status: "current", settings: visible() };
-      } catch (error2) {
-        return failure2(error2);
-      }
-    },
-    async save(update) {
-      try {
-        const { confirm, ...fields } = update;
-        if (typeof fields.revision !== "string" || fields.revision.trim() === "") {
-          return { ok: false, code: "invalid_params", message: NEEDS_REVISION };
-        }
-        const args = { ...fields };
-        if (confirm === true) {
-          const draft = {
-            ...typeof fields.description === "string" ? { description: fields.description.trim() } : {},
-            ...Array.isArray(fields.rules) ? { rules: fields.rules } : {}
-          };
-          if (lowersPrivacy(draft, visible())) {
-            const issued = await callSetupTool(PRIVACY_GET_TOOL_NAME, {}, options.backend);
-            const token = issued._meta?.[PRIVACY_META_KEY]?.confirmation;
-            if (token)
-              args.confirmation = token;
-          }
-        }
-        const result = await callSetupTool(PRIVACY_SET_TOOL_NAME, args, options.backend);
-        const settings = result._meta?.[PRIVACY_META_KEY];
-        if (!settings)
-          return { ok: false, code: "unavailable", message: "Olympus could not read your privacy settings." };
-        const status = result.structuredContent?.status === "conflict" ? "conflict" : "saved";
-        if (status === "saved")
-          cached2 = undefined;
-        const { confirmation: _issued, ...shown } = settings;
-        return { ok: true, status, settings: shown };
-      } catch (error2) {
-        return failure2(error2);
-      }
-    }
-  };
-}
-var DASHBOARD_PRIVACY_PENDING_TTL_MS = 60000, NEEDS_REVISION = "A privacy save needs the revision the editor was built from. Reload the page and try again.";
-var init_dashboard_privacy = __esm(() => {
-  init_dashboard_contract();
-  init_response_builder();
-  init_setup_tools();
-  init_shared_privacy();
-});
-
 // src/core/consult-settings-writer.ts
 import { chmodSync as chmodSync25, lstatSync as lstatSync25, mkdirSync as mkdirSync45, statSync as statSync26 } from "node:fs";
 import { dirname as dirname62, isAbsolute as isAbsolute20 } from "node:path";
@@ -124367,19 +123832,6 @@ function createDashboardConsultAdapter(options) {
         return { ok: false, httpStatus: 409, code: "install_running", message: MESSAGES2.installRunning };
       return { ok: true, status_message: MESSAGES2.installStarted };
     },
-    summary() {
-      const settings = settingsView();
-      if (settings.state === "invalid")
-        return { state: "invalid" };
-      const route = zkapiProfile();
-      if (!route)
-        return { state: "route_not_configured" };
-      if (fenceHeld())
-        return { state: "fence_held" };
-      if (settings.state === "on" && !acknowledgementsCurrent(route.profile.zkapi?.acknowledgements))
-        return { state: "needs_acceptance" };
-      return { state: settings.state };
-    },
     async status() {
       return {
         settings: settingsView(),
@@ -124652,7 +124104,8 @@ var init_dashboard_consult = __esm(() => {
 // src/workers/email-source/dashboard-panel-tools.ts
 var exports_dashboard_panel_tools = {};
 __export(exports_dashboard_panel_tools, {
-  createDashboardPanelTools: () => createDashboardPanelTools
+  createDashboardPanelTools: () => createDashboardPanelTools,
+  computerUnpairEntries: () => computerUnpairEntries
 });
 function refused(text4, code) {
   return { content: [{ type: "text", text: text4 }], structuredContent: { error: code }, isError: true };
@@ -124702,6 +124155,36 @@ async function indexFaster(options, args) {
     structuredContent: { status: "saved", on: args.on }
   };
 }
+async function unpairSource(options, args) {
+  const keys = Object.keys(args);
+  if (typeof args.source_id !== "string" || !UNPAIR_SOURCE_IDS.has(args.source_id) || keys.some((key) => key !== "source_id")) {
+    return refused("source_id must be a paired chat app.", "invalid_params");
+  }
+  const response = await options.workerFetch(new Request("http://olympus-worker.internal/dashboard/unpair", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_id: args.source_id, acknowledge: true })
+  }));
+  const parsed = await response.json().catch(() => {
+    return;
+  });
+  if (!response.ok || !parsed || parsed.ok !== true) {
+    const error2 = parsed?.error;
+    return refused(typeof error2?.message === "string" ? error2.message : "Could not unpair.", typeof error2?.code === "string" ? error2.code : "internal");
+  }
+  const text4 = typeof parsed.status_message === "string" ? parsed.status_message : "Unpaired.";
+  return { content: [{ type: "text", text: text4 }], structuredContent: { status: "saved", source_id: args.source_id } };
+}
+function computerUnpairEntries(view) {
+  if (!view)
+    return [];
+  return view.sources.flatMap((card) => {
+    const action = card.connection.unpair;
+    if (!action || !UNPAIR_SOURCE_IDS.has(action.source_id))
+      return [];
+    return [{ sourceId: action.source_id, label: action.label, confirmation: action.confirmation }];
+  });
+}
 function createDashboardPanelTools(options) {
   const allowed = new Set(COMPUTER_HOST_TOOL_NAMES);
   return {
@@ -124711,27 +124194,41 @@ function createDashboardPanelTools(options) {
         return refused("This tool is not available here.", "unknown_tool");
       if (name === INDEX_FASTER_TOOL_NAME)
         return await indexFaster(options, args);
+      if (name === UNPAIR_SOURCE_TOOL_NAME)
+        return await unpairSource(options, args);
       const signal = context.signal ?? new AbortController().signal;
-      const surface = { ...options.surface(), setup: computerSetup(options, context) };
+      const base = options.surface();
+      let view;
+      const surface = {
+        ...base,
+        setup: computerSetup(options, context),
+        dashboardView: async (viewSignal) => view = await base.dashboardView(viewSignal)
+      };
       const result = await callChatGptTool(name, args, options.makeContext(signal), surface, signal);
       if (name !== DASHBOARD_TOOL_NAME || result.isError)
         return result;
       const on = await options.indexFasterState().catch(() => {
         return;
       });
-      if (on === undefined)
+      const unpair = computerUnpairEntries(view);
+      if (on === undefined && unpair.length === 0)
         return result;
-      const meta2 = { indexFaster: { on } };
+      const meta2 = {
+        ...on !== undefined ? { indexFaster: { on } } : {},
+        ...unpair.length > 0 ? { unpair } : {}
+      };
       const existing = result._meta && typeof result._meta === "object" ? result._meta : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta2 } };
     }
   };
 }
+var UNPAIR_SOURCE_IDS;
 var init_dashboard_panel_tools = __esm(() => {
   init_dashboard_contract();
   init_mcp_surface();
   init_setup_tools();
   init_http();
+  UNPAIR_SOURCE_IDS = new Set(["telegram.messages", "whatsapp.personal.messages"]);
 });
 
 // src/workers/email-source/server.ts
@@ -127289,11 +126786,6 @@ async function main() {
         modelSetup: getModelSetup,
         checkModelSetup: () => modelSetup.checkLocalModels(),
         connectModelKey,
-        privacy: {
-          summary: () => dashboardPrivacy.summary(),
-          read: () => dashboardPrivacy.read(),
-          save: (update) => dashboardPrivacy.save(update)
-        },
         panelTools: {
           allows: (name) => dashboardPanelTools?.allows(name) === true,
           call: (name, args, context) => {
@@ -127303,7 +126795,6 @@ async function main() {
           }
         },
         consult: {
-          summary: () => dashboardConsult.summary(),
           status: () => dashboardConsult.status(),
           setEnabled: (update) => dashboardConsult.setEnabled(update),
           saveRoute: (update) => dashboardConsult.saveRoute(update),
@@ -127311,12 +126802,6 @@ async function main() {
           recover: (update) => dashboardConsult.recover(update),
           abandon: (update) => dashboardConsult.abandon(update),
           installTools: (update) => dashboardConsult.installTools(update)
-        },
-        retryModel: (model) => chatgptSetup.retryModel(model),
-        downloadTranscriptionModel: () => {
-          const engine = process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env);
-          const state = engine?.downloadNow?.() ?? "unavailable";
-          return state === "pending" ? "started" : state;
         },
         stopMessagingCapture,
         corpusRegistry: sourceCorpusRegistry2,
@@ -127575,12 +127060,6 @@ async function main() {
         });
       return builtIn.length > 0;
     }
-  });
-  const { createDashboardPrivacyAdapter: createDashboardPrivacyAdapter2 } = await Promise.resolve().then(() => (init_dashboard_privacy(), exports_dashboard_privacy));
-  const dashboardPrivacy = createDashboardPrivacyAdapter2({
-    backend: chatgptSetup,
-    readSettings: (pending) => readChatGptPrivacySettings2(process.env, pending),
-    pendingCount: pendingClassificationCount
   });
   const { createDashboardConsultAdapter: createDashboardConsultAdapter2 } = await Promise.resolve().then(() => (init_dashboard_consult(), exports_dashboard_consult));
   const consultRouteKey = (secretRef) => {

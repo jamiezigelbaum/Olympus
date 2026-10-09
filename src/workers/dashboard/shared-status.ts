@@ -1,9 +1,8 @@
 /**
  * One status derivation for both dashboards (holistic review 2026-10-02, item
- * 9): the status word held to the progress bar. The ChatGPT view model
- * (chatgpt/dashboard-view-model.ts) and the local pages (source-rows.ts) both
- * call it, so the same engine state never reads Fresh on one surface and
- * Working on the other.
+ * 9): the status word held to the progress bar. The panel's view model
+ * (chatgpt/dashboard-view-model.ts) calls it for every host, so the same
+ * engine state never reads Fresh on one surface and Working on another.
  *
  * Pure: a status word and a source's progress in, a status word out.
  */

@@ -25,7 +25,6 @@ import { dashboardHtmlRoutePage } from '../src/workers/dashboard/index.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_PATHS,
   outsideHelpBlockerWords,
-  renderOutsideHelpSection,
   summaryOf,
   type DashboardOutsideHelpStatus,
 } from '../src/workers/dashboard/outside-help.ts';
@@ -563,7 +562,6 @@ describe('the Outside help page: states and copy', () => {
 
 function fakeBackend(calls: string[]): DashboardConsultBackend {
   return {
-    summary: () => ({ state: 'off' }),
     status: async () => status(),
     setEnabled: async (update) => { calls.push(`enable:${JSON.stringify(update)}`); return { ok: true, status_message: 'on', revision: 1 }; },
     saveRoute: async () => { calls.push('route'); return { ok: true, status_message: 'saved', restarting: true }; },
@@ -685,7 +683,7 @@ describe('the worker serves the card only inside a local control session', () =>
   test('the page reads the card\'s facts only for the control session, never for the bearer\'s plain GET or the dash_ reader', async () => {
     const calls: string[] = [];
     const backend = fakeBackend(calls);
-    const counted: DashboardConsultBackend = { ...backend, status: async () => { calls.push('status'); return status(); }, summary: () => { calls.push('summary'); return { state: 'on' }; } };
+    const counted: DashboardConsultBackend = { ...backend, status: async () => { calls.push('status'); return status(); } };
     const fetcher = worker(counted);
     const { cookie } = await localSession(fetcher);
     const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
@@ -759,11 +757,11 @@ function adapter(input: {
 }
 
 describe('the adapter: status', () => {
-  test('summary and status reflect the file, the route and the fence; the probe never sees the key', async () => {
+  test('the summary word and status reflect the file, the route and the fence; the probe never sees the key', async () => {
     const home = tempHome();
     const { backend, probes } = adapter({ home, secret: 'zk-local-key' });
-    expect(backend.summary()).toEqual({ state: 'off' });
     const value = await backend.status();
+    expect(summaryOf(value)).toEqual({ state: 'off' });
     expect(value.settings).toMatchObject({ state: 'off', revision: 0, languages: ['en'] });
     expect(value.route.state).toBe('configured');
     if (value.route.state === 'configured') {
@@ -787,14 +785,14 @@ describe('the adapter: status', () => {
 
   test('no route, an invalid file and a held fence each give their summary word', async () => {
     const home = tempHome();
-    expect(adapter({ home, zkapi: false }).backend.summary()).toEqual({ state: 'route_not_configured' });
+    expect(summaryOf(await adapter({ home, zkapi: false }).backend.status())).toEqual({ state: 'route_not_configured' });
     const second = adapter({ home: tempHome() });
     writeFileSync(join(second.env.HOME, '.olympus', 'consult.json'), '{bad', { mode: 0o600 });
-    expect(second.backend.summary()).toEqual({ state: 'invalid' });
+    expect(summaryOf(await second.backend.status())).toEqual({ state: 'invalid' });
     const third = tempHome();
     const { backend, env } = adapter({ home: third });
     writeFileSync(join(third, '.olympus', 'zkapi-consult-state.json'), JSON.stringify({ version: 1, day: '2026-10-07', count: 0, reservedMicroUsd: 0, fences: { [zkapiFenceScope({ env })]: { at: '2026-10-07T10:00:00.000Z', configDir: '/w' } } }), { mode: 0o600 });
-    expect(backend.summary()).toEqual({ state: 'fence_held' });
+    expect(summaryOf(await backend.status())).toEqual({ state: 'fence_held' });
     const value = await backend.status();
     expect(value.route.state === 'configured' && value.route.readiness?.fences).toEqual([{ scope: zkapiFenceScope({ env }), at: '2026-10-07T10:00:00.000Z', thisWallet: true }]);
   });
@@ -828,7 +826,7 @@ describe('the adapter: turning outside help on and off', () => {
     const read = readConsultSettings({ env });
     expect(read).toMatchObject({ state: 'valid', settings: { v: 1, revision: 1, enabled: true, languages: ['en', 'pt-BR'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false } });
     expect(read.state === 'valid' && read.settings.domains).toMatchObject({ places: true, technical: true, countries: true, medicineBrands: false });
-    expect(backend.summary()).toEqual({ state: 'on' });
+    expect(summaryOf(await backend.status())).toEqual({ state: 'on' });
     const off = await backend.setEnabled({ enabled: false, revision: 1 });
     expect(off).toEqual({ ok: true, status_message: expect.stringContaining('Anonymous answers are off'), revision: 2 });
     expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { revision: 2, enabled: false, languages: ['en', 'pt-BR'] } });
@@ -901,7 +899,7 @@ describe('the adapter: turning outside help on and off', () => {
     // The owner's state: outside help on, no level key, statements accepted at an older version.
     const stale = adapter({ home: tempHome(), profileOverrides: { acknowledgements: { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION - 2, accepted: ['per_consult_cost', 'deposit_fee'] } } });
     writeFileSync(join(stale.env.HOME, '.olympus', 'consult.json'), JSON.stringify({ v: 1, revision: 3, enabled: true, languages: ['en'], domains: { ...DEFAULT_CONSULT_DOMAIN_PACKS }, strict: false }), { mode: 0o600 });
-    expect(stale.backend.summary()).toEqual({ state: 'needs_acceptance' });
+    expect(summaryOf(await stale.backend.status())).toEqual({ state: 'needs_acceptance' });
     for (const [revision, level] of [[3, 'general'], [4, 'unnamed'], [5, 'general']] as const) {
       expect(await stale.backend.setEnabled({ enabled: true, revision, level })).toEqual({ ok: true, status_message: 'Saved. Anonymous answers stay paused until you accept the statements on this page.', revision: revision + 1 });
     }
@@ -913,7 +911,7 @@ describe('the adapter: turning outside help on and off', () => {
     // Accepting them clears the pause.
     expect((await stale.backend.saveRoute({ acknowledged: ALL_IDS })).ok).toBe(true);
     expect((await stale.backend.setEnabled({ enabled: true, revision: 7 })).ok).toBe(true);
-    expect(stale.backend.summary()).toEqual({ state: 'on' });
+    expect(summaryOf(await stale.backend.status())).toEqual({ state: 'on' });
     expect(await stale.backend.setEnabled({ enabled: true, revision: 8, level: 'everything' })).toMatchObject({ ok: false, httpStatus: 400, code: 'level_unknown' });
   });
 
@@ -1025,7 +1023,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     expect(reloads).toEqual([1]);
     const written = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
     expect(written.modelProfiles[DASHBOARD_ZKAPI_PROFILE_ID]).toMatchObject({ provider: 'zkapi', trust: 'standard_cloud', purpose: 'consult', baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini', secretRef: 'env:OLYMPUS_ZKAPI_API_KEY' });
-    expect(backend.summary()).toEqual({ state: 'off' });
+    expect(summaryOf(await backend.status())).toEqual({ state: 'off' });
     expect(await backend.addRoute({ confirm: true })).toMatchObject({ ok: false, httpStatus: 409, code: 'route_exists' });
     // The added route has no key yet and nothing acknowledged: the probe says so.
     const value = await backend.status();
@@ -1139,11 +1137,11 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     expect(await backend.abandon({ scope })).toMatchObject({ ok: false, code: 'confirmation_required' });
     expect(await backend.abandon({ confirm: true })).toMatchObject({ ok: false, code: 'scope_invalid' });
     expect(await backend.abandon({ confirm: true, scope: 'd'.repeat(32) })).toMatchObject({ ok: false, httpStatus: 409, code: 'no_unresolved_session' });
-    expect(backend.summary()).toEqual({ state: 'fence_held' });
+    expect(summaryOf(await backend.status())).toEqual({ state: 'fence_held' });
     expect(await backend.abandon({ confirm: true, scope })).toEqual({ ok: true, status_message: expect.stringContaining('abandoned') });
     const state = JSON.parse(readFileSync(statePath, 'utf8')) as { fences?: unknown; abandonedFences?: Record<string, { abandonedAt: string }> };
     expect(state.fences).toBeUndefined();
     expect(state.abandonedFences?.[scope]?.abandonedAt).toBe('2026-10-07T12:00:00.000Z');
-    expect(backend.summary()).toEqual({ state: 'off' });
+    expect(summaryOf(await backend.status())).toEqual({ state: 'off' });
   });
 });

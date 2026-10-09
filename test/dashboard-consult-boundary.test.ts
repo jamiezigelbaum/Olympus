@@ -96,8 +96,8 @@ describe('consult authority is not reachable from the worker bearer', () => {
       expect(((await refused.json()) as { error: { code: string } }).error.code).toBe('mac_dashboard_only');
     }
     // The same cookie still works for an ordinary control route.
-    expect((await f.fetch(post('/dashboard/privacy', custody, { description: 'x', revision: 'r' }))).status).toBe(200);
-    expect(f.seen.map((request) => new URL(request.url).pathname)).toEqual(['/dashboard/privacy']);
+    expect((await f.fetch(post('/dashboard/sync-now', custody, { description: 'x', revision: 'r' }))).status).toBe(200);
+    expect(f.seen.map((request) => new URL(request.url).pathname)).toEqual(['/dashboard/sync-now']);
   });
 
   test('bearer → launch ticket → redeem → POST a consult route: the same refusal (the ticket exchange is bearer-derived)', async () => {
@@ -125,7 +125,7 @@ describe('consult authority is not reachable from the worker bearer', () => {
       // keyed by a worker-private secret the bearer never sees (P1-a). Nor can the bearer
       // re-sign its own bearer-grade cookie by hand.
       expect((await f.fetch(post(path, { Cookie: bearerSigned(cookie, 'l'), Origin: ORIGIN, 'X-Olympus-CSRF': csrf }))).status).toBe(401);
-      expect((await f.fetch(post('/dashboard/privacy', { Cookie: bearerSigned(cookie, 'b'), Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(401);
+      expect((await f.fetch(post('/dashboard/sync-now', { Cookie: bearerSigned(cookie, 'b'), Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(401);
     }
     expect(f.seen).toEqual([]);
   });
@@ -135,9 +135,9 @@ describe('consult authority is not reachable from the worker bearer', () => {
     const first = fixture(secret);
     const { cookie, csrf } = await bearerSession(first);
     const restarted = fixture(secret);
-    expect((await restarted.fetch(post('/dashboard/privacy', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(200);
+    expect((await restarted.fetch(post('/dashboard/sync-now', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(200);
     const other = fixture(newDashboardSessionSecret());
-    expect((await other.fetch(post('/dashboard/privacy', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(401);
+    expect((await other.fetch(post('/dashboard/sync-now', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(401);
     expect(other.seen).toEqual([]);
     // The bearer used as the secret is never what a worker runs with: a secret equal
     // to the bearer would make the forge above work, so the loader never produces it.
@@ -194,7 +194,7 @@ describe('the local-only mint', () => {
       expect(request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)).toBe('local');
     }
     // A local cookie is an ordinary control session elsewhere, and the dashboard read learns its grade.
-    expect((await f.fetch(post('/dashboard/privacy', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(200);
+    expect((await f.fetch(post('/dashboard/sync-now', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(200);
     const read = await f.fetch(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }));
     expect(read.status).toBe(200);
     expect(f.seen.at(-1)!.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)).toBe('local');

@@ -44,9 +44,11 @@ pass-through and is not involved.
    single-use 15-minute ticket and opens `/dashboard/launch#…` in the default
    browser, adding `olympus_open=<token>` for a target.
 4. The opening page redeems the ticket for the usual control session, checks
-   the token against the same list, and lands on `/dashboard?setup#olympus-open=<token>`.
-   The dashboard controller opens that source's Connect panel (or Models)
-   and focuses it. It submits nothing.
+   the token against the same list. A Keys target (Connect for a source set
+   up on the computer, or a model fix) lands on `/dashboard?keys#olympus-open=<token>`,
+   where the controller opens that source's Connect panel (or Models) and
+   focuses it; it submits nothing. Any other target (the dashboard, a
+   ChatGPT connect or reconnect fix) lands on `/dashboard`.
 
 ## Threat model
 

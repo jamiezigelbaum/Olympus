@@ -24674,7 +24674,7 @@ var init_scheduler_markers = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -25240,76 +25240,6 @@ var init_vocabulary = __esm(() => {
       unreadable: "Olympus could not read your privacy settings."
     }
   };
-  DASHBOARD_LOCAL_PRIVACY_COPY = {
-    crumb: "Privacy",
-    back: "Back to Setup",
-    title: DASHBOARD_CHATGPT_PRIVACY_COPY.title,
-    intro: "Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.",
-    descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
-    descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
-    questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
-    rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
-    rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
-    kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
-    kindLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.kindLabel,
-    kindSender: DASHBOARD_CHATGPT_PRIVACY_COPY.kindSender,
-    unnamedFolder: "A folder",
-    remove: DASHBOARD_CHATGPT_PRIVACY_COPY.remove,
-    removeFor: DASHBOARD_CHATGPT_PRIVACY_COPY.removeFor,
-    removed: DASHBOARD_CHATGPT_PRIVACY_COPY.removed,
-    undo: DASHBOARD_CHATGPT_PRIVACY_COPY.undo,
-    addFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.addFolder,
-    addLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.addLabel,
-    addSender: DASHBOARD_CHATGPT_PRIVACY_COPY.addSender,
-    needFolderSource: DASHBOARD_CHATGPT_PRIVACY_COPY.needFolderSource,
-    needGmail: DASHBOARD_CHATGPT_PRIVACY_COPY.needGmail,
-    folderIntro: "Open a folder to look inside it. Make private covers everything in the folder.",
-    folderUp: "Back",
-    folderOpen: "Open",
-    folderEmpty: "No folders here.",
-    folderMore: "Load more folders",
-    loading: "Loading…",
-    loadFailed: "Olympus could not load this list. Try again.",
-    makePrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.makePrivate,
-    alreadyPrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.alreadyPrivate,
-    labelIntro: "Mail with a private label is answered only on this computer.",
-    noLabels: DASHBOARD_CHATGPT_PRIVACY_COPY.noLabels,
-    senderIntro: "Mail from this sender is answered only on this computer.",
-    senderLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.senderLabel,
-    senderPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.senderPlaceholder,
-    senderAdd: DASHBOARD_CHATGPT_PRIVACY_COPY.senderAdd,
-    senderInvalid: DASHBOARD_CHATGPT_PRIVACY_COPY.senderInvalid,
-    senderDuplicate: DASHBOARD_CHATGPT_PRIVACY_COPY.senderDuplicate,
-    close: "Done",
-    pending: {
-      one: "{n} item is waiting to be checked on this computer.",
-      many: "{n} items are waiting to be checked on this computer."
-    },
-    nothingPending: "Nothing is waiting to be checked.",
-    save: DASHBOARD_CHATGPT_PRIVACY_COPY.save,
-    saving: DASHBOARD_CHATGPT_PRIVACY_COPY.saving,
-    cancel: DASHBOARD_CHATGPT_PRIVACY_COPY.cancel,
-    saveFailed: DASHBOARD_CHATGPT_PRIVACY_COPY.saveFailed,
-    saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
-    unchanged: "No changes to save.",
-    locked: "Unlock dashboard controls in Setup to see and change what is private.",
-    readOnly: "Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.",
-    counts: "Your description and {n} always-private rules are set.",
-    countsOne: "Your description and 1 always-private rule are set.",
-    countsUnset: "Nothing is set as private yet.",
-    unavailable: "Privacy settings are not available from this worker.",
-    confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
-    confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
-    confirm: DASHBOARD_CHATGPT_PRIVACY_COPY.confirm,
-    conflict: DASHBOARD_CHATGPT_PRIVACY_COPY.conflict,
-    conflictNow: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNow,
-    conflictDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictDescription,
-    conflictNoDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNoDescription,
-    applyAgain: DASHBOARD_CHATGPT_PRIVACY_COPY.applyAgain,
-    discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
-    folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
-    undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
-  };
 });
 
 // src/workers/dashboard/phases.ts
@@ -25505,7 +25435,7 @@ var init_source_dashboard = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -25519,7 +25449,7 @@ var init_dashboard_contract = __esm(() => {
     "olympus_privacy_set",
     SYNC_SOURCE_TOOL_NAME
   ];
-  COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME];
+  COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
 });
 
 // src/workers/dashboard/chatgpt/client.ts
@@ -25700,11 +25630,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     return false;
   }
-  function inlineError(result) {
+  function inlineError(result, name) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config.inlineErrorCodes.indexOf(code) < 0)
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && name === H.unpairTool))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -25724,7 +25654,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         redraw();
         return;
       }
-      const failed = inlineError(result);
+      const failed = inlineError(result, name);
       if (failed) {
         if (name === config.syncTool) {
           state.syncPressed = {};
@@ -25733,6 +25663,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         }
         state.actionError = { key, text: failed };
         render(key);
+        return;
+      }
+      if (name === H.unpairTool) {
+        const parts = result && Array.isArray(result.content) ? result.content : [];
+        const said = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+        refresh();
+        state.notice = said ? String(said.text) : "";
+        redraw();
         return;
       }
       if (acceptResult(result, false))
@@ -25926,6 +25864,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return "";
     return (C[current] || C.relay_unavailable).disabledReason;
   }
+  function rowReason(text) {
+    if (state.hostReadOnly && state.hostKind === "computer")
+      return null;
+    return el("span", "reason", text);
+  }
   function compact() {
     return state.displayMode !== "" && state.displayMode !== "fullscreen";
   }
@@ -25935,7 +25878,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key, null, style), el("span", "reason", blocked || String(fix.disabledReason)));
+      add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
       if (!blocked)
         add(wrap, howLink(fix, key));
       return wrap;
@@ -25977,7 +25920,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       if (state.confirming === key) {
         const run = action;
         wrap.className = "fix confirm";
-        add(wrap, el("span", "reason strong", P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
+        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
           state.confirming = "";
           render(key);
         }, "plain"));
@@ -26164,6 +26107,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (checking)
       add(controls, checkingControl("primary:" + id));
     const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const unpair = unpairEntry(id);
+    if (unpair)
+      menu.push(unpair);
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -26339,7 +26285,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const blocked = globalReason();
       const edit = button(W.edit, "privacy:edit", blocked ? null : () => openPrivacy("privacy:edit"), "plain");
       edit.setAttribute("aria-label", W.editLabel);
-      add(row, blocked ? add(el("span", "fix"), edit, el("span", "reason", blocked)) : edit);
+      add(row, blocked ? add(el("span", "fix"), edit, rowReason(blocked)) : edit);
     }
     return add(section, add(el("ul", "rows"), row));
   }
@@ -26402,6 +26348,15 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const progress = sourceProgress(source);
       return !!progress && progress.stage === "indexing" && !progress.stalled;
     });
+  }
+  function unpairEntry(id) {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.unpair))
+      return null;
+    const entry = meta.unpair.filter((item) => item && item.sourceId === id)[0];
+    if (!entry || typeof entry.label !== "string" || typeof entry.confirmation !== "string")
+      return null;
+    return { label: entry.label, tool: H.unpairTool, args: { source_id: id }, destructive: true, confirmText: entry.confirmation };
   }
   function indexFasterShown() {
     const meta = state.computerMeta;
@@ -29302,6 +29257,7 @@ function chatgptDashboardPageHtml(options = {}) {
       contextKey: OLYMPUS_HOST_CONTEXT_KEY,
       computerMetaKey: COMPUTER_META_KEY,
       indexFasterTool: INDEX_FASTER_TOOL_NAME,
+      unpairTool: UNPAIR_SOURCE_TOOL_NAME,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
   };
@@ -29600,6 +29556,13 @@ function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
+function isKeysOpenTarget(target) {
+  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function keysOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
 var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
@@ -29714,6 +29677,7 @@ var init_dashboard_launch = __esm(() => {
       (function () {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -29739,9 +29703,10 @@ var init_dashboard_launch = __esm(() => {
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
           if (response.ok) {
-            // A target lands on Keys, where the computer's setup sheets and Models live; it
-            // only opens a panel there, never submits anything.
-            window.location.replace(open ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
+            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -31771,16 +31736,22 @@ init_page();
 init_vocabulary();
 init_open_targets();
 var HOST_CSS = `
-:root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};color-scheme:light dark}
-@media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus}}}
+:root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};--accent:${CHATGPT_DASHBOARD_LIGHT.accent};--on-accent:${CHATGPT_DASHBOARD_LIGHT.onAccent};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus};--accent:${CHATGPT_DASHBOARD_DARK.accent};--on-accent:${CHATGPT_DASHBOARD_DARK.onAccent}}}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
+.gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
 .gate p{margin:0}
 .gate .title{font-weight:600}
 .gate .line{color:var(--muted);font-size:0.875rem}
+.gate .line .btn{margin-right:0.25rem}
+.gate code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;color:var(--text);white-space:nowrap}
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.plain{background:transparent}
 .gate .row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem}
 .gate .grow{flex:1 1 14rem;min-width:0}
 .gate .how{margin-top:0.75rem}

@@ -4258,17 +4258,8 @@ export async function main(): Promise<void> {
             modelSetup: getModelSetup,
             checkModelSetup: () => modelSetup.checkLocalModels(),
             connectModelKey,
-            // The local dashboard's Privacy row and editor, and its Models row,
-            // read and act through the same engine operations as the ChatGPT
-            // setup tools (set up further down; called only per request).
-            privacy: {
-              summary: () => dashboardPrivacy.summary(),
-              read: () => dashboardPrivacy.read(),
-              save: (update) => dashboardPrivacy.save(update),
-            },
-            // Outside help (consults): the Mac dashboard card's backend, the
-            // one caller of the settings writer; bound late like privacy.
-            // The panel's tools on the computer; bound late like privacy.
+            // The panel's tools on the computer; bound late (set up further
+            // down; called only per request).
             panelTools: {
               allows: (name) => dashboardPanelTools?.allows(name) === true,
               call: (name, args, context) => {
@@ -4276,8 +4267,9 @@ export async function main(): Promise<void> {
                 return dashboardPanelTools.call(name, args, context);
               },
             },
+            // Outside help (consults): the Mac dashboard card's backend, the
+            // one caller of the settings writer; bound late like the panel's tools.
             consult: {
-              summary: () => dashboardConsult.summary(),
               status: () => dashboardConsult.status(),
               setEnabled: (update) => dashboardConsult.setEnabled(update),
               saveRoute: (update) => dashboardConsult.saveRoute(update),
@@ -4285,12 +4277,6 @@ export async function main(): Promise<void> {
               recover: (update) => dashboardConsult.recover(update),
               abandon: (update) => dashboardConsult.abandon(update),
               installTools: (update) => dashboardConsult.installTools(update),
-            },
-            retryModel: (model) => chatgptSetup.retryModel(model),
-            downloadTranscriptionModel: () => {
-              const engine = process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env);
-              const state = engine?.downloadNow?.() ?? 'unavailable';
-              return state === 'pending' ? 'started' : state;
             },
             stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
@@ -4652,16 +4638,6 @@ export async function main(): Promise<void> {
       for (const provider of builtIn) void provider.retry().catch(() => undefined);
       return builtIn.length > 0;
     },
-  });
-  // The local dashboard's privacy settings, through the ChatGPT privacy
-  // tools' own operation (dashboard-privacy.ts): counts for the pages that
-  // name privacy, full settings only for the editor, and saves that always
-  // carry their revision.
-  const { createDashboardPrivacyAdapter } = await import('./dashboard-privacy.ts');
-  const dashboardPrivacy = createDashboardPrivacyAdapter({
-    backend: chatgptSetup,
-    readSettings: (pending) => readChatGptPrivacySettings(process.env, pending),
-    pendingCount: pendingClassificationCount,
   });
   // Outside help (consults, stage C5): the Mac dashboard card's backend
   // (dashboard-consult.ts) and, through it, the only caller of the

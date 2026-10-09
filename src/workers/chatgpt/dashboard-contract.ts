@@ -339,13 +339,26 @@ export interface OlympusHostContext {
 
 /**
  * Computer only: the `olympus_dashboard` result's `_meta` key carrying what
- * only the computer shows (Index faster's position). ChatGPT never sees it.
+ * only the computer shows (Index faster's position, which paired chat apps
+ * Unpair can end). ChatGPT never sees it.
  */
 export const COMPUTER_META_KEY = 'olympus/computer';
 
 export interface ComputerDashboardMeta {
   /** Present while the overnight guard reports a known state; `on` is the operator override. */
   indexFaster?: { on: boolean };
+  /**
+   * The paired chat apps (Telegram, WhatsApp) whose pairing session this
+   * computer holds, so Unpair can end it: the ⋯ menu entry, and the engine's
+   * own confirmation sentence (what stays, and where to unlink the device).
+   */
+  unpair?: ComputerUnpairEntry[];
+}
+
+export interface ComputerUnpairEntry {
+  sourceId: string;
+  label: string;
+  confirmation: string;
 }
 
 /**
@@ -353,6 +366,13 @@ export interface ComputerDashboardMeta {
  * embedding-priority override the Background page used to switch.
  */
 export const INDEX_FASTER_TOOL_NAME = 'olympus_index_faster';
+
+/**
+ * Computer only, never listed to ChatGPT: Unpair (`{source_id}`) for a paired
+ * chat app, the worker's POST /dashboard/unpair. Pairing happens on the
+ * computer, so ending it does too (design, 2026-10-09).
+ */
+export const UNPAIR_SOURCE_TOOL_NAME = 'olympus_unpair_source';
 
 /**
  * Every tool the panel calls, and so the only tools an Olympus host runs for
@@ -372,8 +392,8 @@ export const PANEL_TOOL_NAMES = [
   SYNC_SOURCE_TOOL_NAME,
 ] as const;
 
-/** The computer adds Index faster to the panel's tools. */
-export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME];
+/** The computer adds Index faster and Unpair to the panel's tools. */
+export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
 
 /** The `_meta` key carrying the picker's names to the widget only. */
 export const SCOPE_UI_META_KEY = 'olympus/scope';

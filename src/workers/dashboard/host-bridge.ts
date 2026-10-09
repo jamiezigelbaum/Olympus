@@ -50,6 +50,11 @@ export interface DashboardHostBridgeIo {
 }
 
 export interface DashboardHostBridge {
+  /**
+   * The local controls just locked (the session expired): from now on only the
+   * dashboard read is answered, and the panel is told so it disables them.
+   */
+  lock(): void;
   dispose(): void;
 }
 
@@ -58,6 +63,7 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
   type Any = any;
   const view = io.frame.ownerDocument.defaultView || window;
   const media = typeof view.matchMedia === 'function' ? view.matchMedia('(prefers-color-scheme: dark)') : null;
+  let readOnly = config.readOnly;
 
   function theme(): 'light' | 'dark' {
     return media && media.matches ? 'dark' : 'light';
@@ -69,7 +75,7 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
       displayMode: 'fullscreen',
       availableDisplayModes: ['fullscreen'],
     };
-    context[config.contextKey] = { kind: config.kind, readOnly: config.readOnly, links: config.links };
+    context[config.contextKey] = { kind: config.kind, readOnly, links: config.links };
     return context;
   }
 
@@ -127,7 +133,7 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
       reply(id, refused('This tool is not available here.'));
       return;
     }
-    if (config.readOnly && name !== config.readTool) {
+    if (readOnly && name !== config.readTool) {
       reply(id, refused('Open dashboard controls first.'));
       return;
     }
@@ -170,6 +176,7 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
     }
   }
 
+  /** The host's context changed (the theme, or the controls locked): tell the panel. */
   function onTheme(): void {
     post({ jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: hostContext() });
   }
@@ -177,6 +184,11 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
   view.addEventListener('message', onMessage);
   if (media && typeof media.addEventListener === 'function') media.addEventListener('change', onTheme);
   return {
+    lock(): void {
+      if (readOnly) return;
+      readOnly = true;
+      onTheme();
+    },
     dispose(): void {
       view.removeEventListener('message', onMessage);
       if (media && typeof media.removeEventListener === 'function') media.removeEventListener('change', onTheme);

@@ -15,7 +15,6 @@
  *
  * What it does, content-free throughout (codes, counts, dates; never a
  * question, a reply, a key or the daemon's config):
- *   - `summary`: one word for Setup's row;
  *   - `status`: the card's facts: the settings file, the zkAPI route and its
  *     readiness (zkapiConsultReadiness: blockers as codes), the risk
  *     acknowledgements, the per-language vocabulary packs;
@@ -80,7 +79,6 @@ import type {
   DashboardOutsideHelpLanguage,
   DashboardOutsideHelpRoute,
   DashboardOutsideHelpStatus,
-  DashboardOutsideHelpSummary,
 } from '../dashboard/outside-help.ts';
 
 export type DashboardConsultOutcome =
@@ -88,8 +86,6 @@ export type DashboardConsultOutcome =
   | { ok: false; httpStatus: number; code: string; message: string; revision?: number };
 
 export interface DashboardConsultBackend {
-  /** One word for Setup's row; probes nothing. */
-  summary(): DashboardOutsideHelpSummary;
   /** The card's facts, including the route readiness probe (a version call and two port probes). */
   status(): Promise<DashboardOutsideHelpStatus>;
   setEnabled(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
@@ -373,15 +369,6 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
       return { ok: true, status_message: MESSAGES.installStarted };
     },
 
-    summary() {
-      const settings = settingsView();
-      if (settings.state === 'invalid') return { state: 'invalid' };
-      const route = zkapiProfile();
-      if (!route) return { state: 'route_not_configured' };
-      if (fenceHeld()) return { state: 'fence_held' };
-      if (settings.state === 'on' && !acknowledgementsCurrent(route.profile.zkapi?.acknowledgements)) return { state: 'needs_acceptance' };
-      return { state: settings.state };
-    },
 
     async status() {
       return {

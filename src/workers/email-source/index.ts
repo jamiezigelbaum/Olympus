@@ -167,10 +167,8 @@ import { dashboardResourceHtml } from '../chatgpt/dashboard-resource.ts';
 import { DASHBOARD_TOOL_NAME } from '../chatgpt/dashboard-contract.ts';
 import type { DashboardPanelCallContext, DashboardPanelTools } from './dashboard-panel-tools.ts';
 import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine } from '../dashboard/vocabulary.ts';
-import type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 import type { DashboardConsultBackend } from './dashboard-consult.ts';
 
-export type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 import type {
   OlympusFolderScopeBrowseResult,
   OlympusFolderScopeSourceId,
@@ -214,9 +212,7 @@ import {
   readCredentialHealthReport,
 } from '../credential-health.ts';
 import {
-  buildSourceDispositionsView,
   resolveSourceIngestionExclusionsPath,
-  readSourceIngestionExclusionsFile,
   saveSourceDispositions,
   type SourceDispositionsSource,
   type SourceFolderScopeSummary,
@@ -495,19 +491,6 @@ export interface EmailSourceWorkerOptions {
     checkModelSetup?: () => Promise<ModelSetupView>;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
     /**
-     * The owner's privacy settings, through the same engine operations as
-     * ChatGPT's olympus_privacy_get / olympus_privacy_set (validation, caps,
-     * Secrets-tier locations kept off the page and kept as saved). Absent: the
-     * dashboard shows no Privacy row and the save route answers 501.
-     */
-    privacy?: {
-      /** Counts only, for the pages that name privacy. */
-      summary(): Promise<DashboardPrivacySummaryOutcome>;
-      /** The full settings, for the editor; supplied only to a reader with write authority. */
-      read(): Promise<DashboardPrivacyOutcome>;
-      save(update: Record<string, unknown>): Promise<DashboardPrivacyOutcome>;
-    };
-    /**
      * Outside help (consults): the Mac dashboard card's backend
      * (dashboard-consult.ts), the one caller of the settings writer. Absent:
      * no Outside help row, the page says it is unavailable, and the routes
@@ -521,14 +504,6 @@ export interface EmailSourceWorkerOptions {
      * and the locked read. Absent: the route answers 501.
      */
     panelTools?: DashboardPanelTools;
-    /** Starts a built-in model's failed install again; false when that model is not built in here. */
-    retryModel?: (model: 'embedding' | 'answers') => boolean;
-    /**
-     * The owner's Download now for the built-in transcription model:
-     * `started`, `ready` (already downloaded: nothing to do), or
-     * `unavailable` (not this machine's transcriber, or it cannot run here).
-     */
-    downloadTranscriptionModel?: () => 'started' | 'loading' | 'ready' | 'unavailable';
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
@@ -1103,8 +1078,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // folder names. The panel's picker reaches them in process through the
         // setup tools (chatgpt/setup-backend.ts); the strong credential is the
         // only other way in.
-        if ((request.method === 'GET' && url.pathname === '/dashboard/dispositions.json')
-          || (request.method === 'POST' && url.pathname === '/dashboard/dispositions')) {
+        if (request.method === 'POST' && url.pathname === '/dashboard/dispositions') {
           if (!sourceDashboard?.ingestionDispositions) {
             throw new EmailSourceWorkerError(
               501,
@@ -1112,8 +1086,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the ingestion-dispositions picker configured.',
             );
           }
-          const postBody = request.method === 'POST' ? await parseObjectBody(request) : undefined;
-          if (postBody?.action === 'browse_folder_scope') {
+          const postBody = await parseObjectBody(request);
+          if (postBody.action === 'browse_folder_scope') {
             if (!sourceDashboard.fileSourceScopes) {
               throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Folder scope browsing is not configured.');
             }
@@ -1137,7 +1111,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               scope_browser: scopeBrowser,
             });
           }
-          if (postBody?.action === 'browse_mail_scope') {
+          if (postBody.action === 'browse_mail_scope') {
             if (!sourceDashboard.fileSourceScopes?.browseMail) {
               throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'The mail scope picker is not configured.');
             }
@@ -1146,7 +1120,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }
             return json(await sourceDashboard.fileSourceScopes.browseMail({ draft: parseMailScopeDraft(postBody.draft) }));
           }
-          if (postBody?.action === 'approve_mail_scope_and_start') {
+          if (postBody.action === 'approve_mail_scope_and_start') {
             assertDashboardModelsReady();
             if (!sourceDashboard.fileSourceScopes?.approveMailAndStart) {
               throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Mail scope approval is not configured.');
@@ -1165,7 +1139,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               draft: parseMailScopeDraft(postBody.scope),
             }));
           }
-          if (postBody?.action === 'approve_source_scope_and_start') {
+          if (postBody.action === 'approve_source_scope_and_start') {
             assertDashboardModelsReady();
             if (!sourceDashboard.fileSourceScopes) {
               throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Folder scope approval is not configured.');
@@ -1188,36 +1162,24 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runtime = await sourceDashboard.ingestionDispositions();
           try {
             const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
-            if (request.method === 'POST') {
-              const body = postBody ?? await parseObjectBody(request);
-              const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(body, runtime.sources));
-              return json({
-                ok: true,
-                kind: 'source_dispositions_save',
-                result: {
-                  changed: save.changed,
-                  noop: save.noop,
-                  applied: save.applied,
-                  refused: save.refused,
-                  untouched_rule_ids: save.untouched_rule_ids,
-                  ...(save.write ? { write: save.write } : {}),
-                },
-                policy: {
-                  writes_config_only: true,
-                  deletes_store_content: false,
-                  runs_purge_or_strip: false,
-                },
-              });
-            }
-            const file = readSourceIngestionExclusionsFile(rulesPath);
-            const view = buildSourceDispositionsView({
-              sources: runtime.sources,
-              folderScopes: sourceDashboard.fileSourceScopes?.summaries() ?? [],
-              document: file.document,
-              rulesPath,
-              rulesPresent: file.present,
+            const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(postBody, runtime.sources));
+            return json({
+              ok: true,
+              kind: 'source_dispositions_save',
+              result: {
+                changed: save.changed,
+                noop: save.noop,
+                applied: save.applied,
+                refused: save.refused,
+                untouched_rule_ids: save.untouched_rule_ids,
+                ...(save.write ? { write: save.write } : {}),
+              },
+              policy: {
+                writes_config_only: true,
+                deletes_store_content: false,
+                runs_purge_or_strip: false,
+              },
             });
-            return json(view);
           } finally {
             runtime.close?.();
           }
@@ -1835,35 +1797,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json({ ok: true, status_message: 'Readiness check requested. See the Models cards above for the result.' });
         }
 
-        // The owner's privacy settings, saved through the same engine operation
-        // as ChatGPT's olympus_privacy_set: each field given replaces the saved
-        // one, every rule is validated and capped, and rules on Secrets-tier
-        // locations stay as saved. Bearer or control session only, like every
-        // control route here.
-        if (request.method === 'POST' && url.pathname === '/dashboard/privacy') {
-          if (!sourceDashboard?.privacy) {
-            throw new EmailSourceWorkerError(501, 'privacy_not_supported', 'This worker does not support privacy settings.');
-          }
-          const record = await parseObjectBody(request);
-          const outcome = await sourceDashboard.privacy.save(record);
-          if (!outcome.ok) {
-            // Lowering protection without the owner's confirmation is refused
-            // as a conflict the page answers with its confirm step.
-            const status = outcome.code === 'invalid_params' ? 400 : outcome.code === 'privacy_owner_only' ? 409 : 500;
-            return json({ ok: false, error: { code: outcome.code, message: outcome.message } }, status);
-          }
-          if (outcome.status === 'conflict') {
-            // Changed somewhere else since the page was read: nothing saved;
-            // the current settings come back so the page can keep the draft.
-            return json({
-              ok: false,
-              error: { code: 'conflict', message: 'These privacy settings were changed somewhere else. Your changes are still here.' },
-              settings: outcome.settings,
-            }, 409);
-          }
-          return json({ ok: true, settings: outcome.settings, status_message: 'Privacy saved.' });
-        }
-
         // Outside help (consults), the Mac dashboard card's five routes. Every
         // one requires the control-session context header, which the HTTP
         // boundary strips from incoming requests and injects only for these
@@ -1894,33 +1827,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             ...(outcome.restarting !== undefined ? { restarting: outcome.restarting } : {}),
             ...(outcome.revision !== undefined ? { revision: outcome.revision } : {}),
           });
-        }
-
-        if (request.method === 'POST' && url.pathname === '/dashboard/models/retry') {
-          if (!sourceDashboard?.retryModel && !sourceDashboard?.downloadTranscriptionModel) {
-            throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'This worker does not support restarting a model download.');
-          }
-          const record = await parseObjectBody(request);
-          if (record.model === 'transcription') {
-            const outcome = sourceDashboard.downloadTranscriptionModel?.() ?? 'unavailable';
-            if (outcome === 'unavailable') {
-              throw new EmailSourceWorkerError(409, 'model_not_configured', 'The built-in transcription model is not used on this computer.');
-            }
-            return json({
-              ok: true,
-              status_message: outcome === 'ready'
-                ? 'Already downloaded.'
-                : outcome === 'loading'
-                  ? 'Starting the transcription model again. This row updates as it goes.'
-                  : 'Downloading the transcription model. This row updates as it goes.',
-            });
-          }
-          const model = record.model === 'embedding' || record.model === 'answers' ? record.model : undefined;
-          if (!model) throw new EmailSourceWorkerError(400, 'invalid_request', 'model must be embedding, answers or transcription.');
-          if (!sourceDashboard.retryModel?.(model)) {
-            throw new EmailSourceWorkerError(409, 'model_not_configured', 'That model is not the built-in one on this computer.');
-          }
-          return json({ ok: true, status_message: 'Downloading again. This row updates as it goes.' });
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/connect/api-key') {

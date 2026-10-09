@@ -1,16 +1,13 @@
-// Download now for the built-in transcription model: the Models row's button,
-// its control route (the same session checks as Try again on a model), and
-// the engine's owner-requested install.
+// Download now for the built-in transcription model: the engine's
+// owner-requested install (the panel's Models row runs it through
+// olympus_model_retry {model: 'transcription'}).
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { DASHBOARD_PREVIEW_NOW, buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
-import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createBuiltInTranscriber } from '../src/workers/file-extraction/extractors/built-in-transcriber.ts';
-import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { BuiltInReasoningInstallError } from '../src/workers/source-index/built-in-reasoning/install.ts';
 import {
   readBuiltInTranscriptionStatus,
@@ -110,43 +107,5 @@ describe('the engine\'s owner-requested download', () => {
     engine.downloadNow?.();
     await settle();
     expect(attempts).toBe(4);
-  });
-});
-
-describe('the Download now route', () => {
-  test('authorized: starts it, or answers a no-op when already downloaded; unauthorized: refused; not built in: 409', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-asr-download-route-'));
-    const outcomes: Array<'started' | 'loading' | 'ready' | 'unavailable'> = ['started', 'ready', 'loading', 'unavailable'];
-    let calls = 0;
-    const worker = createEmailSourceWorker({ sourceDashboard: {
-      sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only')),
-      registryPath: join(dir, 'handles.json'),
-      downloadTranscriptionModel: () => outcomes[calls++] ?? 'unavailable',
-    } });
-    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'test-control' });
-    const post = (authenticated = true) => fetch(new Request('http://worker.test/dashboard/models/retry', {
-      method: 'POST',
-      headers: { ...(authenticated ? { Authorization: 'Bearer test-control' } : {}), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'transcription' }),
-    }));
-    try {
-      expect((await post(false)).status).toBe(401);
-      expect(calls).toBe(0);
-      const started = await post();
-      expect(started.status).toBe(200);
-      expect(await started.json()).toEqual({ ok: true, status_message: 'Downloading the transcription model. This row updates as it goes.' });
-      const ready = await post();
-      expect(ready.status).toBe(200);
-      expect(await ready.json()).toEqual({ ok: true, status_message: 'Already downloaded.' });
-      const loading = await post();
-      expect(loading.status).toBe(200);
-      expect(await loading.json()).toEqual({ ok: true, status_message: 'Starting the transcription model again. This row updates as it goes.' });
-      const unavailable = await post();
-      expect(unavailable.status).toBe(409);
-      expect(calls).toBe(4);
-    } finally {
-      worker.close();
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });

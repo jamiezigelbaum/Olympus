@@ -1505,12 +1505,23 @@ export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
   + 'run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. '
   + 'Do not read or print the worker token. Do not change configuration or connect sources.';
 
-/** The computer host page's banner while the local controls are locked (Setup's gate, moved). */
+/**
+ * The computer host page's banner while the local controls are locked. It
+ * leads with the one-click `olympus://open/dashboard` link (the browser asks
+ * first, then Olympus opens an unlocked dashboard); the terminal command is
+ * the fallback line, and an agent's opening link or a worker token sit behind
+ * "Other ways". It is the only place the locked state is explained: the
+ * panel's controls are disabled without a reason of their own.
+ */
 export const DASHBOARD_HOST_GATE_COPY = {
-  title: 'Open dashboard controls',
-  line: 'Ask your agent for a fresh opening link. No token copying needed.',
-  button: 'Get opening link',
-  how: 'Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.',
+  title: 'Dashboard controls are locked',
+  open: 'Open dashboard controls',
+  /** Before and after the command, which renders as code. */
+  fallbackBefore: 'or run ',
+  fallbackCommand: 'olympus dashboard',
+  fallbackAfter: ' in a terminal',
+  button: 'Other ways',
+  how: 'Ask your agent for a fresh opening link: copy this request to it, then open the link it gives you. The link works once and expires after fifteen minutes.',
   copy: 'Copy prompt',
   copied: 'Copied',
   copyFailed: 'Select the text and copy it.',
@@ -1533,7 +1544,11 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
     outsideHelp: { title: 'Outside help', line: 'Anonymous answers (zkAPI)' },
     connector: { title: 'Build a connector', line: 'For a source Olympus does not have yet' },
   },
-  /** Beside every control while the local dashboard controls are locked. */
+  /**
+   * Why a control waits while the local dashboard controls are locked. The
+   * computer's banner carries it, so the panel shows it beside no control
+   * there; kept for a host without that banner.
+   */
   locked: 'Open dashboard controls first',
   /** The OpenClaw tab for a connection without operator.write. */
   readOnlyOpenClaw: 'Reconnect OpenClaw with operator.write access to change this',
@@ -1992,7 +2007,8 @@ export const DASHBOARD_PICKER_COPY = {
 
 /**
  * The local dashboard's words for the ChatGPT dashboard's rules, ported on
- * 2026-10-02 (source-rows.ts, and the Home, Setup and Privacy pages). Where
+ * 2026-10-02 for the computer's own pages (since 2026-10-09 the panel is the
+ * one dashboard; Keys and the other local pages still read these). Where
  * both surfaces say the same thing the value is the ChatGPT block's own, so
  * they cannot drift apart; wording that names ChatGPT or "your Mac" is
  * rewritten here for the computer Olympus runs on. Never "Public": the owner's
@@ -2071,84 +2087,6 @@ export const DASHBOARD_LOCAL_COPY = {
     pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
     unreadable: 'Olympus could not read your privacy settings.',
   },
-} as const;
-
-/**
- * The local Privacy editor (pages/privacy.ts). The ChatGPT screen's layout and
- * most of its words; the intro and the per-rule sentences say "this computer"
- * and "a cloud model" instead of ChatGPT and "your Mac".
- */
-export const DASHBOARD_LOCAL_PRIVACY_COPY = {
-  crumb: 'Privacy',
-  back: 'Back to Setup',
-  title: DASHBOARD_CHATGPT_PRIVACY_COPY.title,
-  intro: 'Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.',
-  descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
-  descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
-  questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
-  rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
-  rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
-  kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
-  kindLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.kindLabel,
-  kindSender: DASHBOARD_CHATGPT_PRIVACY_COPY.kindSender,
-  unnamedFolder: 'A folder',
-  remove: DASHBOARD_CHATGPT_PRIVACY_COPY.remove,
-  removeFor: DASHBOARD_CHATGPT_PRIVACY_COPY.removeFor,
-  removed: DASHBOARD_CHATGPT_PRIVACY_COPY.removed,
-  undo: DASHBOARD_CHATGPT_PRIVACY_COPY.undo,
-  addFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.addFolder,
-  addLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.addLabel,
-  addSender: DASHBOARD_CHATGPT_PRIVACY_COPY.addSender,
-  needFolderSource: DASHBOARD_CHATGPT_PRIVACY_COPY.needFolderSource,
-  needGmail: DASHBOARD_CHATGPT_PRIVACY_COPY.needGmail,
-  folderIntro: 'Open a folder to look inside it. Make private covers everything in the folder.',
-  folderUp: 'Back',
-  folderOpen: 'Open',
-  folderEmpty: 'No folders here.',
-  folderMore: 'Load more folders',
-  loading: 'Loading…',
-  loadFailed: 'Olympus could not load this list. Try again.',
-  makePrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.makePrivate,
-  alreadyPrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.alreadyPrivate,
-  labelIntro: 'Mail with a private label is answered only on this computer.',
-  noLabels: DASHBOARD_CHATGPT_PRIVACY_COPY.noLabels,
-  senderIntro: 'Mail from this sender is answered only on this computer.',
-  senderLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.senderLabel,
-  senderPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.senderPlaceholder,
-  senderAdd: DASHBOARD_CHATGPT_PRIVACY_COPY.senderAdd,
-  senderInvalid: DASHBOARD_CHATGPT_PRIVACY_COPY.senderInvalid,
-  senderDuplicate: DASHBOARD_CHATGPT_PRIVACY_COPY.senderDuplicate,
-  close: 'Done',
-  pending: {
-    one: '{n} item is waiting to be checked on this computer.',
-    many: '{n} items are waiting to be checked on this computer.',
-  },
-  nothingPending: 'Nothing is waiting to be checked.',
-  save: DASHBOARD_CHATGPT_PRIVACY_COPY.save,
-  saving: DASHBOARD_CHATGPT_PRIVACY_COPY.saving,
-  cancel: DASHBOARD_CHATGPT_PRIVACY_COPY.cancel,
-  saveFailed: DASHBOARD_CHATGPT_PRIVACY_COPY.saveFailed,
-  saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
-  unchanged: 'No changes to save.',
-  locked: 'Unlock dashboard controls in Setup to see and change what is private.',
-  readOnly: 'Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.',
-  /** What a reader without write authority sees: counts, never the words or names. */
-  counts: 'Your description and {n} always-private rules are set.',
-  countsOne: 'Your description and 1 always-private rule are set.',
-  countsUnset: 'Nothing is set as private yet.',
-  unavailable: 'Privacy settings are not available from this worker.',
-  /** The save's confirm and conflict steps: the ChatGPT panel's own words. */
-  confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
-  confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
-  confirm: DASHBOARD_CHATGPT_PRIVACY_COPY.confirm,
-  conflict: DASHBOARD_CHATGPT_PRIVACY_COPY.conflict,
-  conflictNow: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNow,
-  conflictDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictDescription,
-  conflictNoDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNoDescription,
-  applyAgain: DASHBOARD_CHATGPT_PRIVACY_COPY.applyAgain,
-  discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
-  folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
-  undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor,
 } as const;
 
 /**

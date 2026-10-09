@@ -106,6 +106,8 @@ const DASHBOARD_TOOL_REQUEST_MAX_BYTES = 256 * 1024;
 const DASHBOARD_CONTROL_RESPONSE_MAX_BYTES = 256 * 1024;
 const DASHBOARD_PANEL_MAX_BYTES = 2 * 1024 * 1024;
 /** The panel HTML changes only with the worker's build; one read serves many opens. */
+/** How long a failed panel read answers 503 without asking the worker again. */
+export const DASHBOARD_PANEL_FAILURE_CACHE_MS = 5_000;
 const DASHBOARD_PANEL_CACHE_MS = 5 * 60_000;
 const OAUTH_CALLBACK_URL_MAX_BYTES = 16 * 1024;
 const DASHBOARD_TIMEOUT_MAX_MS = 180_000;
@@ -239,6 +241,23 @@ export async function requestDashboardTool(input: {
 function registerPanelRoute(api: OlympusDashboardGatewayApi, config: OlympusConfig, fetchImpl: DashboardFetch): void {
   if (!api.registerHttpRoute) return;
   let cached: { html: string; at: number } | undefined;
+  // The route is unauthenticated (the frame cannot carry a bearer), so a
+  // worker that is down or slow must not turn every request into a bearer
+  // fetch: a failure is remembered briefly, and concurrent misses share one.
+  let failedAt: number | undefined;
+  let pending: Promise<string> | undefined;
+  async function readPanel(): Promise<string> {
+    const authToken = requireWorkerAuthToken(config);
+    const { response: worker, text } = await boundedWorkerRequest({
+      fetchImpl,
+      url: workerRootUrl(config, '/dashboard/panel'),
+      init: { method: 'GET', headers: workerHeaders(authToken), redirect: 'error' },
+      timeoutMs: dashboardTimeoutMs(config),
+      maxResponseBytes: DASHBOARD_PANEL_MAX_BYTES,
+    });
+    if (worker.status !== 200 || !text.startsWith('<!doctype html>')) throw new DashboardGatewayUnavailableError('panel unavailable');
+    return text;
+  }
   api.registerHttpRoute({
     path: OLYMPUS_DASHBOARD_PANEL_PATH,
     auth: 'plugin',
@@ -251,16 +270,19 @@ function registerPanelRoute(api: OlympusDashboardGatewayApi, config: OlympusConf
       }
       try {
         if (!cached || Date.now() - cached.at > DASHBOARD_PANEL_CACHE_MS) {
-          const authToken = requireWorkerAuthToken(config);
-          const { response: worker, text } = await boundedWorkerRequest({
-            fetchImpl,
-            url: workerRootUrl(config, '/dashboard/panel'),
-            init: { method: 'GET', headers: workerHeaders(authToken), redirect: 'error' },
-            timeoutMs: dashboardTimeoutMs(config),
-            maxResponseBytes: DASHBOARD_PANEL_MAX_BYTES,
-          });
-          if (worker.status !== 200 || !text.startsWith('<!doctype html>')) throw new DashboardGatewayUnavailableError('panel unavailable');
-          cached = { html: text, at: Date.now() };
+          if (failedAt !== undefined && Date.now() - failedAt < DASHBOARD_PANEL_FAILURE_CACHE_MS) {
+            throw new DashboardGatewayUnavailableError('panel unavailable');
+          }
+          const read = pending ?? (pending = readPanel());
+          try {
+            cached = { html: await read, at: Date.now() };
+            failedAt = undefined;
+          } catch (error) {
+            failedAt = Date.now();
+            throw error;
+          } finally {
+            if (pending === read) pending = undefined;
+          }
         }
         response.statusCode = 200;
         response.setHeader('Content-Type', 'text/html; charset=utf-8');

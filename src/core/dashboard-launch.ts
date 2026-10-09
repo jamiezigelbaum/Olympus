@@ -22,7 +22,7 @@
  * machinery in `src/workers/http.ts`; this module only owns the ticket.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { DASHBOARD_LAUNCH_OPEN_KEY, DASHBOARD_OPEN_FRAGMENT_KEY, openTargetTokenPattern } from './open-targets.ts';
+import { DASHBOARD_LAUNCH_OPEN_KEY, DASHBOARD_OPEN_FRAGMENT_KEY, openTargetTokenPattern, keysOpenTargetTokenPattern } from './open-targets.ts';
 
 /** GET here renders the ticket-redeeming page. No private data; no token. */
 export const DASHBOARD_LAUNCH_PAGE_PATH = '/dashboard/launch';
@@ -192,6 +192,7 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
       (function () {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -217,9 +218,10 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
           if (response.ok) {
-            // A target lands on Keys, where the computer's setup sheets and Models live; it
-            // only opens a panel there, never submits anything.
-            window.location.replace(open ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
+            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403

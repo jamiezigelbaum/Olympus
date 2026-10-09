@@ -6,6 +6,7 @@ import {
 } from '../src/control-ui-contract.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import {
+  DASHBOARD_PANEL_FAILURE_CACHE_MS,
   OLYMPUS_PANEL_FRAME_CSP,
   OLYMPUS_TAB_TOOL_NAMES,
   parseDashboardToolParams,
@@ -20,6 +21,7 @@ import {
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
 } from '../src/workers/http.ts';
 import { PANEL_TOOL_NAMES } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 
 type RegisteredHandler = (input: {
   params: Record<string, unknown>;
@@ -184,6 +186,70 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     await broken.routes.get(OLYMPUS_DASHBOARD_PANEL_PATH)!({ method: 'GET', url: OLYMPUS_DASHBOARD_PANEL_PATH, headers: {} } as unknown as IncomingMessage, failed.value);
     expect(failed.statusCode()).toBe(503);
     expect(failed.body()).not.toContain('not a page');
+  });
+
+  test('the panel route is the Gateway\'s own public route: the frame cannot carry a bearer, and the page has no data', async () => {
+    const registered: Array<{ path: string; auth?: unknown; match?: unknown }> = [];
+    registerOlympusDashboardGateway({
+      registerGatewayMethod() {},
+      registerHttpRoute(route) {
+        registered.push({ path: route.path, auth: (route as { auth?: unknown }).auth, match: (route as { match?: unknown }).match });
+      },
+    }, configuredWorker());
+    // 'plugin': the plugin answers it itself, with no Gateway auth in front.
+    // Safe because it serves only the static panel (the same page ChatGPT
+    // loads); every byte of data arrives through the tool method, under the
+    // operator's scopes.
+    expect(registered.find((route) => route.path === OLYMPUS_DASHBOARD_PANEL_PATH)).toEqual({ path: OLYMPUS_DASHBOARD_PANEL_PATH, auth: 'plugin', match: 'exact' });
+    const panel = dashboardResourceHtml();
+    expect(panel.startsWith('<!doctype html>')).toBe(true);
+    expect(panel).not.toMatch(/"generatedAt"|"sources":\s*\[/);
+  });
+
+  test('the frame policy admits the real panel: inline script and style only, nothing fetched, framed by the Control UI\'s own origin', () => {
+    const panel = dashboardResourceHtml();
+    // Every script and style is inline, and nothing loads from anywhere: the
+    // policy has no source for any of it but 'unsafe-inline' and data: images.
+    expect(panel).not.toMatch(/<script[^>]*\ssrc=/i);
+    expect(panel).not.toMatch(/<link[^>]*rel=["']?stylesheet/i);
+    expect(panel).not.toMatch(/<img[^>]*\ssrc=["']?(?!data:)/i);
+    expect(panel).toMatch(/<script>/);
+    expect(OLYMPUS_PANEL_FRAME_CSP.split('; ')).toEqual([
+      "default-src 'none'",
+      "script-src 'unsafe-inline'",
+      "style-src 'unsafe-inline'",
+      'img-src data:',
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'self'",
+    ]);
+    // The panel talks to its host by postMessage only: no fetch target, so no connect-src.
+    expect(OLYMPUS_PANEL_FRAME_CSP).not.toContain('connect-src');
+  });
+
+  test('a worker that is down is asked once, not once per request: failures are remembered briefly and misses share one read', async () => {
+    let fetches = 0;
+    let release: (() => void) | undefined;
+    const registrations = gatewayRegistrations(async () => {
+      fetches += 1;
+      await new Promise<void>((resolve) => { release = resolve; });
+      throw new Error('worker down');
+    });
+    const route = registrations.routes.get(OLYMPUS_DASHBOARD_PANEL_PATH)!;
+    const request = { method: 'GET', url: OLYMPUS_DASHBOARD_PANEL_PATH, headers: {} } as unknown as IncomingMessage;
+    const first = mockResponse();
+    const second = mockResponse();
+    const both = Promise.all([route(request, first.value), route(request, second.value)]);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release?.();
+    await both;
+    expect([first.statusCode(), second.statusCode()]).toEqual([503, 503]);
+    expect(fetches).toBe(1);
+    const third = mockResponse();
+    await route(request, third.value);
+    expect(third.statusCode()).toBe(503);
+    expect(fetches).toBe(1);
+    expect(DASHBOARD_PANEL_FAILURE_CACHE_MS).toBeLessThanOrEqual(10_000);
   });
 
   test('the OAuth callback reads OpenClaw\'s live config, like start, not the registration-time copy', async () => {

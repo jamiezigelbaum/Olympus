@@ -23,6 +23,7 @@ import {
   DASHBOARD_TOOL_NAME,
   INDEX_FASTER_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
+  UNPAIR_SOURCE_TOOL_NAME,
   PANEL_TOOL_NAMES,
   PRIVACY_GET_TOOL_NAME,
   PRIVACY_SET_TOOL_NAME,
@@ -35,7 +36,7 @@ import { DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_HOST_GATE_COPY } from '../src/
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import type { DashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { computerUnpairEntries, createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const OPEN_BASE = 'https://olympusplugin.ai/open/';
@@ -58,8 +59,9 @@ describe('the panel\'s tool lists', () => {
     expect(PANEL_TOOL_NAMES).toContain(PRIVACY_SET_TOOL_NAME);
   });
 
-  test('the computer adds exactly Index faster; ChatGPT\'s conversation tools are on neither list', () => {
-    expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME]);
+  test('the computer adds exactly Index faster and Unpair; ChatGPT\'s conversation tools are on neither list', () => {
+    expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME]);
+    expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(UNPAIR_SOURCE_TOOL_NAME);
     for (const name of ['olympus_search', 'olympus_answer', 'olympus_source_status']) {
       expect(COMPUTER_HOST_TOOL_NAMES).not.toContain(name);
     }
@@ -281,7 +283,10 @@ describe('the computer\'s /dashboard', () => {
       const response = await f.fetch(new Request(`http://worker.test/dashboard?token=${encodeURIComponent(token)}`));
       expect(response.status).toBe(200);
       const html = await response.text();
-      expect(html).toContain('data-dashboard-control-gate data-state="locked"');
+      expect(html).toContain(`data-dashboard-control-gate data-state="locked" aria-label="${DASHBOARD_HOST_GATE_COPY.title}">`);
+      // It leads with the one-click open link, the terminal command its fallback line.
+      expect(html).toContain(`<a class="btn primary" href="olympus://open/dashboard" data-gate-open>${DASHBOARD_HOST_GATE_COPY.open}</a>`);
+      expect(html).toContain(`${DASHBOARD_HOST_GATE_COPY.fallbackBefore}<code>olympus dashboard</code>${DASHBOARD_HOST_GATE_COPY.fallbackAfter}`);
       expect(html).toContain(DASHBOARD_HOST_GATE_COPY.button);
       expect(html).toContain('data-locked="true"');
       // The locked read carries the reader's token (the host program reads through it).
@@ -304,7 +309,8 @@ describe('the computer\'s /dashboard', () => {
       const response = await f.fetch(new Request('http://worker.test/dashboard', { headers: { Cookie: session.cookie } }));
       expect(response.status).toBe(200);
       const html = await response.text();
-      expect(html).not.toContain('data-dashboard-control-gate');
+      // The banner is there but hidden, for a session that expires while the page is open.
+      expect(html).toContain(`data-dashboard-control-gate data-state="locked" aria-label="${DASHBOARD_HOST_GATE_COPY.title}" hidden>`);
       expect(html).toContain('data-locked="false"');
       expect(html).toContain(session.csrf);
     } finally {
@@ -330,7 +336,7 @@ describe('the computer\'s /dashboard', () => {
     }
   });
 
-  test('the panel page the OpenClaw tab frames is served to the worker bearer only', async () => {
+  test('the worker serves the panel page the Gateway frames to the worker bearer only (the Gateway route itself is public: control-ui-gateway.test.ts)', async () => {
     const f = fixture();
     try {
       const response = await f.fetch(new Request('http://worker.test/dashboard/panel', { headers: { Authorization: `Bearer ${AUTH}` } }));
@@ -481,6 +487,16 @@ async function onHost(host: Record<string, unknown> | undefined, data: Dashboard
 }
 
 const COMPUTER = { kind: 'computer', readOnly: false, links: LINKS };
+const GMAIL_RECONNECT = {
+  id: 'gmail.email', label: 'Gmail', group: 'cloud', status: 'Needs you', lastSyncAt: ago(5 * MIN),
+  primary: { label: 'Reconnect', tool: 'olympus_connect_source', args: { source: 'gmail' } },
+} as DashboardViewModelV1['sources'][number];
+const TELEGRAM = { id: 'telegram.messages', label: 'Telegram', group: 'local', status: 'Fresh', lastSyncAt: ago(MIN) } as DashboardViewModelV1['sources'][number];
+const UNPAIR_TELEGRAM = {
+  sourceId: 'telegram.messages',
+  label: 'Unpair Telegram',
+  confirmation: 'Stop new Telegram reads and delete this computer\'s Telegram pairing session. Messages already indexed stay.',
+};
 const C = DASHBOARD_COMPUTER_PANEL_COPY;
 
 describe('the panel on the computer', () => {
@@ -533,10 +549,56 @@ describe('the panel on the computer', () => {
     expect(unknown.win.document.querySelector('.index-faster')).toBeNull();
   });
 
-  test('locked: the controls wait with one reason, and the local pages stay one click away', async () => {
-    const page = await onHost({ ...COMPUTER, readOnly: true }, model(), { indexFaster: { on: false } });
-    expect(page.text()).toContain(C.locked);
+  test('locked: the controls are disabled with no reason of their own (the banner says it once), and the local pages stay one click away', async () => {
+    const page = await onHost({ ...COMPUTER, readOnly: true }, model({ sources: [GMAIL_RECONNECT] }), { indexFaster: { on: false } });
+    expect(page.button('Reconnect').disabled).toBe(true);
+    expect(page.text()).not.toContain(C.locked);
     expect(page.win.document.querySelector('section.on-computer')).not.toBeNull();
+    expect(Array.from(page.win.document.querySelectorAll('section.on-computer button')).every((node: any) => !node.disabled)).toBe(true);
+  });
+
+  test('the OpenClaw tab read-only has no banner, so each control still says why', async () => {
+    const page = await onHost({ kind: 'openclaw', readOnly: true, links: {} }, model({ sources: [GMAIL_RECONNECT] }));
+    expect(page.button('Reconnect').disabled).toBe(true);
+    expect(page.text()).toContain(C.readOnlyOpenClaw);
+  });
+
+  test('a paired chat app\'s ⋯ menu offers Unpair on the computer, confirms with the engine\'s own words, and says what it did', async () => {
+    const page = await onHost(COMPUTER, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
+    page.button('Unpair Telegram').click();
+    await settle();
+    expect(page.text()).toContain(UNPAIR_TELEGRAM.confirmation);
+    page.button('Yes, unpair telegram').click();
+    await settle();
+    const calls = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params);
+    expect(calls[calls.length - 1]).toEqual({ name: UNPAIR_SOURCE_TOOL_NAME, arguments: { source_id: 'telegram.messages' } });
+    page.respond('tools/call', { content: [{ type: 'text', text: 'Unpaired. Waiting for the next refresh.' }], structuredContent: { status: 'saved' } });
+    await settle();
+    // It reads the dashboard again, and keeps Unpair's own sentence on the page.
+    const after = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name);
+    expect(after[after.length - 1]).toBe(DASHBOARD_TOOL_NAME);
+    page.respond('tools/call', { structuredContent: model({ sources: [{ ...TELEGRAM, status: 'Off' }] }) });
+    await settle();
+    expect(page.text()).toContain('Unpaired. Waiting for the next refresh.');
+  });
+
+  test('Unpair\'s refusal is shown beside it, not as a dead panel', async () => {
+    const page = await onHost(COMPUTER, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
+    page.button('Unpair Telegram').click();
+    await settle();
+    page.button('Yes, unpair telegram').click();
+    await settle();
+    page.respond('tools/call', { isError: true, content: [{ type: 'text', text: 'This source is finishing a read. Retry Unpair after the current read completes.' }], structuredContent: { error: 'unpair_source_busy' } });
+    await settle();
+    expect(page.text()).toContain('This source is finishing a read.');
+    expect(page.text()).toContain('Telegram');
+  });
+
+  test('no Unpair where the computer did not offer it: a source it does not list, or locked', async () => {
+    const unlisted = await onHost(COMPUTER, model({ sources: [TELEGRAM] }), { indexFaster: { on: false } });
+    expect(unlisted.buttons().some((node) => node.textContent === 'Unpair Telegram')).toBe(false);
+    const locked = await onHost({ ...COMPUTER, readOnly: true }, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
+    expect(locked.button('Unpair Telegram').disabled).toBe(true);
   });
 });
 
@@ -548,6 +610,12 @@ describe('the same panel in ChatGPT', () => {
     expect(page.button('Change').disabled).toBe(true);
     expect(page.text()).toContain('Change models in Olympus on your computer.');
     expect(page.text()).not.toContain(C.section);
+  });
+
+  test('a paired chat app\'s row offers nothing it cannot do there: no Unpair, even if a result carried the computer\'s facts', async () => {
+    const page = await onHost(undefined, model({ sources: [TELEGRAM] }), { unpair: [UNPAIR_TELEGRAM] });
+    expect(page.buttons().some((node) => (node.textContent ?? '').includes('Unpair'))).toBe(false);
+    expect(page.win.document.querySelector('details.menu')).toBeNull();
   });
 
   test('a forged host context naming a non-http link is ignored', async () => {
@@ -562,7 +630,7 @@ describe('the host page renderer', () => {
     expect(html).toContain('srcdoc="<p title=&quot;a&amp;b&quot;>&quot;x&quot;</p>"');
     expect(html).toContain('data-dashboard-control-gate data-state="locked"');
     const unlocked = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN, csrfToken: 'csrf-123' });
-    expect(unlocked).not.toContain('data-dashboard-control-gate');
+    expect(unlocked).toContain('data-state="locked" aria-label="' + DASHBOARD_HOST_GATE_COPY.title + '" hidden>');
     expect(unlocked).toContain('csrf-123');
   });
 
@@ -570,5 +638,122 @@ describe('the host page renderer', () => {
     expect(COMPUTER_HOST_PAGE_CSP).toContain("frame-ancestors 'none'");
     expect(COMPUTER_HOST_PAGE_CSP).toContain("default-src 'none'");
     expect(COMPUTER_HOST_PAGE_CSP).toContain("connect-src 'self'");
+  });
+});
+
+// ---- Unpair on the computer (dashboard-panel-tools.ts) ------------------------
+
+describe('Unpair through the panel tools', () => {
+  function tools(answer: (request: Request) => Response | Promise<Response>) {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const panelTools = createDashboardPanelTools({
+      surface: () => { throw new Error('Unpair never reaches the ChatGPT surface'); },
+      setup: {} as never,
+      workerFetch: async (request) => {
+        requests.push({ url: request.url, body: await request.clone().json() });
+        return await answer(request);
+      },
+      makeContext: () => { throw new Error('not used'); },
+      indexFasterState: async () => undefined,
+    });
+    return { panelTools, requests };
+  }
+
+  test('runs the worker\'s own Unpair route, acknowledged by the panel\'s confirm, and says what it did', async () => {
+    const { panelTools, requests } = tools(() => Response.json({ ok: true, status_message: 'Unpaired. Waiting for the next refresh.' }));
+    expect(panelTools.allows(UNPAIR_SOURCE_TOOL_NAME)).toBe(true);
+    const result = await panelTools.call(UNPAIR_SOURCE_TOOL_NAME, { source_id: 'whatsapp.personal.messages' }, { origin: ORIGIN });
+    expect(result).toEqual({ content: [{ type: 'text', text: 'Unpaired. Waiting for the next refresh.' }], structuredContent: { status: 'saved', source_id: 'whatsapp.personal.messages' } });
+    expect(requests).toEqual([{ url: 'http://olympus-worker.internal/dashboard/unpair', body: { source_id: 'whatsapp.personal.messages', acknowledge: true } }]);
+  });
+
+  test('an incomplete removal\'s own words come back, and a refusal keeps its code and sentence', async () => {
+    const partial = tools(() => Response.json({ ok: true, status_message: 'Unpair incomplete — remove by hand: /x' }));
+    expect((await partial.panelTools.call(UNPAIR_SOURCE_TOOL_NAME, { source_id: 'telegram.messages' }, { origin: ORIGIN })).content)
+      .toEqual([{ type: 'text', text: 'Unpair incomplete — remove by hand: /x' }]);
+    const busy = tools(() => Response.json({ ok: false, error: { code: 'unpair_source_busy', message: 'This source is finishing a read.' } }, { status: 409 }));
+    expect(await busy.panelTools.call(UNPAIR_SOURCE_TOOL_NAME, { source_id: 'telegram.messages' }, { origin: ORIGIN })).toEqual({
+      content: [{ type: 'text', text: 'This source is finishing a read.' }], structuredContent: { error: 'unpair_source_busy' }, isError: true,
+    });
+  });
+
+  test('only a paired chat app, and nothing else in the arguments, reaches the route', async () => {
+    const { panelTools, requests } = tools(() => Response.json({ ok: true }));
+    for (const args of [{ source_id: 'gmail.email' }, { source_id: 'telegram.messages', acknowledge: false }, {}, { source_id: 7 }]) {
+      expect((await panelTools.call(UNPAIR_SOURCE_TOOL_NAME, args as Record<string, unknown>, { origin: ORIGIN })).isError).toBe(true);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test('the computer lists only the paired apps the engine says this computer can unpair, with its own words', () => {
+    const view = {
+      sources: [
+        { source_id: 'telegram.messages', connection: { unpair: { source_id: 'telegram.messages', label: 'Unpair Telegram', confirmation: 'Stop new Telegram reads.', provider_unlink_url: 'https://my.telegram.org/auth', provider_unlink_label: 'Telegram active sessions' } } },
+        { source_id: 'whatsapp.personal.messages', connection: {} },
+        { source_id: 'gmail.email', connection: { unpair: { source_id: 'gmail.email', label: 'Unpair Gmail', confirmation: 'x' } } },
+      ],
+    } as never;
+    expect(computerUnpairEntries(view)).toEqual([{ sourceId: 'telegram.messages', label: 'Unpair Telegram', confirmation: 'Stop new Telegram reads.' }]);
+    expect(computerUnpairEntries(undefined)).toEqual([]);
+  });
+});
+
+// ---- a session that expires while the page is open ---------------------------
+
+describe('the host page when its session expires', () => {
+  function hostPage(readToken?: string) {
+    const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN, csrfToken: 'csrf-123', ...(readToken ? { readToken } : {}) });
+    const start = html.indexOf('<script>') + '<script>'.length;
+    const script = html.slice(start, html.indexOf('</script>', start));
+    const win = new Window({ url: `${ORIGIN}/dashboard`, settings: { disableIframePageLoading: true } });
+    windows.push(win);
+    win.document.write(html.slice(0, start - '<script>'.length) + html.slice(html.indexOf('</script>', start) + '</script>'.length));
+    const frame = win.document.getElementById('olympus-panel')!;
+    const received: Array<Record<string, any>> = [];
+    const child = { postMessage: (message: Record<string, any>) => received.push(message) };
+    Object.defineProperty(frame, 'contentWindow', { configurable: true, get: () => child });
+    const assigned: string[] = [];
+    const fetched: string[] = [];
+    let status = 200;
+    const fakeFetch = async (url: string) => {
+      fetched.push(url);
+      return new Response(JSON.stringify({ structuredContent: { ok: true } }), { status });
+    };
+    const fakeWindow = { location: { assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') }, open: () => null };
+    new Function('window', 'document', 'fetch', 'navigator', script)(fakeWindow, win.document, fakeFetch, win.navigator);
+    const send = (message: Record<string, unknown>) => win.dispatchEvent(new win.MessageEvent('message', { data: { jsonrpc: '2.0', ...message }, source: child as any }));
+    return { win, received, assigned, fetched, send, expire: () => { status = 401; } };
+  }
+
+  test('without a reader\'s token it locks in place: the banner shows, the panel is told, reads keep the last answer, never a raw 401', async () => {
+    const page = hostPage();
+    const gate = page.win.document.querySelector('[data-dashboard-control-gate]') as unknown as HTMLElement;
+    expect(gate.hidden).toBe(true);
+    page.send({ id: 1, method: 'tools/call', params: { name: DASHBOARD_TOOL_NAME, arguments: {} } });
+    await settle();
+    page.expire();
+    page.send({ id: 2, method: 'tools/call', params: { name: 'olympus_sync_source', arguments: { source_id: 'gmail.email' } } });
+    await settle();
+    expect(gate.hidden).toBe(false);
+    expect(page.win.document.body.getAttribute('data-locked')).toBe('true');
+    expect(page.assigned).toEqual([]);
+    const changed = page.received.filter((message) => message.method === 'ui/notifications/host-context-changed');
+    expect(changed[changed.length - 1]!.params[OLYMPUS_HOST_CONTEXT_KEY].readOnly).toBe(true);
+    // The read answers from what it last saw; a control is refused without a request.
+    const before = page.fetched.length;
+    page.send({ id: 3, method: 'tools/call', params: { name: DASHBOARD_TOOL_NAME, arguments: {} } });
+    page.send({ id: 4, method: 'tools/call', params: { name: 'olympus_sync_source', arguments: { source_id: 'gmail.email' } } });
+    await settle();
+    expect(page.received.find((message) => message.id === 3)!.result).toEqual({ structuredContent: { ok: true } });
+    expect(page.received.find((message) => message.id === 4)!.result.isError).toBe(true);
+    expect(page.fetched.length).toBe(before);
+  });
+
+  test('with a reader\'s token it goes to the locked page, which still reads', async () => {
+    const page = hostPage('dash_reader');
+    page.expire();
+    page.send({ id: 1, method: 'tools/call', params: { name: DASHBOARD_TOOL_NAME, arguments: {} } });
+    await settle();
+    expect(page.assigned).toEqual(['/dashboard?token=dash_reader']);
   });
 });

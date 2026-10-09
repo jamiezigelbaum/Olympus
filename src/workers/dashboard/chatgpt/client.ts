@@ -66,6 +66,8 @@ export interface ChatGptDashboardClientConfig {
     /** The computer-only `_meta` key on a dashboard result (ComputerDashboardMeta). */
     computerMetaKey: string;
     indexFasterTool: string;
+    /** Unpair for a paired chat app, offered in its ⋯ menu on the computer only. */
+    unpairTool: string;
     copy: typeof DASHBOARD_COMPUTER_PANEL_COPY;
   };
 }
@@ -307,10 +309,11 @@ export function chatgptDashboardClient(
   }
 
   /** The fixed sentence of a tool error the page shows inline, or ''. */
-  function inlineError(result: Any): string {
+  function inlineError(result: Any, name?: string): string {
     if (!result || !result.isError) return '';
     const code = result.structuredContent && typeof result.structuredContent.error === 'string' ? result.structuredContent.error : '';
-    if (config.inlineErrorCodes.indexOf(code) < 0) return '';
+    // Unpair's refusals are the computer's own sentences (busy, a record to repair): always beside the control.
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && name === H.unpairTool)) return '';
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
     return text ? String(text.text) : '';
@@ -329,7 +332,7 @@ export function chatgptDashboardClient(
         redraw();
         return;
       }
-      const failed = inlineError(result);
+      const failed = inlineError(result, name);
       if (failed) {
         if (name === config.syncTool) {
           state.syncPressed = {};
@@ -338,6 +341,16 @@ export function chatgptDashboardClient(
         }
         state.actionError = { key, text: failed };
         render(key);
+        return;
+      }
+      if (name === H.unpairTool) {
+        // Unpair says what it did, an incomplete removal included: keep its words on the page.
+        const parts = result && Array.isArray(result.content) ? result.content : [];
+        const said = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
+        refresh();
+        // refresh() clears the notice as it starts; the read's answer leaves it.
+        state.notice = said ? String(said.text) : '';
+        redraw();
         return;
       }
       if (acceptResult(result, false)) return;
@@ -509,6 +522,16 @@ export function chatgptDashboardClient(
     if (GLOBAL_STATES.indexOf(current) < 0) return '';
     return ((C as Any)[current] || C.relay_unavailable).disabledReason;
   }
+  /**
+   * The reason beside a disabled control. On the computer's locked page the
+   * banner above the panel already says it once, so the controls are only
+   * disabled; everywhere else (OpenClaw read-only, a ChatGPT connection state)
+   * there is no banner and each control says why.
+   */
+  function rowReason(text: string): HTMLElement | null {
+    if (state.hostReadOnly && state.hostKind === 'computer') return null;
+    return el('span', 'reason', text);
+  }
   function compact(): boolean {
     return state.displayMode !== '' && state.displayMode !== 'fullscreen';
   }
@@ -519,7 +542,7 @@ export function chatgptDashboardClient(
     if (!fix || typeof fix.label !== 'string') return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key, null, style), el('span', 'reason', blocked || String(fix.disabledReason)));
+      add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
       // A repair only the computer can make still says how, unless the whole page is waiting.
       if (!blocked) add(wrap, howLink(fix, key));
       return wrap;
@@ -567,7 +590,7 @@ export function chatgptDashboardClient(
         wrap.className = 'fix confirm';
         add(
           wrap,
-          el('span', 'reason strong', P.confirmPrompt),
+          el('span', 'reason strong', typeof fix.confirmText === 'string' && fix.confirmText ? fix.confirmText : P.confirmPrompt),
           button(fill(P.confirm, { label: String(fix.label).toLowerCase() }), key + ':yes', run, 'danger'),
           button(P.cancel, key + ':no', () => {
             state.confirming = '';
@@ -775,6 +798,9 @@ export function chatgptDashboardClient(
     // and no second Sync now while one is checking.
     const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry: Any) =>
       (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    // Unpair for a paired chat app, on the computer only: the pairing lives here.
+    const unpair = unpairEntry(id);
+    if (unpair) menu.push(unpair);
     let menuBox: HTMLElement | null = null;
     if (menu.length) {
       const glyph = el('span', '', '⋯');
@@ -986,7 +1012,7 @@ export function chatgptDashboardClient(
       const blocked = globalReason();
       const edit = button(W.edit, 'privacy:edit', blocked ? null : () => openPrivacy('privacy:edit'), 'plain');
       edit.setAttribute('aria-label', W.editLabel);
-      add(row, blocked ? add(el('span', 'fix'), edit, el('span', 'reason', blocked)) : edit);
+      add(row, blocked ? add(el('span', 'fix'), edit, rowReason(blocked)) : edit);
     }
     return add(section, add(el('ul', 'rows'), row));
   }
@@ -1061,6 +1087,15 @@ export function chatgptDashboardClient(
   }
 
   /** Computer only, while indexing runs: Index faster (or Stop), with what it costs. */
+  /** The computer's Unpair for this paired chat app, with the engine's own confirmation, or null. */
+  function unpairEntry(id: string): Any {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.unpair)) return null;
+    const entry = meta.unpair.filter((item: Any) => item && item.sourceId === id)[0];
+    if (!entry || typeof entry.label !== 'string' || typeof entry.confirmation !== 'string') return null;
+    return { label: entry.label, tool: H.unpairTool, args: { source_id: id }, destructive: true, confirmText: entry.confirmation };
+  }
+
   function indexFasterShown(): boolean {
     const meta = state.computerMeta;
     return onComputer() && !!meta && !!meta.indexFaster && typeof meta.indexFaster.on === 'boolean' && indexingRuns();

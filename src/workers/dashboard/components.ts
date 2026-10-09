@@ -264,38 +264,17 @@ export function statusGlyph(status: DashboardStatus, fraction?: number): string 
 export interface DashboardActionInput {
   label: string;
   /**
-   * Which control form the button submits; 'none' renders no button, and
-   * 'link' renders a plain link, while 'control_link' mints the same bounded
-   * control session as a form before navigating to a protected dashboard page.
+   * Which control form the button submits on the computer's Keys page:
+   * 'oauth' starts a sign-in, 'api_key' carries the key field, and 'none'
+   * renders no form (a sheet toggle when `sheet` is set, else nothing). Sync
+   * now, Disconnect, Unpair and the model retries are the panel's own tools.
    */
-  kind: 'oauth' | 'oauth_cancel' | 'api_key' | 'sync_now' | 'model_retry' | 'disconnect' | 'unpair' | 'link' | 'control_link' | 'none';
+  kind: 'oauth' | 'api_key' | 'none';
   /** The `source` value the control route expects. */
   source?: string;
   primary?: boolean;
-  /** Visually quiet: for a destructive or rarely-wanted act beside a healthy row. */
-  quiet?: boolean;
   /** Id of a sheet this button toggles instead of submitting (kind 'none'). */
   sheet?: string;
-  /** Where a 'link' or 'control_link' action goes. Same-origin paths only. */
-  href?: string;
-  /** The quiet clause beside a link, e.g. "needs the worker token". */
-  hint?: string;
-  /** Exact facts shown before a bounded Disconnect or Unpair. */
-  confirmation?: string;
-  /** Provider-side grant or device surface retained after the local act. */
-  providerRevocationUrl?: string;
-  /**
-   * What that provider-side surface is called there, e.g. "WhatsApp linked
-   * devices". Unpair leaves a device linked at the provider, so the link has to
-   * name the screen the reader will actually look for; Disconnect's generic
-   * "Provider access" is the default.
-   */
-  providerLinkLabel?: string;
-  /**
-   * What the form says while its request is outstanding ("Checking Dropbox…"),
-   * worded here so the browser script carries no source names of its own.
-   */
-  pendingMessage?: string;
   /**
    * Why this control cannot be used right now. Set, the button renders
    * visibly disabled with the reason beside it, and submits nothing — a
@@ -306,14 +285,14 @@ export interface DashboardActionInput {
 
 /**
  * Control buttons stay in the form shape the worker's control script already
- * binds to (data-connect-kind / data-sync-kind), so the bearer-token path is
- * unchanged: the read-only dash_ token never reaches these routes.
+ * binds to (data-connect-kind), so the bearer-token path is unchanged: the
+ * read-only dash_ token never reaches these routes.
  */
 export function actionButton(input: DashboardActionInput | undefined): string {
   // Every label a button shows passes the vocabulary: the view model may still
   // say Reauthenticate, the owner reads Reconnect.
   const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
-  if (action?.blockedReason !== undefined && action.kind !== 'link' && (action.kind !== 'none' || action.sheet !== undefined)) {
+  if (action?.blockedReason !== undefined && (action.kind !== 'none' || action.sheet !== undefined)) {
     return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>`
       + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
   }
@@ -325,54 +304,9 @@ export function actionButton(input: DashboardActionInput | undefined): string {
     // sheet and looked different from X's, "no reason for them to differ").
     return `<button class="btn${action.primary ? ' primary' : ''}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml(action.label)}</button>`;
   }
-  if (action.kind === 'link') {
-    // A link, never a disabled-looking button: the control route this reader
-    // cannot call is not offered as one. The hint says what the destination
-    // will ask of them, in the same words the detail page's picker link uses.
-    const href = safeHref(action.href);
-    if (href === undefined) return '';
-    const hint = (action.hint ?? '').trim();
-    return `<span class="rowlink"><a class="btn" href="${escapeHtml(href)}">${escapeHtml(action.label)}</a>`
-      + `${hint === '' ? '' : `<span class="hint">${escapeHtml(hint)}</span>`}</span>`;
-  }
-  if (action.kind === 'control_link') {
-    const href = safeHref(action.href);
-    // Control-session navigation never leaves this worker. `//host/path` is a
-    // valid browser URL but is cross-origin, so a leading double slash is not
-    // an acceptable dashboard control target.
-    if (href === undefined || !href.startsWith('/') || href.startsWith('//')) return '';
-    const hint = (action.hint ?? '').trim();
-    return `<span class="rowlink"><button class="btn${action.primary ? ' primary' : ''}" type="button" data-control-link="${escapeHtml(href)}">${escapeHtml(action.label)}</button>`
-      + `${hint === '' ? '' : `<span class="hint">${escapeHtml(hint)}</span>`}`
-      + `<span class="actmsg" data-action-message role="status"></span></span>`;
-  }
-  const button = `<button class="btn${action.primary ? ' primary' : ''}${action.quiet ? ' quiet' : ''}" type="submit">${escapeHtml(action.label)}</button>`;
+  const button = `<button class="btn${action.primary ? ' primary' : ''}" type="submit">${escapeHtml(action.label)}</button>`;
   const source = `<input type="hidden" name="source" value="${escapeHtml(action.source ?? '')}">`;
   const message = `<span class="actmsg" data-action-message role="status"></span>`;
-  if (action.kind === 'sync_now') {
-    const pending = action.pendingMessage ? ` data-pending-message="${escapeHtml(action.pendingMessage)}"` : '';
-    return `<form class="rowform" data-sync-kind="sync_now"${pending}>${source}${button}${message}</form>`;
-  }
-  // A built-in model's failed install, started again; `source` names the model.
-  if (action.kind === 'model_retry') {
-    return `<form class="rowform" data-model-retry="${escapeHtml(action.source ?? '')}">${button}${message}</form>`;
-  }
-  // Disconnect and Unpair are the same bounded shape — confirm, acknowledge,
-  // one source_id — over two different routes, because they remove two
-  // different things: a broker credential grant, and this computer's pairing
-  // session. The form attribute is what selects the route.
-  if (action.kind === 'disconnect' || action.kind === 'unpair') {
-    const revocationUrl = safeExternalHref(action.providerRevocationUrl);
-    const providerLink = revocationUrl
-      ? `<a class="hint" href="${escapeHtml(revocationUrl)}" target="_blank" rel="noreferrer">${escapeHtml(action.providerLinkLabel ?? 'Provider access')}</a>`
-      : '';
-    const kindAttribute = action.kind === 'unpair'
-      ? 'data-unpair-kind="unpair"'
-      : 'data-disconnect-kind="disconnect"';
-    return `<form class="rowform" ${kindAttribute} data-confirmation="${escapeHtml(action.confirmation ?? '')}">`
-      + `<input type="hidden" name="source_id" value="${escapeHtml(action.source ?? '')}">`
-      + `${button}${providerLink}${message}</form>`;
-  }
   // The api-key route rejects a body without `api_key`, so the form carries
   // the field the route reads rather than a button that can only 400.
   const key = action.kind === 'api_key'
@@ -925,14 +859,8 @@ export function standaloneDashboardControllerScript(
       function route(params) {
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
-        if (action === 'cancel_oauth') return ['/dashboard/connect/oauth/cancel', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
-        if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
-        if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
-        if (action === 'retry_model') return ['/dashboard/models/retry', withoutAction(params)];
-        if (action === 'disconnect') return ['/dashboard/disconnect', withoutAction(params)];
-        if (action === 'unpair') return ['/dashboard/unpair', withoutAction(params)];
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
         if (action === 'create_agent_key') return ['/dashboard/agents/keys', withoutAction(params)];
         if (action === 'revoke_agent_connection') return ['/dashboard/agents/revoke', withoutAction(params)];

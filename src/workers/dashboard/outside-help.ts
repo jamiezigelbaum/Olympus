@@ -26,7 +26,7 @@ import {
   type DashboardOutsideHelpTools,
 } from './outside-help-tools.ts';
 
-/** One word for Setup's row. */
+/** One word for the card's state line. */
 export interface DashboardOutsideHelpSummary {
   /** `needs_acceptance`: on, but paused until the current statements are accepted. */
   readonly state: 'off' | 'on' | 'invalid' | 'route_not_configured' | 'fence_held' | 'needs_acceptance';
@@ -115,7 +115,7 @@ export function outsideHelpHref(basePath = '/dashboard'): string {
   return `${basePath}${basePath.includes('?') ? '&' : '?'}${DASHBOARD_OUTSIDE_HELP_QUERY_PARAM}`;
 }
 
-/** The one-line state Setup's row and the card both open with. */
+/** The one-line state the card opens with. */
 export function outsideHelpStateLine(summary: DashboardOutsideHelpSummary): string {
   return W.state[summary.state];
 }
@@ -720,14 +720,4 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     });
   });
 })();`;
-}
-
-/** Setup's row: one line and a link to the card. */
-export function renderOutsideHelpSection(summary: DashboardOutsideHelpSummary | undefined, basePath?: string): string {
-  if (!summary) return '';
-  const href = outsideHelpHref(basePath);
-  const label = summary.state === 'route_not_configured' ? W.setUp : W.edit;
-  return `<div class="sect" id="outside-help">${escapeHtml(W.sectionTitle)}</div>`
-    + `<div class="srows"><div class="srow nodot" data-outside-help-row><div class="smain"><p class="sline strong">${escapeHtml(W.row[summary.state])}</p></div>`
-    + `<div class="sact"><a class="btn" href="${escapeHtml(href)}">${escapeHtml(label)}</a></div></div></div>`;
 }

@@ -934,7 +934,7 @@ describe('worker routes', () => {
       .toBe(401);
   });
 
-  test('read returns the view model with the live rules; the old picker page is gone', async () => {
+  test('the old picker page and its JSON read are gone', async () => {
     const dir = tempDir('olympus-dispositions-read-');
     const rulesPath = join(dir, 'ingestion-exclusions.json');
     writeFileSync(rulesPath, `${JSON.stringify(FIXTURE_RULES, null, 2)}\n`, { mode: 0o600 });
@@ -945,17 +945,9 @@ describe('worker routes', () => {
     const page = await fetch(new Request('http://worker.test/dashboard/dispositions', { headers }));
     expect(page.status).toBe(404);
 
+    // Nor does the picker's old JSON read: the panel's pickers read in process.
     const model = await fetch(new Request('http://worker.test/dashboard/dispositions.json', { headers }));
-    const body = await model.json() as {
-      kind: string;
-      rule_count: number;
-      rules_path: string;
-      sources: Array<{ tree: { roots: Array<{ path: string }> }; non_folder_rules: Array<{ rule_id: string }> }>;
-    };
-    expect(body.kind).toBe('source_dispositions');
-    expect(body.rule_count).toBe(FIXTURE_RULES.rules.length);
-    expect(body.rules_path).toBe(rulesPath);
-    expect(body.sources[0]?.non_folder_rules[0]?.rule_id).toBe('oversized-video');
+    expect(model.status).toBe(404);
   });
 
   test('the dashboard control session saves without persisting the bearer', async () => {

@@ -13,21 +13,28 @@
  *   (no relay handback) with this browser's origin, and the panel opens the
  *   provider's own page instead of a one-time relay link;
  * - the computer adds Index faster (`olympus_index_faster`, the
- *   embedding-priority override) and tells the panel where it stands in the
- *   dashboard result's `_meta['olympus/computer']`, read off the overnight
- *   guard's own files. ChatGPT never sees either.
+ *   embedding-priority override) and Unpair (`olympus_unpair_source`, the
+ *   worker's POST /dashboard/unpair for a paired chat app), and tells the
+ *   panel where they stand in the dashboard result's
+ *   `_meta['olympus/computer']`: Index faster's position read off the
+ *   overnight guard's own files, and which paired apps Unpair can end, read
+ *   off the same view the dashboard result was built from. ChatGPT never sees
+ *   any of it.
  */
 import {
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
   INDEX_FASTER_TOOL_NAME,
+  UNPAIR_SOURCE_TOOL_NAME,
   type ComputerDashboardMeta,
+  type ComputerUnpairEntry,
 } from '../chatgpt/dashboard-contract.ts';
 import { callChatGptTool, type ChatGptSurfaceOptions } from '../chatgpt/mcp-surface.ts';
 import type { ChatGptToolResult } from '../chatgpt/response-builder.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from '../chatgpt/setup-tools.ts';
 import type { OperationContext } from '../../core/operations.ts';
+import type { SourceDashboardViewModel } from '../source-dashboard.ts';
 import { DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../http.ts';
 
 /** Where the call came from: the origin the browser reached Olympus at. */
@@ -107,6 +114,43 @@ async function indexFaster(options: DashboardPanelToolsOptions, args: Record<str
   };
 }
 
+/** The paired chat apps the worker's Unpair route takes. */
+const UNPAIR_SOURCE_IDS = new Set(['telegram.messages', 'whatsapp.personal.messages']);
+
+/** Unpair for a paired chat app: the worker's own route, acknowledged by the panel's confirm. */
+async function unpairSource(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (typeof args.source_id !== 'string' || !UNPAIR_SOURCE_IDS.has(args.source_id) || keys.some((key) => key !== 'source_id')) {
+    return refused('source_id must be a paired chat app.', 'invalid_params');
+  }
+  const response = await options.workerFetch(new Request('http://olympus-worker.internal/dashboard/unpair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_id: args.source_id, acknowledge: true }),
+  }));
+  const parsed = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+  if (!response.ok || !parsed || parsed.ok !== true) {
+    // The route's refusals are its own fixed sentences (busy, record unreadable, ...).
+    const error = parsed?.error as { code?: unknown; message?: unknown } | undefined;
+    return refused(
+      typeof error?.message === 'string' ? error.message : 'Could not unpair.',
+      typeof error?.code === 'string' ? error.code : 'internal',
+    );
+  }
+  const text = typeof parsed.status_message === 'string' ? parsed.status_message : 'Unpaired.';
+  return { content: [{ type: 'text', text }], structuredContent: { status: 'saved', source_id: args.source_id } };
+}
+
+/** Which paired apps this computer can unpair, off the view the dashboard result came from. */
+export function computerUnpairEntries(view: SourceDashboardViewModel | undefined): ComputerUnpairEntry[] {
+  if (!view) return [];
+  return view.sources.flatMap((card) => {
+    const action = card.connection.unpair;
+    if (!action || !UNPAIR_SOURCE_IDS.has(action.source_id)) return [];
+    return [{ sourceId: action.source_id, label: action.label, confirmation: action.confirmation }];
+  });
+}
+
 export function createDashboardPanelTools(options: DashboardPanelToolsOptions): DashboardPanelTools {
   const allowed = new Set(COMPUTER_HOST_TOOL_NAMES);
   return {
@@ -114,13 +158,25 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
     async call(name, args, context) {
       if (!allowed.has(name)) return refused('This tool is not available here.', 'unknown_tool');
       if (name === INDEX_FASTER_TOOL_NAME) return await indexFaster(options, args);
+      if (name === UNPAIR_SOURCE_TOOL_NAME) return await unpairSource(options, args);
       const signal = context.signal ?? new AbortController().signal;
-      const surface = { ...options.surface(), setup: computerSetup(options, context) };
+      const base = options.surface();
+      // Keep the view the dashboard result is built from, for Unpair's entries.
+      let view: SourceDashboardViewModel | undefined;
+      const surface = {
+        ...base,
+        setup: computerSetup(options, context),
+        dashboardView: async (viewSignal?: AbortSignal) => (view = await base.dashboardView(viewSignal)),
+      };
       const result = await callChatGptTool(name, args, options.makeContext(signal), surface, signal);
       if (name !== DASHBOARD_TOOL_NAME || result.isError) return result;
       const on = await options.indexFasterState().catch(() => undefined);
-      if (on === undefined) return result;
-      const meta: ComputerDashboardMeta = { indexFaster: { on } };
+      const unpair = computerUnpairEntries(view);
+      if (on === undefined && unpair.length === 0) return result;
+      const meta: ComputerDashboardMeta = {
+        ...(on !== undefined ? { indexFaster: { on } } : {}),
+        ...(unpair.length > 0 ? { unpair } : {}),
+      };
       const existing = result._meta && typeof result._meta === 'object' ? result._meta as Record<string, unknown> : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta } };
     },

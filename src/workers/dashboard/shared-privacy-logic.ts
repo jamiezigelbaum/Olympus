@@ -1,7 +1,7 @@
 /**
- * The privacy editors' one set of rules, shared by the ChatGPT panel
- * (chatgpt/privacy.ts) and the local Privacy editor (pages/privacy.ts and the
- * browser controller). Extracted unchanged from the reviewed ChatGPT panel
+ * The privacy editor's one set of rules (chatgpt/privacy.ts, the panel's
+ * Privacy screen on every host since the unified dashboard, 2026-10-09; the
+ * computer's own editor went with it). Extracted unchanged from the reviewed ChatGPT panel
  * (2026-10-02): which loaded rules are valid in the engine's shape, how a rule
  * is named, what makes two rules the same rule, what a save would lower, what
  * a save sends, and how a draft is replayed onto settings changed elsewhere.

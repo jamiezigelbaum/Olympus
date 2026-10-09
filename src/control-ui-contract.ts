@@ -68,16 +68,6 @@ export interface OlympusFolderScopeBrowseResult {
 
 export type OlympusDashboardOAuthSource = 'gmail' | 'google-drive' | 'dropbox' | 'x';
 export type OlympusDashboardApiKeySource = 'gemini' | 'venice' | 'readwise';
-export type OlympusDashboardSyncSource = 'gmail' | 'google-drive' | 'dropbox' | 'x' | 'readwise';
-export type OlympusDashboardSourceId =
-  | 'gmail.email'
-  | 'google_drive.docs'
-  | 'dropbox.files'
-  | 'x.bookmarks'
-  | 'telegram.messages'
-  | 'whatsapp.personal.messages'
-  | 'readwise.library';
-export type OlympusDashboardUnpairSourceId = 'telegram.messages' | 'whatsapp.personal.messages';
 export type OlympusSourceDispositionState = 'ingest' | 'metadata_only' | 'exclude';
 
 /** What a form on the computer's local pages submits (browser-controller.ts). */
@@ -90,31 +80,9 @@ export type OlympusDashboardControlParams =
       client_secret?: string;
     }
   | {
-      action: 'cancel_oauth';
-      source: OlympusDashboardOAuthSource;
-    }
-  | {
       action: 'connect_api_key';
       source: OlympusDashboardApiKeySource;
       api_key: string;
-    }
-  | {
-      action: 'sync_now';
-      source: OlympusDashboardSyncSource;
-    }
-  | {
-      action: 'set_embedding_priority';
-      on: boolean;
-    }
-  | {
-      action: 'disconnect';
-      source_id: OlympusDashboardSourceId;
-      acknowledge: true;
-    }
-  | {
-      action: 'unpair';
-      source_id: OlympusDashboardUnpairSourceId;
-      acknowledge: true;
     }
   | {
       /** One-time code for approving Claude, ChatGPT or Grok. Shown once. */
@@ -128,12 +96,6 @@ export type OlympusDashboardControlParams =
   | {
       action: 'revoke_agent_connection';
       connection_id: string;
-    }
-  | {
-      /** Start a built-in model's failed install again (ChatGPT's olympus_model_retry). */
-      action: 'retry_model';
-      /** `transcription`: the owner's Download now for the built-in transcription model. */
-      model: 'embedding' | 'answers' | 'transcription';
     }
   | {
       /**

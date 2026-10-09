@@ -196,6 +196,17 @@ describe('the opening page carries only an allowlisted target', () => {
     expect(plain).toEqual(['/dashboard']);
     for (const navigated of hostile) expect(navigated).toEqual(['/dashboard']);
   });
+
+  test('only a Keys target (Connect, a model fix) lands on Keys; a reconnect or connect fix lands on the dashboard', async () => {
+    const ticket = 'A'.repeat(43);
+    const models = run(`#olympus_launch_ticket=${ticket}&olympus_open=fix.models`);
+    const reconnect = run(`#olympus_launch_ticket=${ticket}&olympus_open=fix.reconnect`);
+    const connect = run(`#olympus_launch_ticket=${ticket}&olympus_open=fix.connect`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(models).toEqual(['/dashboard?keys#olympus-open=fix.models']);
+    expect(reconnect).toEqual(['/dashboard']);
+    expect(connect).toEqual(['/dashboard']);
+  });
 });
 
 describe('the dashboard opens the named panel and submits nothing', () => {

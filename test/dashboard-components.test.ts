@@ -129,27 +129,6 @@ describe('statusGlyph', () => {
   });
 });
 
-describe('control links', () => {
-  test('mints a bounded session before navigating to a protected dashboard page', () => {
-    const html = actionButton({
-      label: 'Edit what gets ingested',
-      kind: 'control_link',
-      href: '/dashboard/dispositions',
-      hint: 'needs the worker token',
-    });
-    expect(html).toContain('data-control-link="/dashboard/dispositions"');
-    expect(html).not.toContain('href=');
-    const controller = mountDashboardController.toString();
-    expect(controller).toContain('data-control-link');
-    expect(controller).toContain('options.navigate(href)');
-  });
-
-  test('refuses scheme-relative and external control destinations', () => {
-    expect(actionButton({ label: 'Bad', kind: 'control_link', href: '//attacker.test/x' })).toBe('');
-    expect(actionButton({ label: 'Bad', kind: 'control_link', href: 'https://attacker.test/x' })).toBe('');
-  });
-});
-
 describe('dashboard-level control gate', () => {
   test('leads with an opening link and retains manual token entry only as an advanced option', () => {
     const html = dashboardControlGate({ connected: false });

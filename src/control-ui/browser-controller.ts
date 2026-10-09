@@ -113,8 +113,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],form[data-model-retry],'
-        + 'form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-model-check],form[data-agent-kind]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -166,15 +165,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    * so the pending state names the actual work instead of a generic wait.
    */
   function pendingMessage(params: OlympusDashboardControlParams): string {
-    const action = params.action;
-    if (params.action === 'retry_model' && params.model === 'transcription') return 'Starting…';
-    switch (action) {
+    switch (params.action) {
       case 'start_oauth': return 'Connecting…';
       case 'connect_api_key': return 'Validating the key…';
-      case 'cancel_oauth': return 'Cancelling…';
-      case 'sync_now': return 'Starting sync…';
-      case 'set_embedding_priority': return 'Saving…';
-      case 'retry_model': return 'Starting the download again…';
       default: return 'Working…';
     }
   }
@@ -185,20 +178,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    * claims the connection is live, which only the server's card may report.
    */
   function successMessage(params: OlympusDashboardControlParams): string {
-    const action = params.action;
-    if (params.action === 'retry_model' && params.model === 'transcription') return 'Started. This row updates as it goes.';
-    switch (action) {
+    switch (params.action) {
       case 'connect_api_key': return 'Key accepted. This card updates when Olympus confirms the connection.';
       case 'start_oauth': return 'Waiting for authorization. This card updates when the connection completes.';
-      case 'cancel_oauth': return 'Connection attempt cancelled. Press Connect when you are ready to start a new one.';
-      // The route starts the check and answers at once ("Checking Dropbox…"
-      // as status_message); the card shows what it found on a later refresh.
-      // This is only the fallback for a reply without a message.
-      case 'sync_now': return 'Checking. This card shows what was found.';
-      case 'set_embedding_priority': return 'Saved.';
-      case 'disconnect': return 'Disconnected. This card updates when Olympus confirms it.';
-      case 'unpair': return 'Unpaired on this computer.';
-      case 'retry_model': return 'Downloading again. This row updates as it goes.';
       default: return 'Saved.';
     }
   }
@@ -334,46 +316,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         ...(body.client_secret ? { client_secret: body.client_secret } : {}),
       };
     }
-    if (connect === 'oauth_cancel') {
-      return {
-        action: 'cancel_oauth',
-        source: body.source as Extract<OlympusDashboardControlParams, { action: 'cancel_oauth' }>['source'],
-      };
-    }
     if (connect === 'api_key') {
       return {
         action: 'connect_api_key',
         source: body.source as Extract<OlympusDashboardControlParams, { action: 'connect_api_key' }>['source'],
         api_key: body.api_key || '',
-      };
-    }
-    if (form.hasAttribute('data-sync-kind')) {
-      return {
-        action: 'sync_now',
-        source: body.source as Extract<OlympusDashboardControlParams, { action: 'sync_now' }>['source'],
-      };
-    }
-    if (form.hasAttribute('data-embedding-kind')) {
-      return { action: 'set_embedding_priority', on: body.on === 'true' };
-    }
-    if (form.hasAttribute('data-model-retry')) {
-      const model = form.dataset.modelRetry;
-      return model === 'embedding' || model === 'answers' || model === 'transcription'
-        ? { action: 'retry_model', model }
-        : undefined;
-    }
-    if (form.hasAttribute('data-disconnect-kind')) {
-      return {
-        action: 'disconnect',
-        source_id: body.source_id as Extract<OlympusDashboardControlParams, { action: 'disconnect' }>['source_id'],
-        acknowledge: true,
-      };
-    }
-    if (form.hasAttribute('data-unpair-kind')) {
-      return {
-        action: 'unpair',
-        source_id: body.source_id as Extract<OlympusDashboardControlParams, { action: 'unpair' }>['source_id'],
-        acknowledge: true,
       };
     }
     return undefined;
@@ -440,13 +387,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       closeAuthorizationTab(authorizationTab);
       return;
     }
-    if (params.action === 'disconnect' || params.action === 'unpair') {
-      const fallback = params.action === 'unpair' ? 'Unpair this source?' : 'Disconnect this source?';
-      if (!window.confirm(form.dataset.confirmation || fallback)) {
-        closeAuthorizationTab(authorizationTab);
-        return;
-      }
-    }
     if (params.action === 'start_oauth') clearAuthorizationFallback(form);
     // A form that words its own wait ("Checking Dropbox…") says that instead.
     setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
@@ -511,7 +451,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       });
       applyWriteCapability();
     }
-    if (params.action === 'cancel_oauth') awaitingAuthorizationReturn = false;
     say(form, typeof statusMessage === 'string'
       ? statusMessage
       : released
@@ -716,12 +655,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function focusKey(node: Element | null): string {
     if (!node || node === root) return '';
     if (node.id) return `#${node.id}`;
-    const action = node.getAttribute('data-connect-kind')
-      || node.getAttribute('data-sync-kind')
-      || node.getAttribute('data-embedding-kind')
-      || node.getAttribute('data-model-retry')
-      || node.getAttribute('data-disconnect-kind')
-      || node.getAttribute('data-unpair-kind');
+    const action = node.getAttribute('data-connect-kind');
     if (action) return `${node.tagName}:${action}`;
     return node.textContent?.trim().slice(0, 120) || '';
   }
@@ -840,7 +774,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (!form.matches(
-      '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-model-retry],[data-disconnect-kind],[data-unpair-kind],[data-model-check]',
+      '[data-connect-kind],[data-model-check]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only
@@ -934,17 +868,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }).catch(() => {
         announceCopy(copy, 'Clipboard unavailable — select the text and copy it with your keyboard.');
       });
-      return;
-    }
-    const controlLink = target.closest<HTMLElement>('[data-control-link]');
-    if (controlLink) {
-      event.preventDefault();
-      if (!canWrite && !csrfToken) {
-        say(controlLink.closest('.rowlink') || controlLink, 'Your OpenClaw connection has read-only access.');
-        return;
-      }
-      const href = controlLink.dataset.controlLink;
-      if (href) options.navigate(href);
       return;
     }
     const anchor = target.closest<HTMLAnchorElement>('a[href]');

@@ -268,13 +268,6 @@ describe('the provider opens in its own tab', () => {
     // an authorization URL.
     expect(script).toContain('closeAuthorizationTab(authorizationTab)');
   });
-
-  test('the cancel form posts to the cancel route and nothing else does', () => {
-    const script = mountDashboardController.toString();
-
-    expect(script).toContain('action: "cancel_oauth"');
-    expect(script).toContain('connect === "oauth_cancel"');
-  });
 });
 
 describe('the worker routes the cancel and lands the callback in the tab it happened in', () => {

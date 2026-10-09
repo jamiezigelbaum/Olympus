@@ -215,17 +215,12 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // The local-only mint behind the Outside help card: no bearer accepted,
   // loopback origin only; its sessions alone reach the consult routes.
   { method: 'POST', path: '/dashboard/control/session/local' },
-  { method: 'GET', path: '/dashboard/dispositions.json' },
   { method: 'POST', path: '/dashboard/dispositions' },
   { method: 'GET', path: '/oauth/callback/', prefix: true },
   { method: 'POST', path: '/dashboard/connect/oauth/start' },
   { method: 'POST', path: '/dashboard/connect/oauth/cancel' },
   { method: 'POST', path: '/dashboard/connect/api-key' },
   { method: 'POST', path: '/dashboard/models/check' },
-  // A built-in model's failed download, started again (ChatGPT's olympus_model_retry).
-  { method: 'POST', path: '/dashboard/models/retry' },
-  // The owner's privacy settings (ChatGPT's olympus_privacy_set).
-  { method: 'POST', path: '/dashboard/privacy' },
   { method: 'POST', path: '/dashboard/sync-now' },
   { method: 'POST', path: '/dashboard/embedding-priority' },
   { method: 'POST', path: '/dashboard/tools/call' },

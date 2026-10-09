@@ -31,7 +31,7 @@ import {
   DASHBOARD_HOST_GATE_COPY,
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
 } from './vocabulary.ts';
-import { DASHBOARD_OPEN_FRAGMENT_KEY, OPEN_PAGE_BASE_URL, allOpenTargets, openTargetPath, openTargetToken } from '../../core/open-targets.ts';
+import { DASHBOARD_OPEN_FRAGMENT_KEY, OPEN_PAGE_BASE_URL, allOpenTargets, isKeysOpenTarget, olympusOpenUrl, openTargetPath, openTargetToken } from '../../core/open-targets.ts';
 
 export const DASHBOARD_HTML_PATH = '/dashboard';
 /** POST: one panel tool call under the control session (http.ts isDashboardControlRoute). */
@@ -71,7 +71,7 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
   for (const target of allOpenTargets()) {
     const path = openTargetPath(target);
     if (target.kind === 'dashboard') out[path] = `${origin}${dashboardHomeHref(token)}`;
-    else if (target.kind === 'connect' || (target.kind === 'fix' && (target.section === 'models' || target.section === 'answers' || target.section === 'search'))) {
+    else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref('keys', token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     }
   }
@@ -108,16 +108,22 @@ function scriptJson(value: unknown): string {
 }
 
 const HOST_CSS = `
-:root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};color-scheme:light dark}
-@media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus}}}
+:root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};--accent:${CHATGPT_DASHBOARD_LIGHT.accent};--on-accent:${CHATGPT_DASHBOARD_LIGHT.onAccent};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus};--accent:${CHATGPT_DASHBOARD_DARK.accent};--on-accent:${CHATGPT_DASHBOARD_DARK.onAccent}}}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
+.gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
 .gate p{margin:0}
 .gate .title{font-weight:600}
 .gate .line{color:var(--muted);font-size:0.875rem}
+.gate .line .btn{margin-right:0.25rem}
+.gate code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;color:var(--text);white-space:nowrap}
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.plain{background:transparent}
 .gate .row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem}
 .gate .grow{flex:1 1 14rem;min-width:0}
 .gate .how{margin-top:0.75rem}
@@ -132,11 +138,17 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
 .status{color:var(--muted);font-size:0.875rem}
 `;
 
-function lockedGate(): string {
+/**
+ * The locked banner. An unlocked page carries it hidden, so a session that
+ * expires while the page is open locks the page in place (hostProgram).
+ */
+function lockedGate(hidden: boolean): string {
   const C = DASHBOARD_HOST_GATE_COPY;
-  return `<section class="gate" data-dashboard-control-gate data-state="locked" aria-label="${attribute(C.title)}">`
-    + `<div class="row"><div class="grow"><p class="title">${text(C.title)}</p><p class="line">${text(C.line)}</p></div>`
-    + `<button class="btn" type="button" data-gate-toggle aria-controls="gate-how" aria-expanded="false">${text(C.button)}</button></div>`
+  return `<section class="gate" data-dashboard-control-gate data-state="locked" aria-label="${attribute(C.title)}"${hidden ? ' hidden' : ''}>`
+    + `<div class="row"><div class="grow"><p class="title">${text(C.title)}</p>`
+    + `<p class="line"><a class="btn primary" href="${attribute(olympusOpenUrl({ kind: 'dashboard' }))}" data-gate-open>${text(C.open)}</a> `
+    + `${text(C.fallbackBefore)}<code>${text(C.fallbackCommand)}</code>${text(C.fallbackAfter)}</p></div>`
+    + `<button class="btn plain" type="button" data-gate-toggle aria-controls="gate-how" aria-expanded="false">${text(C.button)}</button></div>`
     + `<div class="how" id="gate-how" hidden><p class="line">${text(C.how)}</p>`
     + `<p class="prompt" id="gate-prompt">${text(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</p>`
     + `<button class="btn" type="button" data-gate-copy>${text(C.copy)}</button> <span class="status" data-gate-copy-status aria-live="polite"></span>`
@@ -154,6 +166,9 @@ function hostProgram(input: {
   bridge: DashboardHostBridgeConfig;
   csrfToken: string;
   readUrl: string;
+  /** /dashboard, carrying a dash_ reader's token: the locked page with its data. */
+  lockedUrl: string;
+  hasReadToken: boolean;
   toolsCallPath: string;
   words: typeof DASHBOARD_HOST_GATE_COPY;
 }, bridge: typeof dashboardHostBridge): void {
@@ -162,7 +177,31 @@ function hostProgram(input: {
   function failed(): never {
     throw new Error('tool call failed');
   }
+  // The last dashboard read that answered: what a page whose session expired,
+  // with no reader's token to read again, keeps showing (locked).
+  let lastRead: unknown;
+  let expired = false;
+  let handle: { lock(): void } | undefined;
+  function remember(name: string, result: unknown): unknown {
+    if (name === input.bridge.readTool) lastRead = result;
+    return result;
+  }
+  /** The session expired or was locked elsewhere: lock this page, never a raw 401. */
+  function lockPage(): void {
+    if (input.hasReadToken) {
+      // The reader's token still reads: the locked page, with fresh data.
+      window.location.assign(input.lockedUrl);
+      return;
+    }
+    if (expired) return;
+    expired = true;
+    const gate = document.querySelector<HTMLElement>('[data-dashboard-control-gate]');
+    if (gate) gate.hidden = false;
+    document.body.setAttribute('data-locked', 'true');
+    if (handle) handle.lock();
+  }
   function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    if (expired) return lastRead !== undefined && name === input.bridge.readTool ? Promise.resolve(lastRead) : Promise.reject(new Error('locked'));
     if (!input.csrfToken) {
       return fetch(input.readUrl, { cache: 'no-store', credentials: 'same-origin' })
         .then((response) => (response.ok ? response.json() : failed()));
@@ -174,15 +213,15 @@ function hostProgram(input: {
       headers: { 'X-Olympus-CSRF': input.csrfToken, 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, arguments: args }),
     }).then((response) => {
-      // The session expired or was locked elsewhere: the page itself says so.
       if (response.status === 401 || response.status === 403) {
-        window.location.reload();
+        lockPage();
+        if (lastRead !== undefined && name === input.bridge.readTool) return lastRead;
         return failed();
       }
-      return response.ok ? response.json() : failed();
+      return response.ok ? response.json().then((result) => remember(name, result)) : failed();
     });
   }
-  bridge(input.bridge, {
+  handle = bridge(input.bridge, {
     frame,
     callTool,
     openUrl(url: string) {
@@ -269,6 +308,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     bridge,
     csrfToken: input.csrfToken ?? '',
     readUrl,
+    lockedUrl: dashboardHomeHref(token),
+    hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     words: DASHBOARD_HOST_GATE_COPY,
   })}, ${dashboardHostBridge.toString()});`.replaceAll('</script', '<\\/script');
@@ -282,7 +323,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     `<style>${HOST_CSS}</style>`,
     '</head>',
     `<body data-olympus-host="computer" data-locked="${locked ? 'true' : 'false'}">`,
-    locked ? lockedGate() : '',
+    lockedGate(!locked),
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
     // this page's (cookies, storage, DOM) and talks only through postMessage.
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,

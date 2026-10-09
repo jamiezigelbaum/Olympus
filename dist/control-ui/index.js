@@ -21,6 +21,7 @@ var MODEL_RETRY_TOOL_NAME = "olympus_model_retry";
 var SYNC_SOURCE_TOOL_NAME = "olympus_sync_source";
 var OLYMPUS_HOST_CONTEXT_KEY = "olympus/host";
 var INDEX_FASTER_TOOL_NAME = "olympus_index_faster";
+var UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source";
 var PANEL_TOOL_NAMES = [
   DASHBOARD_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
@@ -33,12 +34,13 @@ var PANEL_TOOL_NAMES = [
   "olympus_privacy_set",
   SYNC_SOURCE_TOOL_NAME
 ];
-var COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME];
+var COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
 
 // src/workers/dashboard/host-bridge.ts
 function dashboardHostBridge(config, io) {
   const view = io.frame.ownerDocument.defaultView || window;
   const media = typeof view.matchMedia === "function" ? view.matchMedia("(prefers-color-scheme: dark)") : null;
+  let readOnly = config.readOnly;
   function theme() {
     return media && media.matches ? "dark" : "light";
   }
@@ -48,7 +50,7 @@ function dashboardHostBridge(config, io) {
       displayMode: "fullscreen",
       availableDisplayModes: ["fullscreen"]
     };
-    context[config.contextKey] = { kind: config.kind, readOnly: config.readOnly, links: config.links };
+    context[config.contextKey] = { kind: config.kind, readOnly, links: config.links };
     return context;
   }
   function post(message) {
@@ -98,7 +100,7 @@ function dashboardHostBridge(config, io) {
       reply(id, refused("This tool is not available here."));
       return;
     }
-    if (config.readOnly && name !== config.readTool) {
+    if (readOnly && name !== config.readTool) {
       reply(id, refused("Open dashboard controls first."));
       return;
     }
@@ -149,6 +151,12 @@ function dashboardHostBridge(config, io) {
   if (media && typeof media.addEventListener === "function")
     media.addEventListener("change", onTheme);
   return {
+    lock() {
+      if (readOnly)
+        return;
+      readOnly = true;
+      onTheme();
+    },
     dispose() {
       view.removeEventListener("message", onMessage);
       if (media && typeof media.removeEventListener === "function")
