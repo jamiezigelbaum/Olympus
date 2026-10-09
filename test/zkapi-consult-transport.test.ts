@@ -11,7 +11,7 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
@@ -2469,7 +2469,7 @@ describe('zkAPI consult transport: the daemon finds its wallet companion', () =>
       writeFileSync(join(installBin, 'zkapi-clientd'), '#!/bin/sh\n');
       const linkDir = join(root, 'bin');
       mkdirSync(linkDir);
-      execFileSync('/bin/ln', ['-s', join(installBin, 'zkapi-clientd'), join(linkDir, 'zkapi-clientd')]);
+      symlinkSync(join(installBin, 'zkapi-clientd'), join(linkDir, 'zkapi-clientd'));
       const env = daemonEnvironment({ HOME: '/home/x', PATH: `/usr/bin:${installBin}:/bin` }, join(linkDir, 'zkapi-clientd'));
       expect(env.PATH).toBe(`${installBin}:/usr/bin:/bin`);
       expect(env.HOME).toBe('/home/x');
