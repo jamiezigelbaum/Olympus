@@ -1486,6 +1486,27 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
 } as const;
 
 /**
+ * What the same panel adds when the computer itself hosts it (unified
+ * dashboard phase 4, design signed off by Jamie 2026-10-09): the one "On this
+ * computer" section, the locked-controls reason, and Index faster under
+ * Progress → Details. Nothing else on the page has words of its own here.
+ */
+export const DASHBOARD_COMPUTER_PANEL_COPY = {
+  section: 'On this computer',
+  onlyHere: 'only here',
+  open: 'Open',
+  rows: {
+    keys: { title: 'Keys', line: 'Venice, Readwise and X keys' },
+    agents: { title: 'Agents', line: 'Remote access and connected agents' },
+    outsideHelp: { title: 'Outside help', line: 'Anonymous answers (zkAPI)' },
+    connector: { title: 'Build a connector', line: 'For a source Olympus does not have yet' },
+  },
+  /** Beside every control while the local dashboard controls are locked. */
+  locked: 'Open dashboard controls first',
+  indexFaster: DASHBOARD_INDEX_FASTER,
+} as const;
+
+/**
  * Control labels the ChatGPT producer puts on setup fixes
  * (src/workers/chatgpt/dashboard-view-model.ts, which proposed them as
  * CHATGPT_SETUP_LABELS). Closed set, owner words.

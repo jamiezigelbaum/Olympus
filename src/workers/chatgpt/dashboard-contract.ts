@@ -314,6 +314,46 @@ export const MODEL_RETRY_TOOL_NAME = 'olympus_model_retry';
  */
 export const SYNC_SOURCE_TOOL_NAME = 'olympus_sync_source';
 
+/* ------------------------------------------------------------------ */
+/* Olympus's own hosts (unified dashboard phase 4, 2026-10-09)          */
+/* ------------------------------------------------------------------ */
+/*
+ * The same `ui://olympus/dashboard` page also runs inside two hosts Olympus
+ * owns: the local dashboard at /dashboard on the computer, and the native
+ * OpenClaw Control UI tab. Each answers `ui/initialize` the way ChatGPT does
+ * and adds one namespaced `hostContext` key, so the panel can tell it is not
+ * in ChatGPT. ChatGPT never sends the key; every field is optional.
+ */
+
+/** The `hostContext` key an Olympus host adds. */
+export const OLYMPUS_HOST_CONTEXT_KEY = 'olympus/host';
+
+export interface OlympusHostContext {
+  /** `computer`: /dashboard on the computer; `openclaw`: the Control UI tab. */
+  kind: 'computer' | 'openclaw';
+  /** The local dashboard controls are locked: every control is disabled with the locked reason. */
+  readOnly?: boolean;
+  /** Computer only: the local pages the "On this computer" section opens. */
+  links?: Partial<Record<'keys' | 'agents' | 'outsideHelp' | 'connector', string>>;
+}
+
+/**
+ * Computer only: the `olympus_dashboard` result's `_meta` key carrying what
+ * only the computer shows (Index faster's position). ChatGPT never sees it.
+ */
+export const COMPUTER_META_KEY = 'olympus/computer';
+
+export interface ComputerDashboardMeta {
+  /** Present while the overnight guard reports a known state; `on` is the operator override. */
+  indexFaster?: { on: boolean };
+}
+
+/**
+ * Computer only, never listed to ChatGPT: Index faster (`{on}`), the
+ * embedding-priority override the Background page used to switch.
+ */
+export const INDEX_FASTER_TOOL_NAME = 'olympus_index_faster';
+
 /** The `_meta` key carrying the picker's names to the widget only. */
 export const SCOPE_UI_META_KEY = 'olympus/scope';
 
