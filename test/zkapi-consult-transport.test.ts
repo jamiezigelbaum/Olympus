@@ -193,11 +193,20 @@ beforeAll(() => {
   process.on('exit', () => rmSync(binDir, { recursive: true, force: true }));
 });
 
+/**
+ * Distinct free ports. Every listener stays bound until all are chosen: two
+ * separate picks can return the same port once the first is released, and a
+ * daemon sharing Tor's port dies on its own listen.
+ */
+function freePorts(count: number): number[] {
+  const listeners = Array.from({ length: count }, () => Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }));
+  const ports = listeners.map((listener) => listener.port);
+  for (const listener of listeners) listener.stop(true);
+  return ports;
+}
+
 function freePort(): number {
-  const listener = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
-  const port = listener.port;
-  listener.stop(true);
-  return port;
+  return freePorts(1)[0]!;
 }
 
 interface Plan {
@@ -258,8 +267,7 @@ beforeEach(() => {
   configDir = join(root, 'zkapi-config');
   mkdirSync(configDir);
   statePath = join(root, 'zkapi-consult-state.json');
-  daemonPort = freePort();
-  torPort = freePort();
+  [daemonPort, torPort] = freePorts(2) as [number, number];
   plan = { port: daemonPort, relayPort: torPort, apiKey: API_KEY, version: '0.1.6', requireKey: true, reuse: 0, statePath };
   writePlan();
 });
@@ -1863,14 +1871,14 @@ describe('evidence adapters refuse a zkAPI daemon endpoint where they dispatch',
   });
 
   test('the guard reads the owner\'s policy itself: no validation needed first, and an unreadable policy fails closed', async () => {
-    const port = freePort();
+    const [port, otherPort] = freePorts(2) as [number, number];
     mkdirSync(join(root, '.olympus'), { recursive: true });
     const policyPath = join(root, '.olympus', 'sovereignty.json');
     const config = baseConfig();
     config.modelProfiles.zk = zkapiProfile({ baseUrl: `http://127.0.0.1:${port}/v1` });
     writeFileSync(policyPath, JSON.stringify(config));
     expect(() => assertNotZkapiDaemonEndpoint(`http://127.0.0.1:${port}/v1/chat/completions`, 'probe')).toThrow(/zkAPI daemon/);
-    const localModel = `http://127.0.0.1:${freePort()}/v1/chat/completions`;
+    const localModel = `http://127.0.0.1:${otherPort}/v1/chat/completions`;
     expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).not.toThrow();
     writeFileSync(policyPath, '{ not json');
     expect(() => assertNotZkapiDaemonEndpoint(localModel, 'probe')).toThrow(/cannot be read/);
