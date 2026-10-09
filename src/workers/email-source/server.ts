@@ -314,6 +314,8 @@ import {
   type WhatsAppConnectorStoreSyncHandler,
 } from '../whatsapp/index.ts';
 import { SqliteSourceDashboardHistory, type SourceDashboardViewModel } from '../source-dashboard.ts';
+import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
+import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
 import {
   SqliteSourceIngestionLedgerStore,
   buildSourceIngestionLedgerSnapshot,
@@ -4195,6 +4197,9 @@ export async function main(): Promise<void> {
   // Where a sign-in started from ChatGPT returns (the relay's origin and this
   // install's id); assigned once the relay URL source exists below.
   let chatgptOAuthHandback: () => { origin: string; installId: string } | undefined = () => undefined;
+  // Built further down, once the ChatGPT surface exists; the worker only
+  // calls it per request.
+  let dashboardPanelTools: DashboardPanelTools | undefined;
   const worker = createEmailSourceWorker({
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
@@ -4253,18 +4258,18 @@ export async function main(): Promise<void> {
             modelSetup: getModelSetup,
             checkModelSetup: () => modelSetup.checkLocalModels(),
             connectModelKey,
-            // The local dashboard's Privacy row and editor, and its Models row,
-            // read and act through the same engine operations as the ChatGPT
-            // setup tools (set up further down; called only per request).
-            privacy: {
-              summary: () => dashboardPrivacy.summary(),
-              read: () => dashboardPrivacy.read(),
-              save: (update) => dashboardPrivacy.save(update),
+            // The panel's tools on the computer; bound late (set up further
+            // down; called only per request).
+            panelTools: {
+              allows: (name) => dashboardPanelTools?.allows(name) === true,
+              call: (name, args, context) => {
+                if (!dashboardPanelTools) throw new Error('dashboard panel tools are not ready');
+                return dashboardPanelTools.call(name, args, context);
+              },
             },
             // Outside help (consults): the Mac dashboard card's backend, the
-            // one caller of the settings writer; bound late like privacy.
+            // one caller of the settings writer; bound late like the panel's tools.
             consult: {
-              summary: () => dashboardConsult.summary(),
               status: () => dashboardConsult.status(),
               setEnabled: (update) => dashboardConsult.setEnabled(update),
               saveRoute: (update) => dashboardConsult.saveRoute(update),
@@ -4272,22 +4277,6 @@ export async function main(): Promise<void> {
               recover: (update) => dashboardConsult.recover(update),
               abandon: (update) => dashboardConsult.abandon(update),
               installTools: (update) => dashboardConsult.installTools(update),
-            },
-            modelInstalls: () => {
-              const embedding = chatgptEmbeddingState();
-              const privateModel = chatgptPrivateModelState();
-              const transcription = dashboardTranscriptionState();
-              return {
-                ...(embedding ? { embedding } : {}),
-                ...(privateModel ? { privateModel } : {}),
-                ...(transcription ? { transcription } : {}),
-              };
-            },
-            retryModel: (model) => chatgptSetup.retryModel(model),
-            downloadTranscriptionModel: () => {
-              const engine = process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env);
-              const state = engine?.downloadNow?.() ?? 'unavailable';
-              return state === 'pending' ? 'started' : state;
             },
             stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
@@ -4650,16 +4639,6 @@ export async function main(): Promise<void> {
       return builtIn.length > 0;
     },
   });
-  // The local dashboard's privacy settings, through the ChatGPT privacy
-  // tools' own operation (dashboard-privacy.ts): counts for the pages that
-  // name privacy, full settings only for the editor, and saves that always
-  // carry their revision.
-  const { createDashboardPrivacyAdapter } = await import('./dashboard-privacy.ts');
-  const dashboardPrivacy = createDashboardPrivacyAdapter({
-    backend: chatgptSetup,
-    readSettings: (pending) => readChatGptPrivacySettings(process.env, pending),
-    pendingCount: pendingClassificationCount,
-  });
   // Outside help (consults, stage C5): the Mac dashboard card's backend
   // (dashboard-consult.ts) and, through it, the only caller of the
   // outside-help settings writer. Wired here at the composition root so the
@@ -4770,6 +4749,43 @@ export async function main(): Promise<void> {
     return model ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env, model)) : undefined;
   };
 
+  // ChatGPT's dashboard and setup tools, as /mcp runs them. The same options
+  // serve the panel on Olympus's own hosts (dashboard-panel-tools.ts): the
+  // computer's /dashboard and the OpenClaw Control UI tab.
+  const chatgptSurface = {
+    privateAnswers,
+    dashboardView: async (signal?: AbortSignal) => {
+      const response = await worker.fetch(new Request(
+        'http://olympus-worker.internal/dashboard.json',
+        signal ? { signal } : {},
+      ));
+      if (!response.ok) throw new Error(`dashboard view unavailable (${response.status})`);
+      return await response.json() as SourceDashboardViewModel;
+    },
+    setup: chatgptSetup,
+    ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
+    ...(chatgptPrivateMatchProbe ? { privateMatchProbe: chatgptPrivateMatchProbe } : {}),
+    answerModelAvailable: chatgptAnswerModelAvailable,
+    embedding: chatgptEmbeddingState,
+    privateModel: chatgptPrivateModelState,
+    transcription: dashboardTranscriptionState,
+    privacy: () => {
+      const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
+      return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
+    },
+  };
+  const { createDashboardPanelTools } = await import('./dashboard-panel-tools.ts');
+  dashboardPanelTools = createDashboardPanelTools({
+    surface: () => chatgptSurface,
+    setup: chatgptSetup,
+    workerFetch: worker.fetch,
+    makeContext: (signal) => remoteAgentOptions.makeOperationContext({ surface: 'native', displayName: 'Olympus dashboard' }, signal),
+    indexFasterState: async () => {
+      const runtime = await readEmbeddingRuntime({ env: process.env });
+      return runtime.state === 'unknown' ? undefined : runtime.overrideOn;
+    },
+  });
+
   const server = Bun.serve({
     hostname,
     port,
@@ -4810,26 +4826,7 @@ export async function main(): Promise<void> {
           chatgpt: {
             servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),
             readOnlyFor: isDemoGrant,
-            privateAnswers,
-            dashboardView: async (signal?: AbortSignal) => {
-              const response = await worker.fetch(new Request(
-                'http://olympus-worker.internal/dashboard.json',
-                signal ? { signal } : {},
-              ));
-              if (!response.ok) throw new Error(`dashboard view unavailable (${response.status})`);
-              return await response.json() as SourceDashboardViewModel;
-            },
-            setup: chatgptSetup,
-            ...(chatgptEvidenceSearch ? { evidenceSearch: chatgptEvidenceSearch } : {}),
-            ...(chatgptPrivateMatchProbe ? { privateMatchProbe: chatgptPrivateMatchProbe } : {}),
-            answerModelAvailable: chatgptAnswerModelAvailable,
-            embedding: chatgptEmbeddingState,
-            privateModel: chatgptPrivateModelState,
-            transcription: dashboardTranscriptionState,
-            privacy: () => {
-              const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
-              return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
-            },
+            ...chatgptSurface,
           },
         }),
         withWorkerBearerAuth(worker.fetch, { authToken, sessionSecret: dashboardSessionSecret.secret }),

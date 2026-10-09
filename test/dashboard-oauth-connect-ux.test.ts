@@ -39,8 +39,7 @@ import {
   type SourceDashboardViewModel,
 } from '../src/workers/source-dashboard.ts';
 import { mountDashboardController } from '../src/control-ui/browser-controller.ts';
-import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
-import { renderDashboardHomePage } from '../src/workers/dashboard/pages/home.ts';
+import { renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
 import { dashboardAttentionLine, dashboardStatus } from '../src/workers/dashboard/vocabulary.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 
@@ -162,119 +161,6 @@ describe('a provider refusal is a state the owner can act on, not a stuck handsh
   });
 });
 
-describe('the connect sheet only says a secret is saved when it is (olympus-test, 2026-09-23)', () => {
-  test('X with its secret on file: the field renders filled and masked, never as an empty "leave blank" box', () => {
-    const view = buildView({
-      oauthRedirectBaseUrl: TAILNET,
-      oauthClientIds: { x: 'x-client-id' },
-      oauthClientSecretAvailability: { x: true },
-    });
-    expect(actionOf(view, 'x.bookmarks')).toMatchObject({ kind: 'oauth', client_secret_on_file: true });
-    const sheet = sheetFor(renderDashboardSetupPage(view, { now: NOW }), 'connect-x-bookmarks');
-
-    expect(sheet).toContain(`<input class="keyfield" type="password" name="client_secret"`
-      + ` value="${DASHBOARD_SAVED_SECRET_FIELD_VALUE}" placeholder="Client secret"`);
-    expect(sheet).not.toMatch(/name="client_secret" required/);
-    expect(sheet).not.toContain('leave blank');
-  });
-
-  test('X without a secret on file routes to Set up with a required secret field and no saved claim', () => {
-    const view = buildView({ oauthRedirectBaseUrl: TAILNET, oauthClientIds: { x: 'x-client-id' } });
-    expect(actionOf(view, 'x.bookmarks')).toMatchObject({ kind: 'needs_setup' });
-    const html = renderDashboardSetupPage(view, { now: NOW });
-
-    expect(html).not.toContain(DASHBOARD_SAVED_SECRET_FIELD_VALUE);
-    expect(html).not.toContain('leave blank');
-  });
-
-  test('a source with no secret field never claims one is saved', () => {
-    const view = buildView({ oauthRedirectBaseUrl: TAILNET, oauthClientIds: { dropbox: 'dropbox-app-key' } });
-    expect(actionOf(view, 'dropbox.files')).not.toHaveProperty('client_secret_on_file');
-    const sheet = sheetFor(renderDashboardSetupPage(view, { now: NOW }), 'connect-dropbox-files');
-
-    expect(sheet).not.toContain(DASHBOARD_SAVED_SECRET_FIELD_VALUE);
-  });
-
-  test('a pending attempt says what a provider error page means; a quiet one does not', () => {
-    const pendingSheet = sheetFor(renderDashboardSetupPage(buildView({
-      oauthRedirectBaseUrl: TAILNET,
-      oauthClientIds: { x: 'x-client-id' },
-      oauthClientSecretAvailability: { x: true },
-      pendingConnects: [pending('x')],
-    }), { now: NOW }), 'connect-x-bookmarks');
-    expect(pendingSheet).toContain('shows an error instead of asking you to approve, the callback URL below is not'
-      + ' registered exactly on your app. Add it, press Cancel connection attempt, then Connect again.');
-
-    const quietSheet = sheetFor(renderDashboardSetupPage(buildView({
-      oauthRedirectBaseUrl: TAILNET,
-      oauthClientIds: { x: 'x-client-id' },
-      oauthClientSecretAvailability: { x: true },
-    }), { now: NOW }), 'connect-x-bookmarks');
-    expect(quietSheet).not.toContain('shows an error instead of asking you to approve');
-  });
-});
-
-describe('the connect sheet carries the URI, an editable key, and a way to give up', () => {
-  test('the setup page renders the redirect URI above the Client ID field, copyable', () => {
-    const html = renderDashboardSetupPage(buildView({
-      oauthRedirectBaseUrl: TAILNET,
-      oauthClientIds: { dropbox: 'dropbox-app-key' },
-    }), { now: NOW });
-    const sheet = sheetFor(html, 'connect-dropbox-files');
-
-    expect(sheet).toContain(`<div class="promptbox" id="connect-dropbox-files-redirect">${TAILNET}/oauth/callback/dropbox</div>`);
-    expect(sheet).toContain('data-copy-target="#connect-dropbox-files-redirect"');
-    expect(sheet).toContain('OAuth 2 → Redirect URIs');
-    // Above the field, not below it: registering the URI is the step before the
-    // key is worth pasting.
-    expect(sheet.indexOf('connect-dropbox-files-redirect')).toBeLessThan(sheet.indexOf('name="client_id"'));
-    // Prefilled AND editable — a wrong client id was previously unchangeable.
-    expect(sheet).toContain('name="client_id" required value="dropbox-app-key"');
-    expect(sheet).not.toContain('readonly');
-  });
-
-  test('a pending attempt gets a Cancel control; a quiet source does not', () => {
-    const pendingHtml = renderDashboardSetupPage(buildView({
-      oauthRedirectBaseUrl: TAILNET,
-      oauthClientIds: { dropbox: 'dropbox-app-key' },
-      pendingConnects: [pending('dropbox')],
-    }), { now: NOW });
-
-    expect(pendingHtml).toContain('data-connect-kind="oauth_cancel"');
-    expect(pendingHtml).toContain('>Cancel connection attempt</button>');
-    // The Connecting row itself is no longer a dead end either.
-    expect(pendingHtml).toContain('>Cancel sign-in</button>');
-
-    const quietHtml = renderDashboardSetupPage(buildView({
-      oauthRedirectBaseUrl: TAILNET,
-      oauthClientIds: { dropbox: 'dropbox-app-key' },
-    }), { now: NOW });
-    expect(quietHtml).not.toContain('data-connect-kind="oauth_cancel"');
-  });
-
-  test("home's reconnect row opens the same sheet and repeats the refusal", () => {
-    const html = renderDashboardHomePage(buildView({
-      oauthRedirectBaseUrl: TAILNET,
-      oauthClientIds: { dropbox: 'dropbox-app-key' },
-      pendingConnects: [pending('dropbox', { code: 'redirect_uri_mismatch' })],
-    }), { now: NOW, controlSessionCsrfToken: 'csrf-fixture' });
-
-    expect(html).toContain('data-sheet-toggle="#connect-dropbox-files"');
-    expect(html).toContain('Provider refused the callback (redirect_uri_mismatch)');
-    expect(html).toContain(`${TAILNET}/oauth/callback/dropbox`);
-  });
-
-  test('every rendered redirect URI is escaped rather than trusted as markup', () => {
-    const html = renderDashboardSetupPage(buildView({
-      oauthRedirectBaseUrl: 'https://host.example/"><script>evil()</script>',
-      oauthClientIds: { dropbox: 'dropbox-app-key' },
-    }), { now: NOW });
-
-    expect(html).not.toContain('<script>evil()');
-    expect(html).toContain('&lt;script&gt;evil()&lt;/script&gt;');
-  });
-});
-
 describe('the card walks the owner through registering the callback itself', () => {
   test('Dropbox names its console, its permissions, its setting, and what to bring back', () => {
     const sheet = connectSheet('dropbox.files', { dropbox: 'dropbox-app-key' });
@@ -381,13 +267,6 @@ describe('the provider opens in its own tab', () => {
     // A blank tab is never left orphaned when the start call does not produce
     // an authorization URL.
     expect(script).toContain('closeAuthorizationTab(authorizationTab)');
-  });
-
-  test('the cancel form posts to the cancel route and nothing else does', () => {
-    const script = mountDashboardController.toString();
-
-    expect(script).toContain('action: "cancel_oauth"');
-    expect(script).toContain('connect === "oauth_cancel"');
   });
 });
 
@@ -685,7 +564,8 @@ describe('an unauthenticated callback cannot touch an attempt without its state'
       expect(response.status, label).toBe(200);
       expect(response.headers.get('Content-Type'), label).toContain('text/html');
       expect(response.headers.get('X-Frame-Options'), label).toBe('DENY');
-      expect(response.headers.get('Content-Security-Policy'), label).toBe("frame-ancestors 'none'");
+      // The host page carries its own full policy (host-page.ts); every page refuses framing.
+      expect(response.headers.get('Content-Security-Policy'), label).toContain("frame-ancestors 'none'");
     }
 
     // The done page keeps the header it already had; the framing refusal is
@@ -852,19 +732,21 @@ function guidanceOf(view: SourceDashboardViewModel, sourceId: string): string | 
 
 /** The `connect-*` sheet for a source whose client key is on file. */
 function connectSheet(sourceId: string, clientIds: Record<string, string>, baseUrl = TAILNET): string {
-  const html = renderDashboardSetupPage(buildView({
-    oauthRedirectBaseUrl: baseUrl,
-    oauthClientIds: clientIds,
-  }), { now: NOW });
+  const html = renderDashboardLocalPage('keys', {
+    url: new URL('http://worker.test/dashboard?keys'),
+    view: buildView({ oauthRedirectBaseUrl: baseUrl, oauthClientIds: clientIds }),
+    options: { now: NOW },
+  });
   return sheetFor(html, `connect-${sourceId.replace(/[^A-Za-z0-9_-]+/g, '-')}`);
 }
 
 /** The `setup-*` sheet for a source with no client key registered yet. */
 function setupSheet(sourceId: string, clientIds: Record<string, string> = {}, baseUrl = TAILNET): string {
-  const html = renderDashboardSetupPage(buildView({
-    oauthRedirectBaseUrl: baseUrl,
-    oauthClientIds: clientIds,
-  }), { now: NOW });
+  const html = renderDashboardLocalPage('keys', {
+    url: new URL('http://worker.test/dashboard?keys'),
+    view: buildView({ oauthRedirectBaseUrl: baseUrl, oauthClientIds: clientIds }),
+    options: { now: NOW },
+  });
   return sheetFor(html, `setup-${sourceId.replace(/[^A-Za-z0-9_-]+/g, '-')}`);
 }
 

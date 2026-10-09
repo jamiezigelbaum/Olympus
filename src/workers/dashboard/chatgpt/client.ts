@@ -25,6 +25,7 @@ import type {
 import type {
   DASHBOARD_CHATGPT_CONNECTION_COPY,
   DASHBOARD_CHATGPT_PAGE_COPY,
+  DASHBOARD_COMPUTER_PANEL_COPY,
   DashboardStatusColorToken,
 } from '../vocabulary.ts';
 
@@ -55,6 +56,20 @@ export interface ChatGptDashboardClientConfig {
   privacy: ChatGptPrivacyConfig;
   /** Tool error codes whose fixed sentence is shown beside the control that ran the tool. */
   inlineErrorCodes: readonly string[];
+  /**
+   * An Olympus host (the computer's /dashboard, the OpenClaw Control UI tab)
+   * adds `hostContext[hostContextKey]` (dashboard-contract.ts
+   * OlympusHostContext). ChatGPT never sends it, so none of this applies there.
+   */
+  host: {
+    contextKey: string;
+    /** The computer-only `_meta` key on a dashboard result (ComputerDashboardMeta). */
+    computerMetaKey: string;
+    indexFasterTool: string;
+    /** Unpair for a paired chat app, offered in its ⋯ menu on the computer only. */
+    unpairTool: string;
+    copy: typeof DASHBOARD_COMPUTER_PANEL_COPY;
+  };
 }
 
 // Loose shapes: the page validates what it reads instead of trusting a type.
@@ -103,6 +118,14 @@ export function chatgptDashboardClient(
     actionError: { key: string; text: string } | null;
     /** Sources whose Sync now was pressed and whose `checking` the page has not read back yet. */
     syncPressed: Record<string, boolean>;
+    /** '' in ChatGPT; `computer` or `openclaw` inside an Olympus host. */
+    hostKind: string;
+    /** The local dashboard controls are locked (computer host only). */
+    hostReadOnly: boolean;
+    /** The local pages the computer host offers, by row key: exact URLs the host gave. */
+    hostLinks: Record<string, string>;
+    /** The computer-only facts from the last dashboard result (`_meta[computerMetaKey]`). */
+    computerMeta: Any;
   } = {
     data: null,
     relayDown: false,
@@ -117,7 +140,12 @@ export function chatgptDashboardClient(
     privacyRules: -1,
     actionError: null,
     syncPressed: {},
+    hostKind: '',
+    hostReadOnly: false,
+    hostLinks: {},
+    computerMeta: null,
   };
+  const H = config.host;
 
   // ---- host bridge -------------------------------------------------------
   let nextId = 1;
@@ -166,12 +194,33 @@ export function chatgptDashboardClient(
 
   function applyHostContext(context: Any): void {
     if (!context || typeof context !== 'object') return;
+    applyOlympusHost(context[H.contextKey]);
     if (context.theme === 'light' || context.theme === 'dark') state.theme = context.theme;
     if (typeof context.displayMode === 'string') state.displayMode = context.displayMode;
     if (Array.isArray(context.availableDisplayModes)) {
       state.canFullscreen = context.availableDisplayModes.indexOf('fullscreen') >= 0;
     }
     render();
+  }
+
+  /** An Olympus host's own facts (OlympusHostContext); anything malformed is ignored. */
+  function applyOlympusHost(value: Any): void {
+    if (!value || typeof value !== 'object') return;
+    if (value.kind !== 'computer' && value.kind !== 'openclaw') return;
+    state.hostKind = value.kind;
+    state.hostReadOnly = value.readOnly === true;
+    const links: Record<string, string> = {};
+    const given = value.links && typeof value.links === 'object' ? value.links : {};
+    for (const key of ['keys', 'agents', 'outsideHelp', 'connector']) {
+      const href = given[key];
+      if (typeof href === 'string' && /^https?:\/\//.test(href)) links[key] = href;
+    }
+    state.hostLinks = value.kind === 'computer' ? links : {};
+  }
+
+  /** The panel runs on the computer itself (the local /dashboard). */
+  function onComputer(): boolean {
+    return state.hostKind === 'computer';
   }
 
   function readOpenAiGlobals(): void {
@@ -240,6 +289,8 @@ export function chatgptDashboardClient(
     const content = result.structuredContent;
     if (isDashboard(content)) {
       state.data = content;
+      const meta = result._meta && typeof result._meta === 'object' ? result._meta[H.computerMetaKey] : null;
+      state.computerMeta = meta && typeof meta === 'object' ? meta : null;
       state.relayDown = false;
       // The engine's own `lastManualSync` now says whether a press is still checking.
       if (!state.busy) state.syncPressed = {};
@@ -258,10 +309,11 @@ export function chatgptDashboardClient(
   }
 
   /** The fixed sentence of a tool error the page shows inline, or ''. */
-  function inlineError(result: Any): string {
+  function inlineError(result: Any, name?: string): string {
     if (!result || !result.isError) return '';
     const code = result.structuredContent && typeof result.structuredContent.error === 'string' ? result.structuredContent.error : '';
-    if (config.inlineErrorCodes.indexOf(code) < 0) return '';
+    // Unpair's refusals are the computer's own sentences (busy, a record to repair): always beside the control.
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && name === H.unpairTool)) return '';
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
     return text ? String(text.text) : '';
@@ -280,7 +332,7 @@ export function chatgptDashboardClient(
         redraw();
         return;
       }
-      const failed = inlineError(result);
+      const failed = inlineError(result, name);
       if (failed) {
         if (name === config.syncTool) {
           state.syncPressed = {};
@@ -289,6 +341,16 @@ export function chatgptDashboardClient(
         }
         state.actionError = { key, text: failed };
         render(key);
+        return;
+      }
+      if (name === H.unpairTool) {
+        // Unpair says what it did, an incomplete removal included: keep its words on the page.
+        const parts = result && Array.isArray(result.content) ? result.content : [];
+        const said = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
+        refresh();
+        // refresh() clears the notice as it starts; the read's answer leaves it.
+        state.notice = said ? String(said.text) : '';
+        redraw();
         return;
       }
       if (acceptResult(result, false)) return;
@@ -311,7 +373,10 @@ export function chatgptDashboardClient(
   }
 
   function openLink(href: string): void {
-    if (typeof href !== 'string' || href.slice(0, 6) !== 'https:') return;
+    if (typeof href !== 'string') return;
+    // Only https, or one of the exact local pages the computer host offered.
+    const hostLink = Object.keys(state.hostLinks).some((key) => state.hostLinks[key] === href);
+    if (href.slice(0, 6) !== 'https:' && !hostLink) return;
     const host = openai();
     if (host && typeof host.openExternal === 'function') host.openExternal({ href });
     else request('ui/open-link', { url: href }).then(() => undefined, () => undefined);
@@ -451,9 +516,21 @@ export function chatgptDashboardClient(
     return link;
   }
   function globalReason(): string {
+    // The computer's controls are locked: every control waits for them.
+    if (state.hostReadOnly) return state.hostKind === 'openclaw' ? H.copy.readOnlyOpenClaw : H.copy.locked;
     const current = connectionState();
     if (GLOBAL_STATES.indexOf(current) < 0) return '';
     return ((C as Any)[current] || C.relay_unavailable).disabledReason;
+  }
+  /**
+   * The reason beside a disabled control. On the computer's locked page the
+   * banner above the panel already says it once, so the controls are only
+   * disabled; everywhere else (OpenClaw read-only, a ChatGPT connection state)
+   * there is no banner and each control says why.
+   */
+  function rowReason(text: string): HTMLElement | null {
+    if (state.hostReadOnly && state.hostKind === 'computer') return null;
+    return el('span', 'reason', text);
   }
   function compact(): boolean {
     return state.displayMode !== '' && state.displayMode !== 'fullscreen';
@@ -465,7 +542,7 @@ export function chatgptDashboardClient(
     if (!fix || typeof fix.label !== 'string') return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key, null, style), el('span', 'reason', blocked || String(fix.disabledReason)));
+      add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
       // A repair only the computer can make still says how, unless the whole page is waiting.
       if (!blocked) add(wrap, howLink(fix, key));
       return wrap;
@@ -513,7 +590,7 @@ export function chatgptDashboardClient(
         wrap.className = 'fix confirm';
         add(
           wrap,
-          el('span', 'reason strong', P.confirmPrompt),
+          el('span', 'reason strong', typeof fix.confirmText === 'string' && fix.confirmText ? fix.confirmText : P.confirmPrompt),
           button(fill(P.confirm, { label: String(fix.label).toLowerCase() }), key + ':yes', run, 'danger'),
           button(P.cancel, key + ':no', () => {
             state.confirming = '';
@@ -721,6 +798,9 @@ export function chatgptDashboardClient(
     // and no second Sync now while one is checking.
     const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry: Any) =>
       (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    // Unpair for a paired chat app, on the computer only: the pairing lives here.
+    const unpair = unpairEntry(id);
+    if (unpair) menu.push(unpair);
     let menuBox: HTMLElement | null = null;
     if (menu.length) {
       const glyph = el('span', '', '⋯');
@@ -932,7 +1012,7 @@ export function chatgptDashboardClient(
       const blocked = globalReason();
       const edit = button(W.edit, 'privacy:edit', blocked ? null : () => openPrivacy('privacy:edit'), 'plain');
       edit.setAttribute('aria-label', W.editLabel);
-      add(row, blocked ? add(el('span', 'fix'), edit, el('span', 'reason', blocked)) : edit);
+      add(row, blocked ? add(el('span', 'fix'), edit, rowReason(blocked)) : edit);
     }
     return add(section, add(el('ul', 'rows'), row));
   }
@@ -982,7 +1062,8 @@ export function chatgptDashboardClient(
     const line = el('p', stalled ? 'progress-line stalled' : progressPaused() ? 'progress-line paused' : 'progress-line', progressText(progress));
     add(section, line, progressBar(progress.percent, P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [];
-    if (withDetails && stages.length) {
+    const faster = indexFasterControl();
+    if (withDetails && (stages.length || faster)) {
       const box = details('progress-details', doc.createTextNode(P.details), 'disclosure');
       const list = el('ul', 'plain');
       stages.forEach((stage: Any) => add(list, el('li', '', fill(P.stageLine, {
@@ -991,9 +1072,41 @@ export function chatgptDashboardClient(
         total: count(stage.total),
         unit: unitWord(stage.unit, Number(stage.total) || 0),
       }))));
-      add(section, add(box, list));
+      add(section, add(box, stages.length ? list : null, faster));
     }
     return section;
+  }
+
+  /** A source is indexing right now (its first unfinished stage is indexing, and it is moving). */
+  function indexingRuns(): boolean {
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    return sources.some((source: Any) => {
+      const progress = sourceProgress(source);
+      return !!progress && progress.stage === 'indexing' && !progress.stalled;
+    });
+  }
+
+  /** Computer only, while indexing runs: Index faster (or Stop), with what it costs. */
+  /** The computer's Unpair for this paired chat app, with the engine's own confirmation, or null. */
+  function unpairEntry(id: string): Any {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.unpair)) return null;
+    const entry = meta.unpair.filter((item: Any) => item && item.sourceId === id)[0];
+    if (!entry || typeof entry.label !== 'string' || typeof entry.confirmation !== 'string') return null;
+    return { label: entry.label, tool: H.unpairTool, args: { source_id: id }, destructive: true, confirmText: entry.confirmation };
+  }
+
+  function indexFasterShown(): boolean {
+    const meta = state.computerMeta;
+    return onComputer() && !!meta && !!meta.indexFaster && typeof meta.indexFaster.on === 'boolean' && indexingRuns();
+  }
+
+  function indexFasterControl(): HTMLElement | null {
+    if (!indexFasterShown()) return null;
+    const on = state.computerMeta.indexFaster.on === true;
+    const W = H.copy.indexFaster;
+    const fix = { label: on ? W.off : W.on, tool: H.indexFasterTool, args: { on: !on } };
+    return add(el('div', 'actions index-faster'), fixControl(fix, 'index-faster', 'plain', false), el('span', 'reason', on ? W.explainOff : W.explainOn));
   }
 
   /**
@@ -1074,6 +1187,16 @@ export function chatgptDashboardClient(
     return item;
   }
 
+  /**
+   * Change models: status only in ChatGPT (disabled, with its reason). On the
+   * computer it is enabled and opens the local models page (its own href,
+   * which the computer host maps there).
+   */
+  function changeModelsFix(fix: Any): Any {
+    if (!onComputer() || !fix || !helpHref(fix.href)) return fix;
+    return { label: fix.label, href: fix.href, openHref: true };
+  }
+
   /** One line per installing model, shown without expanding; the fix lives in Needs you, not here. */
   function installLines(models: DashboardModels): ModelInstallLine[] {
     const lines: ModelInstallLine[] = [];
@@ -1111,7 +1234,7 @@ export function chatgptDashboardClient(
     if (words.answers) add(list, el('li', '', P.modelAnswers + ': ' + words.answers));
     add(list, transcriptionItem(models));
     add(box, list);
-    if (models.change) add(box, add(el('div', 'actions'), fixControl(models.change, 'models:change', 'plain', true)));
+    if (models.change) add(box, add(el('div', 'actions'), fixControl(changeModelsFix(models.change), 'models:change', 'plain', true)));
     // A failed search or private-model install is said once, in Needs you with
     // its Try again; transcription has no Needs-you item, so its line stays.
     const installs = installLines(models).filter((entry) => entry.state !== 'failed' || entry.which === 'transcription');
@@ -1163,9 +1286,33 @@ export function chatgptDashboardClient(
     add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
     add(page, privacySection(data));
     const sourceList = Array.isArray(data.sources) ? data.sources : [];
-    add(page, progressRepeatsOneRow(sourceList) ? null : progressSection(data.progress, true));
+    add(page, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data.progress, true));
     add(page, modelsSection(data.models));
+    add(page, computerSection());
     return page;
+  }
+
+  /**
+   * Computer only, at the end: what can't work through ChatGPT (keys, agents,
+   * outside help, building a connector), each opening its local page.
+   */
+  function computerSection(): HTMLElement | null {
+    if (!onComputer()) return null;
+    const W = H.copy;
+    const keys = ['keys', 'agents', 'outsideHelp', 'connector'].filter((key) => !!state.hostLinks[key]);
+    if (!keys.length) return null;
+    const heading = add(el('h2'), doc.createTextNode(W.section + ' '), el('span', 'tag', W.onlyHere));
+    const section = add(el('section', 'section on-computer'), heading);
+    const list = el('ul', 'rows');
+    for (const key of keys) {
+      const words = (W.rows as Any)[key];
+      const text = add(el('div', 'row-text'), el('p', '', words.title), el('p', 'muted', words.line));
+      const href = state.hostLinks[key]!;
+      const open = button(W.open, 'computer:' + key, () => openLink(href), 'plain');
+      open.setAttribute('aria-label', W.open + ' ' + words.title);
+      add(list, add(el('li', 'row'), text, open));
+    }
+    return add(section, list);
   }
 
   // ---- render ------------------------------------------------------------
@@ -1229,6 +1376,9 @@ export function chatgptDashboardClient(
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
+    // An Olympus host starts sign-in on the computer itself, so its link is
+    // the provider's own page, not a one-time mcp.olympusplugin.ai link.
+    directSignIn: () => state.hostKind !== '',
     setDashboard: (value: Any) => {
       if (!isDashboard(value)) return;
       // The Connect flow's own read is newer than anything still in flight.
@@ -1389,6 +1539,9 @@ export function chatgptDashboardClient(
   }, config.resultTimeoutMs).then((result) => {
     if (result && result.hostContext) applyHostContext(result.hostContext);
     notify('ui/notifications/initialized');
+    // ChatGPT delivers the first result itself; an Olympus host has no
+    // conversation turn behind it, so the page reads the dashboard once.
+    if (state.hostKind && !state.data) refresh();
   }, () => undefined);
   if (!state.data) waitForResult();
 }

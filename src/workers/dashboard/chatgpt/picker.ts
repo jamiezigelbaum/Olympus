@@ -78,6 +78,13 @@ export interface ChatGptPickerKit {
   isDashboard(value: Any): boolean;
   /** The fixed sentence of a setup tool error the page shows inline (sign_in_failed, …), or ''. */
   errorText(result: Any): string;
+  /**
+   * The page runs inside an Olympus host (the computer's /dashboard, the
+   * OpenClaw Control UI tab): sign-in starts on the computer itself, so the
+   * link is the provider's own https page rather than a one-time
+   * mcp.olympusplugin.ai/go/ link.
+   */
+  directSignIn(): boolean;
   setDashboard(value: Any): void;
   /** Leave the picker: optional notice, refresh the dashboard when asked, focus the control that opened it. */
   close(notice: string, refresh: boolean, focusKey: string): void;
@@ -183,8 +190,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       } catch {
         continue;
       }
-      if (parsed.protocol === 'https:' && parsed.hostname === kit.config.connectHost
-        && parsed.pathname.indexOf('/go/') === 0 && parsed.pathname.length > 4 && !parsed.username && !parsed.password) {
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) continue;
+      if (kit.directSignIn()) return parsed.href;
+      if (parsed.hostname === kit.config.connectHost && parsed.pathname.indexOf('/go/') === 0 && parsed.pathname.length > 4) {
         return parsed.href;
       }
     }

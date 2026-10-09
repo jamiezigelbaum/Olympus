@@ -1,5 +1,3 @@
-import { DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS } from './static-styles.ts';
-export { DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS };
 /**
  * The page's shared HTML pieces: status glyphs, cards, rows, the connector
  * sheet, and the standalone bootstrap for the shared browser controller.
@@ -19,11 +17,8 @@ import type {
   DashboardSourceCard,
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
-import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
-import { dashboardSourceProgress, type DashboardPhaseId } from './phases.ts';
 import { DASHBOARD_STATUS_COLORS, DASHBOARD_THEME_CSS } from './theme.ts';
-import { privacyLogic } from './shared-privacy-logic.ts';
-import { dashboardActionLabel, type DashboardStatus } from './vocabulary.ts';
+import { DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, dashboardActionLabel, type DashboardStatus } from './vocabulary.ts';
 
 export function escapeHtml(value: string): string {
   return value
@@ -58,13 +53,6 @@ function clampFraction(value: number): number {
   if (value <= 0) return 0;
   if (value >= 1) return 1;
   return value;
-}
-
-function clampPercent(value: number): number {
-  if (Number.isNaN(value)) return 0;
-  if (value <= 0) return 0;
-  if (value >= 100) return 100;
-  return Math.round(value * 10) / 10;
 }
 
 /**
@@ -273,73 +261,20 @@ export function statusGlyph(status: DashboardStatus, fraction?: number): string 
   return dotGlyph(DASHBOARD_STATUS_COLORS[status]);
 }
 
-export interface DashboardCardInput {
-  label: string;
-  status: DashboardStatus;
-  /** The card's second line; omitted or empty renders no line at all. */
-  subLine?: string;
-  /** 0..1 for the Working donut. */
-  fraction?: number;
-  /** Detail-page link target, when this card has a detail page. */
-  href?: string;
-}
-
-/**
- * One source, as a card.
- *
- * The WHOLE card is the link, not the name inside it (owner ruling,
- * 2026-08-18): a card that looks like a target should behave like one
- * everywhere inside its own border. It is a real anchor rather than a scripted
- * div, so it works before any script runs and reads as a link to a screen
- * reader; it keeps the card's own weight and color (a.card.cardlink in the
- * theme) so a source name is still a name you can follow rather than a blue
- * link. Without a href it stays a plain div — a card with nowhere to go must
- * not pretend to be a target.
- */
-export function sourceCard(input: DashboardCardInput): string {
-  const href = safeHref(input.href);
-  const subLine = (input.subLine ?? '').trim();
-  const line = subLine === '' ? '' : `<div class="ln">${escapeHtml(subLine)}</div>`;
-  const inner = `<div class="hd">${statusGlyph(input.status, input.fraction)}${escapeHtml(input.label)}</div>${line}`;
-  if (href === undefined) return `<div class="card">${inner}</div>`;
-  return `<a class="card cardlink" href="${escapeHtml(href)}">${inner}</a>`;
-}
-
 export interface DashboardActionInput {
   label: string;
   /**
-   * Which control form the button submits; 'none' renders no button, and
-   * 'link' renders a plain link, while 'control_link' mints the same bounded
-   * control session as a form before navigating to a protected dashboard page.
+   * Which control form the button submits on the computer's Keys page:
+   * 'oauth' starts a sign-in, 'api_key' carries the key field, and 'none'
+   * renders no form (a sheet toggle when `sheet` is set, else nothing). Sync
+   * now, Disconnect, Unpair and the model retries are the panel's own tools.
    */
-  kind: 'oauth' | 'oauth_cancel' | 'api_key' | 'sync_now' | 'model_retry' | 'disconnect' | 'unpair' | 'link' | 'control_link' | 'none';
+  kind: 'oauth' | 'api_key' | 'none';
   /** The `source` value the control route expects. */
   source?: string;
   primary?: boolean;
-  /** Visually quiet: for a destructive or rarely-wanted act beside a healthy row. */
-  quiet?: boolean;
   /** Id of a sheet this button toggles instead of submitting (kind 'none'). */
   sheet?: string;
-  /** Where a 'link' or 'control_link' action goes. Same-origin paths only. */
-  href?: string;
-  /** The quiet clause beside a link, e.g. "needs the worker token". */
-  hint?: string;
-  /** Exact facts shown before a bounded Disconnect or Unpair. */
-  confirmation?: string;
-  /** Provider-side grant or device surface retained after the local act. */
-  providerRevocationUrl?: string;
-  /**
-   * What that provider-side surface is called there, e.g. "WhatsApp linked
-   * devices". Unpair leaves a device linked at the provider, so the link has to
-   * name the screen the reader will actually look for; Disconnect's generic
-   * "Provider access" is the default.
-   */
-  providerLinkLabel?: string;
-  /**
-   * What the form says while its request is outstanding ("Checking Dropbox…"),
-   * worded here so the browser script carries no source names of its own.
-   */
-  pendingMessage?: string;
   /**
    * Why this control cannot be used right now. Set, the button renders
    * visibly disabled with the reason beside it, and submits nothing — a
@@ -350,14 +285,14 @@ export interface DashboardActionInput {
 
 /**
  * Control buttons stay in the form shape the worker's control script already
- * binds to (data-connect-kind / data-sync-kind), so the bearer-token path is
- * unchanged: the read-only dash_ token never reaches these routes.
+ * binds to (data-connect-kind), so the bearer-token path is unchanged: the
+ * read-only dash_ token never reaches these routes.
  */
 export function actionButton(input: DashboardActionInput | undefined): string {
   // Every label a button shows passes the vocabulary: the view model may still
   // say Reauthenticate, the owner reads Reconnect.
   const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
-  if (action?.blockedReason !== undefined && action.kind !== 'link' && (action.kind !== 'none' || action.sheet !== undefined)) {
+  if (action?.blockedReason !== undefined && (action.kind !== 'none' || action.sheet !== undefined)) {
     return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>`
       + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
   }
@@ -369,54 +304,9 @@ export function actionButton(input: DashboardActionInput | undefined): string {
     // sheet and looked different from X's, "no reason for them to differ").
     return `<button class="btn${action.primary ? ' primary' : ''}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml(action.label)}</button>`;
   }
-  if (action.kind === 'link') {
-    // A link, never a disabled-looking button: the control route this reader
-    // cannot call is not offered as one. The hint says what the destination
-    // will ask of them, in the same words the detail page's picker link uses.
-    const href = safeHref(action.href);
-    if (href === undefined) return '';
-    const hint = (action.hint ?? '').trim();
-    return `<span class="rowlink"><a class="btn" href="${escapeHtml(href)}">${escapeHtml(action.label)}</a>`
-      + `${hint === '' ? '' : `<span class="hint">${escapeHtml(hint)}</span>`}</span>`;
-  }
-  if (action.kind === 'control_link') {
-    const href = safeHref(action.href);
-    // Control-session navigation never leaves this worker. `//host/path` is a
-    // valid browser URL but is cross-origin, so a leading double slash is not
-    // an acceptable dashboard control target.
-    if (href === undefined || !href.startsWith('/') || href.startsWith('//')) return '';
-    const hint = (action.hint ?? '').trim();
-    return `<span class="rowlink"><button class="btn${action.primary ? ' primary' : ''}" type="button" data-control-link="${escapeHtml(href)}">${escapeHtml(action.label)}</button>`
-      + `${hint === '' ? '' : `<span class="hint">${escapeHtml(hint)}</span>`}`
-      + `<span class="actmsg" data-action-message role="status"></span></span>`;
-  }
-  const button = `<button class="btn${action.primary ? ' primary' : ''}${action.quiet ? ' quiet' : ''}" type="submit">${escapeHtml(action.label)}</button>`;
+  const button = `<button class="btn${action.primary ? ' primary' : ''}" type="submit">${escapeHtml(action.label)}</button>`;
   const source = `<input type="hidden" name="source" value="${escapeHtml(action.source ?? '')}">`;
   const message = `<span class="actmsg" data-action-message role="status"></span>`;
-  if (action.kind === 'sync_now') {
-    const pending = action.pendingMessage ? ` data-pending-message="${escapeHtml(action.pendingMessage)}"` : '';
-    return `<form class="rowform" data-sync-kind="sync_now"${pending}>${source}${button}${message}</form>`;
-  }
-  // A built-in model's failed install, started again; `source` names the model.
-  if (action.kind === 'model_retry') {
-    return `<form class="rowform" data-model-retry="${escapeHtml(action.source ?? '')}">${button}${message}</form>`;
-  }
-  // Disconnect and Unpair are the same bounded shape — confirm, acknowledge,
-  // one source_id — over two different routes, because they remove two
-  // different things: a broker credential grant, and this computer's pairing
-  // session. The form attribute is what selects the route.
-  if (action.kind === 'disconnect' || action.kind === 'unpair') {
-    const revocationUrl = safeExternalHref(action.providerRevocationUrl);
-    const providerLink = revocationUrl
-      ? `<a class="hint" href="${escapeHtml(revocationUrl)}" target="_blank" rel="noreferrer">${escapeHtml(action.providerLinkLabel ?? 'Provider access')}</a>`
-      : '';
-    const kindAttribute = action.kind === 'unpair'
-      ? 'data-unpair-kind="unpair"'
-      : 'data-disconnect-kind="disconnect"';
-    return `<form class="rowform" ${kindAttribute} data-confirmation="${escapeHtml(action.confirmation ?? '')}">`
-      + `<input type="hidden" name="source_id" value="${escapeHtml(action.source ?? '')}">`
-      + `${button}${providerLink}${message}</form>`;
-  }
   // The api-key route rejects a body without `api_key`, so the form carries
   // the field the route reads rather than a button that can only 400.
   const key = action.kind === 'api_key'
@@ -432,12 +322,7 @@ export interface DashboardControlGateInput {
 /** Anchor every locked control links back to: the one place the token goes. */
 export const DASHBOARD_CONTROL_GATE_ID = 'dashboard-controls';
 
-/** Opening-link handoff for the host-owning agent; never request a durable secret. */
-export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
-  'Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, '
-  + 'resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, '
-  + 'run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. '
-  + 'Do not read or print the worker token. Do not change configuration or connect sources.';
+export { DASHBOARD_WORKER_TOKEN_AGENT_PROMPT } from './vocabulary.ts';
 
 /**
  * The one dashboard-level custody gate for every mutating source control.
@@ -481,84 +366,6 @@ export function dashboardControlGate(input: DashboardControlGateInput): string {
     + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
 }
 
-export interface DashboardAttentionRowInput {
-  label: string;
-  /** The "— why" half; empty renders nothing rather than a guess. */
-  why?: string;
-  action?: DashboardActionInput;
-  /** Optional second bounded action, used when Reconnect and Disconnect coexist. */
-  secondaryAction?: DashboardActionInput;
-  /** 0..100 progress bar, for a first-ingest row. */
-  barPercent?: number;
-  /** Warm attention tint (true) or plain panel weight (false). */
-  attention?: boolean;
-  /** An error (a source that keeps failing) reads red rather than amber. */
-  tone?: 'warn' | 'error';
-  /** This source's detail page. Absent means the row leads nowhere. */
-  href?: string;
-}
-
-/**
- * A row that says something is wrong, and offers the way to act on it.
- *
- * No warning is a dead end (owner ruling, 2026-08-18): a row with a control
- * keeps the control and turns its name into a link to the source's detail
- * page; a row with no control becomes a link in FULL — same hit zone as a
- * card, with the arrow affordance on the right. A row with neither renders as
- * it always did, because there is genuinely nowhere to send the reader.
- */
-export function attentionRow(input: DashboardAttentionRowInput): string {
-  const why = (input.why ?? '').trim();
-  const reason = why === '' ? '' : `<span class="why"> — ${escapeHtml(why)}</span>`;
-  const bar = input.barPercent === undefined
-    ? ''
-    : progressBar({ percent: input.barPercent, label: `${clampPercent(input.barPercent)} percent` });
-  const klass = input.attention === true ? (input.tone === 'error' ? 'attncard error' : 'attncard') : 'attncard plain';
-  const href = safeHref(input.href);
-  const control = rowControls(input.label, [input.action, input.secondaryAction]);
-  if (href !== undefined && control === '') {
-    // A div inside the anchor, not a span: the progress bar is flow content and
-    // a span parent would have it reparented out of the row by the parser.
-    return `<a class="${klass} rowzone" href="${escapeHtml(href)}">`
-      + `<div class="grow"><span class="name">${escapeHtml(input.label)}</span>${reason}${bar}</div>`
-      + `<span class="go" aria-hidden="true">→</span>`
-      + `</a>`;
-  }
-  const name = href === undefined
-    ? `<span class="name">${escapeHtml(input.label)}</span>`
-    : `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>`;
-  // A row that carries a control still leads to its page: the name is the
-  // link and so is the arrow at the end, the same affordance the control-less
-  // row has, so the reader is never left guessing where to click (owner note,
-  // 2026-09-01: "why can't I click on Gmail in the setup page?").
-  const go = href === undefined
-    ? ''
-    : `<a class="go" href="${escapeHtml(href)}" aria-label="${escapeHtml(`${input.label} details`)}">→</a>`;
-  return `<div class="${klass}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ''}>`
-    + `<div class="grow">${name}${reason}${bar}</div>`
-    + `${control}${go}`
-    + `</div>`;
-}
-
-/** Acts that are never a row's main action: they live in its ⋯ menu. */
-const MENU_ACTION_KINDS: ReadonlySet<DashboardActionInput['kind']> = new Set(['disconnect', 'unpair', 'oauth_cancel']);
-
-function isMenuAction(action: DashboardActionInput): boolean {
-  return action.quiet === true || MENU_ACTION_KINDS.has(action.kind);
-}
-
-/**
- * A row's controls: its one main action as a button, and every secondary act
- * (Disconnect, Unpair, Provider access, Cancel) behind one ⋯ menu, so a row
- * never shows three action styles side by side (UX review 2026-10-01).
- */
-export function rowControls(label: string, actions: ReadonlyArray<DashboardActionInput | undefined>): string {
-  const present = actions.filter((action): action is DashboardActionInput => action !== undefined);
-  const main = present.filter((action) => !isMenuAction(action)).map((action) => actionButton(action)).join('');
-  const menu = present.filter(isMenuAction).map((action) => actionButton({ ...action, quiet: false })).join('');
-  return main + rowMenu(label, menu);
-}
-
 /**
  * The ⋯ menu: a native <details>, so it opens before any script runs and reads
  * as a disclosure. Empty when the row has no secondary act.
@@ -572,6 +379,8 @@ export function rowMenu(label: string, itemsHtml: string): string {
 export interface DashboardSetupRowInput {
   label: string;
   href?: string;
+  /** The source this row sets up (`data-source-id`): where an open link (#olympus-open=connect.x) lands. */
+  sourceId?: string;
   /** One plain sentence about what connecting this source does. */
   blurb: string;
   /**
@@ -613,7 +422,8 @@ export function setupRow(input: DashboardSetupRowInput): string {
   const blurbSpan = blurbBody === '' ? '' : `<span class="blurb">${blurbBody}</span>`;
   // The column closes up only when NOTHING is in it: a row whose whole blurb is
   // the key-location link still needs its column.
-  return `<div class="${blurbBody === '' ? 'setrow noblurb' : 'setrow'}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ''}>`
+  const sourceId = input.sourceId ? ` data-source-id="${escapeHtml(input.sourceId)}"` : '';
+  return `<div class="${blurbBody === '' ? 'setrow noblurb' : 'setrow'}"${sourceId}${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ''}>`
     + `${statusGlyph('Off')}`
     + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`)
     + `${blurbSpan}`
@@ -622,110 +432,6 @@ export function setupRow(input: DashboardSetupRowInput): string {
     // belongs to the page's one primary action (owner rule, 2026-10-02). A
     // row that IS a section's one main act (Agents' Connect an agent) says so.
     + `${actionButton({ ...input.action, primary: input.action.primary ?? false })}`
-    + `</div>`;
-}
-
-export interface DashboardProgressBarInput {
-  percent: number;
-  /** aria-label text, e.g. "8 percent". */
-  label: string;
-}
-
-export function progressBar(input: DashboardProgressBarInput): string {
-  const percent = clampPercent(input.percent);
-  return `<div class="bar" role="progressbar" aria-label="${escapeHtml(input.label)}" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">`
-    + `<i style="width:${percent}%"></i>`
-    + `</div>`;
-}
-
-/**
- * Layout for the background lanes and the home strip that links to them.
- *
- * Kept next to the two components that use it rather than folded into the
- * theme: it is layout for one page and one home section, and the theme file is
- * the token ground truth the whole dashboard shares.
- */
-
-
-/**
- * Layout for the three phase bars, the attention banner and the Advanced fold.
- *
- * `.bar.indet` is the bar that refuses to claim a share: a quiet moving band
- * rather than a fill, because a fill at ANY width is a percentage the caller
- * has already said it does not have. The animation is disabled under
- * prefers-reduced-motion, where it becomes a flat neutral band.
- */
-
-
-export interface DashboardPhaseBarInput {
-  /** The phase's own name, e.g. "Extraction". */
-  name: string;
-  /** The right-hand facts line, already composed by the caller. */
-  facts: string;
-  /**
-   * 0..100. OMITTED means the caller has no defensible share — the bar then
-   * draws the indeterminate band and states no value. Passing a number here is
-   * a claim, so a caller that had to fall back must not pass one.
-   */
-  percent?: number;
-  /** What the bar means, for a reader who gets the value read out to them. */
-  label: string;
-  /** The row's one state word (owner ruling, 2026-09-01). */
-  state: 'done' | 'working' | 'stalled' | 'waiting';
-  /** The state in words: "Working · moved 40s ago". */
-  stateWords: string;
-}
-
-/**
- * One phase's bar: its name, its facts in its own unit, its state, and a track.
- *
- * Every bar is the same colour (owner ruling, 2026-09-01: three bars, one
- * colour, correct units — the state word carries the colour instead). A
- * determinate bar carries aria-valuenow, because it has one. An indeterminate
- * bar carries aria-valuetext and NO valuenow, which is the ARIA way of saying
- * the position is unknown — the same honesty the pixels are making, said to a
- * reader who cannot see them.
- */
-export function phaseBar(input: DashboardPhaseBarInput): string {
-  const state = input.state;
-  const heading = `<div class="ph"><span class="pn">${escapeHtml(input.name)}</span>`
-    + `<span class="pv">${escapeHtml(input.facts)}<span class="st" data-phase-state="${state}">${escapeHtml(input.stateWords)}</span></span></div>`;
-  if (input.percent === undefined) {
-    return `<div class="phase ${state}">${heading}`
-      + `<div class="bar indet ${state}" role="progressbar" aria-label="${escapeHtml(input.label)}"`
-      + ` aria-valuetext="${escapeHtml(`${input.facts} · ${input.stateWords}`)}"><i></i></div></div>`;
-  }
-  const percent = clampPercent(input.percent);
-  return `<div class="phase ${state}">${heading}`
-    + `<div class="bar ${state}" role="progressbar" aria-label="${escapeHtml(input.label)}"`
-    + ` aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100" aria-valuetext="${escapeHtml(`${input.facts} · ${input.stateWords}`)}"><i style="width:${percent}%"></i></div>`
-    + `</div>`;
-}
-
-export interface DashboardAttentionBannerInput {
-  /** The source this is about. */
-  label: string;
-  /** What is wrong and what to do, in one sentence. */
-  sentence: string;
-  /** The real control, when a route for the act exists. */
-  action?: DashboardActionInput;
-  /** A second control, e.g. the sheet toggle for an agent prompt. */
-  secondaryAction?: DashboardActionInput;
-}
-
-/**
- * The one banner at the top of a source page.
- *
- * Built on the same row and the same control wiring every other warning uses,
- * so the button here and the button on home cannot behave differently. No live
- * region: it is present on first paint, and announcing it on every 15-second
- * poll would interrupt a reader who is already reading it.
- */
-export function attentionBanner(input: DashboardAttentionBannerInput): string {
-  return `<div class="attncard banner">`
-    + `<div class="grow"><span class="name">${escapeHtml(input.label)}</span>`
-    + `<span class="why"> — ${escapeHtml(input.sentence)}</span></div>`
-    + `${rowControls(input.label, [input.action, input.secondaryAction])}`
     + `</div>`;
 }
 
@@ -758,134 +464,6 @@ export function detailsDisclosure(summary: string, body: string): string {
   return `<details class="howto"><summary>${escapeHtml(summary)}</summary>${body}</details>`;
 }
 
-export interface DashboardAdvancedInput {
-  /** Summary text. One word by design: "Advanced". */
-  label: string;
-  /** Already-escaped section markup, in the order it should appear. */
-  body: string;
-}
-
-/**
- * The collapsed fold everything else lives under.
- *
- * A real <details>, so it is closed before any script runs, opens without one,
- * and reads as a disclosure to a screen reader. Nothing inside it is altered by
- * being here — the sections keep their own markup, and the fold is the only
- * thing that changed about them.
- */
-export function advancedPanel(input: DashboardAdvancedInput): string {
-  if (input.body.trim() === '') return '';
-  return `<details class="advanced" data-poll-key="advanced"><summary>${escapeHtml(input.label)}</summary>${input.body}</details>`;
-}
-
-export interface DashboardMiniBarInput {
-  /** 0..100. A lane with no denominator passes no bar at all. */
-  percent: number;
-  label: string;
-  /** Print the percent beside the bar, so it is never an unlabelled hairline. */
-  showPercent?: boolean;
-}
-
-/** The thin grey lane bar: progress, stated quietly, never in the run color. */
-export function miniBar(input: DashboardMiniBarInput): string {
-  const percent = clampPercent(input.percent);
-  const bar = `<span class="minibar${percent >= 100 ? ' done' : ''}" role="progressbar" aria-label="${escapeHtml(input.label)}" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">`
-    + `<i style="width:${percent}%"></i>`
-    + `</span>`;
-  return input.showPercent === true
-    ? `<span class="labeledbar">${bar}<span class="pct" aria-hidden="true">${Math.floor(percent)}%</span></span>`
-    : bar;
-}
-
-/** The four outcomes a strip bar can carry. Colors stay out of the caller. */
-export type DashboardLaneTone = 'good' | 'bad' | 'run' | 'idle';
-
-const LANE_TONE_COLORS: Readonly<Record<DashboardLaneTone, string>> = {
-  good: 'var(--good)',
-  bad: 'var(--bad)',
-  run: 'var(--run-fill)',
-  idle: 'var(--line)',
-};
-
-export interface DashboardLaneStripItem {
-  tone: DashboardLaneTone;
-  /** What this bar stands for, e.g. "Gmail · completed". Title text only. */
-  label: string;
-}
-
-export interface DashboardLaneRowInput {
-  name: string;
-  /** The one line of facts. Empty renders an empty cell, never a guess. */
-  facts: string;
-  /** 0..100, only for a lane whose progress has a real denominator. */
-  percent?: number;
-  strip?: readonly DashboardLaneStripItem[];
-  /** What the strip is, for the reader who cannot see color. */
-  stripLabel?: string;
-}
-
-/**
- * One background lane: name, optional bar, facts, optional outcome strip.
- *
- * No status glyph, deliberately — the six-word source vocabulary describes
- * sources, and a lane is not one. Absent cells stay as empty spans so every
- * row's four columns line up down the page.
- */
-export function laneRow(input: DashboardLaneRowInput): string {
-  const bar = input.percent === undefined
-    ? '<span></span>'
-    : miniBar({ percent: input.percent, label: `${input.name} progress` });
-  const strip = input.strip === undefined || input.strip.length === 0
-    ? '<span></span>'
-    : `<span class="lanestrip"${input.stripLabel ? ` role="img" aria-label="${escapeHtml(input.stripLabel)}"` : ''}>`
-      + input.strip.map((item) =>
-        `<i style="background:${LANE_TONE_COLORS[item.tone] ?? LANE_TONE_COLORS.idle}" title="${escapeHtml(item.label)}"></i>`).join('')
-      + `</span>`;
-  return `<div class="lanerow">`
-    + `<span class="nm">${escapeHtml(input.name)}</span>`
-    + `${bar}`
-    + `<span class="st">${escapeHtml(input.facts)}</span>`
-    + `${strip}`
-    + `</div>`;
-}
-
-export interface DashboardBackgroundRowLine {
-  name: string;
-  facts: string;
-  /** 0..100; omitted for a lane with nothing measurable to show. */
-  percent?: number;
-}
-
-export interface DashboardBackgroundRowInput {
-  /** Where the whole card leads. Same-document paths only. */
-  href: string;
-  /** Accessible name for the link, e.g. "Background work details". */
-  label: string;
-  lines: readonly DashboardBackgroundRowLine[];
-}
-
-/**
- * Home's background card: one line per lane, the whole card a link. A real
- * anchor rather than the mockup's scripted div, so it works before any script
- * runs and reads as a link to a screen reader.
- */
-export function backgroundRow(input: DashboardBackgroundRowInput): string {
-  const href = safeHref(input.href);
-  const lines = input.lines.map((line) => {
-    const bar = line.percent === undefined
-      ? '<span></span>'
-      : miniBar({ percent: line.percent, label: `${line.name} progress`, showPercent: true });
-    return `<span class="bgl"><span class="nm">${escapeHtml(line.name)}</span>`
-      + `<span class="fx">${escapeHtml(line.facts)}</span>${bar}</span>`;
-  }).join('');
-  if (href === undefined) {
-    return `<div class="bgrow">${lines}</div>`;
-  }
-  return `<a class="bgrow" href="${escapeHtml(href)}" aria-label="${escapeHtml(input.label)}">`
-    + `${lines}<span class="go" aria-hidden="true">→</span>`
-    + `</a>`;
-}
-
 /**
  * Layout for the two policy surfaces: the sensitivity page's tier table, and the detail page's scope rows and review chips.
  *
@@ -893,50 +471,6 @@ export function backgroundRow(input: DashboardBackgroundRowInput): string {
  * the same tabular treatment, and a page carrying a few unused rules costs less
  * than the same rule written twice.
  */
-
-
-/**
- * A tier-table permission cell. The mark is decorative and the word beside it
- * is the real content, so a reader who cannot see the glyph still hears which
- * way the policy falls.
- */
-export function permissionCell(allowed: boolean): string {
-  const mark = allowed ? '✓' : '✕';
-  const word = allowed ? 'Permitted' : 'Not permitted';
-  return `<td class="pm${allowed ? ' yes' : ''}">`
-    + `<span aria-hidden="true">${mark}</span><span class="vh">${word}</span>`
-    + `</td>`;
-}
-
-export interface DashboardScopeRowInput {
-  /** The rule's own id. Never its prefix, folder name or reason. */
-  ruleId: string;
-  /** The one line of facts about this rule, already composed. */
-  facts: string;
-}
-
-/**
- * One scope rule: id, disposition and counts.
- *
- * The configured prefix stays off this page — /dashboard.json promises no file
- * paths and no file names, and it is reachable with the read-only query token —
- * so the row names the rule and the bearer-gated picker carries the paths.
- */
-export function scopeRow(input: DashboardScopeRowInput): string {
-  return `<div class="scoperow">`
-    + `<span><b class="rid">${escapeHtml(input.ruleId)}</b> <span class="what">${escapeHtml(input.facts)}</span></span>`
-    + `</div>`;
-}
-
-export interface DashboardCountChipInput {
-  count: string;
-  label: string;
-}
-
-/** A count and what it counts, in one quiet pill. */
-export function countChip(input: DashboardCountChipInput): string {
-  return `<span class="chip"><b>${escapeHtml(input.count)}</b> ${escapeHtml(input.label)}</span>`;
-}
 
 export interface DashboardSheetInput {
   id: string;
@@ -1325,17 +859,8 @@ export function standaloneDashboardControllerScript(
       function route(params) {
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
-        if (action === 'cancel_oauth') return ['/dashboard/connect/oauth/cancel', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
-        if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
-        if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
-        if (action === 'save_privacy') return ['/dashboard/privacy', withoutAction(params)];
-        if (action === 'retry_model') return ['/dashboard/models/retry', withoutAction(params)];
-        // The Privacy editor's folder and label lists: the pickers' own read-only browses.
-        if (action === 'browse_folder_scope' || action === 'browse_mail_scope') return ['/dashboard/dispositions', params];
-        if (action === 'disconnect') return ['/dashboard/disconnect', withoutAction(params)];
-        if (action === 'unpair') return ['/dashboard/unpair', withoutAction(params)];
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
         if (action === 'create_agent_key') return ['/dashboard/agents/keys', withoutAction(params)];
         if (action === 'revoke_agent_connection') return ['/dashboard/agents/revoke', withoutAction(params)];
@@ -1407,74 +932,8 @@ export function standaloneDashboardControllerScript(
         signature: config.signature,
         pollIntervalMs: config.intervalMs,
         csrfToken: csrfToken,
-        // The privacy rules shared with ChatGPT's panel, inlined beside the controller.
-        privacyLogic: ${privacyLogic.toString().replaceAll('</script', '<\\/script')},
       });
       window.addEventListener('pagehide', function () { controller.dispose(); abort.abort(); }, { once: true });
     })();
   </script>`;
-}
-
-/** The change signature a poll compares against; same shape for both sides. */
-export interface DashboardSignatureOptions {
-  /** True when the render was unlocked: custody is part of what the page shows. */
-  controlSession?: boolean;
-  embeddingRuntime?: EmbeddingRuntimeFacts;
-  now?: Date;
-}
-
-/**
- * Everything the rendered page can differ on, so the poll swaps the body when
- * — and only when — something visible changed.
- *
- * Beyond the counts: the custody state (an expired or rotated session must
- * not leave a page reading "unlocked" with dead controls), the embedding
- * lane's own run state, each row's phase state word, and — while a row is
- * Working — the age of its last rise in whole minutes, so "moved 40s ago"
- * cannot sit unchanged for an hour and a Working row flips to Stalled the
- * minute it should.
- */
-export function dashboardSignature(
-  sources: readonly DashboardSourceCard[],
-  options: DashboardSignatureOptions = {},
-): string {
-  const now = options.now ?? new Date();
-  return JSON.stringify([
-    options.controlSession === true,
-    options.embeddingRuntime?.state ?? null,
-    options.embeddingRuntime?.stateLine ?? null,
-    sources.map((source) => {
-      const progress = dashboardSourceProgress(source, {
-        now,
-        ...(options.embeddingRuntime === undefined ? {} : { embeddingRuntime: options.embeddingRuntime }),
-      });
-      return [
-        source.source_id,
-        source.connection.state,
-        source.connection.label,
-        source.answer_readiness.state,
-        source.coverage.indexed_items,
-        source.coverage.content_ready_items,
-        source.coverage.embedded_items,
-        source.coverage.embedded_files ?? null,
-        source.queue_health.waiting,
-        source.queue_health.needs_attention,
-        progress.phases.map((phase) => [
-          phase.state,
-          phase.state === 'working' ? movementAgeMinutes(source, phase.id, now) : null,
-        ]),
-      ];
-    }),
-  ]);
-}
-
-function movementAgeMinutes(source: DashboardSourceCard, id: DashboardPhaseId, now: Date): number | null {
-  const movement = source.movement;
-  const at = id === 'metadata_sync'
-    ? movement?.metadata_sync_at
-    : id === 'extraction'
-      ? movement?.extraction_at
-      : movement?.embedding_at;
-  const movedAt = Date.parse(at ?? '');
-  return Number.isFinite(movedAt) ? Math.max(0, Math.floor((now.getTime() - movedAt) / 60_000)) : null;
 }

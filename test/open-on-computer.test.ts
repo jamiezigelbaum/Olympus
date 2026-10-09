@@ -181,7 +181,7 @@ describe('the opening page carries only an allowlisted target', () => {
     return navigated;
   }
 
-  test('a known target lands on Setup with the target in the fragment; anything else on the dashboard', async () => {
+  test('a known target lands on Keys with the target in the fragment; anything else on the dashboard', async () => {
     const ticket = 'A'.repeat(43);
     const landed = run(`#olympus_launch_ticket=${ticket}&olympus_open=connect.whatsapp`);
     const plain = run(`#olympus_launch_ticket=${ticket}`);
@@ -192,9 +192,20 @@ describe('the opening page carries only an allowlisted target', () => {
       run(`#olympus_launch_ticket=${ticket}&olympus_open=connectXx`),
     ];
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(landed).toEqual(['/dashboard?setup#olympus-open=connect.whatsapp']);
+    expect(landed).toEqual(['/dashboard?keys#olympus-open=connect.whatsapp']);
     expect(plain).toEqual(['/dashboard']);
     for (const navigated of hostile) expect(navigated).toEqual(['/dashboard']);
+  });
+
+  test('only a Keys target (Connect, a model fix) lands on Keys; a reconnect or connect fix lands on the dashboard', async () => {
+    const ticket = 'A'.repeat(43);
+    const models = run(`#olympus_launch_ticket=${ticket}&olympus_open=fix.models`);
+    const reconnect = run(`#olympus_launch_ticket=${ticket}&olympus_open=fix.reconnect`);
+    const connect = run(`#olympus_launch_ticket=${ticket}&olympus_open=fix.connect`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(models).toEqual(['/dashboard?keys#olympus-open=fix.models']);
+    expect(reconnect).toEqual(['/dashboard']);
+    expect(connect).toEqual(['/dashboard']);
   });
 });
 
@@ -220,9 +231,9 @@ describe('the dashboard opens the named panel and submits nothing', () => {
       // The publisher panel starts its sign-in on a real click; a link must not.
       publisher: { intro: 'Connect X', byoSummary: 'Use my own app' },
     });
-    root.innerHTML = setupRow({ label: 'X bookmarks', href: '/dashboard?source=x.bookmarks', blurb: '', action: { label: 'Connect', kind: 'none', sheet: 'connect-x-bookmarks' } })
+    root.innerHTML = setupRow({ label: 'X bookmarks', sourceId: 'x.bookmarks', blurb: '', action: { label: 'Connect', kind: 'none', sheet: 'connect-x-bookmarks' } })
       + sheet
-      + '<section id="models"><details class="models"><summary>Models</summary><p>body</p></details></section>';
+      + '<section aria-label="Models"><h2>Models</h2><p>body</p></section>';
     happy.document.body.append(root as never);
     const calls: unknown[] = [];
     const controller = mountDashboardController({
@@ -244,26 +255,26 @@ describe('the dashboard opens the named panel and submits nothing', () => {
   });
 
   test('connect.x opens the X panel, clears the fragment and starts no sign-in', async () => {
-    const page = mount('http://127.0.0.1:8010/dashboard?setup#olympus-open=connect.x');
+    const page = mount('http://127.0.0.1:8010/dashboard?keys#olympus-open=connect.x');
     expect(page.root.querySelector('#connect-x-bookmarks')!.classList.contains('on')).toBe(true);
     expect(happy.location.hash).toBe('');
-    expect(happy.location.search).toBe('?setup');
+    expect(happy.location.search).toBe('?keys');
     await happy.happyDOM.waitUntilComplete();
     expect(page.calls).toEqual([]);
     page.dispose();
   });
 
-  test('fix.models opens Models', () => {
-    const models = mount('http://127.0.0.1:8010/dashboard?setup#olympus-open=fix.models');
-    expect(models.root.querySelector<HTMLDetailsElement>('details.models')!.open).toBe(true);
+  test('fix.models takes the reader to Models', () => {
+    const models = mount('http://127.0.0.1:8010/dashboard?keys#olympus-open=fix.models');
+    expect(happy.document.activeElement).toBe(models.root.querySelector('section[aria-label="Models"]') as never);
     expect(models.root.querySelector('.sheet.on')).toBeNull();
     models.dispose();
   });
 
   test('an unknown target opens nothing and is cleared too', async () => {
-    const other = mount('http://127.0.0.1:8010/dashboard?setup#olympus-open=connect.gmail');
+    const other = mount('http://127.0.0.1:8010/dashboard?keys#olympus-open=connect.gmail');
     expect(other.root.querySelector('.sheet.on')).toBeNull();
-    expect(other.root.querySelector<HTMLDetailsElement>('details.models')!.open).toBe(false);
+    expect(happy.document.activeElement).not.toBe(other.root.querySelector('section[aria-label="Models"]') as never);
     expect(happy.location.hash).toBe('');
     expect(other.calls).toEqual([]);
     other.dispose();

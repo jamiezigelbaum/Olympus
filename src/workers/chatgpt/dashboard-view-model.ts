@@ -467,9 +467,8 @@ function syncFix(
 }
 
 /**
- * The owner has to sign this source in again: the same signal the local
- * dashboard's row reads (source-rows.ts dashboardSourceRowFix and
- * dashboardReconnectAction). A credential problem or a stall on sign-in, or a
+ * The owner has to sign this source in again. (The computer's own row once
+ * read the same signal; since 2026-10-09 the panel is that row.) A credential problem or a stall on sign-in, or a
  * source that needs the owner while the engine's own card still carries a
  * connect action (sign-in, setup or key): that action is the repair. Read off
  * the unscrubbed card's action kind, which the scrubbed card drops
@@ -715,8 +714,8 @@ function retryFix(model: 'embedding' | 'answers'): DashboardFix {
  * machine's transcriber. Download now while it is not needed yet (no audio
  * chosen: the owner may add some), not downloaded, stopped part way or
  * failed; Try again when it downloaded but would not start. Moved here from
- * the local dashboard's own row (source-rows.ts) on 2026-10-09 so both
- * surfaces read one model.
+ * the local dashboard's own row on 2026-10-09, when the panel became the one
+ * dashboard.
  */
 function transcriptionModel(state: BuiltInTranscriptionDashboardState | undefined): TranscriptionModelView | undefined {
   if (!state) return undefined;

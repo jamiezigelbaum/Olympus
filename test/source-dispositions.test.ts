@@ -28,9 +28,7 @@ import {
 import {
   buildSourceDispositionsView,
   readSourceIngestionExclusionsFile,
-  renderSourceDispositionsHtml,
   saveSourceDispositions,
-  selectableDispositionStates,
   writeSourceIngestionExclusionsFile,
   type SourceDispositionsSource,
 } from '../src/workers/source-dispositions.ts';
@@ -548,12 +546,6 @@ describe('media rules are read-only beside the tree', () => {
     ]);
   });
 
-  test('the normal Finder picker keeps advanced non-folder rules out of the user journey', () => {
-    const html = renderSourceDispositionsHtml(fixtureView());
-    expect(html).not.toContain('Rules that are not about folders');
-    expect(html).not.toContain('oversized-video');
-    expect(html).not.toContain('at least 100 MiB');
-  });
 });
 
 // --- The config write -------------------------------------------------------
@@ -696,26 +688,6 @@ describe('atomic write and backup', () => {
 
 // --- The picker's controls --------------------------------------------------
 
-describe('what the page offers as changeable', () => {
-  test('nothing is selectable under an excluded ancestor', () => {
-    const tree = fixtureTree();
-    const node = nodeAt(tree, '/2 areas/castor workfiles/deep');
-    expect(selectableDispositionStates(node, 'exclude')).toEqual([]);
-  });
-
-  test('only the stricter choice is selectable under a metadata-only ancestor', () => {
-    const tree = fixtureTree();
-    const node = nodeAt(tree, '/3 resources/spirituality/retreat');
-    expect(selectableDispositionStates(node, 'metadata_only')).toEqual(['exclude']);
-  });
-
-  test('an ordinary folder offers all three', () => {
-    const tree = fixtureTree();
-    expect(selectableDispositionStates(nodeAt(tree, '/2 areas/finances'), 'ingest'))
-      .toEqual(['ingest', 'metadata_only', 'exclude']);
-  });
-});
-
 // --- The rendered page ------------------------------------------------------
 
 function fixtureSource(overrides: Partial<SourceDispositionsSource> = {}): SourceDispositionsSource {
@@ -740,179 +712,6 @@ function fixtureView() {
     now: new Date('2026-07-29T12:00:00.000Z'),
   });
 }
-
-describe('rendered picker page', () => {
-  test('every folder renders one compact state in the Finder-style outline', () => {
-    const html = renderSourceDispositionsHtml(fixtureView());
-    expect(html).toContain('Castor Workfiles');
-    expect(html).toContain('class="finder-window"');
-    expect(html).toContain('data-folder-status>Skipped</span>');
-    expect(html).toContain('data-folder-status>Names only</span>');
-    expect(html).toContain('data-folder-status>Fully indexed</span>');
-    expect(html).toContain('data-folder-status>Mixed</span>');
-  });
-
-  test('one inspector owns the three choices while stored radios preserve the save contract', () => {
-    const html = renderSourceDispositionsHtml(fixtureView(), { csrfToken: 'csrf-fixture-token' });
-    expect(html).toContain('class="finder-inspector"');
-    expect(html).toContain('data-picker-state="ingest"');
-    expect(html).toContain('data-picker-state="metadata_only"');
-    expect(html).toContain('data-picker-state="exclude"');
-    expect(html).toContain('class="stored-controls"');
-    expect(html).toContain('value="metadata_only"');
-    expect(html).not.toContain('role="radiogroup"');
-    expect(html).toContain('var csrfToken = "csrf-fixture-token"');
-    expect(html).toContain("'X-Olympus-CSRF': csrfToken");
-    expect(html).toContain("credentials: 'same-origin'");
-    expect(html).not.toContain('sessionStorage');
-    expect(html).not.toContain("'Authorization': 'Bearer '");
-  });
-
-  test('editing renews the control session, and an expired one never discards unsaved choices', () => {
-    const html = renderSourceDispositionsHtml(fixtureView(), { csrfToken: 'csrf-fixture-token' });
-    // Choosing folders in a large tree is minutes of pure client-side work, so
-    // the page renews its own session while the owner is still working.
-    expect(html).toContain("fetch('/dashboard/control/session'");
-    expect(html).toContain('async function renew()');
-    expect(html).toContain('240000');
-    // Renewal is cookie plus CSRF: the picker page never sees the bearer.
-    expect(html).not.toContain("'Authorization': 'Bearer '");
-    expect(html).not.toContain('window.prompt');
-    // An expired session must leave every selection on the page.
-    expect(html).toContain('result.status === 401');
-    expect(html).toContain('Your folder choices are still here');
-  });
-
-  test('cleanup remains non-mutating policy evidence and stays out of the normal picker', () => {
-    const view = fixtureView();
-    expect(view.cleanup).toMatchObject({
-      dry_run_command: 'bun run source-exclusions:purge -- --dry-run',
-      purge_command: 'bun run source-exclusions:purge -- --purge',
-      strip_command: 'bun run source-exclusions:purge -- --strip-metadata-only',
-      items_would_purge: 3,
-      items_would_strip: 2,
-    });
-    const html = renderSourceDispositionsHtml(view);
-    expect(html).not.toContain('bun run source-exclusions:purge -- --purge');
-    expect(html).not.toContain('Already-ingested content');
-    expect(view.policy).toEqual({
-      folder_paths_returned: true,
-      writes_config_only: true,
-      deletes_store_content: false,
-      runs_purge_or_strip: false,
-    });
-  });
-
-  test('a source whose gate refused to compile renders the refusal instead of an empty tree', () => {
-    const view = buildSourceDispositionsView({
-      sources: [fixtureSource({
-        error: 'Exclusion rule x names source y, which cannot enforce path prefixes.',
-        store_present: false,
-        items: () => [],
-      })],
-      document: fixtureDocument(),
-    });
-    expect(view.sources[0]?.editable_by_path).toBe(false);
-    const html = renderSourceDispositionsHtml(view);
-    expect(html).toContain("This source's rules could not be loaded.");
-    expect(html).toContain('cannot enforce path prefixes');
-  });
-
-  // The three tests below are the picker's half of "never silent". Each fact
-  // reaches the page through the view payload, and each one is the reason a
-  // control the owner can see does nothing — so the page has to say it, not
-  // just carry it.
-  test('a source whose folders are named by identity says so instead of disabling its choices in silence', () => {
-    const document = parseSourceIngestionExclusions({
-      schemaVersion: 1,
-      rules: [{
-        id: 'by-identity',
-        sources: [SOURCE],
-        folder_ids: [{ id: 'abc123', name: 'Shared Drive' }],
-        reason: 'named by identity',
-      }],
-    }, 'fixture');
-    const view = buildSourceDispositionsView({
-      sources: [fixtureSource({
-        enforceable: ['folder_id', 'media'],
-        matcher: createSourceExclusionMatcher(document, SOURCE, { enforceable: ['folder_id', 'media'] }),
-      })],
-      document,
-    });
-    expect(view.sources[0]?.editable_by_path).toBe(false);
-    const html = renderSourceDispositionsHtml(view);
-    // The tree still renders, so the disabled choices and the missing Save
-    // button are both on screen and both need an explanation beside them.
-    expect(html).toContain('Castor Workfiles');
-    expect(html).not.toContain('<button type="submit">Save</button>');
-    expect(html).toContain('names folders by identity rather than by path');
-    // And the same reason reaches the inspector, which is where the owner is
-    // looking when the three buttons refuse to move. It rides on the form, not
-    // on four thousand identical rows.
-    expect(html).toContain('data-locked="This source names folders by identity rather than by path');
-    expect(html.match(/data-locked="This source names/g)).toHaveLength(1);
-  });
-
-  test('a folder locked under an excluded parent carries the reason its choices will not move', () => {
-    const html = renderSourceDispositionsHtml(fixtureView());
-    expect(html).toContain('data-locked="Follows /2 areas/castor workfiles, which is excluded.');
-  });
-
-  test('a blanket rule this source can enforce nothing of is named on the page, not only in the payload', () => {
-    const document = fixtureDocument();
-    const view = buildSourceDispositionsView({
-      sources: [fixtureSource({
-        enforceable: ['path_prefix'],
-        matcher: createSourceExclusionMatcher(document, SOURCE, { enforceable: ['path_prefix'] }),
-      })],
-      document,
-    });
-    expect(view.sources[0]?.unenforceable_rule_ids).toEqual(['oversized-video']);
-    const html = renderSourceDispositionsHtml(view);
-    expect(html).toContain('oversized-video');
-    expect(html).toContain('not silently ignored');
-  });
-
-  test('folders left out of the tree and items with no path are reported under it', () => {
-    const document = parseSourceIngestionExclusions({
-      schemaVersion: 1,
-      rules: [{ id: 'deep', sources: [SOURCE], path_prefixes: ['/a/b/c/d/e/f/g'], reason: 'x' }],
-    }, 'fixture');
-    const view = buildSourceDispositionsView({
-      sources: [fixtureSource({
-        matcher: createSourceExclusionMatcher(document, SOURCE, { enforceable: ENFORCEABLE }),
-        items: () => [
-          { locator: '/a/b/c/d/e/f/g/h/i.md', hasContent: true },
-          { locator: '../escape.md', hasContent: true },
-        ],
-      })],
-      document,
-      maxDepth: 2,
-    });
-    expect(view.sources[0]!.tree.truncated_nodes).toBeGreaterThan(0);
-    expect(view.sources[0]!.tree.unplaced_items).toBe(1);
-    const html = renderSourceDispositionsHtml(view);
-    expect(html).toContain('not listed');
-    expect(html).toContain('no readable path');
-  });
-
-  test('folder names are escaped rather than interpolated into the page', () => {
-    const document = parseSourceIngestionExclusions({
-      schemaVersion: 1,
-      rules: [{ id: 'x', sources: [SOURCE], path_prefixes: ['/plain'], reason: 'x' }],
-    }, 'fixture');
-    const view = buildSourceDispositionsView({
-      sources: [fixtureSource({
-        matcher: fixtureMatcher(document),
-        items: () => [{ locator: '/<script>alert(1)</script>/note.md', hasContent: true }],
-      })],
-      document,
-    });
-    const html = renderSourceDispositionsHtml(view);
-    expect(html).not.toContain('<script>alert(1)</script>');
-    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
-  });
-});
 
 // --- Over a real fixture store ---------------------------------------------
 
@@ -1003,43 +802,6 @@ describe('over a real connector store', () => {
     }
   });
 
-  test('a rendered snapshot over the fixture store is a complete page', async () => {
-    const dir = tempDir('olympus-dispositions-snapshot-');
-    const dbPath = join(dir, 'fixture-store.sqlite');
-    await buildFixtureStore(dbPath);
-    const store = new LocalConnectorStore({
-      dbPath,
-      corpusId: CORPUS_ID,
-      family: 'file',
-      trustDomain: 'secure_local',
-      exclusions: fixtureMatcher(),
-      readOnly: true,
-    });
-    try {
-      const view = buildSourceDispositionsView({
-        sources: [{
-          source_id: SOURCE,
-          label: 'Fixture files',
-          corpus_ids: [CORPUS_ID],
-          enforceable: ENFORCEABLE,
-          matcher: store.exclusions,
-          store_present: true,
-          items: () => store.itemLocatorCensus(),
-        }],
-        document: fixtureDocument(),
-        rulesPath: '/fixture/ingestion-exclusions.json',
-        now: new Date('2026-07-29T12:00:00.000Z'),
-      });
-      const html = renderSourceDispositionsHtml(view);
-      expect(html.startsWith('<!doctype html>')).toBe(true);
-      expect(html.trimEnd().endsWith('</html>')).toBe(true);
-      expect(html).toContain('Choose folders');
-      expect(html).toContain('Castor Workfiles');
-      expect(html).toContain('Spirituality');
-    } finally {
-      store.close();
-    }
-  });
 });
 
 // --- The way in from the dashboard and the walkthrough ----------------------
@@ -1172,32 +934,23 @@ describe('worker routes', () => {
       .toBe(401);
   });
 
-  test('read returns the page and the view model, with the live rules in both', async () => {
+  test('the old picker page and its JSON read are gone', async () => {
     const dir = tempDir('olympus-dispositions-read-');
     const rulesPath = join(dir, 'ingestion-exclusions.json');
     writeFileSync(rulesPath, `${JSON.stringify(FIXTURE_RULES, null, 2)}\n`, { mode: 0o600 });
     const fetch = withWorkerBearerAuth(dispositionsWorker(rulesPath).fetch, { authToken: 'worker-secret' });
     const headers = { Authorization: 'Bearer worker-secret' };
 
+    // Unified dashboard phase 4: folders are chosen in the panel; no page renders here.
     const page = await fetch(new Request('http://worker.test/dashboard/dispositions', { headers }));
-    expect(page.status).toBe(200);
-    expect(page.headers.get('content-type')).toContain('text/html');
-    expect(await page.text()).toContain('Castor Workfiles');
+    expect(page.status).toBe(404);
 
+    // Nor does the picker's old JSON read: the panel's pickers read in process.
     const model = await fetch(new Request('http://worker.test/dashboard/dispositions.json', { headers }));
-    const body = await model.json() as {
-      kind: string;
-      rule_count: number;
-      rules_path: string;
-      sources: Array<{ tree: { roots: Array<{ path: string }> }; non_folder_rules: Array<{ rule_id: string }> }>;
-    };
-    expect(body.kind).toBe('source_dispositions');
-    expect(body.rule_count).toBe(FIXTURE_RULES.rules.length);
-    expect(body.rules_path).toBe(rulesPath);
-    expect(body.sources[0]?.non_folder_rules[0]?.rule_id).toBe('oversized-video');
+    expect(model.status).toBe(404);
   });
 
-  test('the dashboard control session opens and saves the picker without persisting the bearer', async () => {
+  test('the dashboard control session saves without persisting the bearer', async () => {
     const dir = tempDir('olympus-dispositions-session-route-');
     const rulesPath = join(dir, 'ingestion-exclusions.json');
     writeFileSync(rulesPath, `${JSON.stringify(FIXTURE_RULES, null, 2)}\n`, { mode: 0o600 });
@@ -1211,15 +964,6 @@ describe('worker routes', () => {
     expect(mint.status).toBe(200);
     const cookie = mint.headers.get('Set-Cookie')!.split(';')[0]!;
     const control = await mint.json() as { csrf_token: string };
-
-    const page = await fetch(new Request(`${origin}/dashboard/dispositions`, {
-      headers: { Cookie: cookie, Referer: `${origin}/dashboard?source=dropbox.files` },
-    }));
-    expect(page.status).toBe(200);
-    const html = await page.text();
-    expect(html).toContain(`var csrfToken = "${control.csrf_token}"`);
-    expect(html).not.toContain('worker-secret');
-    expect(html).not.toContain('sessionStorage');
 
     const saved = await fetch(new Request(`${origin}/dashboard/dispositions`, {
       method: 'POST',

@@ -11,26 +11,14 @@ import {
 } from '../src/workers/dashboard/theme.ts';
 import {
   AGENT_CONNECT_CSS,
-  BACKGROUND_CSS,
-  DASHBOARD_NAV_CSS,
-  DASHBOARD_POLICY_CSS,
-  DASHBOARD_PROGRESS_CSS,
-  DISPOSITIONS_CSS,
+  DASHBOARD_OUTSIDE_HELP_CSS,
+  LOCAL_PAGE_CSS,
   MODEL_SETUP_CSS,
-  SETUP_JOURNEY_CSS,
-  DASHBOARD_SOURCE_ROWS_CSS,
-  DASHBOARD_PRIVACY_CSS,
 } from '../src/workers/dashboard/static-styles.ts';
 import {
-  DASHBOARD_LANE_CSS,
-  attentionRow,
-  backgroundRow,
   connectorSheet,
-  laneRow,
   pageShell,
-  progressBar,
   setupRow,
-  sourceCard,
 } from '../src/workers/dashboard/components.ts';
 import {
   DASHBOARD_STATUS_ORDER,
@@ -70,9 +58,7 @@ const MOCKUP_TOKENS: Array<[string, string]> = [
   ['--selected', '#2C4485'],
 ];
 
-const ALL_SHEETS = [DASHBOARD_THEME_CSS, DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS, DASHBOARD_NAV_CSS,
-  BACKGROUND_CSS, DISPOSITIONS_CSS, AGENT_CONNECT_CSS, MODEL_SETUP_CSS, SETUP_JOURNEY_CSS, DASHBOARD_SOURCE_ROWS_CSS,
-  DASHBOARD_PRIVACY_CSS].join('\n');
+const ALL_SHEETS = [DASHBOARD_THEME_CSS, LOCAL_PAGE_CSS, AGENT_CONNECT_CSS, MODEL_SETUP_CSS, DASHBOARD_OUTSIDE_HELP_CSS].join('\n');
 
 /** WCAG 2.x relative luminance and contrast ratio. */
 function luminance(hex: string): number {
@@ -238,28 +224,17 @@ describe('dashboard stylesheet', () => {
   test('every class the components emit has a rule to land on', () => {
     // The drift this pins: a component emitting a class no stylesheet styles
     // (the old a.cardlink), or a rule pointing at markup nothing emits.
-    const css = DASHBOARD_THEME_CSS + DASHBOARD_LANE_CSS;
+    const css = DASHBOARD_THEME_CSS + LOCAL_PAGE_CSS;
     const samples = [
-      pageShell({ title: 'Olympus', crumb: 'Gmail', meta: 'Working', body: '' }),
-      sourceCard({ label: 'Gmail', status: 'Working', subLine: 'indexing', fraction: 0.5, href: '/dashboard?source=g' }),
-      attentionRow({
-        label: 'Dropbox',
-        why: 'reauth required',
-        attention: false,
-        barPercent: 8,
-        action: { label: 'Connect', kind: 'api_key', source: 'readwise' },
-      }),
+      pageShell({ title: 'Olympus', crumb: 'Keys', meta: 'Working', body: '' }),
       setupRow({ label: 'Readwise', blurb: '', action: { label: 'Connect', kind: 'api_key', source: 'readwise' } }),
       setupRow({ label: 'Something else', blurb: 'Build it', action: { label: 'Build', kind: 'none', sheet: 'x' } }),
       connectorSheet({ id: 'x', heading: 'h', intro: 'i', promptText: 'p', copyButtonLabel: 'Copy' }),
-      laneRow({ name: 'Syncs', facts: 'all on schedule', percent: 50, strip: [{ tone: 'good', label: 'Gmail' }], stripLabel: 'runs' }),
-      backgroundRow({ href: '/dashboard?background', label: 'Background', lines: [{ name: 'Embeddings', facts: '50%', percent: 50 }] }),
-      progressBar({ percent: 8, label: '8 percent' }),
     ].join('\n');
     const classes = new Set(
       [...samples.matchAll(/class="([^"]+)"/g)].flatMap((match) => (match[1] ?? '').split(/\s+/)),
     );
-    expect(classes.size).toBeGreaterThan(10);
+    expect(classes.size).toBeGreaterThan(5);
     for (const token of classes) {
       expect(`${token}: ${new RegExp(`\\.${token}(?![\\w-])`).test(css)}`).toBe(`${token}: true`);
     }

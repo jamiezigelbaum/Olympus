@@ -5,9 +5,7 @@ import { join } from 'node:path';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
-import { defaultConfig } from '../src/core/config.ts';
-import { registerOlympusDashboardGateway, type DashboardFetch } from '../src/core/control-ui-gateway.ts';
-import { OLYMPUS_DASHBOARD_READ_METHOD, OLYMPUS_DASHBOARD_CONTROL_METHOD, type OlympusFolderScopeBrowseResult } from '../src/control-ui-contract.ts';
+import type { OlympusFolderScopeBrowseResult } from '../src/control-ui-contract.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -52,13 +50,12 @@ async function session(fetch: ReturnType<typeof fixture>['fetch']) {
   return { Cookie: response.headers.get('set-cookie')!.split(';')[0]!, Origin: 'http://worker.test', 'X-Olympus-CSRF': body.csrf_token, 'Content-Type': 'application/json' };
 }
 
-test('standalone picker needs control-session CSRF; rendering and browsing do not approve ingestion', async () => {
+test('the scope route needs control-session CSRF; browsing does not approve ingestion', async () => {
   const f = fixture(); const headers = await session(f.fetch);
+  // The folder picker page is gone (unified dashboard phase 4): its address is
+  // no longer a dashboard route, so even a control session gets nothing.
   const rendered = await f.fetch(new Request('http://worker.test/dashboard/dispositions?source_id=google_drive.docs', { headers }));
-  expect(rendered.status).toBe(200);
-  const html = await rendered.text();
-  expect(html).toContain('data-folder-scope-source="google_drive.docs"');
-  expect(html).not.toContain('fixture-worker-secret'); expect(html).not.toContain('Private folder');
+  expect(rendered.status).toBe(401);
   expect(f.calls).toEqual({ browses: [], approvals: [] });
   const browse = { action: 'browse_folder_scope', source_id: SOURCE, parent_key: 'private-parent' };
   for (const body of [browse, approval]) {
@@ -80,36 +77,6 @@ test('read-only dashboard URL token cannot browse or activate private scope', as
     expect(response.status).toBe(401);
   }
   expect(f.calls).toEqual({ browses: [], approvals: [] });
-});
-
-test('native RPC reaches the same worker hooks without exposing auth or folder paths in URLs', async () => {
-  const f = fixture(); const config = defaultConfig(); config.worker.authToken = 'fixture-worker-secret'; config.email.baseUrl = 'http://worker.test/v1';
-  type Handler = (input: { params: Record<string, unknown>; client: { connect: { scopes: string[] } }; respond: (...args: unknown[]) => void }) => Promise<void> | void;
-  const methods = new Map<string, Handler>(); const urls: string[] = [];
-  const fetchImpl: DashboardFetch = async (url, init) => { urls.push(String(url)); return f.fetch(new Request(String(url), init)); };
-  registerOlympusDashboardGateway({ registerGatewayMethod(method, handler) { methods.set(method, handler as Handler); }, registerHttpRoute() {} }, config, { fetchImpl });
-  const responses: unknown[][] = [];
-  const invoke = async (method: string, params: Record<string, unknown>, scopes = ['operator.write']) => {
-    await methods.get(method)!({ params, client: { connect: { scopes } }, respond: (...args) => responses.push(args) });
-  };
-  await invoke(OLYMPUS_DASHBOARD_READ_METHOD, { view: 'dispositions', source_id: 'dropbox.files' });
-  expect(responses.at(-1)?.[0]).toBe(true);
-  const picker = responses.at(-1)?.[1] as { body: string };
-  expect(picker.body).toContain('data-scope-panel="dropbox.files">');
-  expect(picker.body).toContain('data-scope-panel="google_drive.docs" hidden>');
-  await invoke(OLYMPUS_DASHBOARD_READ_METHOD, { view: 'dispositions', source_id: SOURCE });
-  expect(responses.at(-1)?.[0]).toBe(true); expect(f.calls.browses).toHaveLength(0);
-  await invoke(OLYMPUS_DASHBOARD_READ_METHOD, { view: 'dispositions', action: 'browse_folder_scope', source_id: SOURCE, parent_key: 'private-parent' }, ['operator.read']);
-  expect(responses.at(-1)?.[0]).toBe(false); expect(f.calls.browses).toHaveLength(0);
-  await invoke(OLYMPUS_DASHBOARD_READ_METHOD, { view: 'dispositions', action: 'browse_folder_scope', source_id: SOURCE, parent_key: 'private-parent' });
-  expect(responses.at(-1)?.[0]).toBe(true); expect(responses.at(-1)?.[1]).toMatchObject({ scope_browser: { source_id: SOURCE } });
-  expect(f.calls.approvals).toHaveLength(0);
-  await invoke(OLYMPUS_DASHBOARD_CONTROL_METHOD, approval, ['operator.read']);
-  expect(responses.at(-1)?.[0]).toBe(false); expect(f.calls.approvals).toHaveLength(0);
-  await invoke(OLYMPUS_DASHBOARD_CONTROL_METHOD, approval);
-  expect(responses.at(-1)?.[0]).toBe(true); expect(f.calls.approvals).toHaveLength(1);
-  expect(urls.every((url) => !url.includes('private-parent'))).toBe(true);
-  expect(JSON.stringify(responses)).not.toContain('fixture-worker-secret');
 });
 
 test.each([false, true])('metadata-only worker searches stay isolated with mixed full ingestion=%s', async (mixed) => {

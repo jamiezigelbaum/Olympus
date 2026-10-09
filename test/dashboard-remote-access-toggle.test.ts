@@ -13,7 +13,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { parseDashboardControlParams } from '../src/core/control-ui-gateway.ts';
 import {
   emptyRemoteAccessStatus,
   remoteAccessDir,
@@ -189,24 +188,6 @@ describe('the toggle carries dashboard custody', () => {
     // Minting agent codes keeps its own budget (the route then refuses: no store here).
     expect(AGENT_MINT_LIMIT).toBeGreaterThan(0);
     expect((await fetcher(post('/dashboard/agents/keys', { name: 'Muse' }, custody))).status).not.toBe(429);
-  });
-});
-
-describe('turning it on asks for no agreement', () => {
-  test('on writes at once; an accept_terms field from an older page is ignored; malformed requests are refused', async () => {
-    const { dir } = home();
-    const { backend, writes } = control(dir);
-    expect((await call(backend, { enabled: true })).status).toBe(200);
-    expect((await call(backend, { enabled: true, accept_terms: { url: TERMS_V1 } })).status).toBe(200);
-    expect((await call(backend, { enabled: false })).status).toBe(200);
-    expect(writes).toEqual([true, true, false]);
-    for (const body of [{}, { enabled: 'yes' }, { enabled: true, extra: 1 }]) {
-      expect((await call(backend, body)).status).toBe(400);
-    }
-    expect(writes).toEqual([true, true, false]);
-    // The Gateway bridge validates the same shape before it reaches the worker.
-    expect(parseDashboardControlParams({ action: 'set_remote_access', enabled: false })).toEqual({ action: 'set_remote_access', enabled: false });
-    expect(() => parseDashboardControlParams({ action: 'set_remote_access', enabled: true, relayHost: 'evil.test' })).toThrow();
   });
 });
 

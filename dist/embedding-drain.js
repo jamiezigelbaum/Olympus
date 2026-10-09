@@ -24674,11 +24674,19 @@ var init_scheduler_markers = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
   init_scheduler_markers();
+  DASHBOARD_STATUS_PRESENTATION = {
+    Fresh: { label: "Fresh", colorToken: "good", glyphKind: "dot" },
+    Working: { label: "Working", colorToken: "run", glyphKind: "donut" },
+    Waiting: { label: "Waiting", colorToken: "off", glyphKind: "ring" },
+    "Needs you": { label: "Needs you", colorToken: "warn", glyphKind: "dot" },
+    Failing: { label: "Failing", colorToken: "bad", glyphKind: "dot" },
+    Off: { label: "Off", colorToken: "line", glyphKind: "dot" }
+  };
   DASHBOARD_UNCONNECTED_STATES = new Set([
     "not_connected",
     "needs_setup"
@@ -24694,6 +24702,12 @@ var init_vocabulary = __esm(() => {
     "invalid_redirect_uri",
     "redirect_uri_not_registered"
   ]);
+  DASHBOARD_INDEX_FASTER = {
+    on: "Index faster",
+    off: "Stop indexing faster",
+    explainOn: "Syncing pauses until you turn this off.",
+    explainOff: "Syncing is paused until you turn this off."
+  };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
     damaged_or_unsupported: {
@@ -24732,6 +24746,35 @@ var init_vocabulary = __esm(() => {
     fixOnMac: "Open Olympus on your computer to fix this.",
     privateMatches: "Some matching items are private and stay on your computer.",
     changeModelsOnMac: "Change models in Olympus on your computer."
+  };
+  DASHBOARD_CHATGPT_CONNECTION_COPY = {
+    not_connected: {
+      title: "Olympus isn't connected to ChatGPT yet",
+      disabledReason: "Connect Olympus first",
+      install: "Not installed yet?"
+    },
+    installing: {
+      title: "Olympus is setting up on your computer…",
+      disabledReason: "Available once Olympus is set up"
+    },
+    mac_offline: {
+      title: "Your computer is offline or asleep, so answers are paused",
+      lastSeen: "Last seen {when}",
+      disabledReason: "Your computer is offline"
+    },
+    relay_unavailable: {
+      title: "Olympus can't reach your computer right now.",
+      disabledReason: "Can't reach your computer"
+    },
+    actions: {
+      connect: { label: "Connect Olympus", help: "" },
+      open_olympus: { label: "Open Olympus on your computer", help: "Open Olympus on your computer, then check again here." },
+      wake_mac: {
+        label: "How to keep it available",
+        help: "Keep your computer on, awake and online with Olympus running. Answers resume on their own when it is back."
+      },
+      retry: { label: "Try again", help: "" }
+    }
   };
   DASHBOARD_CHATGPT_PAGE_COPY = {
     title: "Olympus",
@@ -24826,6 +24869,21 @@ var init_vocabulary = __esm(() => {
     unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
     unreadableNote: DASHBOARD_UNREADABLE_NOTE,
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
+  };
+  DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  DASHBOARD_COMPUTER_PANEL_COPY = {
+    section: "On this computer",
+    onlyHere: "only here",
+    open: "Open",
+    rows: {
+      keys: { title: "Keys", line: "Venice, Readwise and X keys" },
+      agents: { title: "Agents", line: "Remote access and connected agents" },
+      outsideHelp: { title: "Outside help", line: "Anonymous answers (zkAPI)" },
+      connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
+    },
+    locked: "Open dashboard controls first",
+    readOnlyOpenClaw: "Reconnect OpenClaw with operator.write access to change this",
+    indexFaster: DASHBOARD_INDEX_FASTER
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -25182,76 +25240,6 @@ var init_vocabulary = __esm(() => {
       unreadable: "Olympus could not read your privacy settings."
     }
   };
-  DASHBOARD_LOCAL_PRIVACY_COPY = {
-    crumb: "Privacy",
-    back: "Back to Setup",
-    title: DASHBOARD_CHATGPT_PRIVACY_COPY.title,
-    intro: "Olympus may use a cloud model to answer from items you have not marked private. Private items are answered only on this computer and never sent to a cloud model. Passwords and other secrets are always kept on this computer.",
-    descriptionLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionLabel,
-    descriptionPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.descriptionPlaceholder,
-    questions: DASHBOARD_PRIVACY_QUESTIONS_COPY,
-    rulesTitle: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesTitle,
-    rulesEmpty: DASHBOARD_CHATGPT_PRIVACY_COPY.rulesEmpty,
-    kindFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.kindFolder,
-    kindLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.kindLabel,
-    kindSender: DASHBOARD_CHATGPT_PRIVACY_COPY.kindSender,
-    unnamedFolder: "A folder",
-    remove: DASHBOARD_CHATGPT_PRIVACY_COPY.remove,
-    removeFor: DASHBOARD_CHATGPT_PRIVACY_COPY.removeFor,
-    removed: DASHBOARD_CHATGPT_PRIVACY_COPY.removed,
-    undo: DASHBOARD_CHATGPT_PRIVACY_COPY.undo,
-    addFolder: DASHBOARD_CHATGPT_PRIVACY_COPY.addFolder,
-    addLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.addLabel,
-    addSender: DASHBOARD_CHATGPT_PRIVACY_COPY.addSender,
-    needFolderSource: DASHBOARD_CHATGPT_PRIVACY_COPY.needFolderSource,
-    needGmail: DASHBOARD_CHATGPT_PRIVACY_COPY.needGmail,
-    folderIntro: "Open a folder to look inside it. Make private covers everything in the folder.",
-    folderUp: "Back",
-    folderOpen: "Open",
-    folderEmpty: "No folders here.",
-    folderMore: "Load more folders",
-    loading: "Loading…",
-    loadFailed: "Olympus could not load this list. Try again.",
-    makePrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.makePrivate,
-    alreadyPrivate: DASHBOARD_CHATGPT_PRIVACY_COPY.alreadyPrivate,
-    labelIntro: "Mail with a private label is answered only on this computer.",
-    noLabels: DASHBOARD_CHATGPT_PRIVACY_COPY.noLabels,
-    senderIntro: "Mail from this sender is answered only on this computer.",
-    senderLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.senderLabel,
-    senderPlaceholder: DASHBOARD_CHATGPT_PRIVACY_COPY.senderPlaceholder,
-    senderAdd: DASHBOARD_CHATGPT_PRIVACY_COPY.senderAdd,
-    senderInvalid: DASHBOARD_CHATGPT_PRIVACY_COPY.senderInvalid,
-    senderDuplicate: DASHBOARD_CHATGPT_PRIVACY_COPY.senderDuplicate,
-    close: "Done",
-    pending: {
-      one: "{n} item is waiting to be checked on this computer.",
-      many: "{n} items are waiting to be checked on this computer."
-    },
-    nothingPending: "Nothing is waiting to be checked.",
-    save: DASHBOARD_CHATGPT_PRIVACY_COPY.save,
-    saving: DASHBOARD_CHATGPT_PRIVACY_COPY.saving,
-    cancel: DASHBOARD_CHATGPT_PRIVACY_COPY.cancel,
-    saveFailed: DASHBOARD_CHATGPT_PRIVACY_COPY.saveFailed,
-    saved: DASHBOARD_CHATGPT_PRIVACY_COPY.saved,
-    unchanged: "No changes to save.",
-    locked: "Unlock dashboard controls in Setup to see and change what is private.",
-    readOnly: "Your OpenClaw connection is read-only. What is private is shown only to a connection that can change it.",
-    counts: "Your description and {n} always-private rules are set.",
-    countsOne: "Your description and 1 always-private rule are set.",
-    countsUnset: "Nothing is set as private yet.",
-    unavailable: "Privacy settings are not available from this worker.",
-    confirmRemoves: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmRemove,
-    confirmDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.confirmDescription,
-    confirm: DASHBOARD_CHATGPT_PRIVACY_COPY.confirm,
-    conflict: DASHBOARD_CHATGPT_PRIVACY_COPY.conflict,
-    conflictNow: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNow,
-    conflictDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictDescription,
-    conflictNoDescription: DASHBOARD_CHATGPT_PRIVACY_COPY.conflictNoDescription,
-    applyAgain: DASHBOARD_CHATGPT_PRIVACY_COPY.applyAgain,
-    discardMine: DASHBOARD_CHATGPT_PRIVACY_COPY.discardMine,
-    folderUnnamed: DASHBOARD_CHATGPT_PRIVACY_COPY.folderUnnamed,
-    undoFor: DASHBOARD_CHATGPT_PRIVACY_COPY.undoFor
-  };
 });
 
 // src/workers/dashboard/phases.ts
@@ -25445,6 +25433,1369 @@ var init_source_dashboard = __esm(() => {
     ]
   };
 });
+
+// src/workers/chatgpt/dashboard-contract.ts
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var init_dashboard_contract = __esm(() => {
+  PANEL_TOOL_NAMES = [
+    DASHBOARD_TOOL_NAME,
+    CONNECT_SOURCE_TOOL_NAME,
+    SCOPE_LIST_TOOL_NAME,
+    SCOPE_SET_TOOL_NAME,
+    DISCONNECT_SOURCE_TOOL_NAME,
+    MODEL_SET_TOOL_NAME,
+    MODEL_RETRY_TOOL_NAME,
+    "olympus_privacy_get",
+    "olympus_privacy_set",
+    SYNC_SOURCE_TOOL_NAME
+  ];
+  COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
+});
+
+// src/workers/dashboard/chatgpt/client.ts
+function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
+  const doc = document;
+  const root = doc.getElementById("app");
+  const P = config.page;
+  const C = config.connection;
+  const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
+  const state = {
+    data: null,
+    relayDown: false,
+    busy: "",
+    confirming: "",
+    helpOpen: false,
+    theme: "",
+    displayMode: "",
+    canFullscreen: true,
+    open: {},
+    notice: "",
+    privacyRules: -1,
+    actionError: null,
+    syncPressed: {},
+    hostKind: "",
+    hostReadOnly: false,
+    hostLinks: {},
+    computerMeta: null
+  };
+  const H = config.host;
+  let nextId = 1;
+  const pending = {};
+  function post(message) {
+    if (window.parent && window.parent !== window)
+      window.parent.postMessage(message, "*");
+  }
+  function request(method, params, timeoutMs) {
+    const id = nextId++;
+    post({ jsonrpc: "2.0", id, method, params: params || {} });
+    return new Promise((resolve5, reject) => {
+      const timer = timeoutMs ? setTimeout(() => {
+        delete pending[id];
+        reject(new Error("timeout"));
+      }, timeoutMs) : null;
+      pending[id] = { resolve: resolve5, reject, timer };
+    });
+  }
+  function notify(method, params) {
+    post({ jsonrpc: "2.0", method, params: params || {} });
+  }
+  function openai() {
+    return window.openai || null;
+  }
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent)
+      return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0")
+      return;
+    if (message.id !== undefined && pending[message.id]) {
+      const entry = pending[message.id];
+      delete pending[message.id];
+      if (entry.timer)
+        clearTimeout(entry.timer);
+      if (message.error)
+        entry.reject(message.error);
+      else
+        entry.resolve(message.result);
+      return;
+    }
+    if (message.method === "ui/notifications/tool-result") {
+      supersede();
+      acceptResult(message.params, true);
+    } else if (message.method === "ui/notifications/host-context-changed")
+      applyHostContext(message.params);
+  });
+  function applyHostContext(context) {
+    if (!context || typeof context !== "object")
+      return;
+    applyOlympusHost(context[H.contextKey]);
+    if (context.theme === "light" || context.theme === "dark")
+      state.theme = context.theme;
+    if (typeof context.displayMode === "string")
+      state.displayMode = context.displayMode;
+    if (Array.isArray(context.availableDisplayModes)) {
+      state.canFullscreen = context.availableDisplayModes.indexOf("fullscreen") >= 0;
+    }
+    render();
+  }
+  function applyOlympusHost(value) {
+    if (!value || typeof value !== "object")
+      return;
+    if (value.kind !== "computer" && value.kind !== "openclaw")
+      return;
+    state.hostKind = value.kind;
+    state.hostReadOnly = value.readOnly === true;
+    const links = {};
+    const given = value.links && typeof value.links === "object" ? value.links : {};
+    for (const key of ["keys", "agents", "outsideHelp", "connector"]) {
+      const href = given[key];
+      if (typeof href === "string" && /^https?:\/\//.test(href))
+        links[key] = href;
+    }
+    state.hostLinks = value.kind === "computer" ? links : {};
+  }
+  function onComputer() {
+    return state.hostKind === "computer";
+  }
+  function readOpenAiGlobals() {
+    const host = openai();
+    if (!host)
+      return;
+    if (host.theme === "light" || host.theme === "dark")
+      state.theme = host.theme;
+    if (typeof host.displayMode === "string")
+      state.displayMode = host.displayMode;
+    if (host.toolOutput && isDashboard(host.toolOutput) && host.toolOutput !== state.data) {
+      state.data = host.toolOutput;
+      state.relayDown = false;
+    }
+  }
+  window.addEventListener("openai:set_globals", () => {
+    readOpenAiGlobals();
+    render();
+  });
+  let resultTimer = null;
+  function waitForResult() {
+    if (resultTimer)
+      clearTimeout(resultTimer);
+    resultTimer = setTimeout(() => {
+      resultTimer = null;
+      if (!state.data) {
+        state.relayDown = true;
+        render();
+      }
+    }, config.resultTimeoutMs);
+  }
+  function isDashboard(value) {
+    return !!value && typeof value === "object" && value.v === 1 && !!value.connection && typeof value.connection.state === "string";
+  }
+  let generation = 0;
+  function supersede() {
+    return ++generation;
+  }
+  function editorOpen() {
+    return !!picker && picker.active() || !!privacy && privacy.active();
+  }
+  function redraw() {
+    if (!editorOpen())
+      render();
+  }
+  function acceptResult(result, fromHost) {
+    if (resultTimer) {
+      clearTimeout(resultTimer);
+      resultTimer = null;
+    }
+    if (!result || result.isError) {
+      state.relayDown = true;
+      redraw();
+      return false;
+    }
+    const content = result.structuredContent;
+    if (isDashboard(content)) {
+      state.data = content;
+      const meta = result._meta && typeof result._meta === "object" ? result._meta[H.computerMetaKey] : null;
+      state.computerMeta = meta && typeof meta === "object" ? meta : null;
+      state.relayDown = false;
+      if (!state.busy)
+        state.syncPressed = {};
+      refreshFailures = 0;
+      redraw();
+      if (!refreshing)
+        scheduleRefresh();
+      return true;
+    }
+    if (fromHost) {
+      state.relayDown = true;
+      redraw();
+    }
+    return false;
+  }
+  function inlineError(result, name) {
+    if (!result || !result.isError)
+      return "";
+    const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && name === H.unpairTool))
+      return "";
+    const parts = Array.isArray(result.content) ? result.content : [];
+    const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    return text ? String(text.text) : "";
+  }
+  function callTool(name, args, key) {
+    const mine = supersede();
+    state.busy = key;
+    state.confirming = "";
+    state.notice = "";
+    state.actionError = null;
+    render();
+    request("tools/call", { name, arguments: args || {} }, config.resultTimeoutMs).then((result) => {
+      if (state.busy === key)
+        state.busy = "";
+      if (mine !== generation) {
+        redraw();
+        return;
+      }
+      const failed = inlineError(result, name);
+      if (failed) {
+        if (name === config.syncTool) {
+          state.syncPressed = {};
+          if (key.indexOf("menu:") === 0)
+            state.open[key.slice(0, key.lastIndexOf(":"))] = true;
+        }
+        state.actionError = { key, text: failed };
+        render(key);
+        return;
+      }
+      if (name === H.unpairTool) {
+        const parts = result && Array.isArray(result.content) ? result.content : [];
+        const said = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+        refresh();
+        state.notice = said ? String(said.text) : "";
+        redraw();
+        return;
+      }
+      if (acceptResult(result, false))
+        return;
+      if (!state.relayDown && name !== config.toolName)
+        refresh();
+    }, () => {
+      if (state.busy === key)
+        state.busy = "";
+      if (name === config.syncTool)
+        state.syncPressed = {};
+      if (mine === generation)
+        state.relayDown = true;
+      redraw();
+    });
+  }
+  function refresh() {
+    callTool(config.toolName, {}, "refresh");
+  }
+  function callRaw(name, args) {
+    return request("tools/call", { name, arguments: args || {} }, config.resultTimeoutMs);
+  }
+  function openLink(href) {
+    if (typeof href !== "string")
+      return;
+    const hostLink = Object.keys(state.hostLinks).some((key) => state.hostLinks[key] === href);
+    if (href.slice(0, 6) !== "https:" && !hostLink)
+      return;
+    const host = openai();
+    if (host && typeof host.openExternal === "function")
+      host.openExternal({ href });
+    else
+      request("ui/open-link", { url: href }).then(() => {
+        return;
+      }, () => {
+        return;
+      });
+  }
+  function goFullscreen() {
+    const host = openai();
+    if (host && typeof host.requestDisplayMode === "function")
+      host.requestDisplayMode({ mode: "fullscreen" });
+    else
+      request("ui/request-display-mode", { mode: "fullscreen" }).then(() => {
+        return;
+      }, () => {
+        return;
+      });
+  }
+  function fill2(template, values) {
+    let out = template;
+    for (const key of Object.keys(values))
+      out = out.split("{" + key + "}").join(String(values[key]));
+    return out;
+  }
+  function count(value) {
+    return Math.max(0, Math.round(value)).toLocaleString("en-US");
+  }
+  function unitWord(unit, n) {
+    const words = P.units[unit] || P.units.items;
+    return n === 1 ? words.one : words.many;
+  }
+  function ago(iso) {
+    const at = Date.parse(iso);
+    if (!isFinite(at))
+      return "";
+    const minutes = Math.floor(Math.max(0, Date.now() - at) / 60000);
+    if (minutes < 1)
+      return P.justNow;
+    if (minutes < 60)
+      return fill2(P.minutesAgo, { n: minutes });
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24)
+      return fill2(P.hoursAgo, { n: hours });
+    const days = Math.floor(hours / 24);
+    return days === 1 ? P.dayAgo : fill2(P.daysAgo, { n: days });
+  }
+  function duration(seconds) {
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 1)
+      return P.durationLessThanMinute;
+    if (minutes < 60)
+      return fill2(P.durationMinutes, { n: minutes });
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) {
+      const rest = minutes % 60;
+      return rest ? fill2(P.durationHoursMinutes, { h: hours, m: rest }) : fill2(P.durationHours, { n: hours });
+    }
+    return fill2(P.durationDays, { n: Math.round(hours / 24) });
+  }
+  function percent(value) {
+    const n = Math.max(0, Math.min(100, Number(value) || 0));
+    return String(Math.floor(n));
+  }
+  function icon(glyph) {
+    const node = el("span", "icon", glyph);
+    node.setAttribute("aria-hidden", "true");
+    return node;
+  }
+  function el(tag, cls, text) {
+    const node = doc.createElement(tag);
+    if (cls)
+      node.className = cls;
+    if (text !== undefined)
+      node.textContent = text;
+    return node;
+  }
+  function add(parent, ...children) {
+    for (const child of children)
+      if (child)
+        parent.appendChild(child);
+    return parent;
+  }
+  let accentUsed = false;
+  function button(label, key, onClick, style) {
+    const node = el("button", "btn", label);
+    node.type = "button";
+    node.setAttribute("data-key", key);
+    if (style === "danger")
+      node.className = "btn danger";
+    else if (style === "warn" && onClick)
+      node.className = "btn warnfill";
+    else if (style === "main" && onClick && !accentUsed) {
+      node.className = "btn primary";
+      accentUsed = true;
+    }
+    if (onClick)
+      node.addEventListener("click", onClick);
+    else
+      node.disabled = true;
+    return node;
+  }
+  function progressBar(value, label) {
+    const bar = el("div", "bar");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", "100");
+    bar.setAttribute("aria-valuenow", percent(value));
+    bar.setAttribute("aria-label", label);
+    const fillNode = el("div", "bar-fill");
+    fillNode.style.width = percent(value) + "%";
+    return add(bar, fillNode);
+  }
+  function details(key, summary, cls) {
+    const node = el("details", cls);
+    node.setAttribute("data-open-key", key);
+    if (state.open[key])
+      node.open = true;
+    node.addEventListener("toggle", () => {
+      state.open[key] = node.open;
+      reportHeight();
+    });
+    const head = el("summary");
+    head.setAttribute("data-key", "summary:" + key);
+    add(head, summary);
+    return add(node, head);
+  }
+  function connectionState() {
+    if (state.relayDown)
+      return "relay_unavailable";
+    const current = state.data ? String(state.data.connection.state) : "";
+    return current === "not_installed" ? "not_connected" : current;
+  }
+  function helpHref(href) {
+    if (typeof href !== "string" || !href)
+      return "";
+    let parsed;
+    try {
+      parsed = new URL(href);
+    } catch {
+      return "";
+    }
+    const host = parsed.hostname;
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password)
+      return "";
+    return host === "olympusplugin.ai" || host === "www.olympusplugin.ai" ? parsed.href : "";
+  }
+  function howLink(fix, key) {
+    const href = helpHref(fix && fix.href);
+    if (!href || compact())
+      return null;
+    const link = button(P.howOnMac, key + ":how", () => openLink(href), "plain");
+    link.className = "btn link";
+    return link;
+  }
+  function globalReason() {
+    if (state.hostReadOnly)
+      return state.hostKind === "openclaw" ? H.copy.readOnlyOpenClaw : H.copy.locked;
+    const current = connectionState();
+    if (GLOBAL_STATES.indexOf(current) < 0)
+      return "";
+    return (C[current] || C.relay_unavailable).disabledReason;
+  }
+  function rowReason(text) {
+    if (state.hostReadOnly && state.hostKind === "computer")
+      return null;
+    return el("span", "reason", text);
+  }
+  function compact() {
+    return state.displayMode !== "" && state.displayMode !== "fullscreen";
+  }
+  function fixControl(fix, key, style, allowConfirm, source) {
+    const wrap = el("span", "fix");
+    if (!fix || typeof fix.label !== "string")
+      return wrap;
+    const blocked = globalReason();
+    if (blocked || fix.disabledReason) {
+      add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
+      if (!blocked)
+        add(wrap, howLink(fix, key));
+      return wrap;
+    }
+    if (state.busy === key) {
+      const busy = button(P.working, key, null, style);
+      busy.setAttribute("aria-busy", "true");
+      return add(wrap, busy);
+    }
+    const failure = state.actionError && state.actionError.key === key ? state.actionError.text : "";
+    let action = null;
+    const opens = fix.openHref === true ? helpHref(fix.href) : "";
+    if (opens) {
+      return add(wrap, button(fix.label, key, () => openLink(opens), style));
+    }
+    if (privacy && privacy.handles(fix)) {
+      action = () => openPrivacy(key);
+    } else if (picker && picker.handles(fix)) {
+      action = () => {
+        supersede();
+        state.notice = "";
+        state.confirming = "";
+        picker.start(fix, source ? source.id : "", source ? source.label : "", key);
+      };
+    } else if (fix.tool === config.syncTool && source) {
+      action = () => {
+        state.syncPressed[source.id] = true;
+        state.open["menu:" + source.id] = false;
+        callTool(fix.tool, fix.args || {}, key);
+      };
+    } else if (typeof fix.tool === "string" && fix.tool)
+      action = () => callTool(fix.tool, fix.args || {}, key);
+    else if (helpHref(fix.href)) {
+      return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
+    }
+    if (fix.destructive && action) {
+      if (!allowConfirm)
+        return wrap;
+      if (state.confirming === key) {
+        const run = action;
+        wrap.className = "fix confirm";
+        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
+          state.confirming = "";
+          render(key);
+        }, "plain"));
+        return wrap;
+      }
+      return add(wrap, button(fix.label, key, () => {
+        supersede();
+        state.confirming = key;
+        render(key + ":no");
+      }, "plain"), errorNote(failure));
+    }
+    return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key) : null, errorNote(failure));
+  }
+  function errorNote(text) {
+    if (!text)
+      return null;
+    const note = el("span", "reason error", text);
+    note.setAttribute("role", "alert");
+    return note;
+  }
+  function connectionBanner() {
+    const current = connectionState();
+    if (!current || current === "ready")
+      return null;
+    const copy = C[current] || C.relay_unavailable;
+    const tone = current === "installing" ? "info" : "warn";
+    const banner = el("section", "banner " + tone);
+    banner.setAttribute("role", current === "installing" ? "status" : "alert");
+    add(banner, icon(current === "installing" ? "…" : "!"));
+    const body = add(el("div", "banner-body"), el("p", "banner-title", copy.title));
+    const conn = state.data ? state.data.connection : {};
+    if (current === "installing" && conn.progress) {
+      const pct = percent(conn.progress.percent);
+      const label = typeof conn.progress.label === "string" ? conn.progress.label : "";
+      add(body, el("p", "muted", label + " · " + pct + "%"), progressBar(conn.progress.percent, label));
+    }
+    if (current === "mac_offline" && typeof conn.lastSeenAt === "string" && ago(conn.lastSeenAt)) {
+      add(body, el("p", "muted", fill2(C.mac_offline.lastSeen, { when: ago(conn.lastSeenAt) })));
+    }
+    const actions = el("div", "actions");
+    if (current === "relay_unavailable") {
+      add(actions, state.busy === "refresh" ? button(P.working, "refresh", null, "main") : button(C.actions.retry.label, "refresh", refresh, "main"));
+    } else if (current === "not_connected") {
+      add(actions, state.busy === "connection-action" ? button(P.working, "connection-action", null, "main") : button(C.actions.connect.label, "connection-action", () => callTool(config.toolName, {}, "connection-action"), "main"));
+      const install = compact() ? "" : helpHref(conn.installHref);
+      if (install)
+        add(actions, button(C.not_connected.install, "connection-install", () => openLink(install), "plain"));
+    } else if (current !== "installing" && conn.action && C.actions[conn.action.id]) {
+      const words = C.actions[conn.action.id];
+      const href = conn.action.href;
+      let onClick;
+      if (conn.action.id === "retry")
+        onClick = refresh;
+      else if (typeof href === "string" && href)
+        onClick = () => openLink(href);
+      else
+        onClick = () => {
+          state.helpOpen = !state.helpOpen;
+          render("connection-action");
+        };
+      const control = button(words.label, "connection-action", onClick, "main");
+      if (!href && conn.action.id !== "retry")
+        control.setAttribute("aria-expanded", String(state.helpOpen));
+      add(actions, control);
+      if (state.helpOpen && !href && words.help)
+        add(body, el("p", "help", words.help));
+    }
+    if (actions.childNodes.length)
+      add(body, actions);
+    return add(banner, body);
+  }
+  function itemSource(item) {
+    const id = typeof item.id === "string" && item.id.indexOf("source:") === 0 ? item.id.slice(7) : "";
+    if (!id)
+      return;
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    const match = sources.filter((source) => source && String(source.id) === id)[0];
+    return { id, label: match ? String(match.label || id) : id };
+  }
+  function itemBanner(item, key, allowConfirm) {
+    const banner = el("section", "banner warn");
+    banner.setAttribute("role", "alert");
+    add(banner, icon("!"));
+    const body = add(el("div", "banner-body"), el("p", "banner-title", String(item.sentence || "")));
+    add(body, add(el("div", "actions"), fixControl(item.fix, key, "main", allowConfirm, itemSource(item))));
+    return add(banner, body);
+  }
+  function staleWords() {
+    const data = state.data;
+    if (!data || state.relayDown)
+      return "";
+    const at = Date.parse(data.generatedAt);
+    if (!isFinite(at) || Date.now() - at < config.staleAfterMs)
+      return "";
+    return fill2(P.updated, { when: ago(data.generatedAt) });
+  }
+  function staleLine() {
+    const words = staleWords();
+    drawnStale = words;
+    if (!words)
+      return null;
+    const line = add(el("p", "stale"), el("span", "muted", words));
+    return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
+  }
+  function needsYouSection(items) {
+    if (!items.length)
+      return null;
+    const section = add(el("section", "section"), el("h2", "", P.needsYou));
+    const list = el("ul", "rows");
+    items.forEach((item, index) => {
+      const key = "need:" + String(item.id || index);
+      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key, "warn", true, itemSource(item)));
+      add(list, add(el("li", "row need"), body));
+    });
+    return add(section, list);
+  }
+  function sourceItem(source) {
+    const items = state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : [];
+    return items.filter((item) => aboutSource(item, source))[0] || null;
+  }
+  function aboutSource(item, source) {
+    if (!item || !source)
+      return false;
+    const id = String(source.id);
+    if (item.id === "source:" + id || item.source === id || item.sourceId === id)
+      return true;
+    const label = typeof source.label === "string" ? source.label : "";
+    return !!label && typeof item.sentence === "string" && item.sentence.indexOf(label + " — ") === 0;
+  }
+  function sourceRow(source) {
+    const id = String(source.id || source.label);
+    const status = String(source.status || "");
+    const item = sourceItem(source);
+    const tone = item ? "warn" : config.statusTone[status] || "off";
+    const row = el("li", item ? "row source need-row" : "row source");
+    const main = el("div", "source-main");
+    const dot2 = el("span", "dot tone-" + tone);
+    dot2.setAttribute("aria-hidden", "true");
+    const head = add(el("p", "source-head"), dot2, el("span", "source-name", String(source.label || "")));
+    const off = status === "Off" && !item;
+    if (!off)
+      add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
+    add(main, head);
+    const meta = [];
+    const progress = sourceProgress(source);
+    const stalledWords = progress ? stalledSentence(progress, source) : "";
+    const detail = typeof source.detail === "string" && source.detail ? source.detail : "";
+    const checking = syncChecking(source);
+    const manual = !checking && !source.connecting && syncResult(source) && !!detail;
+    if (source.connecting) {
+      meta.push(capitalise(detail || (item ? itemReason(item, source) : "")));
+      const expires = linkExpiry(source.connecting.expiresAt);
+      if (expires)
+        meta.push(expires);
+    } else if (checking) {
+      meta.push(fill2(P.syncCheckingLine, { source: String(source.label || "") }));
+    } else if (manual) {
+      meta.push(capitalise(detail));
+    } else if (progress) {} else if (item)
+      meta.push(capitalise(itemReason(item, source)));
+    else if (off)
+      meta.push(capitalise(detail || P.notConnected));
+    else if (detail)
+      meta.push(capitalise(detail));
+    if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt) && !source.connecting && !progress && !checking && !manual && !saysSynced(detail)) {
+      meta.push(fill2(P.synced, { when: ago(source.lastSyncAt) }));
+    }
+    const shown = meta.filter((part) => !!part);
+    if (shown.length)
+      add(main, el("p", "muted", shown.join(" · ")));
+    if (progress && !((checking || manual) && progress.stalled)) {
+      add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
+    }
+    const why = seeWhy(source, id);
+    if (why)
+      add(main, why);
+    add(row, main);
+    const controls = el("div", "source-actions");
+    const context = { id, label: String(source.label || id) };
+    const fix = item && item.fix ? item.fix : source.primary;
+    const isSync = (entry) => !!entry && entry.tool === config.syncTool;
+    if (fix && !(checking && isSync(fix)))
+      add(controls, fixControl(fix, "primary:" + id, "plain", true, context));
+    if (checking)
+      add(controls, checkingControl("primary:" + id));
+    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const unpair = unpairEntry(id);
+    if (unpair)
+      menu.push(unpair);
+    let menuBox = null;
+    if (menu.length) {
+      const glyph = el("span", "", "⋯");
+      glyph.setAttribute("aria-hidden", "true");
+      const hidden = el("span", "sr", fill2(P.moreActions, { source: String(source.label || "") }));
+      const box = details("menu:" + id, add(el("span"), glyph, hidden), "menu");
+      const panel = el("div", "menu-panel");
+      menu.forEach((fix2, index) => add(panel, fixControl(fix2, "menu:" + id + ":" + index, "plain", true, context)));
+      menuBox = add(box, panel);
+    }
+    if (controls.childNodes.length) {
+      row.className += " has-actions";
+      add(row, controls);
+    }
+    if (menuBox) {
+      row.className += " has-menu";
+      add(row, menuBox);
+    }
+    return row;
+  }
+  function seeWhy(source, id) {
+    const unreadable = source.unreadable;
+    if (!unreadable || typeof unreadable !== "object" || !Array.isArray(unreadable.reasons))
+      return null;
+    const words = P.unreadableReasons;
+    const lines = unreadable.reasons.filter((reason) => reason && words[reason.code] && Number(reason.count) > 0).map((reason) => {
+      const n = Number(reason.count);
+      return add(el("li"), document.createTextNode(fill2(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count(n) })));
+    });
+    if (!lines.length)
+      return null;
+    const box = details("why:" + id, document.createTextNode(P.seeWhy), "why");
+    add(box, add(el("ul", "plain"), ...lines), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    return box;
+  }
+  function syncChecking(source) {
+    if (!source || source.connecting)
+      return false;
+    if (state.syncPressed[String(source.id)])
+      return true;
+    const manual = source.lastManualSync;
+    return !!manual && typeof manual === "object" && manual.outcome === "checking";
+  }
+  function syncResult(source) {
+    const manual = source && source.lastManualSync;
+    return !!manual && typeof manual === "object" && ["checked", "failed", "busy"].indexOf(manual.outcome) >= 0;
+  }
+  function checkingControl(key) {
+    const busy = button(P.syncChecking, key, null, "plain");
+    busy.setAttribute("aria-busy", "true");
+    return add(el("span", "fix"), busy);
+  }
+  function saysSynced(detail) {
+    const word = P.synced.split("{")[0].trim().toLowerCase();
+    return !!word && detail.trim().toLowerCase().indexOf(word + " ") === 0;
+  }
+  function pauseFallback(item, source) {
+    const reason = item ? itemReason(item, source) : "";
+    const detail = typeof source.detail === "string" ? source.detail : "";
+    return capitalise(reason || detail || P.sourcePaused);
+  }
+  function sourceProgress(source) {
+    const progress = source && source.progress;
+    if (!progress || typeof progress !== "object" || source.connecting)
+      return null;
+    if (progress.stage === "done" && !progress.stalled)
+      return null;
+    return progress;
+  }
+  function stalledSentence(progress, source) {
+    if (!progress.stalled || !progress.stalledReason)
+      return "";
+    const words = P.stalledReasons[progress.stalledReason];
+    return typeof words === "string" ? fill2(words, { source: String(source.label || "") }) : "";
+  }
+  function sourceProgressLabel(progress) {
+    const total = Number(progress.total) || 0;
+    if (total <= 0)
+      return P.findingItems;
+    const stage = P.sourceStages[progress.stage] || P.findingItems;
+    return fill2(P.sourceProgress, {
+      stage,
+      percent: percent(progress.percent),
+      done: count(progress.done),
+      total: count(total),
+      unit: unitWord(progress.unit, total)
+    });
+  }
+  function sourceProgressBlock(progress, source, stalledWords) {
+    const box = el("div", progress.stalled ? "source-progress stalled" : "source-progress");
+    const name = String(source.label || "");
+    if (progress.stalled) {
+      const real = (Number(progress.total) || 0) > 0 && (Number(progress.percent) || 0) > 0 && progress.stage !== "done";
+      if (stalledWords)
+        add(box, el("p", "stall-line", stalledWords));
+      if (real)
+        add(box, progressBar(progress.percent, name + ": " + (stalledWords || sourceProgressLabel(progress))));
+      return box;
+    }
+    const label = sourceProgressLabel(progress);
+    add(box, el("p", "muted", label), progressBar(progress.percent, name + ": " + label));
+    return box;
+  }
+  function progressRepeatsOneRow(sources) {
+    const reporting = sources.filter((source) => source && source.progress && typeof source.progress === "object");
+    if (!reporting.length)
+      return false;
+    return sources.filter((source) => {
+      const progress = sourceProgress(source);
+      return !!progress && !progress.stalled;
+    }).length < 2;
+  }
+  function linkExpiry(iso) {
+    const at = typeof iso === "string" ? Date.parse(iso) : NaN;
+    if (!isFinite(at))
+      return "";
+    const left = at - Date.now();
+    if (left <= 0)
+      return P.linkExpired;
+    return fill2(P.linkExpires, { n: Math.max(1, Math.ceil(left / 60000)) });
+  }
+  function itemReason(item, source) {
+    const sentence = String(item.sentence || "");
+    const prefix = String(source.label || "") + " — ";
+    if (sentence.indexOf(prefix) === 0)
+      return sentence.slice(prefix.length);
+    return typeof source.detail === "string" && source.detail ? source.detail : sentence;
+  }
+  function capitalise(text) {
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+  }
+  function sourcesSection(sources) {
+    const section = add(el("section", "section"), el("h2", "", P.sources));
+    if (!sources.length)
+      return add(section, el("p", "muted", P.noSources));
+    const off = (source) => String(source && source.status) === "Off" && !sourceItem(source);
+    const ordered = sources.filter((source) => sourceItem(source)).concat(sources.filter((source) => !sourceItem(source) && !off(source))).concat(sources.filter((source) => !sourceItem(source) && off(source)));
+    const list = el("ul", "rows");
+    for (const source of ordered)
+      add(list, sourceRow(source));
+    return add(section, list);
+  }
+  function openPrivacy(returnKey) {
+    if (!privacy)
+      return;
+    state.notice = "";
+    supersede();
+    state.confirming = "";
+    privacy.start(returnKey);
+  }
+  function privacySection(data) {
+    const info = data && data.privacy && typeof data.privacy === "object" ? data.privacy : null;
+    if (!info || !privacy)
+      return null;
+    const W = config.privacy.copy;
+    const configured = info.configured === true;
+    const pending2 = typeof info.pendingCount === "number" && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    const asked = (Array.isArray(data.needsYou) ? data.needsYou : []).some((item) => item && item.fix && privacy.handles(item.fix));
+    if (!configured && (asked || !pending2))
+      return null;
+    const section = add(el("section", "section privacy-row"), el("h2", "", W.section));
+    const row = el("li", "row");
+    const text = el("div", "row-text");
+    if (configured) {
+      const rules = typeof info.ruleCount === "number" && isFinite(info.ruleCount) ? Math.max(0, Math.round(info.ruleCount)) : state.privacyRules;
+      const words = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
+      add(text, el("p", "", rules >= 0 ? fill2(words, { n: count(rules) }) : W.rowNoCount));
+    }
+    if (pending2 > 0)
+      add(text, el("p", "muted", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })));
+    add(row, text);
+    if (configured) {
+      const blocked = globalReason();
+      const edit = button(W.edit, "privacy:edit", blocked ? null : () => openPrivacy("privacy:edit"), "plain");
+      edit.setAttribute("aria-label", W.editLabel);
+      add(row, blocked ? add(el("span", "fix"), edit, rowReason(blocked)) : edit);
+    }
+    return add(section, add(el("ul", "rows"), row));
+  }
+  function progressPaused() {
+    const current = connectionState();
+    return current === "mac_offline" || current === "relay_unavailable";
+  }
+  function totalUnknown(progress) {
+    const stages = Array.isArray(progress.details) ? progress.details : [];
+    return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
+  }
+  function progressFinished(progress) {
+    return !!progress && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
+  }
+  function progressText(progress) {
+    const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
+    if (totalUnknown(progress)) {
+      const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + P.stalled : "";
+      return phase + ": " + P.findingItems + paused;
+    }
+    const parts = [fill2(P.percentDone, { percent: percent(progress.percent) })];
+    if (progressPaused()) {
+      parts.push(P.progressPaused);
+      return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
+    }
+    const left = Number(progress.itemsLeft) || 0;
+    parts.push(fill2(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
+    if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled) {
+      parts.push(fill2(P.eta, { duration: duration(progress.etaSeconds) }));
+    }
+    if (progress.stalled)
+      parts.push(P.stalled);
+    return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
+  }
+  function progressSection(progress, withDetails) {
+    if (!progress || progressFinished(progress))
+      return null;
+    const section = add(el("section", "section"), el("h2", "", P.progress));
+    const stalled = progress.stalled && !progressPaused();
+    const line = el("p", stalled ? "progress-line stalled" : progressPaused() ? "progress-line paused" : "progress-line", progressText(progress));
+    add(section, line, progressBar(progress.percent, P.progress));
+    const stages = Array.isArray(progress.details) ? progress.details : [];
+    const faster = indexFasterControl();
+    if (withDetails && (stages.length || faster)) {
+      const box = details("progress-details", doc.createTextNode(P.details), "disclosure");
+      const list = el("ul", "plain");
+      stages.forEach((stage) => add(list, el("li", "", fill2(P.stageLine, {
+        stage: String(stage.stage || ""),
+        done: count(stage.done),
+        total: count(stage.total),
+        unit: unitWord(stage.unit, Number(stage.total) || 0)
+      }))));
+      add(section, add(box, stages.length ? list : null, faster));
+    }
+    return section;
+  }
+  function indexingRuns() {
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    return sources.some((source) => {
+      const progress = sourceProgress(source);
+      return !!progress && progress.stage === "indexing" && !progress.stalled;
+    });
+  }
+  function unpairEntry(id) {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.unpair))
+      return null;
+    const entry = meta.unpair.filter((item) => item && item.sourceId === id)[0];
+    if (!entry || typeof entry.label !== "string" || typeof entry.confirmation !== "string")
+      return null;
+    return { label: entry.label, tool: H.unpairTool, args: { source_id: id }, destructive: true, confirmText: entry.confirmation };
+  }
+  function indexFasterShown() {
+    const meta = state.computerMeta;
+    return onComputer() && !!meta && !!meta.indexFaster && typeof meta.indexFaster.on === "boolean" && indexingRuns();
+  }
+  function indexFasterControl() {
+    if (!indexFasterShown())
+      return null;
+    const on = state.computerMeta.indexFaster.on === true;
+    const W = H.copy.indexFaster;
+    const fix = { label: on ? W.off : W.on, tool: H.indexFasterTool, args: { on: !on } };
+    return add(el("div", "actions index-faster"), fixControl(fix, "index-faster", "plain", false), el("span", "reason", on ? W.explainOff : W.explainOn));
+  }
+  function modelInstall(models, which) {
+    const source = which === "search" ? models.embedding : which === "answers" ? models.answers ? models.answers.install : undefined : models.transcription;
+    if (!source || typeof source !== "object")
+      return null;
+    const stateName = source.state;
+    if (stateName !== "downloading" && stateName !== "verifying" && stateName !== "failed")
+      return null;
+    const number = (value) => typeof value === "number" && isFinite(value) && value >= 0 ? value : -1;
+    const reason = source.failedReason;
+    return {
+      which,
+      state: stateName,
+      percent: number(source.percent),
+      done: number(source.bytesDone),
+      total: number(source.bytesTotal),
+      reason: typeof reason === "string" && Object.prototype.hasOwnProperty.call(P.modelInstallReasons, reason) ? reason : "unknown"
+    };
+  }
+  function installBytes(done, total) {
+    const units = [[1000000000000, "TB"], [1e9, "GB"], [1e6, "MB"], [1000, "KB"]];
+    const [scale, unit] = units.filter(([size]) => total >= size)[0] || [1, "bytes"];
+    const shown = (value) => scale === 1 ? String(Math.round(value)) : (value / scale).toFixed(1);
+    return fill2(P.modelInstallBytes, { done: shown(Math.min(done, total)), total: shown(total) + " " + unit });
+  }
+  function modelWords(models) {
+    const embedding = models.embedding;
+    const kind = embedding.kind === "built_in" ? P.modelBuiltIn : P.modelCustom;
+    let ready = P.modelReady;
+    if (embedding.state === "downloading")
+      ready = fill2(P.modelDownloading, { percent: percent(embedding.percent ?? 0) });
+    else if (embedding.state === "verifying")
+      ready = P.modelChecking;
+    else if (embedding.state === "failed")
+      ready = P.modelNotWorking;
+    const answers = models.answers;
+    const answersWords = answers ? String(answers.label || "") + " · " + (answers.ready ? P.modelReady : P.modelNotReady) : "";
+    const installs = installLines(models);
+    let overall = ready;
+    const transcription = models.transcription && typeof models.transcription === "object" ? models.transcription : null;
+    if (installs.some((entry) => entry.state === "failed") || transcription && transcription.state === "load_failed")
+      overall = P.modelNeedsYou;
+    else if (installs.length)
+      overall = P.modelGettingReady;
+    else if (embedding.state === "ready" && answers && !answers.ready)
+      overall = P.modelNotReady;
+    return { summary: P.models + " — " + kind + " · " + overall, search: kind + " · " + ready, answers: answersWords };
+  }
+  function transcriptionWords(models) {
+    const entry = models.transcription;
+    if (!entry || typeof entry !== "object")
+      return "";
+    switch (entry.state) {
+      case "not_needed":
+        return P.modelNotNeededNoAudio;
+      case "not_downloaded":
+        return P.modelNotDownloaded;
+      case "interrupted":
+        return P.modelDownloadInterrupted;
+      case "load_failed":
+        return fill2(P.modelCouldNotStart, { model: P.modelNames.transcription });
+      case "ready":
+        return P.modelBuiltIn + " · " + P.modelReady;
+      case "failed":
+        return P.modelBuiltIn + " · " + P.modelNotWorking;
+      case "verifying":
+        return P.modelBuiltIn + " · " + P.modelChecking;
+      case "downloading":
+        return P.modelBuiltIn + " · " + P.modelGettingReady;
+      default:
+        return "";
+    }
+  }
+  function transcriptionItem(models) {
+    const words = transcriptionWords(models);
+    if (!words)
+      return null;
+    const item = el("li", "", P.modelTranscription + ": " + words + " ");
+    const fix = models.transcription && models.transcription.download;
+    if (fix)
+      add(item, fixControl(fix, "models:transcription", "plain", false));
+    return item;
+  }
+  function changeModelsFix(fix) {
+    if (!onComputer() || !fix || !helpHref(fix.href))
+      return fix;
+    return { label: fix.label, href: fix.href, openHref: true };
+  }
+  function installLines(models) {
+    const lines = [];
+    for (const which of ["search", "answers", "transcription"]) {
+      const entry = modelInstall(models, which);
+      if (entry)
+        lines.push(entry);
+    }
+    return lines;
+  }
+  function installLine(entry) {
+    const model = P.modelNames[entry.which];
+    const line = el("div", "model-install" + (entry.state === "failed" ? " failed" : ""));
+    let text;
+    if (entry.state === "failed") {
+      text = fill2(P.modelInstallFailed, { model, reason: P.modelInstallReasons[entry.reason] });
+    } else if (entry.state === "verifying") {
+      text = fill2(P.modelInstallVerifying, { model });
+    } else {
+      const parts = [fill2(P.modelInstallDownloading, { model })];
+      if (entry.percent >= 0)
+        parts.push(percent(entry.percent) + "%");
+      if (entry.total > 0 && entry.done >= 0)
+        parts.push(installBytes(entry.done, entry.total));
+      text = parts.join(" · ");
+    }
+    add(line, el("p", "", text));
+    if (entry.state !== "failed" && entry.percent >= 0)
+      add(line, progressBar(entry.percent, text));
+    return line;
+  }
+  function modelsSection(models) {
+    if (!models || !models.embedding)
+      return null;
+    const words = modelWords(models);
+    const box = details("models", doc.createTextNode(words.summary), "section models");
+    const list = add(el("ul", "plain"), el("li", "", P.modelSearch + ": " + words.search));
+    if (words.answers)
+      add(list, el("li", "", P.modelAnswers + ": " + words.answers));
+    add(list, transcriptionItem(models));
+    add(box, list);
+    if (models.change)
+      add(box, add(el("div", "actions"), fixControl(changeModelsFix(models.change), "models:change", "plain", true)));
+    const installs = installLines(models).filter((entry) => entry.state !== "failed" || entry.which === "transcription");
+    if (!installs.length)
+      return box;
+    const wrap = add(el("div", "models-wrap"), box);
+    const lines = el("div", "model-installs");
+    for (const entry of installs)
+      add(lines, installLine(entry));
+    return add(wrap, lines);
+  }
+  function renderCompact() {
+    const card = el("div", "card compact");
+    const data = state.data;
+    const top = connectionBanner() || (data && data.blocker ? itemBanner(data.blocker, "blocker", false) : null) || (data && data.needsYou && data.needsYou[0] ? itemBanner(data.needsYou[0], "need:" + String(data.needsYou[0].id || 0), false) : null);
+    add(card, top);
+    if (!top && !data)
+      add(card, el("p", "muted", P.loading));
+    if (data && data.progress && !state.relayDown && !progressFinished(data.progress))
+      add(card, el("p", "progress-line", progressText(data.progress)));
+    else if (!top && data)
+      add(card, el("p", "", P.upToDate));
+    if (state.canFullscreen) {
+      const buttons = card.querySelectorAll("button").length;
+      if (buttons < 2)
+        add(card, add(el("div", "actions"), button(P.openOlympus, "open", goFullscreen, "plain")));
+    }
+    return card;
+  }
+  function renderFull() {
+    const page = el("main", "page");
+    add(page, el("h1", "", P.title));
+    const data = state.data;
+    add(page, connectionBanner());
+    if (state.notice) {
+      const notice = el("p", "notice", state.notice);
+      notice.setAttribute("role", "status");
+      add(page, notice);
+    }
+    if (!data) {
+      if (!state.relayDown)
+        add(page, el("p", "muted", P.loading));
+      return page;
+    }
+    add(page, data.blocker ? itemBanner(data.blocker, "blocker", true) : null);
+    add(page, staleLine());
+    const listed = Array.isArray(data.sources) ? data.sources : [];
+    add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
+    add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
+    add(page, privacySection(data));
+    const sourceList = Array.isArray(data.sources) ? data.sources : [];
+    add(page, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data.progress, true));
+    add(page, modelsSection(data.models));
+    add(page, computerSection());
+    return page;
+  }
+  function computerSection() {
+    if (!onComputer())
+      return null;
+    const W = H.copy;
+    const keys = ["keys", "agents", "outsideHelp", "connector"].filter((key) => !!state.hostLinks[key]);
+    if (!keys.length)
+      return null;
+    const heading = add(el("h2"), doc.createTextNode(W.section + " "), el("span", "tag", W.onlyHere));
+    const section = add(el("section", "section on-computer"), heading);
+    const list = el("ul", "rows");
+    for (const key of keys) {
+      const words = W.rows[key];
+      const text = add(el("div", "row-text"), el("p", "", words.title), el("p", "muted", words.line));
+      const href = state.hostLinks[key];
+      const open4 = button(W.open, "computer:" + key, () => openLink(href), "plain");
+      open4.setAttribute("aria-label", W.open + " " + words.title);
+      add(list, add(el("li", "row"), text, open4));
+    }
+    return add(section, list);
+  }
+  function render(focusKey) {
+    const active = doc.activeElement;
+    const keepFocus = focusKey || (active && active.getAttribute ? active.getAttribute("data-key") : "") || "";
+    const field = active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT") && keepFocus === active.getAttribute("data-key") ? active : null;
+    const selection = field && typeof field.selectionStart === "number" ? [field.selectionStart, field.selectionEnd === null ? field.selectionStart : field.selectionEnd] : null;
+    const theme = state.theme;
+    if (theme)
+      doc.documentElement.setAttribute("data-theme", theme);
+    else
+      doc.documentElement.removeAttribute("data-theme");
+    const picking = !!picker && picker.active();
+    const privacyOpen = !picking && !!privacy && privacy.active();
+    doc.documentElement.setAttribute("data-mode", compact() && !picking && !privacyOpen ? "inline" : "fullscreen");
+    accentUsed = false;
+    const view = picking ? picker.view() : privacyOpen ? privacy.view() : compact() ? renderCompact() : renderFull();
+    root.textContent = "";
+    root.appendChild(view);
+    if (picking)
+      picker.afterRender();
+    if (keepFocus) {
+      const nodes = root.querySelectorAll("[data-key]");
+      for (let i = 0;i < nodes.length; i++) {
+        const node = nodes[i];
+        if (node.getAttribute("data-key") === keepFocus) {
+          node.focus();
+          if (selection && (node.tagName === "TEXTAREA" || node.tagName === "INPUT")) {
+            try {
+              node.setSelectionRange(selection[0], selection[1]);
+            } catch {}
+          }
+          break;
+        }
+      }
+    }
+    reportHeight();
+  }
+  function reportHeight() {
+    const height = Math.ceil(doc.documentElement.scrollHeight || doc.body.scrollHeight || 0);
+    const host = openai();
+    if (host && typeof host.notifyIntrinsicHeight === "function")
+      host.notifyIntrinsicHeight(height);
+    notify("ui/notifications/size-changed", { height });
+  }
+  const picker = pickerProgram ? pickerProgram({
+    config: config.picker,
+    dashboardTool: config.toolName,
+    el,
+    add,
+    button,
+    fill: fill2,
+    count,
+    call: callRaw,
+    render,
+    reportHeight,
+    openLink,
+    compact,
+    fullscreen: goFullscreen,
+    isDashboard,
+    errorText: inlineError,
+    directSignIn: () => state.hostKind !== "",
+    setDashboard: (value) => {
+      if (!isDashboard(value))
+        return;
+      supersede();
+      state.data = value;
+      state.relayDown = false;
+      refreshFailures = 0;
+    },
+    close: (notice, again, focusKey) => closeScreen(notice, again, focusKey)
+  }) : null;
+  function closeScreen(notice, again, focusKey) {
+    state.notice = notice;
+    if (again) {
+      const mine = supersede();
+      state.busy = "refresh";
+      render(focusKey);
+      request("tools/call", { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+        if (state.busy === "refresh")
+          state.busy = "";
+        if (mine !== generation)
+          return redraw();
+        acceptResult(result, false);
+        if (!editorOpen())
+          render(focusKey);
+      }, () => {
+        if (state.busy === "refresh")
+          state.busy = "";
+        if (!editorOpen())
+          render(focusKey);
+      });
+      return;
+    }
+    render(focusKey);
+  }
+  const privacy = privacyProgram ? privacyProgram({
+    config: config.privacy,
+    el,
+    add,
+    button,
+    fill: fill2,
+    count,
+    call: callRaw,
+    render,
+    compact,
+    fullscreen: goFullscreen,
+    data: () => state.data,
+    picker,
+    remember: (rules) => {
+      state.privacyRules = rules;
+    },
+    close: (notice, again, focusKey) => closeScreen(notice, again, focusKey)
+  }) : null;
+  const R = config.refresh;
+  let refreshTimer = null;
+  let refreshing = false;
+  let refreshFailures = 0;
+  let nextRefreshAt = 0;
+  let drawnStale = "";
+  function pageHidden() {
+    return doc.visibilityState === "hidden" || doc.hidden === true;
+  }
+  function moving() {
+    const data = state.data;
+    if (!data || state.relayDown || String(data.connection.state) !== "ready")
+      return true;
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    if (sources.some((source) => {
+      if (!source || typeof source !== "object")
+        return false;
+      if (source.connecting || source.status === "Working" || syncChecking(source))
+        return true;
+      const progress = sourceProgress(source);
+      return !!progress && !progress.stalled;
+    }))
+      return true;
+    if (data.progress && !data.progress.stalled && !progressFinished(data.progress))
+      return true;
+    return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed");
+  }
+  function refreshDelay() {
+    const base = moving() ? R.activeMs : R.idleMs;
+    return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
+  }
+  function scheduleRefresh() {
+    if (refreshTimer)
+      clearTimeout(refreshTimer);
+    refreshTimer = null;
+    const wait = refreshDelay();
+    nextRefreshAt = Date.now() + wait;
+    if (!pageHidden())
+      refreshTimer = setTimeout(backgroundRefresh, wait);
+  }
+  function backgroundRefresh() {
+    refreshTimer = null;
+    if (pageHidden() || refreshing)
+      return;
+    if (editorOpen() || state.busy || state.confirming) {
+      scheduleRefresh();
+      return;
+    }
+    refreshing = true;
+    const mine = generation;
+    request("tools/call", { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+      refreshing = false;
+      if (mine !== generation)
+        return scheduleRefresh();
+      const ok = !!result && !result.isError && isDashboard(result.structuredContent);
+      if (!ok)
+        refreshFailures++;
+      acceptResult(result, true);
+      scheduleRefresh();
+    }, () => {
+      refreshing = false;
+      if (mine !== generation)
+        return scheduleRefresh();
+      refreshFailures++;
+      state.relayDown = true;
+      redraw();
+      scheduleRefresh();
+    });
+  }
+  doc.addEventListener("visibilitychange", () => {
+    if (pageHidden()) {
+      if (refreshTimer)
+        clearTimeout(refreshTimer);
+      refreshTimer = null;
+      return;
+    }
+    if (refreshing || refreshTimer)
+      return;
+    const left = nextRefreshAt - Date.now();
+    if (left <= 0)
+      backgroundRefresh();
+    else
+      refreshTimer = setTimeout(backgroundRefresh, left);
+    tickStale();
+  });
+  function tickStale() {
+    if (pageHidden() || compact() || editorOpen())
+      return;
+    if (staleWords() !== drawnStale)
+      render();
+  }
+  setInterval(tickStale, R.staleTickMs);
+  readOpenAiGlobals();
+  render();
+  scheduleRefresh();
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appInfo: { name: "olympus-dashboard", version: "1" },
+    appCapabilities: {}
+  }, config.resultTimeoutMs).then((result) => {
+    if (result && result.hostContext)
+      applyHostContext(result.hostContext);
+    notify("ui/notifications/initialized");
+    if (state.hostKind && !state.data)
+      refresh();
+  }, () => {
+    return;
+  });
+  if (!state.data)
+    waitForResult();
+}
 
 // src/workers/dashboard/shared-privacy-logic.ts
 function privacyLogic(config) {
@@ -25782,12 +27133,2408 @@ function privacyLogic(config) {
     withShownAnswers
   };
 }
-var PRIVACY_FOLDER_SOURCE_NAMES;
-var init_shared_privacy_logic = __esm(() => {
-  PRIVACY_FOLDER_SOURCE_NAMES = {
+var init_shared_privacy_logic = () => {};
+
+// src/workers/dashboard/chatgpt/picker.ts
+function chatgptPickerProgram(kit) {
+  const T = kit.config.tools;
+  const Q = kit.config.copy;
+  const el = kit.el;
+  const add = kit.add;
+  const fill2 = kit.fill;
+  const STATES = ["ingest", "metadata_only", "exclude"];
+  const WINDOWS = ["6m", "1y", "2y", "5y", "all"];
+  const CATEGORIES = ["primary", "updates", "forums", "social", "promotions"];
+  let p = null;
+  let session = 0;
+  let timer = null;
+  const ACCOUNT = "@account";
+  const MAX_RULES = 100;
+  function handles(fix) {
+    return !!fix && (fix.tool === T.connectSource || fix.tool === T.scopeList);
+  }
+  function stopTimer() {
+    if (timer)
+      clearTimeout(timer);
+    timer = null;
+  }
+  function leave(notice, refresh, picked) {
+    stopTimer();
+    if (p && p.pick) {
+      const done = p.pick.done;
+      p = null;
+      session++;
+      done(picked || null);
+      return;
+    }
+    const key = p ? p.returnKey : "";
+    p = null;
+    session++;
+    kit.close(notice, refresh, key);
+  }
+  function start(fix, sourceId, sourceLabel, returnKey) {
+    stopTimer();
+    session++;
+    if (kit.compact())
+      kit.fullscreen();
+    const args = fix && fix.args && typeof fix.args === "object" ? fix.args : {};
+    const id = String(args.source_id || sourceId || args.source || "");
+    const label = sourceLabel || id;
+    if (fix.tool === T.connectSource)
+      startConnect(args, id, label, returnKey);
+    else
+      openScope(id, label, String(fix.label || ""), returnKey, "");
+  }
+  function authorizeHref(content) {
+    if (!content || typeof content !== "object")
+      return "";
+    for (const value of [content.openUrl]) {
+      if (typeof value !== "string")
+        continue;
+      let parsed;
+      try {
+        parsed = new URL(value);
+      } catch {
+        continue;
+      }
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password)
+        continue;
+      if (kit.directSignIn())
+        return parsed.href;
+      if (parsed.hostname === kit.config.connectHost && parsed.pathname.indexOf("/go/") === 0 && parsed.pathname.length > 4) {
+        return parsed.href;
+      }
+    }
+    return "";
+  }
+  function startConnect(args, id, label, returnKey) {
+    p = { mode: "connect", id, label, returnKey, phase: "starting", href: "", startedAt: 0, connectArgs: args };
+    const mine = session;
+    kit.render("picker:back");
+    kit.call(T.connectSource, args).then((result) => {
+      if (mine !== session || !p)
+        return;
+      const href = result && !result.isError ? authorizeHref(result.structuredContent) : "";
+      if (!href) {
+        p.phase = "error";
+        p.errorText = kit.errorText(result);
+        kit.render("picker:connect:retry");
+        return;
+      }
+      p.href = href;
+      p.phase = "waiting";
+      p.startedAt = Date.now();
+      kit.openLink(href);
+      kit.render("picker:back");
+      schedulePoll();
+    }, () => {
+      if (mine !== session || !p)
+        return;
+      p.phase = "error";
+      p.errorText = "";
+      kit.render("picker:connect:retry");
+    });
+  }
+  function schedulePoll() {
+    stopTimer();
+    const mine = session;
+    timer = setTimeout(() => {
+      timer = null;
+      if (mine !== session || !p || p.mode !== "connect")
+        return;
+      kit.call(kit.dashboardTool, {}).then((result) => {
+        if (mine !== session || !p)
+          return;
+        const content = result && !result.isError ? result.structuredContent : null;
+        if (kit.isDashboard(content)) {
+          kit.setDashboard(content);
+          const sources = Array.isArray(content.sources) ? content.sources : [];
+          const source = sources.filter((entry) => entry && String(entry.id) === p.id)[0];
+          if (signedIn(source)) {
+            connected(source);
+            return;
+          }
+        }
+        continuePolling();
+      }, () => {
+        if (mine !== session || !p)
+          return;
+        continuePolling();
+      });
+    }, kit.config.pollMs);
+  }
+  function signedIn(source) {
+    if (!source || typeof source !== "object")
+      return false;
+    if (source.connecting !== undefined && source.connecting !== null)
+      return false;
+    return source.status !== "Off";
+  }
+  function continuePolling() {
+    if (Date.now() - p.startedAt >= kit.config.pollCapMs) {
+      p.phase = "timeout";
+      kit.render("picker:connect:check");
+      return;
+    }
+    schedulePoll();
+  }
+  function connected(source) {
+    const next = source.primary;
+    if (next && next.tool === T.scopeList && !next.disabledReason) {
+      const args = next.args && typeof next.args === "object" ? next.args : {};
+      openScope(String(args.source_id || p.id), p.label, String(next.label || ""), p.returnKey, fill2(Q.connected, { source: p.label }));
+      return;
+    }
+    leave(fill2(Q.connected, { source: p.label }), false);
+  }
+  function reopen() {
+    if (!p || p.mode !== "connect")
+      return;
+    stopTimer();
+    session++;
+    startConnect(p.connectArgs, p.id, p.label, p.returnKey);
+  }
+  function connectView(page) {
+    add(page, el("h1", "", fill2(Q.connectTitle, { source: p.label })));
+    const box = el("div", "picker-status");
+    if (p.phase === "starting") {
+      const line = el("p", "", Q.connectStarting);
+      line.setAttribute("role", "status");
+      add(box, line);
+    } else if (p.phase === "waiting") {
+      const line = el("p", "strong", Q.connectWaiting);
+      line.setAttribute("role", "status");
+      add(box, line, el("p", "muted", fill2(Q.connectWaitingHelp, { source: p.label })));
+      add(box, add(el("div", "actions"), kit.button(Q.connectReopen, "picker:connect:reopen", reopen, "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+    } else if (p.phase === "timeout") {
+      const line = el("p", "", fill2(Q.connectTimeout, { source: p.label }));
+      line.setAttribute("role", "alert");
+      add(box, line, add(el("div", "actions"), kit.button(Q.checkAgain, "picker:connect:check", () => {
+        p.phase = "waiting";
+        p.startedAt = Date.now();
+        kit.render("picker:connect:cancel");
+        schedulePoll();
+      }, "main"), kit.button(Q.connectReopen, "picker:connect:reopen", reopen, "plain"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+    } else {
+      const line = el("p", "", p.errorText || fill2(Q.connectFailed, { source: p.label }));
+      line.setAttribute("role", "alert");
+      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", reopen, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", true), "plain")));
+    }
+    add(page, box);
+  }
+  function pickFolder(sourceId, sourceLabel, words, taken, done) {
+    stopTimer();
+    session++;
+    if (kit.compact())
+      kit.fullscreen();
+    openScope(sourceId, sourceLabel, words.title, "", "", undefined, { words, taken: taken.slice(), done });
+  }
+  function openScope(id, label, title, returnKey, notice, initial, pick) {
+    stopTimer();
+    session++;
+    const mail = id === kit.config.mailSourceId;
+    p = {
+      mode: mail ? "mail" : "folders",
+      id,
+      label,
+      returnKey,
+      notice,
+      title: title || (mail ? Q.mailTitle : Q.foldersTitle),
+      loading: "root",
+      loaded: false,
+      error: "",
+      retry: null,
+      generation: "",
+      revision: "",
+      edited: false,
+      saving: false,
+      saveError: "",
+      discarding: false,
+      roots: [],
+      rootCursor: "",
+      branches: new Map,
+      cursors: new Map,
+      catalog: new Map,
+      remaining: new Map,
+      truncated: new Set,
+      ancestors: new Map,
+      own: new Map,
+      whole: false,
+      wholeConfirmed: false,
+      path: [],
+      lastSeg: "",
+      draft: null,
+      labels: [],
+      categories: [],
+      suggestions: [],
+      sampleSize: 0,
+      estimate: null,
+      pick: pick || null
+    };
+    if (initial && mail)
+      takeMail(initial, "picker:back");
+    else if (initial && validBrowse(initial))
+      takeFolders(initial, "", false, "picker:back");
+    else {
+      kit.render("picker:back");
+      if (mail)
+        listMail(false);
+      else
+        list("", false);
+    }
+  }
+  function reload(message, fresh) {
+    const keep = p;
+    openScope(keep.id, keep.label, keep.title, keep.returnKey, message, fresh || undefined, keep.pick || undefined);
+  }
+  function scopeData(result) {
+    if (!result || result.isError || !result._meta || typeof result._meta !== "object")
+      return null;
+    const data = result._meta[kit.config.scopeMetaKey];
+    return data && typeof data === "object" ? data : null;
+  }
+  function validNode(node) {
+    return !!node && typeof node.key === "string" && !!node.key && typeof node.name === "string";
+  }
+  function validBrowse(page) {
+    return !!page && typeof page === "object" && typeof page.account_generation === "string" && !!page.account_generation && typeof page.scope_revision === "string" && !!page.scope_revision && Array.isArray(page.nodes) && page.nodes.every(validNode);
+  }
+  function failLoad(retry, focus) {
+    p.loading = "";
+    p.error = Q.loadFailed;
+    p.retry = retry;
+    kit.render(focus);
+  }
+  function list(parentKey, append, after) {
+    const cursor = append ? parentKey ? p.cursors.get(parentKey) : p.rootCursor : "";
+    const args = { source_id: p.id };
+    if (parentKey)
+      args.parent_key = parentKey;
+    if (parentKey && (p.ancestors.get(parentKey) || []).length)
+      args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
+    if (cursor)
+      args.cursor = cursor;
+    p.loading = parentKey || "root";
+    p.error = "";
+    const focus = append ? "picker:more:" + parentKey : p.loaded ? "" : "picker:back";
+    kit.render(focus);
+    const mine = session;
+    kit.call(T.scopeList, args).then((result) => {
+      if (mine !== session || !p)
+        return;
+      const page = scopeData(result);
+      if (!validBrowse(page)) {
+        failLoad(() => list(parentKey, append, after), "picker:retry");
+        return;
+      }
+      if (p.loaded && !p.pick && (page.account_generation !== p.generation || page.scope_revision !== p.revision)) {
+        reload(Q.conflict, parentKey || append ? null : page);
+        return;
+      }
+      takeFolders(page, parentKey, append, focus, after);
+    }, () => {
+      if (mine !== session || !p)
+        return;
+      failLoad(() => list(parentKey, append, after), "picker:retry");
+    });
+  }
+  function takeFolders(page, parentKey, append, focus, after) {
+    if (!p.loaded) {
+      p.generation = page.account_generation;
+      p.revision = page.scope_revision;
+      p.whole = page.whole_account_selected === true;
+      p.wholeConfirmed = p.whole;
+      const saved = Array.isArray(page.selections) ? page.selections : [];
+      for (const selection of saved) {
+        if (!selection || typeof selection.key !== "string" || STATES.indexOf(selection.state) < 0)
+          continue;
+        p.own.set(selection.key, selection.state);
+        p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys) ? selection.ancestor_keys.filter((key) => typeof key === "string") : []);
+      }
+      p.loaded = true;
+    }
+    const trail = parentKey ? trailOf(parentKey) : [];
+    const previous = append ? parentKey ? p.branches.get(parentKey) || [] : p.roots : [];
+    const seen = {};
+    for (const node of previous)
+      seen[node.key] = true;
+    const fresh = page.nodes.filter((node) => !seen[node.key] && trail.indexOf(node.key) < 0);
+    for (const node of fresh) {
+      p.catalog.set(node.key, node);
+      p.ancestors.set(node.key, trail);
+    }
+    const nodes = previous.concat(fresh).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
+    const next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "";
+    const more = typeof page.remaining === "number" && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
+    if (next && more)
+      p.remaining.set(parentKey, more);
+    else
+      p.remaining.delete(parentKey);
+    if (page.truncated === true)
+      p.truncated.add(parentKey);
+    if (parentKey) {
+      p.branches.set(parentKey, nodes);
+      if (next)
+        p.cursors.set(parentKey, next);
+      else
+        p.cursors.delete(parentKey);
+    } else {
+      p.roots = nodes;
+      p.rootCursor = next;
+    }
+    p.loading = "";
+    if (after)
+      after();
+    else
+      kit.render(focus);
+  }
+  function trailOf(key) {
+    return (p.ancestors.get(key) || []).concat([key]);
+  }
+  function nameOf(key) {
+    const node = p.catalog.get(key);
+    if (node && typeof node.name === "string" && node.name)
+      return node.name;
+    const above = (p.ancestors.get(key) || []).filter((ancestor) => {
+      const known = p.catalog.get(ancestor);
+      return known && typeof known.name === "string" && known.name;
+    });
+    return above.length ? fill2(Q.insideFolder, { name: p.catalog.get(above[above.length - 1]).name }) : Q.unknownFolder;
+  }
+  function shortPath(key) {
+    const node = p.catalog.get(key);
+    if (!node || typeof node.name !== "string" || !node.name)
+      return nameOf(key);
+    const ancestors = p.ancestors.get(key) || [];
+    const parent = ancestors.length ? p.catalog.get(ancestors[ancestors.length - 1]) : null;
+    return parent && typeof parent.name === "string" && parent.name ? parent.name + " / " + node.name : node.name;
+  }
+  function inherited(key) {
+    let state = p.whole ? "ingest" : "";
+    let from = p.whole ? ACCOUNT : "";
+    for (const ancestor of p.ancestors.get(key) || []) {
+      const choice = p.own.get(ancestor);
+      if (choice === "exclude") {
+        state = "exclude";
+        from = ancestor;
+      } else if (choice === "metadata_only" && state !== "exclude") {
+        state = "metadata_only";
+        from = ancestor;
+      } else if (choice === "ingest" && (state === "" || state === "ingest")) {
+        state = "ingest";
+        from = ancestor;
+      }
+    }
+    return { state, from };
+  }
+  function effective(key) {
+    const from = inherited(key).state;
+    const own = p.own.get(key) || "";
+    if (from === "exclude" || own === "exclude")
+      return "exclude";
+    if (from === "metadata_only")
+      return "metadata_only";
+    return own || from;
+  }
+  function allowed(key, state) {
+    const from = inherited(key).state;
+    if (!state)
+      return true;
+    if (from === "exclude")
+      return state === "exclude";
+    if (from === "metadata_only")
+      return state !== "ingest";
+    return true;
+  }
+  function descendants(key) {
+    const out = [];
+    p.own.forEach((_state, other) => {
+      if (other !== key && (p.ancestors.get(other) || []).indexOf(key) >= 0)
+        out.push(other);
+    });
+    return out;
+  }
+  function mixed(key) {
+    const access = (state) => state === "exclude" ? "" : state;
+    const mine = access(effective(key));
+    for (const other of descendants(key)) {
+      const theirs = effective(other);
+      if (access(theirs) !== mine)
+        return theirs || "exclude";
+    }
+    return "";
+  }
+  function stateName(state) {
+    return state ? Q.states[state] : Q.notIncluded;
+  }
+  function sourceName(from) {
+    return from === ACCOUNT ? fill2(Q.accountRow, { source: p.label }) : nameOf(from);
+  }
+  function size(bytes) {
+    const units = ["bytes", "KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1000 && unit < units.length - 1) {
+      value /= 1000;
+      unit++;
+    }
+    const shown = unit === 0 || value >= 100 ? String(Math.round(value)) : String(Math.round(value * 10) / 10);
+    return shown + " " + units[unit];
+  }
+  function nodeMeta(node) {
+    let bytes = "";
+    let files = "";
+    if (typeof node.size_bytes === "number" && isFinite(node.size_bytes) && node.size_bytes >= 0)
+      bytes = size(node.size_bytes);
+    if (typeof node.file_count === "number" && isFinite(node.file_count) && node.file_count >= 0) {
+      const n = Math.round(node.file_count);
+      files = fill2(n === 1 ? Q.folderFiles.one : Q.folderFiles.many, { n: kit.count(n) });
+    }
+    return [bytes, files];
+  }
+  function exceptions() {
+    const out = [];
+    p.own.forEach((state, key) => {
+      if (state !== inherited(key).state)
+        out.push(key);
+    });
+    return out;
+  }
+  function choose(key, value, focus) {
+    if (p.saving)
+      return;
+    if (key === ACCOUNT) {
+      const whole = value === "ingest";
+      if (whole !== p.whole) {
+        p.whole = whole;
+        p.wholeConfirmed = false;
+        p.edited = true;
+      }
+    } else {
+      if (value && STATES.indexOf(value) < 0)
+        return;
+      if (value && !allowed(key, value))
+        return;
+      if (value && !p.own.has(key) && p.own.size >= MAX_RULES)
+        return;
+      if (value)
+        p.own.set(key, value);
+      else
+        p.own.delete(key);
+      p.edited = true;
+      const tapped = focus.slice(focus.lastIndexOf(":") + 1);
+      if (!value && tapped && !allowed(key, tapped))
+        focus = "picker:seg:" + key + ":" + effective(key);
+    }
+    if (p.notice && p.notice !== Q.conflict)
+      p.notice = "";
+    p.saveError = "";
+    p.lastSeg = focus;
+    kit.render(focus);
+  }
+  function drill(key) {
+    if (p.loading || p.saving)
+      return;
+    const arrive = () => {
+      p.path = trailOf(key);
+      kit.render("picker:up");
+    };
+    if (p.branches.has(key))
+      arrive();
+    else
+      list(key, false, arrive);
+  }
+  function jump(key) {
+    if (p.loading || p.saving)
+      return;
+    const trail = trailOf(key);
+    const mine = session;
+    const step = (index) => {
+      if (mine !== session || !p)
+        return;
+      if (index >= trail.length) {
+        p.path = trail;
+        kit.render("picker:up");
+        return;
+      }
+      if (p.branches.has(trail[index]))
+        step(index + 1);
+      else
+        list(trail[index], false, () => step(index + 1));
+    };
+    step(0);
+  }
+  function up() {
+    const left = p.path.pop();
+    kit.render(left ? "picker:open:" + left : "picker:back");
+  }
+  function counts() {
+    const totals = { ingest: 0, metadata_only: 0, exclude: 0 };
+    p.own.forEach((_state, key) => {
+      const state = effective(key);
+      if (state)
+        totals[state]++;
+    });
+    return totals;
+  }
+  function indexedBytes() {
+    if (p.whole)
+      return -1;
+    let total = 0;
+    let known = true;
+    p.own.forEach((_state, key) => {
+      const state = effective(key);
+      const ancestors = p.ancestors.get(key) || [];
+      let nearest = "";
+      for (const ancestor of ancestors)
+        if (p.own.has(ancestor))
+          nearest = ancestor;
+      const parentIngest = nearest !== "" && effective(nearest) === "ingest";
+      let sign = 0;
+      if (state === "ingest" && !parentIngest)
+        sign = 1;
+      else if (state !== "ingest" && parentIngest)
+        sign = -1;
+      if (!sign)
+        return;
+      const node = p.catalog.get(key);
+      if (!node || typeof node.size_bytes !== "number" || !isFinite(node.size_bytes)) {
+        known = false;
+        return;
+      }
+      total += sign * node.size_bytes;
+    });
+    return known ? Math.max(0, total) : -1;
+  }
+  function folderSummary() {
+    const totals = counts();
+    const lines = [];
+    const parts = [];
+    const templates = [["ingest", Q.summaryIngest], ["metadata_only", Q.summaryMetadata], ["exclude", Q.summaryExclude]];
+    for (const [state, template] of templates) {
+      const n = totals[state] || 0;
+      if (!n)
+        continue;
+      let part = fill2(template, { n: kit.count(n) });
+      if (!parts.length) {
+        const noun = n === 1 ? Q.summaryFolder.one : Q.summaryFolder.many;
+        part = part.replace(kit.count(n), kit.count(n) + " " + noun);
+      }
+      parts.push(part);
+    }
+    if (p.whole)
+      lines.push(fill2(Q.summaryWhole, { source: p.label }));
+    if (parts.length) {
+      const bytes = indexedBytes();
+      lines.push(parts.join(", ") + (bytes > 0 ? " · " + fill2(Q.summarySize, { size: size(bytes) }) : ""));
+    } else if (!p.whole)
+      lines.push(Q.summaryNone);
+    return lines;
+  }
+  function anyChosen() {
+    let chosen = false;
+    p.own.forEach((_state, key) => {
+      const state = effective(key);
+      if (state === "ingest" || state === "metadata_only")
+        chosen = true;
+    });
+    return chosen;
+  }
+  function saveFolders() {
+    if (!canSaveFolders())
+      return;
+    const selections = [];
+    p.own.forEach((state, key) => {
+      selections.push({ key, state, ancestor_keys: (p.ancestors.get(key) || []).slice() });
+    });
+    const args = {
+      source_id: p.id,
+      account_generation: p.generation,
+      scope_revision: p.revision,
+      selections,
+      whole_account_selected: p.whole
+    };
+    if (p.whole)
+      args.confirm_whole_account = true;
+    save(args, "picker:save");
+  }
+  function canSaveFolders() {
+    if (!p.loaded || p.saving || !p.generation || !p.revision || p.own.size > MAX_RULES)
+      return false;
+    if (p.whole)
+      return p.wholeConfirmed;
+    return anyChosen() || p.edited;
+  }
+  function save(args, focus) {
+    p.saving = true;
+    p.saveError = "";
+    kit.render(focus);
+    const mine = session;
+    kit.call(T.scopeSet, args).then((result) => {
+      if (mine !== session || !p)
+        return;
+      p.saving = false;
+      const content = result && !result.isError ? result.structuredContent : null;
+      const status = content && typeof content === "object" ? content.status : "";
+      if (status === "conflict") {
+        reload(Q.conflict, scopeData(result));
+        return;
+      }
+      if (status === "saved") {
+        leave(fill2(Q.saved, { source: p.label }), true);
+        return;
+      }
+      p.saveError = Q.saveFailed;
+      kit.render(focus);
+    }, () => {
+      if (mine !== session || !p)
+        return;
+      p.saving = false;
+      p.saveError = Q.saveFailed;
+      kit.render(focus);
+    });
+  }
+  function wholeConfirm() {
+    const confirm = el("div", "confirm-box");
+    confirm.setAttribute("role", "alert");
+    add(confirm, el("p", "strong", fill2(Q.wholePrompt, { source: p.label })), add(el("div", "actions"), kit.button(Q.wholeConfirm, "picker:whole:yes", p.saving ? null : () => {
+      p.wholeConfirmed = true;
+      kit.render("picker:seg:" + ACCOUNT + ":ingest");
+    }, "danger"), kit.button(Q.cancel, "picker:whole:no", p.saving ? null : () => {
+      p.whole = false;
+      p.wholeConfirmed = false;
+      kit.render("picker:seg:" + ACCOUNT + ":ingest");
+    }, "plain")));
+    return confirm;
+  }
+  function segKeys(event, buttons, current) {
+    const live = buttons.filter((button) => !button.disabled);
+    if (!live.length)
+      return;
+    const at = live.indexOf(current);
+    let next;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown")
+      next = live[(at + 1) % live.length];
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp")
+      next = live[(at - 1 + live.length) % live.length];
+    else if (event.key === "Home")
+      next = live[0];
+    else if (event.key === "End")
+      next = live[live.length - 1];
+    if (!next)
+      return;
+    event.preventDefault();
+    for (const button of buttons)
+      button.tabIndex = button === next ? 0 : -1;
+    next.focus();
+  }
+  function segControl(name, focusBase, model) {
+    const group2 = el("div", "seg");
+    group2.setAttribute("role", "group");
+    group2.setAttribute("aria-label", fill2(Q.choiceGroup, { name }));
+    const buttons = [];
+    for (const state of STATES) {
+      const words = Q.segments[state];
+      const pressed = model.pressed === state;
+      const button = el("button", "seg-opt" + (pressed ? " on" : model.inherited === state ? " inherited" : ""));
+      button.type = "button";
+      button.setAttribute("data-key", focusBase + state);
+      button.setAttribute("aria-label", words[0]);
+      button.setAttribute("aria-pressed", pressed ? "true" : "false");
+      add(button, el("span", "seg-long", words[0]), el("span", "seg-short", words[1]));
+      const blocked = pressed ? "" : model.blocked(state);
+      const note = blocked || model.note(state);
+      if (note) {
+        button.setAttribute("aria-description", note);
+        button.title = note;
+      }
+      if (blocked || p.saving)
+        button.disabled = true;
+      else
+        button.addEventListener("click", () => model.pick(state));
+      button.addEventListener("keydown", (event) => segKeys(event, buttons, button));
+      buttons.push(button);
+      add(group2, button);
+    }
+    const live = buttons.filter((button) => !button.disabled);
+    const home = live.filter((button) => button.getAttribute("data-key") === p.lastSeg)[0] || live.filter((button) => button.getAttribute("aria-pressed") === "true")[0] || live.filter((button) => button.className.indexOf("inherited") >= 0)[0] || live[0];
+    for (const button of buttons)
+      button.tabIndex = button === home ? 0 : -1;
+    return group2;
+  }
+  function folderControl(key, name, node) {
+    const own = p.own.get(key) || "";
+    const from = inherited(key);
+    const now = effective(key);
+    const selectable = !node || node.selectable !== false;
+    const capped = !own && p.own.size >= MAX_RULES;
+    return segControl(name, "picker:seg:" + key + ":", {
+      pressed: own,
+      inherited: own ? now !== own ? now : "" : from.state,
+      blocked: (state) => {
+        if (!selectable)
+          return Q.cannotChoose;
+        if (!allowed(key, state))
+          return fill2(Q.notPossible, { parent: sourceName(from.from), state: Q.statesLower[from.state] });
+        if (capped)
+          return fill2(Q.capReached, { max: kit.count(MAX_RULES) });
+        return "";
+      },
+      note: (state) => {
+        if (own === state && now !== own)
+          return fill2(Q.overridden, { own: stateName(own), parent: sourceName(from.from), state: stateName(from.state) });
+        if (!own && from.from && from.state === state)
+          return fill2(Q.inheritedFrom, { parent: sourceName(from.from) });
+        return "";
+      },
+      pick: (state) => choose(key, own === state ? "" : state, "picker:seg:" + key + ":" + state)
+    });
+  }
+  function accountControl() {
+    return segControl(fill2(Q.accountRow, { source: p.label }), "picker:seg:" + ACCOUNT + ":", {
+      pressed: p.whole ? "ingest" : "",
+      inherited: "",
+      blocked: (state) => state === "ingest" ? "" : Q.wholeOnlyFull,
+      note: () => "",
+      pick: (state) => choose(ACCOUNT, p.whole ? "" : state, "picker:seg:" + ACCOUNT + ":" + state)
+    });
+  }
+  function pickButton(key, name, focusKey) {
+    const words = p.pick.words;
+    if (p.pick.taken.indexOf(key) >= 0)
+      return kit.button(words.alreadyPrivate, focusKey, null, "plain");
+    const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => leave("", false, { key, name }), "plain");
+    control.setAttribute("aria-label", fill2(words.makePrivateFor, { name }));
+    return control;
+  }
+  function pickRow(node) {
+    const key = node.key;
+    const li = el("li", "frow pick");
+    if (node.has_children) {
+      const open4 = el("button", "fname");
+      open4.type = "button";
+      open4.setAttribute("data-key", "picker:open:" + key);
+      add(open4, el("span", "fname-text", node.name));
+      const chevron = el("span", "chev", "›");
+      chevron.setAttribute("aria-hidden", "true");
+      add(open4, chevron);
+      if (p.loading || p.saving)
+        open4.disabled = true;
+      else
+        open4.addEventListener("click", () => drill(key));
+      add(li, open4);
+    } else
+      add(li, add(el("p", "fname leaf"), el("span", "fname-text", node.name)));
+    if (node.selectable !== false)
+      add(li, pickButton(key, node.name, "picker:pick:" + key));
+    return li;
+  }
+  function nameParts(target, name, key, node) {
+    const main = add(el("span", "fname-main"), el("span", "fname-text", name));
+    const differs = key ? mixed(key) : "";
+    if (differs) {
+      const tag = el("span", "ftag", Q.mixed);
+      tag.title = fill2(Q.mixedSome, { state: Q.statesLower[differs] });
+      add(main, tag);
+    }
+    add(target, main);
+    if (node) {
+      const [bytes, files] = nodeMeta(node);
+      if (bytes)
+        add(target, el("span", "fmeta fsize", bytes));
+      if (files)
+        add(target, el("span", "fmeta fcount", (bytes ? "· " : "") + files));
+    }
+  }
+  function folderRow(node) {
+    if (p.pick)
+      return pickRow(node);
+    const key = node.key;
+    const li = el("li", "frow seg-row");
+    const busy = p.loading || p.saving;
+    let label;
+    if (node.has_children) {
+      const open4 = el("button", "fname");
+      open4.type = "button";
+      open4.setAttribute("data-key", "picker:open:" + key);
+      open4.setAttribute("aria-label", fill2(Q.openFolder, { name: node.name }));
+      if (busy)
+        open4.disabled = true;
+      else
+        open4.addEventListener("click", () => drill(key));
+      const chevron = el("span", "fopen", "›");
+      chevron.setAttribute("aria-hidden", "true");
+      add(open4, chevron);
+      label = open4;
+    } else {
+      label = el("p", "fname leaf");
+      const spacer = el("span", "fopen-gap");
+      spacer.setAttribute("aria-hidden", "true");
+      add(label, spacer);
+    }
+    label.title = node.name;
+    nameParts(label, node.name, key, node);
+    add(li, label, folderControl(key, node.name, node));
+    return li;
+  }
+  function loadMore(parentKey) {
+    const busy = p.loading === (parentKey || "root");
+    const more = p.remaining.get(parentKey) || 0;
+    const label = more ? fill2(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
+    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
+  }
+  function levelList(parentKey, nodes, hasMore) {
+    const listNode = el("ul", "flist");
+    for (const node of nodes)
+      add(listNode, folderRow(node));
+    if (!nodes.length)
+      add(listNode, el("li", "muted fempty", Q.noFolders));
+    if (hasMore)
+      add(listNode, add(el("li", "fmore"), loadMore(parentKey)));
+    if (p.truncated.has(parentKey))
+      add(listNode, el("li", "muted fmore", Q.truncated));
+    return listNode;
+  }
+  function loadingLine() {
+    if (!p.loading)
+      return null;
+    const line = el("p", "muted fstate", Q.loadingFolders);
+    line.setAttribute("role", "status");
+    return line;
+  }
+  function topRow(text, control) {
+    const row = el("div", "this-row");
+    add(row, el("p", "this-label", text), control);
+    return row;
+  }
+  function exceptionList(rules) {
+    const section = el("section", "fsection exceptions");
+    add(section, el("h2", "", fill2(Q.exceptions, { n: kit.count(rules.length) })));
+    const listNode = el("ul", "flist");
+    for (const key of rules) {
+      const path = shortPath(key);
+      const state = p.own.get(key);
+      const jumpButton = el("button", "jump-btn");
+      jumpButton.type = "button";
+      jumpButton.setAttribute("data-key", "picker:jump:" + key);
+      jumpButton.title = path;
+      add(jumpButton, el("span", "fname-text", path), el("span", "jtag jtag-" + state, Q.segments[state][0]));
+      const chevron = el("span", "chev", "›");
+      chevron.setAttribute("aria-hidden", "true");
+      add(jumpButton, chevron);
+      if (p.loading || p.saving)
+        jumpButton.disabled = true;
+      else
+        jumpButton.addEventListener("click", () => jump(key));
+      add(listNode, add(el("li", "frow jump"), jumpButton));
+    }
+    return add(section, listNode);
+  }
+  function rootScreen(body) {
+    add(body, el("h1", "", p.title));
+    add(body, el("p", "muted intro", fill2(p.pick ? p.pick.words.intro : Q.foldersIntro, { source: p.label })));
+    noticeAndError(body);
+    if (!p.loaded) {
+      add(body, loadingLine());
+      return;
+    }
+    if (p.pick) {
+      const only = add(el("section", "fsection"), el("h2", "", p.label));
+      add(only, loadingLine());
+      add(only, levelList("", p.roots, !!p.rootCursor));
+      add(body, only);
+      return;
+    }
+    add(body, topRow(fill2(Q.accountRow, { source: p.label }), accountControl()));
+    if (p.whole && !p.wholeConfirmed)
+      add(body, wholeConfirm());
+    const rules = exceptions();
+    if (rules.length)
+      add(body, exceptionList(rules));
+    const folders = add(el("section", "fsection"), el("h2", "", Q.foldersHeading));
+    add(folders, loadingLine());
+    add(folders, levelList("", p.roots, !!p.rootCursor));
+    add(body, folders);
+  }
+  function pathLine() {
+    const names = [p.label].concat(p.path.map((key) => nameOf(key)));
+    const shown = names.length > 3 ? [Q.pathMore].concat(names.slice(-2)) : names;
+    const head = el("h1", "fpath");
+    shown.forEach((name, index) => {
+      if (index === shown.length - 1)
+        add(head, el("span", "fpath-here", name));
+      else
+        add(head, el("span", "fpath-up", name + " / "));
+    });
+    return head;
+  }
+  function folderScreen(body) {
+    const key = p.path[p.path.length - 1];
+    add(body, pathLine());
+    noticeAndError(body);
+    const node = p.catalog.get(key);
+    if (p.pick) {
+      const here = el("div", "this-row pick");
+      add(here, add(el("p", "this-text"), el("span", "this-label", nameOf(key))));
+      if (!node || node.selectable !== false)
+        add(here, pickButton(key, nameOf(key), "picker:pick-this"));
+      add(body, here);
+    } else
+      add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
+    add(body, loadingLine());
+    add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
+  }
+  function noticeAndError(body) {
+    if (p.notice) {
+      const notice = el("p", p.notice === Q.conflict ? "fnote strong" : "fnote muted", p.notice);
+      notice.setAttribute("role", "status");
+      add(body, notice);
+    }
+    if (p.error) {
+      const error = el("div", "banner");
+      error.setAttribute("role", "alert");
+      add(error, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
+      add(body, error);
+    }
+  }
+  function folderFooter() {
+    const footer = el("section", "picker-footer");
+    footer.setAttribute("aria-label", Q.summaryTitle);
+    const summary = el("div", "summary");
+    summary.setAttribute("aria-live", "polite");
+    for (const line of folderSummary())
+      add(summary, el("p", "", line));
+    if (p.own.size >= MAX_RULES)
+      add(summary, el("p", "reason strong", fill2(Q.capReached, { max: kit.count(MAX_RULES) })));
+    add(footer, summary);
+    add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? Q.needConfirm : !anyChosen() && !p.edited ? Q.needChoice : ""));
+    return footer;
+  }
+  function foldersView(page) {
+    const body = el("div", "picker-body");
+    if (p.path.length)
+      folderScreen(body);
+    else
+      rootScreen(body);
+    if (p.loaded && !p.pick)
+      add(body, folderFooter());
+    add(page, body);
+  }
+  function saveRow(enabled, label, onSave, reason) {
+    const row = el("div", "actions");
+    if (p.saving) {
+      const busy = kit.button(Q.saving, "picker:save", null, "main");
+      busy.setAttribute("aria-busy", "true");
+      add(row, busy);
+    } else
+      add(row, kit.button(label, "picker:save", enabled ? onSave : null, "main"));
+    add(row, kit.button(Q.cancel, "picker:cancel", p.saving ? null : back, "plain"));
+    const wrap = el("div", "save");
+    add(wrap, row);
+    if (!enabled && !p.saving && reason)
+      add(wrap, el("p", "reason", reason));
+    if (p.saveError) {
+      const error = el("p", "error", p.saveError);
+      error.setAttribute("role", "alert");
+      add(wrap, error);
+    }
+    return wrap;
+  }
+  function strings(value) {
+    return Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : [];
+  }
+  function normalizeDraft(value) {
+    const draft = value && typeof value === "object" ? value : {};
+    return {
+      window: WINDOWS.indexOf(draft.window) >= 0 ? draft.window : "2y",
+      skipped_categories: Array.isArray(draft.skipped_categories) ? draft.skipped_categories.filter((entry) => CATEGORIES.indexOf(entry) >= 0) : ["promotions", "social"],
+      skipped_labels: Array.isArray(draft.skipped_labels) ? draft.skipped_labels.filter((entry) => entry && typeof entry.id === "string" && typeof entry.name === "string").map((entry) => ({ id: entry.id, name: entry.name })) : [],
+      always_private_senders: strings(draft.always_private_senders),
+      skip_senders: strings(draft.skip_senders)
+    };
+  }
+  function draftOut() {
+    const clean = (lines) => {
+      const out = [];
+      for (const line of lines) {
+        const value = line.trim();
+        if (value && out.indexOf(value) < 0)
+          out.push(value);
+      }
+      return out;
+    };
+    return {
+      window: p.draft.window,
+      skipped_categories: p.draft.skipped_categories.slice(),
+      skipped_labels: p.draft.skipped_labels.map((label) => ({ id: label.id, name: label.name })),
+      always_private_senders: clean(p.draft.always_private_senders),
+      skip_senders: clean(p.draft.skip_senders)
+    };
+  }
+  function listMail(withDraft) {
+    const args = { source_id: p.id };
+    if (withDraft && p.draft)
+      args[kit.config.mailArgs.list] = draftOut();
+    p.loading = "root";
+    p.error = "";
+    const focus = withDraft ? "picker:estimate" : "picker:back";
+    kit.render(focus);
+    const mine = session;
+    kit.call(T.scopeList, args).then((result) => {
+      if (mine !== session || !p)
+        return;
+      const body = scopeData(result);
+      if (!validMail(body)) {
+        failLoad(() => listMail(withDraft), "picker:retry");
+        return;
+      }
+      if (p.loaded && (body.account_generation !== p.generation || body.scope_revision !== p.revision)) {
+        reload(Q.conflict, withDraft ? null : body);
+        return;
+      }
+      takeMail(body, focus);
+    }, () => {
+      if (mine !== session || !p)
+        return;
+      failLoad(() => listMail(withDraft), "picker:retry");
+    });
+  }
+  function validMail(body) {
+    return !!body && typeof body === "object" && typeof body.account_generation === "string" && !!body.account_generation && typeof body.scope_revision === "string" && !!body.scope_revision;
+  }
+  function takeMail(body, focus) {
+    if (!validMail(body))
+      return;
+    if (!p.loaded) {
+      p.generation = body.account_generation;
+      p.revision = body.scope_revision;
+      p.draft = normalizeDraft(body.draft);
+      p.loaded = true;
+    }
+    p.labels = Array.isArray(body.labels) ? body.labels.filter((label) => label && typeof label.id === "string" && typeof label.name === "string") : [];
+    p.categories = Array.isArray(body.categories) ? body.categories : [];
+    p.suggestions = Array.isArray(body.sender_suggestions) ? body.sender_suggestions.filter((entry) => entry && typeof entry.sender === "string") : [];
+    p.sampleSize = typeof body.sample_size === "number" ? body.sample_size : 0;
+    p.estimate = body.estimate && typeof body.estimate === "object" ? body.estimate : null;
+    p.loading = "";
+    kit.render(focus);
+  }
+  function mailEdited(focus) {
+    p.edited = true;
+    p.saveError = "";
+    kit.render(focus);
+  }
+  function option(type, name, key, checked, text, hint, onChange) {
+    const label = el("label", "opt");
+    const input = el("input");
+    input.type = type;
+    if (name)
+      input.name = name;
+    input.checked = checked;
+    input.disabled = p.saving;
+    input.setAttribute("data-key", key);
+    input.addEventListener("change", () => onChange(input));
+    const words = add(el("span", "opt-text"), el("span", "", text));
+    if (hint)
+      add(words, el("span", "muted opt-hint", hint));
+    return add(label, input, words);
+  }
+  function group(legend, help) {
+    const box = el("fieldset", "group");
+    add(box, el("legend", "", legend));
+    if (help)
+      add(box, el("p", "muted", help));
+    return box;
+  }
+  function senderField(which, title, help) {
+    const label = el("label", "field");
+    add(label, el("span", "field-label", title), el("span", "muted", help));
+    const area = el("textarea", "text");
+    area.rows = 3;
+    area.spellcheck = false;
+    area.disabled = p.saving;
+    area.value = p.draft[which].join(`
+`);
+    area.setAttribute("data-key", "picker:senders:" + which);
+    area.addEventListener("input", () => {
+      p.draft[which] = area.value.split(`
+`);
+      p.edited = true;
+      const slot = p.summaryNode;
+      if (slot)
+        slot.textContent = mailSummary();
+    });
+    return add(label, area);
+  }
+  function lowerFirst(value) {
+    return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
+  }
+  function plural(words, n) {
+    return fill2(n === 1 ? words.one : words.many, { n: kit.count(n) });
+  }
+  function mailSummary() {
+    const draft = draftOut();
+    const skipped = draft.skipped_categories.length + draft.skipped_labels.length;
+    return [
+      fill2(Q.mailSummaryWindow, { window: lowerFirst(Q.mailWindows[draft.window]) }),
+      plural(Q.mailSummarySkipped, skipped),
+      plural(Q.mailSummaryPrivate, draft.always_private_senders.length),
+      plural(Q.mailSummarySkipSenders, draft.skip_senders.length)
+    ].join(" · ");
+  }
+  function addSender(which, sender, focus) {
+    const listNow = p.draft[which].map((line) => line.trim()).filter((line) => line);
+    if (listNow.indexOf(sender) < 0)
+      listNow.push(sender);
+    p.draft[which] = listNow;
+    mailEdited(focus);
+  }
+  function mailView(page) {
+    add(page, el("h1", "", p.title));
+    add(page, el("p", "muted", fill2(Q.mailIntro, { source: p.label })));
+    if (p.notice) {
+      const notice = el("p", p.notice === Q.conflict ? "fnote strong" : "fnote muted", p.notice);
+      notice.setAttribute("role", "status");
+      add(page, notice);
+    }
+    if (p.error) {
+      const error = el("div", "banner");
+      error.setAttribute("role", "alert");
+      add(error, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
+      add(page, error);
+    }
+    if (!p.loaded) {
+      if (p.loading) {
+        const line = el("p", "muted", Q.loadingMail);
+        line.setAttribute("role", "status");
+        add(page, line);
+      }
+      return;
+    }
+    const draft = p.draft;
+    const windows = group(Q.mailWindow, Q.mailWindowHelp);
+    for (const value of WINDOWS) {
+      add(windows, option("radio", "mail-window", "picker:window:" + value, draft.window === value, Q.mailWindows[value], value === "2y" ? Q.mailRecommended : "", () => {
+        draft.window = value;
+        mailEdited("picker:window:" + value);
+      }));
+    }
+    add(page, windows);
+    const categories = group(Q.mailCategories, Q.mailCategoriesHelp);
+    for (const category of CATEGORIES) {
+      const words = Q.mailCategoryNames[category];
+      const known = p.categories.filter((entry) => entry && entry.category === category)[0];
+      const hint = known && typeof known.messages_total === "number" ? words[1] + " · " + fill2(Q.mailCategoryCount, { count: kit.count(known.messages_total) }) : words[1];
+      add(categories, option("checkbox", "", "picker:category:" + category, draft.skipped_categories.indexOf(category) < 0, words[0], hint, (input) => {
+        const rest = draft.skipped_categories.filter((entry) => entry !== category);
+        draft.skipped_categories = input.checked ? rest : rest.concat([category]);
+        mailEdited("picker:category:" + category);
+      }));
+    }
+    add(page, categories);
+    const labels = group(Q.mailLabels, Q.mailLabelsHelp);
+    if (!p.labels.length)
+      add(labels, el("p", "muted", Q.mailLabelsEmpty));
+    p.labels.forEach((label, index) => {
+      const skipped = draft.skipped_labels.some((entry) => entry.id === label.id);
+      add(labels, option("checkbox", "", "picker:label:" + index, !skipped, label.id === "SENT" ? Q.mailSentLabel : label.name, "", (input) => {
+        const rest = draft.skipped_labels.filter((entry) => entry.id !== label.id);
+        draft.skipped_labels = input.checked ? rest : rest.concat([{ id: label.id, name: label.name }]);
+        mailEdited("picker:label:" + index);
+      }));
+    });
+    add(page, labels);
+    const senders = group(Q.mailSenders, "");
+    add(senders, senderField("always_private_senders", Q.mailPrivate, Q.mailPrivateHelp));
+    add(senders, senderField("skip_senders", Q.mailSkip, Q.mailSkipHelp));
+    if (p.suggestions.length) {
+      add(senders, el("p", "field-label", Q.mailSuggestions));
+      const listNode = el("ul", "suggestions");
+      p.suggestions.forEach((entry, index) => {
+        const item = el("li", "suggestion");
+        const text = add(el("p", "suggestion-text"), el("span", "", entry.sender));
+        if (typeof entry.sample_messages === "number" && p.sampleSize > 0) {
+          add(text, el("span", "muted", " · " + fill2(Q.mailSuggestionCount, { n: kit.count(entry.sample_messages), total: kit.count(p.sampleSize) })));
+        }
+        add(item, text, add(el("div", "actions"), kit.button(Q.mailPrivate, "picker:suggest:private:" + index, p.saving ? null : () => addSender("always_private_senders", entry.sender, "picker:suggest:private:" + index), "plain"), kit.button(Q.mailSkip, "picker:suggest:skip:" + index, p.saving ? null : () => addSender("skip_senders", entry.sender, "picker:suggest:skip:" + index), "plain")));
+        add(listNode, item);
+      });
+      add(senders, listNode);
+    }
+    add(page, senders);
+    const footer = el("section", "picker-footer");
+    footer.setAttribute("aria-label", Q.summaryTitle);
+    const summary = el("div", "summary");
+    summary.setAttribute("aria-live", "polite");
+    const summaryLine = el("p", "", mailSummary());
+    p.summaryNode = summaryLine;
+    add(summary, summaryLine);
+    const estimate = p.estimate;
+    if (estimate && typeof estimate.content_messages === "number" && typeof estimate.metadata_messages === "number") {
+      add(summary, el("p", "", fill2(Q.mailEstimate, { content: kit.count(estimate.content_messages), metadata: kit.count(estimate.metadata_messages) })));
+      if (typeof estimate.embedding_cost_usd === "number" && isFinite(estimate.embedding_cost_usd)) {
+        add(summary, el("p", "", fill2(Q.mailCost, { cost: estimate.embedding_cost_usd.toFixed(2) })));
+      }
+      add(summary, el("p", "muted", Q.mailEstimateNote));
+    }
+    add(summary, add(el("div", "actions"), kit.button(p.loading ? Q.loadingMail : Q.mailUpdateEstimate, "picker:estimate", p.loading || p.saving ? null : () => listMail(true), "plain")));
+    add(footer, summary);
+    add(footer, saveRow(!p.saving && !p.loading, Q.saveMail, () => {
+      if (p.saving || !p.loaded)
+        return;
+      const args = { source_id: p.id, account_generation: p.generation, scope_revision: p.revision };
+      args[kit.config.mailArgs.set] = draftOut();
+      save(args, "picker:save");
+    }, ""));
+    add(page, footer);
+  }
+  function back() {
+    if (!p)
+      return;
+    if (p.mode !== "connect" && p.edited && !p.saving) {
+      p.discarding = true;
+      kit.render("picker:discard:no");
+      return;
+    }
+    leave("", true);
+  }
+  function view() {
+    const page = el("main", "page picker");
+    if (!p)
+      return page;
+    const top = el("div", "picker-top");
+    const deep = p.mode === "folders" && p.path.length > 0;
+    const backButton = deep ? kit.button(Q.up, "picker:up", escape, "plain") : kit.button(p.pick ? p.pick.words.back : Q.back, "picker:back", escape, "plain");
+    if (deep) {
+      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : fill2(Q.accountRow, { source: p.label });
+      backButton.setAttribute("aria-label", fill2(Q.upTo, { name: above }));
+    }
+    backButton.className = "btn back";
+    add(top, backButton);
+    add(page, top);
+    if (p.discarding) {
+      const confirm = el("div", "confirm-box");
+      confirm.setAttribute("role", "alert");
+      add(confirm, el("p", "strong", Q.discardPrompt), add(el("div", "actions"), kit.button(Q.discard, "picker:discard:yes", () => leave("", true), "danger"), kit.button(Q.keep, "picker:discard:no", () => {
+        p.discarding = false;
+        kit.render("picker:back");
+      }, "plain")));
+      add(page, confirm);
+    }
+    if (p.mode === "connect")
+      connectView(page);
+    else if (p.mode === "mail")
+      mailView(page);
+    else
+      foldersView(page);
+    return page;
+  }
+  function escape() {
+    if (!p)
+      return;
+    if (p.discarding) {
+      p.discarding = false;
+      kit.render("picker:back");
+    } else if (p.mode === "folders" && p.path.length)
+      up();
+    else
+      back();
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("keydown", (event) => {
+      if (!p || event.key !== "Escape" || event.defaultPrevented)
+        return;
+      event.preventDefault();
+      escape();
+    });
+  }
+  return {
+    handles,
+    start,
+    pickFolder,
+    active: () => !!p,
+    view,
+    afterRender: () => {
+      return;
+    }
+  };
+}
+var CHATGPT_PICKER_TOOLS, CHATGPT_PICKER_MAIL_ARGS, CHATGPT_SCOPE_META_KEY, CHATGPT_CONNECT_HOST = "mcp.olympusplugin.ai", CHATGPT_CONNECT_POLL_MS = 3000, CHATGPT_CONNECT_POLL_CAP_MS, CHATGPT_MAIL_SOURCE_ID = "gmail.email";
+var init_picker = __esm(() => {
+  init_dashboard_contract();
+  CHATGPT_PICKER_TOOLS = {
+    connectSource: CONNECT_SOURCE_TOOL_NAME,
+    scopeList: SCOPE_LIST_TOOL_NAME,
+    scopeSet: SCOPE_SET_TOOL_NAME
+  };
+  CHATGPT_PICKER_MAIL_ARGS = { list: "draft", set: "mail" };
+  CHATGPT_SCOPE_META_KEY = SCOPE_UI_META_KEY;
+  CHATGPT_CONNECT_POLL_CAP_MS = 3 * 60000;
+});
+
+// src/workers/dashboard/chatgpt/privacy.ts
+function chatgptPrivacyProgram(kit, makeLogic) {
+  const T = kit.config.tools;
+  const W = kit.config.copy;
+  const el = kit.el;
+  const add = kit.add;
+  const fill2 = kit.fill;
+  const L = makeLogic({ mailSourceId: kit.config.mailSourceId, folderSources: kit.config.folderSources, topicWords: W.questions });
+  let s = null;
+  let session = 0;
+  function handles(fix) {
+    return !!fix && fix.tool === T.get;
+  }
+  function start(returnKey) {
+    session++;
+    if (kit.compact())
+      kit.fullscreen();
+    s = {
+      screen: "main",
+      returnKey,
+      loaded: false,
+      loading: true,
+      error: "",
+      description: "",
+      rules: [],
+      pendingCount: 0,
+      revision: "",
+      savedDescription: "",
+      confirmation: "",
+      confirmedAt: 0,
+      confirmStep: false,
+      hidden: [],
+      server: null,
+      edited: false,
+      saving: false,
+      saveError: "",
+      discarding: false,
+      picking: false,
+      labels: [],
+      labelsLoading: false,
+      labelsError: "",
+      sender: "",
+      senderError: "",
+      questionsError: ""
+    };
+    load();
+  }
+  function leave(notice, refresh) {
+    const key = s ? s.returnKey : "";
+    s = null;
+    session++;
+    kit.close(notice, refresh, key);
+  }
+  function settings(result) {
+    if (!result || result.isError || !result._meta || typeof result._meta !== "object")
+      return null;
+    const data = result._meta[kit.config.metaKey];
+    if (!data || typeof data !== "object" || !Array.isArray(data.rules))
+      return null;
+    return data;
+  }
+  function validRule(rule) {
+    return L.validRule(rule);
+  }
+  function displayOf(rule) {
+    return L.displayOf(rule, fill2(W.folderUnnamed, { source: sourceLabel(rule.source_id) }));
+  }
+  function viewRule(rule) {
+    return L.viewRule(rule, displayOf(rule));
+  }
+  function take(data) {
+    s.description = typeof data.description === "string" ? data.description : "";
+    s.savedDescription = s.description;
+    s.revision = typeof data.revision === "string" ? data.revision : "";
+    s.edited = false;
+    s.confirmStep = false;
+    s.rules = data.rules.filter(validRule).map(viewRule);
+    s.hidden = data.rules.filter((rule) => !validRule(rule));
+    s.server = null;
+    s.pendingCount = typeof data.pendingCount === "number" && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
+    if (typeof data.confirmation === "string" && data.confirmation) {
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+    }
+  }
+  function load() {
+    s.loading = true;
+    s.error = "";
+    kit.render("privacy:back");
+    const mine = session;
+    kit.call(T.get, {}).then((result) => {
+      if (mine !== session || !s)
+        return;
+      const data = settings(result);
+      s.loading = false;
+      if (!data) {
+        s.error = W.loadFailed;
+        kit.render("privacy:retry");
+        return;
+      }
+      take(data);
+      s.loaded = true;
+      kit.render("privacy:description");
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.loading = false;
+      s.error = W.loadFailed;
+      kit.render("privacy:retry");
+    });
+  }
+  function identity(rule) {
+    return L.identity(rule);
+  }
+  function kept() {
+    return s.rules.filter((rule) => !rule.removed);
+  }
+  function ruleOut(rule) {
+    return L.ruleOut(rule);
+  }
+  function rulesOut() {
+    return kept().map(ruleOut).concat(s.hidden);
+  }
+  function changed() {
+    s.edited = true;
+    s.confirmStep = false;
+  }
+  function canSave() {
+    return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
+  }
+  function addRule(rule) {
+    L.addTo(s.rules, rule);
+    changed();
+    s.saveError = "";
+  }
+  function lowering() {
+    return L.lowering(s.rules, s.description, s.savedDescription);
+  }
+  function lowers() {
+    return L.lowers(s.rules, s.description, s.savedDescription);
+  }
+  function save() {
+    if (!s || !s.loaded || s.saving || !canSave())
+      return;
+    const shown = L.withShownAnswers(s.description);
+    if (shown !== s.description) {
+      s.description = shown;
+      changed();
+    }
+    if (lowers()) {
+      s.confirmStep = true;
+      s.saveError = "";
+      kit.render("privacy:confirm:yes");
+      return;
+    }
+    send(false, false);
+  }
+  const CONFIRMATION_FRESH_MS = 25 * 60000;
+  function send(confirmed, retried) {
+    if (confirmed && (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS)) {
+      renewConfirmation(() => send(true, true));
+      return;
+    }
+    const args = { description: s.description.trim(), rules: rulesOut() };
+    if (s.revision)
+      args.revision = s.revision;
+    if (confirmed)
+      args.confirmation = s.confirmation;
+    s.saving = true;
+    s.saveError = "";
+    s.confirmStep = false;
+    kit.render("privacy:save");
+    const mine = session;
+    kit.call(T.set, args).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+      if (confirmed && result && result.isError && content && content.error === "privacy_owner_only" && !retried) {
+        s.confirmation = "";
+        renewConfirmation(() => send(true, true));
+        return;
+      }
+      const data = settings(result);
+      if (data && content && content.status === "conflict")
+        return conflict(data);
+      if (!data || result.isError) {
+        s.saveError = W.saveFailed;
+        kit.render("privacy:save");
+        return;
+      }
+      if (confirmed)
+        s.confirmation = "";
+      kit.remember(data.rules.filter(validRule).length);
+      leave(W.saved, true);
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render("privacy:save");
+    });
+  }
+  function conflict(data) {
+    s.server = data;
+    s.confirmStep = false;
+    s.saveError = "";
+    kit.render("privacy:conflict:apply");
+  }
+  function applyAgain() {
+    const server = s.server;
+    if (!server)
+      return;
+    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    take(server);
+    const replayed = L.replay(draft, s.rules);
+    s.rules = replayed.rules;
+    s.confirmStep = false;
+    s.saveError = "";
+    if (replayed.description !== null)
+      s.description = replayed.description;
+    s.edited = true;
+    save();
+    if (!s.saving && !s.confirmStep)
+      kit.render("privacy:save");
+  }
+  function discardMine() {
+    const server = s.server;
+    if (!server)
+      return;
+    take(server);
+    kit.render("privacy:description");
+  }
+  function conflictBox() {
+    const box = el("div", "confirm-box");
+    box.setAttribute("role", "alert");
+    add(box, el("p", "strong", W.conflict), el("p", "", W.conflictNow));
+    const list = el("ul", "plain");
+    const description = typeof s.server.description === "string" ? s.server.description.trim() : "";
+    add(list, el("li", "", description ? fill2(W.conflictDescription, { text: description }) : W.conflictNoDescription));
+    const rules = s.server.rules.filter(validRule);
+    if (!rules.length)
+      add(list, el("li", "", W.rulesEmpty));
+    for (const rule of rules)
+      add(list, el("li", "", displayOf(rule) + " · " + kindText(rule)));
+    add(box, list, add(el("div", "actions"), kit.button(W.applyAgain, "privacy:conflict:apply", applyAgain, "main"), kit.button(W.discardMine, "privacy:conflict:discard", discardMine, "plain")));
+    return box;
+  }
+  function renewConfirmation(then) {
+    s.saving = true;
+    s.saveError = "";
+    s.confirmStep = false;
+    kit.render("privacy:save");
+    const mine = session;
+    kit.call(T.get, {}).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      const data = settings(result);
+      if (!data || typeof data.confirmation !== "string" || !data.confirmation) {
+        s.saveError = W.saveFailed;
+        kit.render("privacy:save");
+        return;
+      }
+      if (s.revision && typeof data.revision === "string" && data.revision !== s.revision)
+        return conflict(data);
+      s.confirmation = data.confirmation;
+      s.confirmedAt = Date.now();
+      then();
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render("privacy:save");
+    });
+  }
+  function confirmBox() {
+    const change = lowering();
+    const box = el("div", "confirm-box");
+    box.setAttribute("role", "alert");
+    if (change.removed.length) {
+      add(box, el("p", "strong", fill2(W.confirmRemove, { list: change.removed.map((rule) => rule.display).join(", ") })));
+    }
+    if (change.described)
+      add(box, el("p", change.removed.length ? "" : "strong", W.confirmDescription));
+    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send(lowers(), false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
+      s.confirmStep = false;
+      kit.render("privacy:save");
+    }, "plain")));
+    return box;
+  }
+  function sources() {
+    const data = kit.data();
+    return data && Array.isArray(data.sources) ? data.sources : [];
+  }
+  function connected(id) {
+    return sources().filter((source) => source && String(source.id) === id && source.status !== "Off")[0] || null;
+  }
+  function sourceLabel(id) {
+    const listed = sources().filter((source) => source && String(source.id) === id)[0];
+    if (listed && typeof listed.label === "string" && listed.label)
+      return listed.label;
+    return kit.config.folderSources[id] || id;
+  }
+  function folderSources() {
+    return Object.keys(kit.config.folderSources).filter((id) => !!connected(id)).map((id) => ({ id, label: sourceLabel(id) }));
+  }
+  function gmailConnected() {
+    return !!connected(kit.config.mailSourceId);
+  }
+  function addFolder() {
+    const choices = folderSources();
+    if (!choices.length || !kit.picker)
+      return;
+    if (choices.length === 1) {
+      pickIn(choices[0].id, choices[0].label);
+      return;
+    }
+    s.screen = "sources";
+    kit.render("privacy:back");
+  }
+  function pickIn(id, label) {
+    const mine = session;
+    const taken = kept().filter((rule) => rule.kind === "folder" && rule.source_id === id && typeof rule.key === "string").map((rule) => rule.key);
+    s.picking = true;
+    kit.picker.pickFolder(id, label, {
+      back: W.backToPrivacy,
+      title: W.folderTitle,
+      intro: W.folderIntro,
+      makePrivate: W.makePrivate,
+      makePrivateFor: W.makePrivateFor,
+      alreadyPrivate: W.alreadyPrivate
+    }, taken, (folder) => {
+      if (mine !== session || !s)
+        return;
+      s.picking = false;
+      s.screen = "main";
+      if (folder)
+        addRule({ kind: "folder", source_id: id, key: folder.key, display: folder.name, removed: false });
+      kit.render("privacy:add:folder");
+    });
+  }
+  function addLabel() {
+    if (!gmailConnected())
+      return;
+    s.screen = "labels";
+    s.labels = [];
+    s.labelsLoading = true;
+    s.labelsError = "";
+    kit.render("privacy:back");
+    const mine = session;
+    kit.call(kit.config.scopeList, { source_id: kit.config.mailSourceId }).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.labelsLoading = false;
+      const data = result && !result.isError && result._meta && typeof result._meta === "object" ? result._meta[kit.config.scopeMetaKey] : null;
+      if (!data || typeof data !== "object" || !Array.isArray(data.labels)) {
+        s.labelsError = W.loadFailed;
+        kit.render("privacy:labels:retry");
+        return;
+      }
+      s.labels = data.labels.filter((label) => label && typeof label.id === "string" && label.id && typeof label.name === "string");
+      kit.render("privacy:back");
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.labelsLoading = false;
+      s.labelsError = W.loadFailed;
+      kit.render("privacy:labels:retry");
+    });
+  }
+  function labelName(label) {
+    return label.id === "SENT" ? W.sentLabel : label.name;
+  }
+  function addSender() {
+    s.screen = "sender";
+    s.sender = "";
+    s.senderError = "";
+    kit.render("privacy:sender");
+  }
+  function submitSender() {
+    const value = L.senderValue(s.sender);
+    if (!value) {
+      s.senderError = W.senderInvalid;
+      kit.render("privacy:sender");
+      return;
+    }
+    const rule = { kind: "sender", source_id: kit.config.mailSourceId, value, display: value, removed: false };
+    if (kept().some((other) => identity(other) === identity(rule))) {
+      s.senderError = W.senderDuplicate;
+      kit.render("privacy:sender");
+      return;
+    }
+    addRule(rule);
+    s.screen = "main";
+    kit.render("privacy:add:sender");
+  }
+  function kindText(rule) {
+    if (rule.kind === "folder")
+      return fill2(W.kindFolder, { source: sourceLabel(rule.source_id) });
+    return rule.kind === "label" ? W.kindLabel : W.kindSender;
+  }
+  function ruleRow(rule, index) {
+    const li = el("li", "frow pick rule");
+    if (rule.removed) {
+      add(li, el("p", "fname leaf muted", fill2(W.removed, { name: rule.display })));
+      const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
+        rule.removed = false;
+        changed();
+        kit.render("privacy:rule:" + index);
+      }, "plain");
+      undo.setAttribute("aria-label", fill2(W.undoFor, { name: rule.display }));
+      return add(li, undo);
+    }
+    add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
+    const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
+      rule.removed = true;
+      changed();
+      s.saveError = "";
+      kit.render("privacy:rule:" + index);
+    }, "plain");
+    remove.setAttribute("aria-label", fill2(W.removeFor, { name: rule.display }));
+    return add(li, remove);
+  }
+  function questionsSection() {
+    const Q = W.questions;
+    const asked = L.questions(s.description);
+    if (!asked.length)
+      return null;
+    const section = add(el("section", "fsection questions"), el("h2", "", Q.title), el("p", "reason", Q.intro));
+    for (const topic of asked) {
+      const heading = el("h3", "qtitle", topic.question);
+      heading.id = "privacy-q-" + topic.id;
+      const group = add(el("div", "qtopic"), heading);
+      for (const option of topic.options) {
+        const id = "privacy-q-" + topic.id + "-" + option.id;
+        const row = el("div", "qopt");
+        row.setAttribute("role", "radiogroup");
+        row.setAttribute("aria-labelledby", heading.id + " " + id);
+        const name = el("span", "qlabel", option.label);
+        name.id = id;
+        const choices = el("span", "qchoices");
+        for (const side of ["private", "share"]) {
+          const choice = el("label", "qchoice");
+          const input = el("input");
+          input.type = "radio";
+          input.name = id;
+          input.value = side;
+          input.checked = option.side === side;
+          input.disabled = s.saving;
+          input.setAttribute("data-key", "privacy:q:" + topic.id + ":" + option.id + ":" + side);
+          input.addEventListener("change", () => {
+            if (!input.checked || !s)
+              return;
+            const next = L.answerTopic(s.description, topic.id, option.id, side);
+            s.questionsError = next.fits ? "" : Q.tooLong;
+            if (next.fits) {
+              s.description = next.description;
+              changed();
+              s.saveError = "";
+            }
+            kit.render("privacy:q:" + topic.id + ":" + option.id + ":" + side);
+          });
+          add(choices, add(choice, input, el("span", "", side === "private" ? Q.private : Q.share)));
+        }
+        add(group, add(row, name, choices));
+      }
+      add(section, group);
+    }
+    if (s.questionsError) {
+      const message = el("p", "reason error", s.questionsError);
+      message.setAttribute("role", "alert");
+      add(section, message);
+    }
+    return section;
+  }
+  function mainView(page) {
+    add(page, el("h1", "", W.title));
+    add(page, el("p", "muted intro", W.intro));
+    if (s.server)
+      add(page, conflictBox());
+    if (s.error) {
+      const error = el("div", "banner");
+      error.setAttribute("role", "alert");
+      add(error, add(el("div", "banner-body"), el("p", "", s.error), add(el("div", "actions"), kit.button(W.tryAgain, "privacy:retry", load, "plain"))));
+      add(page, error);
+    }
+    if (!s.loaded) {
+      if (s.loading) {
+        const line = el("p", "muted fstate", W.loading);
+        line.setAttribute("role", "status");
+        add(page, line);
+      }
+      return;
+    }
+    const field = el("label", "field");
+    add(field, el("span", "field-label", W.descriptionLabel));
+    const area = el("textarea", "text");
+    area.rows = 4;
+    area.placeholder = W.descriptionPlaceholder;
+    area.value = s.description;
+    area.disabled = s.saving;
+    area.setAttribute("data-key", "privacy:description");
+    area.setAttribute("aria-describedby", "privacy-description-shared");
+    const asked = L.questionsKey(s.description);
+    area.addEventListener("input", () => {
+      s.description = area.value;
+      const open4 = s.confirmStep;
+      const could = canSave();
+      changed();
+      const noted = !!s.questionsError;
+      s.questionsError = "";
+      if (open4 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
+        kit.render("privacy:description");
+    });
+    add(page, add(field, area));
+    const shared = el("p", "reason field-note", W.descriptionShared);
+    shared.id = "privacy-description-shared";
+    add(page, shared);
+    const questions = questionsSection();
+    if (questions)
+      add(page, questions);
+    const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
+    if (s.rules.length) {
+      const listNode = el("ul", "flist");
+      s.rules.forEach((rule, index) => add(listNode, ruleRow(rule, index)));
+      add(rules, listNode);
+    } else
+      add(rules, el("p", "muted fempty", W.rulesEmpty));
+    const folders = folderSources().length > 0 && !!kit.picker;
+    const gmail = gmailConnected();
+    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && !s.saving ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && !s.saving ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", s.saving ? null : addSender, "plain")));
+    if (!folders)
+      add(rules, el("p", "reason", W.needFolderSource));
+    if (!gmail)
+      add(rules, el("p", "reason", W.needGmail));
+    add(rules, el("p", "reason", W.namesShared));
+    add(page, rules);
+    const footer = el("section", "picker-footer");
+    if (s.pendingCount > 0) {
+      add(footer, el("p", "", fill2(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
+    }
+    if (s.confirmStep && !s.saving && lowers()) {
+      add(page, add(footer, confirmBox()));
+      return;
+    }
+    const row = el("div", "actions");
+    if (s.saving) {
+      const busy = kit.button(W.saving, "privacy:save", null, "main");
+      busy.setAttribute("aria-busy", "true");
+      add(row, busy);
+    } else
+      add(row, kit.button(W.save, "privacy:save", canSave() ? save : null, "main"));
+    add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
+    const wrap = add(el("div", "save"), row);
+    if (s.saveError) {
+      const error = el("p", "error", s.saveError);
+      error.setAttribute("role", "alert");
+      add(wrap, error);
+    }
+    add(page, add(footer, wrap));
+  }
+  function sourcesView(page) {
+    add(page, el("h1", "", W.folderSourceTitle));
+    add(page, el("p", "muted intro", W.folderSourceIntro));
+    for (const source of folderSources()) {
+      const control = el("button", "account");
+      control.type = "button";
+      control.setAttribute("data-key", "privacy:source:" + source.id);
+      add(control, add(el("span", "two-line"), el("span", "two-top", source.label)));
+      const chevron = el("span", "chev", "›");
+      chevron.setAttribute("aria-hidden", "true");
+      add(control, chevron);
+      control.addEventListener("click", () => pickIn(source.id, source.label));
+      add(page, control);
+    }
+  }
+  function labelsView(page) {
+    add(page, el("h1", "", W.labelTitle));
+    add(page, el("p", "muted intro", W.labelIntro));
+    if (s.labelsError) {
+      const error = el("div", "banner");
+      error.setAttribute("role", "alert");
+      add(error, add(el("div", "banner-body"), el("p", "", s.labelsError), add(el("div", "actions"), kit.button(W.tryAgain, "privacy:labels:retry", addLabel, "plain"))));
+      add(page, error);
+      return;
+    }
+    if (s.labelsLoading) {
+      const line = el("p", "muted fstate", W.loadingLabels);
+      line.setAttribute("role", "status");
+      add(page, line);
+      return;
+    }
+    const listNode = el("ul", "flist");
+    if (!s.labels.length)
+      add(listNode, el("li", "muted fempty", W.noLabels));
+    const mail = kit.config.mailSourceId;
+    s.labels.forEach((label, index) => {
+      const name = labelName(label);
+      const li = add(el("li", "frow pick"), add(el("p", "fname leaf"), el("span", "fname-text", name)));
+      const rule = { kind: "label", source_id: mail, key: label.id, value: label.name, display: name, removed: false };
+      if (kept().some((other) => other.kind === "label" && other.source_id === mail && other.key === label.id)) {
+        add(li, kit.button(W.alreadyPrivate, "privacy:label:" + index, null, "plain"));
+      } else {
+        const control = kit.button(W.makePrivate, "privacy:label:" + index, () => {
+          addRule(rule);
+          s.screen = "main";
+          kit.render("privacy:add:label");
+        }, "plain");
+        control.setAttribute("aria-label", fill2(W.makePrivateFor, { name }));
+        add(li, control);
+      }
+      add(listNode, li);
+    });
+    add(page, listNode);
+  }
+  function senderView(page) {
+    add(page, el("h1", "", W.senderTitle));
+    add(page, el("p", "muted intro", W.senderIntro));
+    const field = el("label", "field");
+    add(field, el("span", "field-label", W.senderLabel));
+    const input = el("input", "text");
+    input.type = "text";
+    input.setAttribute("inputmode", "email");
+    input.setAttribute("autocomplete", "off");
+    input.spellcheck = false;
+    input.placeholder = W.senderPlaceholder;
+    input.value = s.sender;
+    input.setAttribute("data-key", "privacy:sender");
+    input.addEventListener("input", () => {
+      s.sender = input.value;
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter")
+        return;
+      event.preventDefault();
+      submitSender();
+    });
+    add(field, input);
+    if (s.senderError) {
+      const error = el("p", "error", s.senderError);
+      error.id = "privacy-sender-error";
+      error.setAttribute("role", "alert");
+      input.setAttribute("aria-invalid", "true");
+      input.setAttribute("aria-describedby", "privacy-sender-error");
+      add(field, error);
+    }
+    add(page, field);
+    add(page, add(el("div", "actions"), kit.button(W.senderAdd, "privacy:sender:add", submitSender, "main")));
+  }
+  function view() {
+    const page = el("main", "page picker privacy");
+    if (!s)
+      return page;
+    const top = el("div", "picker-top");
+    const backButton = kit.button(s.screen === "main" ? W.back : W.backToPrivacy, "privacy:back", escape, "plain");
+    backButton.className = "btn back";
+    add(page, add(top, backButton));
+    if (s.discarding) {
+      const confirm = el("div", "confirm-box");
+      confirm.setAttribute("role", "alert");
+      add(confirm, el("p", "strong", W.discardPrompt), add(el("div", "actions"), kit.button(W.discard, "privacy:discard:yes", () => leave("", false), "danger"), kit.button(W.keep, "privacy:discard:no", () => {
+        s.discarding = false;
+        kit.render("privacy:back");
+      }, "plain")));
+      add(page, confirm);
+    }
+    if (s.screen === "sources")
+      sourcesView(page);
+    else if (s.screen === "labels")
+      labelsView(page);
+    else if (s.screen === "sender")
+      senderView(page);
+    else
+      mainView(page);
+    return page;
+  }
+  function backOut() {
+    if (!s)
+      return;
+    if (s.edited && !s.saving) {
+      s.discarding = true;
+      kit.render("privacy:discard:no");
+      return;
+    }
+    leave("", false);
+  }
+  function escape() {
+    if (!s || s.picking)
+      return;
+    if (s.discarding) {
+      s.discarding = false;
+      kit.render("privacy:back");
+    } else if (s.screen !== "main") {
+      const from = s.screen;
+      s.screen = "main";
+      kit.render(from === "sources" ? "privacy:add:folder" : from === "labels" ? "privacy:add:label" : "privacy:add:sender");
+    } else
+      backOut();
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("keydown", (event) => {
+      if (!s || s.picking || event.key !== "Escape" || event.defaultPrevented)
+        return;
+      event.preventDefault();
+      escape();
+    });
+  }
+  return {
+    handles,
+    start,
+    active: () => !!s,
+    view
+  };
+}
+var CHATGPT_PRIVACY_TOOLS, CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_FOLDER_SOURCES;
+var init_privacy = __esm(() => {
+  init_dashboard_contract();
+  CHATGPT_PRIVACY_TOOLS = { get: PRIVACY_GET_TOOL_NAME, set: PRIVACY_SET_TOOL_NAME };
+  CHATGPT_PRIVACY_META_KEY = PRIVACY_META_KEY;
+  CHATGPT_PRIVACY_FOLDER_SOURCES = {
     "dropbox.files": "Dropbox",
     "google_drive.docs": "Google Drive"
   };
+});
+
+// src/workers/dashboard/chatgpt/page.ts
+function vars(palette) {
+  return [
+    `--bg:${palette.bg}`,
+    `--text:${palette.text}`,
+    `--muted:${palette.muted}`,
+    `--line:${palette.line}`,
+    `--surface:${palette.surface}`,
+    `--accent:${palette.accent}`,
+    `--on-accent:${palette.onAccent}`,
+    `--focus:${palette.focus}`,
+    `--warn-bg:${palette.warnBg}`,
+    `--warn-line:${palette.warnLine}`,
+    `--info-bg:${palette.infoBg}`,
+    `--info-line:${palette.infoLine}`,
+    `--danger:${palette.danger}`,
+    `--good:${palette.good}`,
+    `--run:${palette.run}`,
+    `--warn:${palette.warn}`,
+    `--bad:${palette.bad}`,
+    `--off:${palette.off}`,
+    `--idle:${palette.idle}`
+  ].join(";");
+}
+function chatgptDashboardPageHtml(options = {}) {
+  const config = {
+    toolName: DASHBOARD_TOOL_NAME,
+    syncTool: SYNC_SOURCE_TOOL_NAME,
+    connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
+    page: DASHBOARD_CHATGPT_PAGE_COPY,
+    statusTone: STATUS_TONE,
+    resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
+    staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
+    refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
+    picker: {
+      tools: CHATGPT_PICKER_TOOLS,
+      mailArgs: CHATGPT_PICKER_MAIL_ARGS,
+      scopeMetaKey: CHATGPT_SCOPE_META_KEY,
+      copy: DASHBOARD_CHATGPT_PICKER_COPY,
+      connectHost: CHATGPT_CONNECT_HOST,
+      mailSourceId: CHATGPT_MAIL_SOURCE_ID,
+      pollMs: options.connectPollMs ?? CHATGPT_CONNECT_POLL_MS,
+      pollCapMs: options.connectPollCapMs ?? CHATGPT_CONNECT_POLL_CAP_MS
+    },
+    privacy: {
+      tools: CHATGPT_PRIVACY_TOOLS,
+      metaKey: CHATGPT_PRIVACY_META_KEY,
+      scopeList: CHATGPT_PICKER_TOOLS.scopeList,
+      scopeMetaKey: CHATGPT_SCOPE_META_KEY,
+      mailSourceId: CHATGPT_MAIL_SOURCE_ID,
+      folderSources: CHATGPT_PRIVACY_FOLDER_SOURCES,
+      copy: DASHBOARD_CHATGPT_PRIVACY_COPY
+    },
+    inlineErrorCodes: CHATGPT_INLINE_ERROR_CODES,
+    host: {
+      contextKey: OLYMPUS_HOST_CONTEXT_KEY,
+      computerMetaKey: COMPUTER_META_KEY,
+      indexFasterTool: INDEX_FASTER_TOOL_NAME,
+      unpairTool: UNPAIR_SOURCE_TOOL_NAME,
+      copy: DASHBOARD_COMPUTER_PANEL_COPY
+    }
+  };
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${DASHBOARD_CHATGPT_PAGE_COPY.title}</title>`,
+    `<style>${CHATGPT_DASHBOARD_CSS}</style>`,
+    "</head>",
+    "<body>",
+    '<div id="app"></div>',
+    `<script>(${chatgptDashboardClient.toString()})(${scriptJson(config)}, ${chatgptPickerProgram.toString()}, ${privacyProgramSource()});</script>`,
+    "</body>",
+    "</html>",
+    ""
+  ].join(`
+`);
+}
+function privacyProgramSource() {
+  return `function (kit) { return (${chatgptPrivacyProgram.toString()})(kit, ${privacyLogic.toString()}); }`;
+}
+function scriptJson(value) {
+  return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
+}
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
+var init_page = __esm(() => {
+  init_vocabulary();
+  init_dashboard_contract();
+  init_shared_privacy_logic();
+  init_picker();
+  init_privacy();
+  CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "sync_unavailable", "disconnect_incomplete"];
+  CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
+  CHATGPT_DASHBOARD_REFRESH = {
+    activeMs: 15000,
+    idleMs: 60000,
+    maxBackoffMs: 5 * 60000,
+    staleTickMs: 30000
+  };
+  STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
+  CHATGPT_DASHBOARD_LIGHT = {
+    bg: "#ffffff",
+    text: "#0d0d0d",
+    muted: "#5d5d5d",
+    line: "#d9d9d9",
+    surface: "#f7f7f8",
+    accent: "#5b45c2",
+    onAccent: "#ffffff",
+    focus: "#2f5bd6",
+    warnBg: "#fff6e0",
+    warnLine: "#8a5a00",
+    infoBg: "#f2f0fc",
+    infoLine: "#6d5bd0",
+    danger: "#b42318",
+    good: "#2e7d4f",
+    run: "#f5c518",
+    warn: "#ea6c0a",
+    bad: "#c0362c",
+    off: "#6b6e76",
+    idle: "#8e8e93"
+  };
+  CHATGPT_DASHBOARD_DARK = {
+    bg: "#212121",
+    text: "#ececec",
+    muted: "#b4b4b4",
+    line: "#4a4a4a",
+    surface: "#2a2a2a",
+    accent: "#a594f0",
+    onAccent: "#14121f",
+    focus: "#8fb0ff",
+    warnBg: "#2e2614",
+    warnLine: "#c99a3e",
+    infoBg: "#24213a",
+    infoLine: "#a594f0",
+    danger: "#f07468",
+    good: "#5fb582",
+    run: "#facc15",
+    warn: "#fb8c3c",
+    bad: "#f07468",
+    off: "#9a9ca3",
+    idle: "#8e8e93"
+  };
+  CHATGPT_DASHBOARD_CSS = `
+:root{${vars(CHATGPT_DASHBOARD_LIGHT)};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){${vars(CHATGPT_DASHBOARD_DARK)}}}
+:root[data-theme=dark]{${vars(CHATGPT_DASHBOARD_DARK)}}
+:root[data-theme=light]{color-scheme:light}
+:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box}
+html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+body{margin:0;background:var(--bg);color:var(--text);font-size:0.9375rem;overflow-wrap:anywhere}
+p{margin:0}
+h1{font-size:1.25rem;font-weight:600;margin:0 0 1rem}
+h2{font-size:1rem;font-weight:600;margin:0 0 0.5rem}
+h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25rem}
+.page{max-width:48rem;margin:0 auto;padding:1.25rem 1rem 2rem}
+.card{padding:0.75rem}
+.section{margin-top:1.5rem}
+.muted{color:var(--muted);font-size:0.875rem}
+.banner{display:flex;gap:0.75rem;align-items:flex-start;padding:0.875rem 1rem;border:1px solid var(--warn-line);border-radius:0.75rem;background:var(--warn-bg);margin-bottom:0.75rem}
+.banner.info{border-color:var(--info-line);background:var(--info-bg)}
+.banner-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:0.5rem}
+.banner-title{font-weight:600}
+.icon{flex:none;width:1.5rem;height:1.5rem;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:700;background:var(--warn-line);color:var(--bg)}
+.banner.info .icon{background:var(--info-line)}
+.help{user-select:text;-webkit-user-select:text;padding:0.5rem 0.75rem;border:1px solid var(--line);border-radius:0.5rem;background:var(--bg)}
+.stale{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem;margin:0.25rem 0 0.5rem}
+.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem;padding:0.75rem 0;border-bottom:1px solid var(--line)}
+.row-text{flex:1 1 14rem;min-width:0}
+.row.need{display:grid;grid-template-columns:0.625rem minmax(0,1fr);align-items:start;gap:0 0.75rem}
+.need-body{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem 1rem;min-width:0}
+.need .row-text{padding-top:max(0px,calc((2.25rem - 1.45em) / 2))}
+.need .dot{margin-top:calc((2.25rem - 0.625rem) / 2)}
+.row.source{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;position:relative}
+.row.source.has-actions{grid-template-columns:minmax(0,1fr) fit-content(50%)}
+.row.source.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}
+.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) fit-content(50%) 2.25rem}
+.row.source>.menu{grid-column:-2/-1;grid-row:1}
+.row.source>.menu[open]{grid-column:1/-1;grid-row:auto}
+.row.source>.menu[open]>summary{position:absolute;top:0.75rem;right:0}
+.source-main{min-width:0}
+.source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
+.source-name{font-weight:600}
+.status{color:var(--muted);font-size:0.875rem}
+.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
+.dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
+.tone-good{background:var(--good)}.tone-run{background:var(--run)}.tone-warn{background:var(--warn)}
+.tone-bad{background:var(--bad)}.tone-off{background:var(--off)}.tone-line{background:transparent;border:2px solid var(--idle)}
+.fix{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
+.reason{color:var(--muted);font-size:0.875rem}
+.reason.strong{color:var(--text);font-weight:600}
+.actions{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center}
+.tag{font-size:0.75rem;font-weight:400;padding:0 0.4rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);margin-left:0.25rem}
+.index-faster{margin-top:0.5rem}
+.btn{font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
+.btn:hover:not(:disabled){background:var(--surface)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
+.btn.danger{border-color:var(--danger);color:var(--danger)}
+.btn.link{border-color:transparent;background:none;color:var(--muted);padding:0.375rem 0.5rem}
+.btn.link:hover:not(:disabled){color:var(--text)}
+.btn:disabled{cursor:not-allowed;color:var(--muted);background:var(--surface);border-style:dashed}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+summary{cursor:pointer;border-radius:0.375rem}
+.menu summary{list-style:none;font-size:1.25rem;line-height:1;min-width:2.25rem;min-height:2.25rem;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:999px}
+.menu summary::-webkit-details-marker{display:none}
+.menu{display:flex;flex-direction:column;align-items:flex-end;gap:0.5rem}
+.menu-panel{display:flex;flex-direction:row;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:0.5rem;padding-top:0.25rem}
+.progress-line{margin-bottom:0.5rem}
+.progress-line.stalled{font-weight:600}
+.bar{height:0.5rem;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
+.bar-fill{height:100%;border-radius:999px;background:var(--run);min-width:0}
+.disclosure{margin-top:0.75rem}
+.disclosure summary,.models summary{color:var(--muted);font-size:0.875rem;padding:0.25rem 0}
+.models summary{font-size:1rem;color:var(--text);font-weight:600}
+.models{padding-top:0.75rem}
+.model-installs{display:flex;flex-direction:column;gap:0.5rem;margin-top:0.25rem}
+.model-install{display:flex;flex-direction:column;gap:0.25rem;font-size:0.875rem;color:var(--muted)}
+.model-install .bar{height:0.375rem}
+.model-install.failed{color:var(--text);font-weight:600}
+.plain{margin:0.5rem 0;padding-left:1.25rem}
+.why{margin-top:0.25rem}
+.why summary{color:var(--muted);font-size:0.875rem;padding:0.125rem 0}
+.why .plain{margin:0.25rem 0;font-size:0.875rem}
+.why-note{font-size:0.8125rem;color:var(--muted)}
+.notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
+.strong{font-weight:600}
+.error{color:var(--danger);font-weight:600}
+.picker-top{margin:0 0 0.75rem}
+.btn.back::before{content:"\\2190\\00a0"}
+.picker h1{margin-bottom:0.25rem}
+.picker>.muted{margin-bottom:0.75rem}
+.picker-status{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
+.field{display:flex;flex-direction:column;gap:0.25rem;margin:0.75rem 0}
+.field-label{font-weight:600;font-size:0.875rem}
+.field+.field-note{margin:-0.5rem 0 0.75rem}
+.text{font:inherit;font-size:1rem;width:100%;min-height:2.25rem;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.5rem;background:var(--bg);color:var(--text)}
+textarea.text{resize:vertical;min-height:4.5rem}
+.picker-body{display:flex;flex-direction:column;container-type:inline-size}
+.picker-body>.intro{margin-bottom:1rem}
+.account{display:flex;align-items:center;gap:0.75rem;width:100%;min-height:3.5rem;padding:0.625rem 0.875rem;margin:0 0 0.75rem;font:inherit;text-align:left;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:0.75rem;cursor:pointer}
+.two-line{flex:1;min-width:0;display:flex;flex-direction:column;gap:0.125rem}
+.two-top{font-weight:600}
+.two-bottom{color:var(--muted);font-size:0.875rem}
+.chev{flex:none;color:var(--muted);font-size:1.25rem;line-height:1}
+.fsection{margin-top:1rem}
+.fsection h2{margin-bottom:0.25rem}
+.flist{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.frow{display:flex;flex-direction:column;min-height:3rem;border-bottom:1px solid var(--line)}
+.fname,.jump-btn{display:flex;align-items:flex-end;gap:0.5rem;width:100%;min-height:2.5rem;padding:0.5rem 0 0.125rem;margin:0;font:inherit;font-weight:500;text-align:left;color:var(--text);background:none;border:0;cursor:pointer}
+.fname.leaf{cursor:default;min-height:0;padding-top:0.625rem}
+.fname-text{flex:1;min-width:0}
+.fname:disabled,.jump-btn:disabled{cursor:default;color:var(--muted)}
+.fempty,.fstate{padding:0.75rem 0}
+.fmore{padding:0.5rem 0}
+.fpath{font-size:1.125rem;margin-bottom:0.75rem}
+.fpath-up{color:var(--muted);font-weight:400}
+.this-row{display:flex;align-items:center;gap:0.5rem;min-height:3rem;padding:0.25rem 0 0.25rem 0.75rem;margin-bottom:0.75rem;background:var(--surface);border-radius:0.75rem}
+.this-label{flex:1 1 auto;min-width:0;font-weight:600}
+.this-row>.seg{margin-left:auto}
+.this-row.pick{flex-wrap:wrap;justify-content:space-between;gap:0.5rem 0.75rem;padding:0.625rem 0.875rem;border:1px solid var(--line)}
+.this-text{flex:1 1 12rem;min-width:0}
+.this-row .btn{min-height:2.75rem}
+.fnote{margin:0 0 0.75rem}
+.frow.seg-row{flex-direction:row;align-items:center;gap:0.25rem;min-height:3rem}
+.seg-row>.fname{flex:1 1 auto;flex-wrap:wrap;align-items:center;align-content:flex-start;gap:0 0.5rem;width:auto;min-width:0;height:2.75rem;min-height:0;padding:0;overflow:hidden;white-space:nowrap}
+.seg-row>.fname>*{line-height:2.75rem}
+.fname-main{display:flex;align-items:center;gap:0.5rem;flex:0 1 auto;min-width:0;max-width:100%}
+.seg-row>.fname.leaf{cursor:default}
+.seg-row .fname-text,.jump-btn .fname-text{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ftag{flex:none;font-size:0.75rem;font-weight:500;line-height:1.25rem;padding:0 0.4375rem;color:var(--muted);border:1px solid var(--line);border-radius:999px}
+.fmeta{flex:none;color:var(--muted);font-size:0.8125rem;font-weight:400}
+.fmeta.fcount{margin-left:-0.25rem}
+.seg-row>.fname{position:relative;min-width:2.75rem;padding-left:1.4375rem;border-radius:0.5rem}
+.seg-row>.fname>.fopen,.seg-row>.fname>.fopen-gap{position:absolute;left:0;top:0;width:1.125rem;height:2.75rem;text-align:center}
+.seg-row>.fname>.fopen{font-size:1.375rem;color:var(--muted)}
+.seg-row>button.fname:hover:not(:disabled)>.fopen{color:var(--text)}
+.seg-row>.seg{margin-left:auto}
+.seg{flex:none;display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
+.seg-opt{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:2.75rem;height:2rem;margin:0;padding:0 0.75rem;font:inherit;font-size:0.8125rem;font-weight:500;color:var(--text);background:none;border:0;border-radius:999px;cursor:pointer;white-space:nowrap}
+.seg-opt::before{content:"";position:absolute;inset:-0.4375rem 0}
+.seg-opt+.seg-opt::after{content:"";position:absolute;left:0;top:0.5rem;bottom:0.5rem;width:1px;background:var(--line)}
+.seg-opt.on::after,.seg-opt.on+.seg-opt::after,.seg-opt.inherited::after,.seg-opt.inherited+.seg-opt::after{display:none}
+.seg-opt:hover:not(:disabled):not(.on){background:var(--surface)}
+.seg-opt.on{background:var(--text);color:var(--bg);font-weight:600}
+.seg-opt.inherited{color:var(--text);background:var(--surface);box-shadow:inset 0 0 0 1px var(--muted)}
+.seg-opt:disabled{cursor:not-allowed;color:var(--muted);opacity:0.5}
+.seg-opt:disabled.inherited{opacity:1}
+.seg-short{display:none}
+@container (max-width:26.25rem){.seg-long{display:none}.seg-short{display:inline}.seg-opt{padding:0 0.5rem}.fcount{display:none}}
+.jump-btn{width:100%;align-items:center;min-height:3rem;padding:0}
+.jtag{flex:none;margin-left:auto;font-size:0.8125rem;color:var(--muted)}
+.opt{display:flex;align-items:flex-start;gap:0.5rem;padding:0.375rem 0;cursor:pointer}
+.opt input{flex:none;width:1.125rem;height:1.125rem;margin:0.125rem 0 0;accent-color:var(--accent)}
+.opt-text{display:flex;flex-direction:column;min-width:0}
+.opt-hint{font-size:0.8125rem}
+.confirm-box{display:flex;flex-direction:column;gap:0.5rem;margin:0.5rem 0 0.75rem;padding:0.75rem;border:1px solid var(--warn-line);border-radius:0.75rem;background:var(--warn-bg)}
+.group{border:0;border-top:1px solid var(--line);margin:1rem 0 0;padding:0.75rem 0 0;min-width:0}
+.group legend{font-weight:600;padding:0;float:left;width:100%;margin-bottom:0.25rem}
+.group legend+*{clear:both}
+.suggestions{list-style:none;margin:0.25rem 0 0;padding:0}
+.suggestion{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.75rem;padding:0.375rem 0;border-bottom:1px solid var(--line)}
+.suggestion-text{flex:1 1 12rem;min-width:0}
+.picker-footer{margin-top:1.5rem;padding:1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface);display:flex;flex-direction:column;gap:0.75rem}
+.summary{display:flex;flex-direction:column;gap:0.25rem}
+.save{display:flex;flex-direction:column;gap:0.375rem}
+.frow.pick{flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.25rem 0.75rem;padding:0.375rem 0}
+.frow.pick>.fname{flex:1 1 10rem;width:auto;align-items:center;min-height:2.5rem;padding:0.5rem 0}
+.frow.pick>.fname.leaf{display:flex;align-items:center;padding:0.5rem 0}
+.frow.pick>.fname.two-line{flex-direction:column;align-items:flex-start;gap:0.125rem}
+.frow.pick .two-top{font-weight:500}
+.add-rules{margin-top:0.75rem}
+.qtopic{margin-top:0.75rem}
+.qtitle{font-size:0.9375rem;font-weight:600;margin:0 0 0.25rem}
+.qopt{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.25rem 0.75rem;padding:0.25rem 0;border-bottom:1px solid var(--line)}
+.qlabel{flex:1 1 12rem;min-width:0}
+.qchoices{display:flex;flex-wrap:wrap;gap:0.25rem 1rem}
+.qchoice{display:inline-flex;align-items:center;gap:0.375rem;min-height:2.5rem;cursor:pointer}
+.qchoice input{flex:none;width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
+.fsection>.reason{margin-top:0.375rem}
+.privacy>.intro{margin-bottom:0.5rem}
+.source-progress{display:flex;flex-direction:column;gap:0.25rem;margin-top:0.375rem}
+.source-progress .bar{height:0.375rem}
+.source-progress.stalled .bar-fill{background:var(--warn)}
+.stall-line{font-size:0.875rem}
+.reason.error{color:var(--danger)}
+.row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
+.btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
+.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+[data-mode=inline] .banner{margin-bottom:0.5rem}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+`;
 });
 
 // src/core/open-targets.ts
@@ -25809,6 +29556,13 @@ function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
+function isKeysOpenTarget(target) {
+  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function keysOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
 var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
@@ -25820,71 +29574,164 @@ var init_open_targets = __esm(() => {
   OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
 });
 
-// src/workers/dashboard/shared-status.ts
-var DASHBOARD_FIXABLE_STALLS;
-var init_shared_status = __esm(() => {
-  init_vocabulary();
-  DASHBOARD_FIXABLE_STALLS = new Set([
-    "waiting_for_credentials",
-    "scope_pending"
-  ]);
-});
-// src/workers/chatgpt/dashboard-view-model.ts
-var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
-var init_dashboard_view_model = __esm(() => {
-  init_open_targets();
-  init_shared_status();
-  init_phases();
-  init_source_dashboard();
-  init_vocabulary();
-  CONNECTING_DETAIL = DASHBOARD_CHATGPT_PICKER_COPY.connectWaiting;
-  CONNECTING_REASON = DASHBOARD_CHATGPT_PICKER_COPY.connectWaiting.replace(/…$/, "").replace(/^W/, "w");
-  STAGE_DETAIL = {
-    listing: "Finding items",
-    reading: DASHBOARD_CHATGPT_VOCABULARY.stageReading,
-    indexing: DASHBOARD_CHATGPT_VOCABULARY.stageSearchable
-  };
-  CHATGPT_OAUTH_SOURCES = new Set(["gmail", "google-drive", "dropbox"]);
-  SCOPE_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files"]);
-  DISCONNECT_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
-  SYNC_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
-  KNOWN_CONNECTION_LABELS = new Set([
-    "not connected",
-    "connection state unreadable",
-    "awaiting browser consent",
-    "reauth required",
-    "syncing",
-    "connected",
-    "connected · live session not checked",
-    "connected, waiting for first sync",
-    "connected · waiting for new messages",
-    "connected · choose folders to start",
-    "connected · choose mail to start",
-    "unpaired",
-    "unpair state unreadable",
-    "Unpair incomplete — manual cleanup required",
-    "synced"
-  ]);
-  KNOWN_READINESS_LABELS = new Set([
-    "Connect this source",
-    "Ready for questions; sync paused",
-    "Ready for questions",
-    "Syncing now",
-    "Preparing answer-ready text",
-    "Waiting for the first sync",
-    DASHBOARD_MANY_UNREADABLE_LABEL
-  ]);
-  KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
-  KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
-  TRANSCRIPTION_DOWNLOADABLE = new Set(["not_needed", "not_downloaded", "interrupted", "failed"]);
-  PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
-  MANUAL_SYNC_OUTCOMES = new Set(["checking", "checked", "failed", "busy"]);
+// src/workers/chatgpt/dashboard-resource.ts
+import { createHash as createHash13 } from "node:crypto";
+function versionedResourceUri(base, html) {
+  return `${base}?v=${createHash13("sha256").update(html).digest("hex").slice(0, 12)}`;
+}
+var DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI;
+var init_dashboard_resource = __esm(() => {
+  init_page();
+  init_dashboard_contract();
+  DASHBOARD_HTML = chatgptDashboardPageHtml();
+  DASHBOARD_RESOURCE_VERSIONED_URI = versionedResourceUri(DASHBOARD_RESOURCE_URI, DASHBOARD_HTML);
 });
 
 // src/core/request-peer.ts
 var peers;
 var init_request_peer = __esm(() => {
   peers = new WeakMap;
+});
+
+// src/core/dashboard-launch.ts
+import { createHash as createHash14, randomBytes as randomBytes2 } from "node:crypto";
+
+class DashboardLaunchTickets {
+  tickets = new Map;
+  now;
+  maxTickets;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
+    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
+      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
+    }
+  }
+  mint(origin) {
+    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
+    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
+    const ticket = randomBytes2(32).toString("base64url");
+    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
+    while (this.tickets.size > this.maxTickets) {
+      const oldest = this.tickets.keys().next();
+      if (oldest.done)
+        break;
+      this.tickets.delete(oldest.value);
+    }
+    return ticket;
+  }
+  consume(ticket, origin) {
+    if (!isWellFormedDashboardLaunchTicket(ticket))
+      return { status: "unknown" };
+    const record = this.tickets.get(ticket);
+    if (!record)
+      return { status: "unknown" };
+    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
+      return { status: "origin_mismatch" };
+    }
+    this.tickets.delete(ticket);
+    if (record.expiresAtMs <= this.now())
+      return { status: "expired" };
+    return { status: "ok", ticket };
+  }
+  get size() {
+    return this.tickets.size;
+  }
+  prune(nowMs) {
+    for (const [ticket, record] of this.tickets) {
+      if (record.expiresAtMs <= nowMs)
+        this.tickets.delete(ticket);
+    }
+  }
+}
+function dashboardLaunchOriginTag(origin) {
+  return createHash14("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+}
+function isWellFormedDashboardLaunchTicket(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_LAUNCH_PAGE_HTML;
+var init_dashboard_launch = __esm(() => {
+  init_open_targets();
+  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var status = document.getElementById('status');
+        var open = '';
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          var params = new URLSearchParams(hash);
+          // Where to land: one of a closed list, or the plain dashboard.
+          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
+          if (OPEN.test(wanted)) open = wanted;
+          return params.get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          status.textContent = 'This link is missing its opening ticket.';
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (response.ok) {
+            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
+            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            return;
+          }
+          status.textContent = response.status === 403
+            ? 'This opening link is no longer valid.'
+            : 'Opening failed.';
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+});
+
+// src/workers/http.ts
+var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, AGENT_MINT_PATHS, AGENT_MINT_WINDOW_MS, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
+var init_http = __esm(() => {
+  init_request_peer();
+  init_worker_auth();
+  init_dashboard_launch();
+  DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+  AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
+  AGENT_MINT_WINDOW_MS = 10 * 60000;
+  REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 });
 
 // src/workers/google-connectors/gmail-live-control.ts
@@ -25981,7 +29828,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -25993,7 +29840,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash15("sha256").update(material, "utf8").digest("hex");
+  return createHash16("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -26376,7 +30223,7 @@ init_sovereignty();
 init_secret_store();
 init_worker_auth();
 init_dropbox_files();
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 import { existsSync as existsSync14, lstatSync as lstatSync4, mkdirSync as mkdirSync13, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname20, isAbsolute as isAbsolute6 } from "node:path";
 
@@ -27511,9 +31358,11 @@ var SOURCE_WATCH_POLICY = Object.freeze({
 // src/workers/email-source/index.ts
 init_corpora();
 
+// src/workers/dashboard/outside-help.ts
+init_zkapi_consult_settings();
+
 // src/workers/dashboard/components.ts
 init_source_dashboard();
-init_phases();
 
 // src/workers/dashboard/theme.ts
 var DASHBOARD_THEME_TOKENS = {
@@ -27866,54 +31715,70 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 `;
 
 // src/workers/dashboard/components.ts
-init_shared_privacy_logic();
 init_vocabulary();
-var DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
-var MENU_ACTION_KINDS = new Set(["disconnect", "unpair", "oauth_cancel"]);
-
-// src/workers/dashboard/index.ts
 init_vocabulary();
 
-// src/workers/dashboard/pages/home.ts
+// src/workers/dashboard/outside-help.ts
+init_vocabulary();
 init_vocabulary();
 
-// src/workers/dashboard/lane-state.ts
-var LANE_HEARTBEAT_STALE_AFTER_MS = 5 * 60 * 1000;
-var LANE_STUCK_GRACE_MS = 10 * 60 * 1000;
-var LANE_RATE_WINDOW_MS = 15 * 60 * 1000;
-var LANE_RATE_MIN_WINDOW_MS = 45 * 1000;
-
-// src/workers/dashboard/pages/background.ts
-init_scheduler_markers();
+// src/workers/dashboard/outside-help-tools.ts
 init_vocabulary();
-var PARKED_EMBEDDING_STATES = new Set([
-  "parked",
-  "guard_paused"
-]);
 
-// src/workers/dashboard/source-rows.ts
-init_dashboard_view_model();
+// src/workers/dashboard/outside-help.ts
+var LIMIT_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid", "note_expired", "daily_cap_reached", "spend_cap_reached"]);
+var SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on"]);
+var TOOL_BLOCKERS = new Map([["daemon_not_found", "zkapi-clientd"], ["tor_not_found", "tor"]]);
+
+// src/workers/dashboard/host-page.ts
+init_dashboard_contract();
+init_page();
+init_vocabulary();
+init_open_targets();
+var HOST_CSS = `
+:root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};--accent:${CHATGPT_DASHBOARD_LIGHT.accent};--on-accent:${CHATGPT_DASHBOARD_LIGHT.onAccent};color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:${CHATGPT_DASHBOARD_DARK.bg};--text:${CHATGPT_DASHBOARD_DARK.text};--muted:${CHATGPT_DASHBOARD_DARK.muted};--line:${CHATGPT_DASHBOARD_DARK.line};--warn-bg:${CHATGPT_DASHBOARD_DARK.warnBg};--warn:${CHATGPT_DASHBOARD_DARK.warn};--surface:${CHATGPT_DASHBOARD_DARK.surface};--focus:${CHATGPT_DASHBOARD_DARK.focus};--accent:${CHATGPT_DASHBOARD_DARK.accent};--on-accent:${CHATGPT_DASHBOARD_DARK.onAccent}}}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:0.9375rem;line-height:1.45}
+.panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
+.gate[hidden]{display:none}
+.gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
+.gate p{margin:0}
+.gate .title{font-weight:600}
+.gate .line{color:var(--muted);font-size:0.875rem}
+.gate .line .btn{margin-right:0.25rem}
+.gate code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;color:var(--text);white-space:nowrap}
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.plain{background:transparent}
+.gate .row{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem 1rem}
+.gate .grow{flex:1 1 14rem;min-width:0}
+.gate .how{margin-top:0.75rem}
+.gate .how[hidden]{display:none}
+.prompt{white-space:pre-wrap;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:0.5rem 0.75rem;margin:0.5rem 0;font-size:0.875rem;user-select:all}
+.btn{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
+.btn:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+details{margin-top:0.5rem}
+summary{cursor:pointer;color:var(--muted);font-size:0.875rem}
+form{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem}
+input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:12rem}
+.status{color:var(--muted);font-size:0.875rem}
+`;
+var COMPUTER_HOST_PAGE_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src data:",
+  "connect-src 'self'",
+  "frame-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'"
+].join("; ");
+
+// src/workers/dashboard/pages/local.ts
 init_source_dashboard();
-init_vocabulary();
-
-// src/workers/dashboard/attention.ts
-init_source_dashboard();
-init_phases();
-init_vocabulary();
-var HEALTHY_CONNECTION_STATES = new Set([
-  "connected",
-  "syncing",
-  "synced",
-  "waiting_for_first_sync"
-]);
-
-// src/workers/dashboard/source-rows.ts
-init_shared_status();
-// src/workers/dashboard/pages/detail.ts
-init_source_dashboard();
-init_phases();
-init_scheduler_markers();
-init_vocabulary();
 
 // src/workers/agent-connections.ts
 init_operation_caller();
@@ -27951,73 +31816,16 @@ var CODEX_SNIPPET = [
 ].join(`
 `);
 
-// src/workers/dashboard/pages/setup.ts
-init_source_dashboard();
+// src/workers/dashboard/pages/local.ts
 init_vocabulary();
-
-// src/workers/dashboard/outside-help.ts
-init_zkapi_consult_settings();
-init_vocabulary();
-var LIMIT_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid", "note_expired", "daily_cap_reached", "spend_cap_reached"]);
-var SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on"]);
-var TOOL_BLOCKERS = new Map([["daemon_not_found", "zkapi-clientd"], ["tor_not_found", "tor"]]);
-
-// src/workers/dashboard/pages/setup.ts
-var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears on this page like any " + "built-in.";
+var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
 var CONNECTOR_PROMPT = [
   "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
   "",
   "Read docs/CREATE_CONNECTOR.md and follow it exactly. Start by asking me its Leg 0 " + "identity questions, then build leg by leg — connector contract, corpus registry, store mount, " + "scheduler tasks, request budget, tests, host enablement — using the Readwise and Drive " + "connectors as reference stampings. The one rule: SourceConnector is the only per-source code; " + "everything downstream is shared. Keep the required CI check green."
 ].join(`
 `);
-
-// src/workers/dashboard/pages/sensitivity.ts
-init_privacy_language();
-init_vocabulary();
-
-// src/workers/dashboard/pages/privacy.ts
-init_mail_source_scope();
-init_vocabulary();
-init_shared_privacy_logic();
-var MAIL_SOURCE_ID = "gmail.email";
-var LOGIC = privacyLogic({ mailSourceId: MAIL_SOURCE_ID, folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES }, topicWords: DASHBOARD_LOCAL_PRIVACY_COPY.questions });
-var CLIENT_COPY = {
-  remove: DASHBOARD_LOCAL_PRIVACY_COPY.remove,
-  removeFor: DASHBOARD_LOCAL_PRIVACY_COPY.removeFor,
-  undo: DASHBOARD_LOCAL_PRIVACY_COPY.undo,
-  removed: DASHBOARD_LOCAL_PRIVACY_COPY.removed,
-  kindFolder: DASHBOARD_LOCAL_PRIVACY_COPY.kindFolder,
-  kindLabel: DASHBOARD_LOCAL_PRIVACY_COPY.kindLabel,
-  kindSender: DASHBOARD_LOCAL_PRIVACY_COPY.kindSender,
-  makePrivate: DASHBOARD_LOCAL_PRIVACY_COPY.makePrivate,
-  alreadyPrivate: DASHBOARD_LOCAL_PRIVACY_COPY.alreadyPrivate,
-  folderUp: DASHBOARD_LOCAL_PRIVACY_COPY.folderUp,
-  folderOpen: DASHBOARD_LOCAL_PRIVACY_COPY.folderOpen,
-  folderEmpty: DASHBOARD_LOCAL_PRIVACY_COPY.folderEmpty,
-  folderMore: DASHBOARD_LOCAL_PRIVACY_COPY.folderMore,
-  noLabels: DASHBOARD_LOCAL_PRIVACY_COPY.noLabels,
-  loading: DASHBOARD_LOCAL_PRIVACY_COPY.loading,
-  loadFailed: DASHBOARD_LOCAL_PRIVACY_COPY.loadFailed,
-  senderInvalid: DASHBOARD_LOCAL_PRIVACY_COPY.senderInvalid,
-  senderDuplicate: DASHBOARD_LOCAL_PRIVACY_COPY.senderDuplicate,
-  saving: DASHBOARD_LOCAL_PRIVACY_COPY.saving,
-  saved: DASHBOARD_LOCAL_PRIVACY_COPY.saved,
-  saveFailed: DASHBOARD_LOCAL_PRIVACY_COPY.saveFailed,
-  unchanged: DASHBOARD_LOCAL_PRIVACY_COPY.unchanged,
-  discard: "Discard your changes?",
-  confirmRemoves: DASHBOARD_LOCAL_PRIVACY_COPY.confirmRemoves,
-  confirmDescription: DASHBOARD_LOCAL_PRIVACY_COPY.confirmDescription,
-  confirm: DASHBOARD_LOCAL_PRIVACY_COPY.confirm,
-  conflict: DASHBOARD_LOCAL_PRIVACY_COPY.conflict,
-  conflictNow: DASHBOARD_LOCAL_PRIVACY_COPY.conflictNow,
-  conflictDescription: DASHBOARD_LOCAL_PRIVACY_COPY.conflictDescription,
-  conflictNoDescription: DASHBOARD_LOCAL_PRIVACY_COPY.conflictNoDescription,
-  applyAgain: DASHBOARD_LOCAL_PRIVACY_COPY.applyAgain,
-  discardMine: DASHBOARD_LOCAL_PRIVACY_COPY.discardMine,
-  folderUnnamed: DASHBOARD_LOCAL_PRIVACY_COPY.folderUnnamed,
-  undoFor: DASHBOARD_LOCAL_PRIVACY_COPY.undoFor,
-  rulesEmpty: DASHBOARD_LOCAL_PRIVACY_COPY.rulesEmpty
-};
+var W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 
 // src/workers/dashboard/pages/outside-help.ts
 init_vocabulary();
@@ -28026,180 +31834,17 @@ init_vocabulary();
 init_vocabulary();
 
 // src/workers/email-source/index.ts
+init_dashboard_resource();
+init_dashboard_contract();
 init_vocabulary();
 init_mail_source_scope();
-
-// src/workers/http.ts
-init_request_peer();
-init_worker_auth();
-
-// src/core/dashboard-launch.ts
-init_open_targets();
-import { createHash as createHash13, randomBytes as randomBytes2 } from "node:crypto";
-var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
-var DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900;
-var DASHBOARD_LAUNCH_MAX_TICKETS = 32;
-
-class DashboardLaunchTickets {
-  tickets = new Map;
-  now;
-  maxTickets;
-  constructor(options = {}) {
-    this.now = options.now ?? Date.now;
-    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
-    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
-      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
-    }
-  }
-  mint(origin) {
-    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
-    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
-    const ticket = randomBytes2(32).toString("base64url");
-    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
-    while (this.tickets.size > this.maxTickets) {
-      const oldest = this.tickets.keys().next();
-      if (oldest.done)
-        break;
-      this.tickets.delete(oldest.value);
-    }
-    return ticket;
-  }
-  consume(ticket, origin) {
-    if (!isWellFormedDashboardLaunchTicket(ticket))
-      return { status: "unknown" };
-    const record = this.tickets.get(ticket);
-    if (!record)
-      return { status: "unknown" };
-    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
-      return { status: "origin_mismatch" };
-    }
-    this.tickets.delete(ticket);
-    if (record.expiresAtMs <= this.now())
-      return { status: "expired" };
-    return { status: "ok", ticket };
-  }
-  get size() {
-    return this.tickets.size;
-  }
-  prune(nowMs) {
-    for (const [ticket, record] of this.tickets) {
-      if (record.expiresAtMs <= nowMs)
-        this.tickets.delete(ticket);
-    }
-  }
-}
-function dashboardLaunchOriginTag(origin) {
-  return createHash13("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
-}
-function isWellFormedDashboardLaunchTicket(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
-}
-var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="referrer" content="no-referrer">
-    <title>Olympus</title>
-    <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
-      main { max-width: 32rem; margin: 0 auto; }
-      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
-      p { margin: 0; color: #a9a4ae; }
-      a { color: #cfc7ff; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
-    </main>
-    <script>
-      (function () {
-        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
-        var OPEN = /${openTargetTokenPattern()}/;
-        var status = document.getElementById('status');
-        var open = '';
-        function take() {
-          var hash = window.location.hash.slice(1);
-          // Clear even malformed fragments before parsing or making a request.
-          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
-          catch (e) { return ''; }
-          var params = new URLSearchParams(hash);
-          // Where to land: one of a closed list, or the plain dashboard.
-          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
-          if (OPEN.test(wanted)) open = wanted;
-          return params.get(KEY) || '';
-        }
-        var ticket = take();
-        if (!ticket) {
-          status.textContent = 'This link is missing its opening ticket.';
-          return;
-        }
-        fetch('/dashboard/control/launch/redeem', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ticket: ticket })
-        }).then(function (response) {
-          if (response.ok) {
-            // A target lands on Setup, where every source and Models live; it
-            // only opens a panel there, never submits anything.
-            window.location.replace(open ? '/dashboard?setup#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
-            return;
-          }
-          status.textContent = response.status === 403
-            ? 'This opening link is no longer valid.'
-            : 'Opening failed.';
-        }).catch(function () {
-          status.textContent = 'Opening failed.';
-        });
-      }());
-    </script>
-  </body>
-</html>
-`;
-
-// src/workers/http.ts
-var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
-var AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
-var AGENT_MINT_WINDOW_MS = 10 * 60000;
-var REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
-
-// src/workers/dashboard/pages/embedding-ledger.ts
-init_embedding_ledger();
-init_vocabulary();
-
-// src/workers/email-source/index.ts
-init_embedding_ledger();
+init_http();
 
 // src/workers/dashboard/embedding-runtime.ts
 init_model_transport();
 var GUARD_REPORT_MAX_AGE_MS = 5 * 60 * 1000;
 var DRAIN_REPORT_MAX_AGE_MS = 300 * 1000;
 var REPORT_MAX_FUTURE_SKEW_MS = 60 * 1000;
-
-// src/workers/dashboard/background-runtime.ts
-var SAMPLE_RING_LIMIT = 80;
-class LaneSampleStore {
-  rings = new Map;
-  record(id, sample, now) {
-    const ring = this.rings.get(id) ?? [];
-    const last = ring[ring.length - 1];
-    const duplicate = last !== undefined && (sample.heartbeatSeq !== undefined && last.heartbeatSeq === sample.heartbeatSeq || last.at.getTime() === sample.at.getTime());
-    if (!duplicate)
-      ring.push(sample);
-    const cutoff = now.getTime() - LANE_RATE_WINDOW_MS;
-    const kept = ring.filter((held, index) => held.at.getTime() >= cutoff || index === ring.length - 1);
-    const trimmed = kept.length > SAMPLE_RING_LIMIT ? kept.slice(kept.length - SAMPLE_RING_LIMIT) : kept;
-    this.rings.set(id, trimmed);
-    return trimmed;
-  }
-  samples(id) {
-    return this.rings.get(id) ?? [];
-  }
-}
-var backgroundLaneSampleStore = new LaneSampleStore;
 
 // src/workers/email-source/index.ts
 init_source_dashboard();
@@ -28213,10 +31858,7 @@ init_source_ingestion_exclusions();
 
 // src/workers/source-dispositions.ts
 init_operation_error();
-init_vocabulary();
-init_mail_source_scope();
 init_source_ingestion_exclusions();
-var NOT_EDITABLE_BY_PATH_REASON = "This source names folders by identity rather than by path, " + "so the folder tree cannot edit its rules.";
 
 // src/workers/email-source/index.ts
 init_source_ingestion_ledger();
@@ -28226,7 +31868,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -28310,7 +31952,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash14("sha256").update(value).digest("hex");
+  return createHash15("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -28392,6 +32034,7 @@ var FILE_EXTRACTION_ROUTE_ALIASES = new Map([
 // src/workers/email-source/server.ts
 init_analyst_answer();
 init_status();
+init_http();
 init_analyst();
 
 // src/core/analyst-built-in.ts
@@ -28614,7 +32257,7 @@ init_config();
 init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
 init_readwise();
@@ -29420,7 +33063,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash16("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash17("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -29603,7 +33246,7 @@ init_unpaired_sources();
 
 // src/workers/classification/sniffer.ts
 init_engine();
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 
 // src/workers/classification/delphi-scorer.ts
 var SCORER_SYSTEM_PROMPT = [
@@ -29652,12 +33295,12 @@ function stripCodeFences(text) {
 // src/workers/classification/sniffer-store.ts
 init_sqlite_migrations();
 import { Database as Database3 } from "bun:sqlite";
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 import { chmodSync as chmodSync4, existsSync as existsSync12, mkdirSync as mkdirSync11 } from "node:fs";
 import { dirname as dirname16 } from "node:path";
 var TIER_SNIFFER_SCHEMA_VERSION = 1;
 function snifferMaterialHash(pass, material) {
-  return createHash17("sha256").update(`${pass}
+  return createHash18("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 
@@ -30074,13 +33717,13 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_PROMPT_VERSION = `p-${createHash18("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash18("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+var SNIFFER_PROMPT_VERSION = `p-${createHash19("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash19("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 function snifferPromptVersions(ownerContext) {
   const context = boundedOwnerContext(ownerContext);
   if (!context)
     return { approval: SNIFFER_PROMPT_VERSION, cache: SNIFFER_PROMPT_VERSION };
-  const digest = createHash18("sha256").update(context).digest("hex").slice(0, 8);
+  const digest = createHash19("sha256").update(context).digest("hex").slice(0, 8);
   return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest}` };
 }
 function parseSnifferBatchResponse(text, expected) {
@@ -31270,6 +34913,11 @@ var TIER_MIGRATION_REPLAN_STOP_REASONS = new Set([
 
 // src/workers/email-source/server.ts
 init_embedding_ledger();
+
+// src/core/remote-access-config.ts
+init_http();
+
+// src/workers/email-source/server.ts
 function requireSourceEmbeddingDimension(options) {
   const configuredKey = options.envKeys.find((key) => Boolean(options.env[key]?.trim()));
   if (options.envKeys.every((key) => options.env[key] === undefined)) {
@@ -32008,7 +35656,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash19("sha256").update(message).digest("hex"));
+      scopeReport.errors.push(createHash20("sha256").update(message).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -32462,7 +36110,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash19("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash20("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);

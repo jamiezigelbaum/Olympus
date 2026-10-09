@@ -1,26 +1,22 @@
 /**
- * Browser-safe contract between the Olympus Gateway bridge, the worker's
- * inert renderer, and OpenClaw's native plugin page.
+ * Browser-safe shapes shared by the Olympus tab in OpenClaw's Control UI, its
+ * Gateway bridge, the computer's own local pages and the worker.
  *
  * Nothing in these shapes carries worker authentication, cookies, CSRF state,
  * executable script, or arbitrary worker routes. The Gateway owns the worker
- * bearer and derives `can_write` from the authenticated operator connection.
+ * bearer and checks the operator's scopes per call.
  */
 
-export const OLYMPUS_DASHBOARD_READ_METHOD = 'olympus.dashboard.read' as const;
-export const OLYMPUS_DASHBOARD_CONTROL_METHOD = 'olympus.dashboard.control' as const;
+/**
+ * The Olympus tab's one Gateway method (unified dashboard phase 4,
+ * 2026-10-09): `{name, arguments}` for one of the panel's tools, answered
+ * with the tool's MCP result. operator.read reaches the dashboard read;
+ * every other tool needs operator.write.
+ */
+export const OLYMPUS_DASHBOARD_TOOL_METHOD = 'olympus.dashboard.tool' as const;
 
-export const OLYMPUS_DASHBOARD_VIEWS = [
-  'home',
-  'setup',
-  'background',
-  'sensitivity',
-  'privacy',
-  'source',
-  'dispositions',
-] as const;
-
-export type OlympusDashboardView = typeof OLYMPUS_DASHBOARD_VIEWS[number];
+/** Where the Gateway serves the panel page the tab frames. */
+export const OLYMPUS_DASHBOARD_PANEL_PATH = '/olympus/dashboard/panel' as const;
 
 export type OlympusFolderScopeSourceId = 'google_drive.docs' | 'dropbox.files';
 /** The mail source whose scope is a time window, categories, labels and sender rules. */
@@ -70,75 +66,13 @@ export interface OlympusFolderScopeBrowseResult {
   whole_account_selected: boolean;
 }
 
-export type OlympusDashboardReadParams =
-  | {
-      view: Exclude<OlympusDashboardView, 'dispositions'>;
-      /** Required only for the source detail view. */
-      source_id?: string;
-    }
-  | {
-      view: 'dispositions';
-      source_id?: string;
-      action?: undefined;
-    }
-  | {
-      view: 'dispositions';
-      action: 'browse_folder_scope';
-      source_id: OlympusFolderScopeSourceId;
-      /** Omitted means the provider's virtual root. */
-      parent_key?: string;
-      /** Opaque provider continuation minted by the preceding response. */
-      cursor?: string;
-    };
-
-export interface OlympusDashboardReadResult {
-  status: number;
-  title: string;
-  /** Complete inert mount fragment. It must contain no style or script. */
-  body: string;
-  controller: 'dashboard' | 'dispositions';
-  /** Derived from the live Gateway client. Never accepted from request params. */
-  can_write: boolean;
-  /** Stable digest of the rendered state, used to avoid needless DOM replacement. */
-  signature: string;
-  poll_interval_ms: number;
-  /** Present only for an explicit browse_folder_scope request. */
-  scope_browser?: OlympusFolderScopeBrowseResult;
-}
-
 export type OlympusDashboardOAuthSource = 'gmail' | 'google-drive' | 'dropbox' | 'x';
 export type OlympusDashboardApiKeySource = 'gemini' | 'venice' | 'readwise';
-export type OlympusDashboardSyncSource = 'gmail' | 'google-drive' | 'dropbox' | 'x' | 'readwise';
-export type OlympusDashboardSourceId =
-  | 'gmail.email'
-  | 'google_drive.docs'
-  | 'dropbox.files'
-  | 'x.bookmarks'
-  | 'telegram.messages'
-  | 'whatsapp.personal.messages'
-  | 'readwise.library';
-export type OlympusDashboardUnpairSourceId = 'telegram.messages' | 'whatsapp.personal.messages';
 export type OlympusSourceDispositionState = 'ingest' | 'metadata_only' | 'exclude';
 
-export interface OlympusSourceDispositionEdit {
-  path: string;
-  state: OlympusSourceDispositionState;
-}
-
+/** What a form on the computer's local pages submits (browser-controller.ts). */
 export type OlympusDashboardControlParams =
   | { action: 'check_model_setup' }
-  | {
-      /** Standalone browser transport for the same read-only native RPC action. */
-      action: 'browse_folder_scope';
-      source_id: OlympusFolderScopeSourceId;
-      parent_key?: string;
-      cursor?: string;
-    }
-  | {
-      action: 'save_dispositions';
-      source: string;
-      edits: OlympusSourceDispositionEdit[];
-    }
   | {
       action: 'start_oauth';
       source: OlympusDashboardOAuthSource;
@@ -146,56 +80,9 @@ export type OlympusDashboardControlParams =
       client_secret?: string;
     }
   | {
-      action: 'cancel_oauth';
-      source: OlympusDashboardOAuthSource;
-    }
-  | {
       action: 'connect_api_key';
       source: OlympusDashboardApiKeySource;
       api_key: string;
-    }
-  | {
-      action: 'sync_now';
-      source: OlympusDashboardSyncSource;
-    }
-  | {
-      /** The only action that turns a connected folder source into an ingestion lane. */
-      action: 'approve_source_scope_and_start';
-      source_id: OlympusFolderScopeSourceId;
-      account_generation: string;
-      expected_scope_revision: string;
-      selections: OlympusSourceScopeSelection[];
-      whole_account: boolean;
-      /** Must be true when whole_account is true; ignored otherwise. */
-      explicit_whole_account_confirmation: boolean;
-    }
-  | {
-      /** Read-only: labels, categories, sender suggestions and the estimate for a draft. */
-      action: 'browse_mail_scope';
-      source_id: OlympusMailScopeSourceId;
-      draft: OlympusMailScopeDraft;
-    }
-  | {
-      /** The only action that turns a connected mailbox into an ingestion lane. */
-      action: 'approve_mail_scope_and_start';
-      source_id: OlympusMailScopeSourceId;
-      account_generation: string;
-      expected_scope_revision: string;
-      scope: OlympusMailScopeDraft;
-    }
-  | {
-      action: 'set_embedding_priority';
-      on: boolean;
-    }
-  | {
-      action: 'disconnect';
-      source_id: OlympusDashboardSourceId;
-      acknowledge: true;
-    }
-  | {
-      action: 'unpair';
-      source_id: OlympusDashboardUnpairSourceId;
-      acknowledge: true;
     }
   | {
       /** One-time code for approving Claude, ChatGPT or Grok. Shown once. */
@@ -212,26 +99,6 @@ export type OlympusDashboardControlParams =
     }
   | {
       /**
-       * Save what is private for the owner: the same operation as ChatGPT's
-       * olympus_privacy_set. Each field given replaces the saved one; `rules`
-       * is the whole list the editor shows. Answers with the settings now.
-       */
-      action: 'save_privacy';
-      description?: string;
-      rules?: OlympusPrivacyRule[];
-      /** The revision the page was showing (required): a save against changed settings answers conflict. */
-      revision: string;
-      /** The owner confirmed on the page that this save lowers protection (removes a rule or changes the words). */
-      confirm?: boolean;
-    }
-  | {
-      /** Start a built-in model's failed install again (ChatGPT's olympus_model_retry). */
-      action: 'retry_model';
-      /** `transcription`: the owner's Download now for the built-in transcription model. */
-      model: 'embedding' | 'answers' | 'transcription';
-    }
-  | {
-      /**
        * Turn remote access on or off. Turning it on the first time answers
        * 409 `terms_required` with the CA's agreement; the owner's explicit
        * acceptance is sent back naming that agreement's URL (null when the CA
@@ -241,23 +108,6 @@ export type OlympusDashboardControlParams =
       enabled: boolean;
       accept_terms?: { url: string | null };
     };
-
-/** Which kind of place an always-private rule names. */
-export type OlympusPrivacyRuleKind = 'folder' | 'label' | 'sender';
-
-/**
- * One always-private rule, the same shape the ChatGPT privacy tools take
- * (workers/chatgpt/dashboard-contract.ts PrivacyRuleView): a folder by its
- * picker key (and its name as `display`), a Gmail label by id (`key`) and name
- * (`value`), a sender by address or `@domain` (`value`).
- */
-export interface OlympusPrivacyRule {
-  kind: OlympusPrivacyRuleKind;
-  source_id: 'dropbox.files' | 'google_drive.docs' | 'gmail.email';
-  key?: string;
-  value?: string;
-  display?: string;
-}
 
 export interface OlympusDashboardControlResult {
   status: number;

@@ -44,7 +44,7 @@ describe('worker HTTP bind and auth', () => {
         [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
       },
     }));
-    await guarded(new Request('http://worker.test/dashboard/ui', {
+    await guarded(new Request('http://worker.test/dashboard/panel', {
       headers: {
         Authorization: 'Bearer worker-secret',
         [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'http://non-loopback.example',
@@ -176,27 +176,22 @@ describe('worker HTTP bind and auth', () => {
     expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(payload.csrf_token);
     seen.length = 0;
 
-    const directRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions'));
+    // No GET control route is left (the folder picker's JSON went with the
+    // old picker page, 2026-10-09): a session cookie opens no data read.
+    const directRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions.json'));
     expect(directRead.status).toBe(401);
-
-    const wrongReadOrigin = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions', {
-      headers: { Cookie: cookie, Referer: 'http://attacker.test/dashboard' },
+    const cookieRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions.json', {
+      headers: { Cookie: cookie, Referer: 'http://127.0.0.1:17777/dashboard' },
     }));
-    expect(wrongReadOrigin.status).toBe(403);
-
-    const allowedRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions', {
-      headers: { Cookie: cookie, Referer: 'http://127.0.0.1:17777/dashboard?source=dropbox.files' },
-    }));
-    expect(allowedRead.status).toBe(200);
-    expect(seen).toHaveLength(1);
-    expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(payload.csrf_token);
+    expect(cookieRead.status).toBe(401);
+    expect(seen).toHaveLength(0);
 
     const missingCsrf = await fetch(new Request('http://127.0.0.1:17777/dashboard/sync-now', {
       method: 'POST',
       headers: { Cookie: cookie, Origin: 'http://127.0.0.1:17777' },
     }));
     expect(missingCsrf.status).toBe(403);
-    expect(seen).toHaveLength(1);
+    expect(seen).toHaveLength(0);
 
     const wrongOrigin = await fetch(new Request('http://127.0.0.1:17777/dashboard/sync-now', {
       method: 'POST',
@@ -207,7 +202,7 @@ describe('worker HTTP bind and auth', () => {
       },
     }));
     expect(wrongOrigin.status).toBe(403);
-    expect(seen).toHaveLength(1);
+    expect(seen).toHaveLength(0);
 
     const allowed = await fetch(new Request('http://127.0.0.1:17777/dashboard/sync-now', {
       method: 'POST',
@@ -218,7 +213,7 @@ describe('worker HTTP bind and auth', () => {
       },
     }));
     expect(allowed.status).toBe(200);
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(1);
 
     now += 30 * 24 * 60 * 60_000 + 1_000;
     const expired = await fetch(new Request('http://127.0.0.1:17777/dashboard/sync-now', {
@@ -230,7 +225,7 @@ describe('worker HTTP bind and auth', () => {
       },
     }));
     expect(expired.status).toBe(401);
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(1);
   });
 
   test('a control session has a fixed thirty-day life, survives a worker restart, and can be locked', async () => {

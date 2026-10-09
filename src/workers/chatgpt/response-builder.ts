@@ -711,13 +711,20 @@ const SOURCE_LABELS: Record<string, string> = {
   'readwise.library': 'Readwise',
 };
 
-export function connectSourceToolResult(result: ConnectSourceResult): ChatGptToolResult {
+export function connectSourceToolResult(result: ConnectSourceResult, options: { direct?: boolean } = {}): ChatGptToolResult {
   const source = OAUTH_SOURCES.has(result.source) ? result.source : undefined;
-  const openUrl = handoffUrl(result.openUrl);
+  // `direct`: the computer's own panel, where the link is the provider's
+  // sign-in page itself (the start route already checked its origin).
+  const openUrl = options.direct ? directSignInUrl(result.openUrl) : handoffUrl(result.openUrl);
   if (!source || !openUrl) return errorToolResult(new ChatGptSurfaceError('internal'));
   const structured: ConnectSourceResult = { status: 'open_link', source, openUrl, expiresAt: iso(result.expiresAt) ?? '' };
   return {
-    content: [{ type: 'text', text: `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.` }],
+    content: [{
+      type: 'text',
+      text: options.direct
+        ? `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl}. Then choose what Olympus may read in the Olympus panel.`
+        : `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`,
+    }],
     structuredContent: structured as unknown as Record<string, unknown>,
   };
 }
@@ -980,6 +987,16 @@ function opaque(value: unknown): string {
 
 function handoffUrl(value: unknown): string | undefined {
   return typeof value === 'string' && HANDOFF_URL.test(value) ? value : undefined;
+}
+
+function directSignInUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /* ------------------------------------------------------------------ */

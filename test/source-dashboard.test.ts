@@ -8,7 +8,6 @@ import {
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
-import { renderDashboardDetailBody } from '../src/workers/dashboard/pages/detail.ts';
 import {
   DASHBOARD_NEEDS_REVIEW_REASONS,
   DASHBOARD_SUPPORTED_SOURCES,
@@ -577,35 +576,27 @@ describe('multi-source source dashboard', () => {
     expect(response.status).toBe(200);
     expect(html).not.toContain(workerBearerToken);
     expect(html).not.toContain('bootstrapWorkerToken');
-    // The served page keeps the bearer token out of the document: controls
-    // exchange it for a short-lived HttpOnly session, keep only the CSRF token
-    // in memory, and refuse the read-only dash_ token by name.
-    expect(html).toContain("fetch('/dashboard/control/session'");
-    expect(html).toContain("'X-Olympus-CSRF': csrfToken");
+    // The served page keeps the bearer token out of the document: the locked
+    // host page exchanges a pasted token for a short-lived HttpOnly session,
+    // keeps only the CSRF token in memory, and refuses the read-only dash_
+    // token by name (unified dashboard phase 4: the gate sits on /dashboard
+    // itself while the controls are locked).
+    expect(html).toContain('data-dashboard-control-gate data-state="locked"');
+    expect(html).toContain('/dashboard/control/session');
+    expect(html).toContain('X-Olympus-CSRF');
     expect(html).not.toContain('localStorage');
     expect(html).not.toContain('sessionStorage');
     expect(html).toContain('That is the read-only view token; use the worker bearer token from setup.');
-    // The token gate is on the setup page only (owner ruling, 2026-09-01).
-    expect(html).not.toContain('data-dashboard-control-gate');
     expect(html).not.toContain('name="worker_token"');
+    // The old Setup address lands on the same page.
     const setupResponse = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&setup`));
-    const setupHtml = await setupResponse.text();
-    expect(setupResponse.status).toBe(200);
-    expect(setupHtml).not.toContain(workerBearerToken);
-    expect(setupHtml).toContain('id="dashboard-controls"');
-    expect(setupHtml).toContain('Open dashboard controls');
-    // The field has no name, so a scriptless submit carries no token; the form
-    // POSTs to the session route rather than putting a bearer in a URL.
-    expect(setupHtml).toContain('data-dashboard-control-token');
-    expect(setupHtml).not.toContain('name="worker_token"');
-    expect(setupHtml).toContain('method="post" action="/dashboard/control/session"');
-    expect(setupHtml).not.toContain('localStorage');
-    expect(setupHtml).not.toContain('sessionStorage');
+    expect(setupResponse.status).toBe(302);
+    expect(setupResponse.headers.get('Location')).toBe(`/dashboard?token=${dashboardToken}`);
   });
 
   test('the query-addressed pages stay reachable with only the read-only dash_ token', async () => {
     // isDashboardQueryTokenRequest allowlists by pathname, which is why
-    // detail/setup/background are ?source=/?setup/?background rather than
+    // keys/agents/outside-help/connector are query flags rather than
     // paths of their own. A future move to /dashboard/<id> would 401 exactly
     // the reader these pages exist for — this pins the whole reason.
     const workerBearerToken = 'dashboard-secret-query-token-must-not-leak';
@@ -623,20 +614,21 @@ describe('multi-source source dashboard', () => {
     const fetch = withWorkerBearerAuth(worker.fetch, { authToken: workerBearerToken });
     const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(workerBearerToken);
 
-    const detail = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&source=gmail.email`));
-    expect(detail.status).toBe(200);
-    const detailHtml = await detail.text();
-    expect(detailHtml).toContain('<span class="crumb">/</span> Gmail');
-    // Internal links keep carrying the token the reader arrived with.
-    expect(detailHtml).toContain(`href="/dashboard?token=${dashboardToken}"`);
-
-    const setup = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&setup`));
-    expect(setup.status).toBe(200);
-    expect(await setup.text()).toContain('Build a connector');
-
-    const background = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&background`));
-    expect(background.status).toBe(200);
-    expect(await background.text()).toContain('<span class="crumb">/</span> Background');
+    for (const page of ['keys', 'agents', 'outside-help', 'connector']) {
+      const response = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&${page}`));
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).not.toContain(workerBearerToken);
+      // Internal links keep carrying the token the reader arrived with.
+      expect(html).toContain(`token=${dashboardToken}`);
+    }
+    const read = await fetch(new Request(`http://worker.test/dashboard?panel-read&token=${dashboardToken}`));
+    // No panel tools in this fixture: the read is refused plainly, not with a 401.
+    expect(read.status).toBe(501);
+    for (const old of ['source=gmail.email', 'setup', 'background']) {
+      const response = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}&${old}`));
+      expect(response.status).toBe(302);
+    }
   });
 
   test('matches connected handles by source provider rather than owner-specific handle ids', () => {
@@ -1541,14 +1533,15 @@ describe('multi-source source dashboard', () => {
     ]);
 
     const landing = await fetch(new Request(`http://worker.test/dashboard?token=${dashboardToken}`));
-    const landingHtml = await landing.text();
     expect(landing.status).toBe(200);
-    // The landing page is the live dashboard: connected Gmail on a card, and
-    // the shared standalone controller that carries a later connect to the
-    // OAuth redirect.
-    expect(landingHtml).toContain('Gmail');
-    // The provider now opens in its own tab, so the dashboard survives the
-    // round trip instead of being navigated away from it.
+    // The landing page is the panel's host (unified dashboard phase 4).
+    expect(await landing.text()).toContain('id="olympus-panel"');
+    // Keys carries the shared standalone controller that takes a later
+    // connect to the OAuth redirect.
+    const keys = await fetch(new Request(`http://worker.test/dashboard?keys&token=${dashboardToken}`));
+    const landingHtml = await keys.text();
+    expect(keys.status).toBe(200);
+    // The provider opens in its own tab, so the page survives the round trip.
     // A tab pre-opened inside the submit gesture, then pointed at the
     // provider. window.open(..., 'noopener') returns null by spec even on
     // success, so it could never tell a blocked tab from an opened one.
@@ -1556,7 +1549,7 @@ describe('multi-source source dashboard', () => {
     expect(landingHtml).toMatch(/tab\.opener\s*=\s*null/);
     expect(landingHtml).toMatch(/authorizationTab\.location\.href\s*=\s*authorizationUrl/);
     expect(landingHtml).toContain('/dashboard/connect/oauth/start');
-    // Polling now owns one inert root whose signature and session markers are
+    // Polling owns one inert root whose signature and session markers are
     // data, while the shared controller is the only executable path.
     expect(landingHtml).toContain('data-olympus-dashboard-root');
     expect(landingHtml).toMatch(/data-signature="[0-9a-f]{64}"/);
@@ -3491,95 +3484,6 @@ describe('retry counters are not item counts', () => {
     expect(healthy?.connection.action).toEqual({ kind: 'none' });
   });
 
-  // Live 2026-08-19 (~15:29Z, x.bookmarks): the budget guard parked the lane
-  // (degraded_reason 'daily_cost_guard') while the last failure it recorded on
-  // the way in still read 'api_request_guard'. The error kind alone re-armed
-  // Reauthenticate on a lane whose credential had just been replaced, and the detail
-  // page led with "provider is refusing requests" over an operator pause.
-  test('a budget-parked lane stays uncontrolled even when its last error kind is the refusal marker', () => {
-    const status = fixtureStatus();
-    status.corpora = [{
-      corpus_id: 'internal.x.bookmarks',
-      family: 'x',
-      trust_domain: 'internal',
-      activation_mode: 'hybrid_primary',
-      embedding_policy: 'cloud_allowed',
-      configured: true,
-      provider: 'x',
-      // The store now publishes per-item embedding parity, so the embedding
-      // bar has a numerator and the settled line can appear at all.
-      counts: { indexed_items: 100, items_with_text: 100, items_embedded: 100 },
-      item_metadata_returned: false,
-    } as never];
-    const scheduler = fixtureScheduler();
-    scheduler.sources = [{
-      source_id: 'x.bookmarks',
-      corpus_id: 'internal.x.bookmarks',
-      sync_cadence: 'continuous',
-      sync_interval_seconds: 300,
-      freshness_threshold_hours: 26,
-      freshness_hours: 1,
-      stale_sync_anomaly: false,
-      tasks: [{
-        id: 'x.sync',
-        kind: 'sync',
-        running: false,
-        consecutive_failures: 3,
-        last_error_kind: 'api_request_guard',
-        degraded_reason: 'daily_cost_guard',
-      }],
-    }];
-    const view = buildSourceDashboardViewModel({
-      sourceIndexStatus: status,
-      schedulerStatus: scheduler,
-      sovereigntyEngine: fixtureSovereigntyEngine(),
-      connectedHandleRegistry: fixtureHandleRegistry(),
-      oauthClientIds: { x: 'x-client-id-fixture' },
-      oauthClientSecretAvailability: { x: true },
-      now: new Date('2026-07-02T12:00:00.000Z'),
-    });
-
-    const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
-    expect(card?.connection.action).toEqual({ kind: 'none' });
-
-    const html = renderDashboardDetailBody(card!, { now: new Date('2026-07-02T12:00:00.000Z') });
-    // Was: "Nothing is waiting on you here — paused by the daily budget until
-    // 00:00 UTC." Owner ruling, 2026-08-24 — self-healing conditions show
-    // NOTHING, and a budget that rolls over at midnight is the type case. The
-    // page states the pause without asking for anything: no banner at all, and
-    // the settled line drops its watching-for-changes claim.
-    expect(html).not.toContain('class="attncard banner"');
-    expect(html).toContain('Fully synced · sync paused');
-    expect(html).not.toContain('watching for changes');
-    expect(html).not.toContain('provider is refusing requests');
-    expect(html).not.toContain('Reauthenticate');
-    // The pause outranks the stale kind for what the page ASKS, but the kind
-    // itself is still on the page: suppressing a real refusal would trade one
-    // dishonesty for another.
-    expect(html).toContain('api_request_guard');
-  });
-
-  // Live 2026-08-21 (x.bookmarks): the header read "Needs attention before
-  // answers" while the detail page for the same card said nothing was waiting
-  // and the lane was parked by the daily budget. The 2026-08-19 honesty fix
-  // reached the connect control and the detail sentence; this ladder was the
-  // one surface it missed.
-  test('a budget-parked lane with ready content is answerable, not needing attention', () => {
-    const card = parkedBookmarksCard({});
-
-    expect(card?.answer_readiness).toEqual({
-      state: 'ready',
-      label: 'Ready for questions; sync paused',
-    });
-    expect(card?.answer_readiness.label).not.toBe('Needs attention before answers');
-    // The header and the page it opens now say the same thing: caught up, and
-    // paused. Nothing is asked of the reader, which after the 2026-08-24 ruling
-    // means nothing is said to them at all.
-    const html = renderDashboardDetailBody(card!, { now: PARKED_NOW });
-    expect(html).not.toContain('class="attncard banner"');
-    expect(html).toContain('sync paused');
-  });
-
   test('a park does not absorb a genuine failure — real broken work still needs attention', () => {
     const card = parkedBookmarksCard({ counts: { extraction_jobs_failed: 4 } });
 
@@ -3673,51 +3577,6 @@ describe('retry counters are not item counts', () => {
     expect(card?.connection.action).toMatchObject({ label: 'Reauthenticate' });
   });
 
-  // R61B: the same refusal with the app key missing routes to Set up, and the
-  // detail page built from that exact card must lead with the remediation —
-  // never "no control changes this" over a check saying to reconnect.
-  test('a refusing provider with no app key routes to setup, end to end', () => {
-    const status = fixtureStatus();
-    status.corpora = [{
-      corpus_id: 'internal.x.bookmarks',
-      family: 'x',
-      trust_domain: 'internal',
-      activation_mode: 'hybrid_primary',
-      embedding_policy: 'cloud_allowed',
-      configured: true,
-      provider: 'x',
-      // The store now publishes per-item embedding parity, so the embedding
-      // bar has a numerator and the settled line can appear at all.
-      counts: { indexed_items: 100, items_with_text: 100, items_embedded: 100 },
-      item_metadata_returned: false,
-    } as never];
-    const scheduler = fixtureScheduler();
-    scheduler.sources = [{
-      source_id: 'x.bookmarks',
-      corpus_id: 'internal.x.bookmarks',
-      sync_cadence: 'continuous',
-      sync_interval_seconds: 300,
-      freshness_threshold_hours: 26,
-      freshness_hours: 1,
-      stale_sync_anomaly: false,
-      tasks: [{ id: 'x.sync', kind: 'sync', running: false, consecutive_failures: 3, last_error_kind: 'api_request_guard' }],
-    }];
-    const view = buildSourceDashboardViewModel({
-      sourceIndexStatus: status,
-      schedulerStatus: scheduler,
-      sovereigntyEngine: fixtureSovereigntyEngine(),
-      connectedHandleRegistry: fixtureHandleRegistry(),
-      // No client id or secret anywhere: reconnect cannot start.
-      now: new Date('2026-07-02T12:00:00.000Z'),
-    });
-
-    const card = view.sources.find((source) => source.source_id === 'x.bookmarks');
-    expect(card?.connection.action).toMatchObject({ kind: 'needs_setup', source: 'x' });
-
-    const html = renderDashboardDetailBody(card!, { now: new Date('2026-07-02T12:00:00.000Z') });
-    expect(html).toContain('provider is refusing requests, and reconnecting needs the app key first');
-    expect(html).not.toContain('No control on this page changes this one');
-  });
 });
 
 describe('coverage honesty', () => {

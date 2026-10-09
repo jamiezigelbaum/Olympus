@@ -34,11 +34,10 @@ import {
   DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
 } from '../src/core/publisher-oauth-client.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { OLYMPUS_DASHBOARD_CONTROL_METHOD } from '../src/control-ui-contract.ts';
+import { OLYMPUS_DASHBOARD_TOOL_METHOD } from '../src/control-ui-contract.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import {
   registerOlympusDashboardGateway,
-  requestDashboardRead,
 } from '../src/core/control-ui-gateway.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
 import {
@@ -55,6 +54,8 @@ import { createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
+import type { ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
+import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
 import { SetupBackendError } from '../src/workers/chatgpt/setup-tools.ts';
 import {
   createGatewayCallbackPeerHeader,
@@ -139,6 +140,23 @@ function fixture(
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
   const registryPath = join(dir, 'handles.json');
+  // The panel's tools, as server.ts wires them: the native tab's Connect runs
+  // through POST /dashboard/tools/call into the worker's own OAuth start.
+  let workerFetch: (request: Request) => Promise<Response> = async () => new Response(null, { status: 503 });
+  const panelTools = createDashboardPanelTools({
+    surface: () => ({ dashboardView: async () => await (await workerFetch(new Request('http://olympus-worker.internal/dashboard.json'))).json() }) as unknown as ChatGptSurfaceOptions,
+    setup: createChatGptSetupBackend({
+      workerFetch: (request) => workerFetch(request),
+      handoffs: createChatGptHandoffs(),
+      publicUrls: () => undefined,
+      sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'preset' },
+      credentialPresent: () => false,
+      requestReload: () => false,
+    }),
+    workerFetch: (request) => workerFetch(request),
+    makeContext: () => ({}) as never,
+    indexFasterState: async () => undefined,
+  });
   const worker = createEmailSourceWorker({
     sourceIndexStatus: { async status() { return fixtureStatus(); } },
     sourceDashboard: {
@@ -146,6 +164,7 @@ function fixture(
       registryPath,
       secretStore,
       oauthFetch,
+      panelTools,
       ...(options.handback ? { oauthHandback: () => options.handback } : {}),
       ...(options.modelSetup ? { modelSetup: options.modelSetup } : {}),
       // Only used by the 'expired state' scenario below: the real starter,
@@ -162,6 +181,7 @@ function fixture(
       }),
     },
   });
+  workerFetch = worker.fetch;
   return {
     fetch: withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' }),
     secretStore,
@@ -1129,8 +1149,7 @@ describe('publisher-mode card', () => {
 // walkthrough with the pilot client id prefilled, because the card shape was
 // gated on the native render having an OAuth origin, and that origin existed
 // only when gateway.publicOrigin was configured.
-describe('native OpenClaw page offers the same publisher one-click connect', () => {
-  const PUBLISHER_SHEETS = ['connect-gmail-email', 'connect-google_drive-docs', 'connect-dropbox-files'] as const;
+describe('the native OpenClaw tab connects in one click through the Gateway', () => {
   const LOOPBACK_BROWSER_ORIGIN = 'http://localhost:19989';
   // What OpenClaw records at the operator's WebSocket handshake for a browser
   // behind an SSH port forward: its Origin, the Host it arrived with, and a
@@ -1147,36 +1166,6 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
 
   function bridge(instance: Fixture) {
     return async (url: RequestInfo | URL, init?: RequestInit) => instance.fetch(new Request(url, init));
-  }
-
-  async function nativeSetupBody(instance: Fixture, browserOrigin?: Record<string, unknown>): Promise<string> {
-    const result = await requestDashboardRead({
-      params: { view: 'setup' },
-      canWrite: true,
-      config: nativeWorkerConfig(),
-      openClawConfig: FRESH_GATEWAY,
-      ...(browserOrigin === undefined ? {} : { browserOrigin }),
-      fetchImpl: bridge(instance),
-    });
-    expect(result.status).toBe(200);
-    return result.body;
-  }
-
-  function sheet(body: string, id: string): string {
-    const start = body.indexOf(`<div class="sheet" id="${id}"`);
-    expect(start).toBeGreaterThanOrEqual(0);
-    const next = body.indexOf('<div class="sheet"', start + 1);
-    return body.slice(start, next === -1 ? undefined : next);
-  }
-
-  function expectPublisherSheet(markup: string): void {
-    // The one-click form leads and asks for nothing: no client id field.
-    const firstForm = markup.slice(markup.indexOf('<form'), markup.indexOf('</form>'));
-    expect(firstForm).toContain('data-oauth-autostart');
-    expect(firstForm).not.toContain('name="client_id"');
-    // Bring-your-own is still there, one disclosure down.
-    expect(markup).toContain(`<summary>${PUBLISHER_ADVANCED_BYO_SUMMARY}</summary>`);
-    expect(markup.indexOf('name="client_id"')).toBeGreaterThan(markup.indexOf('<details'));
   }
 
   function gateway(instance: Fixture, openClawConfig: unknown) {
@@ -1200,14 +1189,18 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     browserOrigin: Record<string, unknown> = LOCAL_BROWSER,
     source: 'dropbox' | 'gmail' | 'google-drive' = 'dropbox',
   ): Promise<{ status: number; body: Record<string, any> }> {
+    // The panel's Connect, as the tab's frame sends it (control-ui.ts).
     const calls: unknown[][] = [];
-    await registered.methods.get(OLYMPUS_DASHBOARD_CONTROL_METHOD)!({
-      params: { action: 'start_oauth', source },
+    await registered.methods.get(OLYMPUS_DASHBOARD_TOOL_METHOD)!({
+      params: { name: CONNECT_SOURCE_TOOL_NAME, arguments: { source } },
       client: { connect: { scopes: ['operator.write'] }, browserOrigin },
       context: { getRuntimeConfig: () => openClawConfig },
       respond: (...args: unknown[]) => calls.push(args),
     });
-    return calls[0]?.[1] as { status: number; body: Record<string, any> };
+    expect(calls[0]?.[0]).toBe(true);
+    const result = calls[0]?.[1] as { isError?: boolean; structuredContent?: Record<string, any> };
+    if (result.isError) return { status: 409, body: { error: { code: result.structuredContent?.error } } };
+    return { status: 200, body: { authorization_url: result.structuredContent?.openUrl } };
   }
 
   async function callbackThroughGateway(
@@ -1240,34 +1233,11 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     }
   });
 
-  test('a loopback Gateway with no publicOrigin renders the same publisher cards, enabled', async () => {
-    const body = await nativeSetupBody(fixture(), LOCAL_BROWSER);
-    for (const id of PUBLISHER_SHEETS) expectPublisherSheet(sheet(body, id));
-    expect(body).not.toContain('id="setup-dropbox-files"');
-    expect(body).not.toContain('data-native-oauth-unavailable');
-  });
-
-  test('without any trusted origin the cards stay publisher-shaped and are marked unavailable', async () => {
-    const body = await nativeSetupBody(fixture());
-    for (const id of PUBLISHER_SHEETS) expectPublisherSheet(sheet(body, id));
-    expect(body).not.toContain('id="setup-dropbox-files"');
-    expect(body).toContain('OAuth connections are unavailable until the Gateway has a trusted public origin.');
-  });
-
-  test('a remote browser origin is not a substitute for gateway.publicOrigin', async () => {
-    const body = await nativeSetupBody(fixture(), {
-      origin: 'https://gateway.tailnet.example', requestHost: 'gateway.tailnet.example', isLocalClient: false,
-    });
-    expect(body).toContain('data-native-oauth-unavailable');
-    expect(body).not.toContain('https://gateway.tailnet.example/oauth/callback/');
-  });
-
   test('a loopback-shaped origin is refused from a non-local client or a different Host', async () => {
     for (const browserOrigin of [
       { ...LOCAL_BROWSER, isLocalClient: false },
       { ...LOCAL_BROWSER, requestHost: 'localhost:28000' },
     ]) {
-      expect(await nativeSetupBody(fixture(), browserOrigin)).toContain('data-native-oauth-unavailable');
       const instance = fixture();
       const started = await startThroughGateway(gateway(instance, FRESH_GATEWAY), FRESH_GATEWAY, browserOrigin);
       expect(started.status).toBe(409);
@@ -1298,13 +1268,8 @@ describe('native OpenClaw page offers the same publisher one-click connect', () 
     expect(instance.exchanges[0]?.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
   });
 
-  test('with no Google Desktop client, the native page and Gateway still connect Gmail and Drive in one click', async () => {
+  test('with no Google Desktop client, the native tab still connects Gmail and Drive in one click through the Gateway', async () => {
     await withoutPilotClient(async () => {
-      const body = await nativeSetupBody(fixture(), LOCAL_BROWSER);
-      for (const id of ['connect-gmail-email', 'connect-google_drive-docs']) expectPublisherSheet(sheet(body, id));
-      expect(body).not.toContain('id="setup-gmail-email"');
-      expect(body).not.toContain('id="setup-google_drive-docs"');
-      expect(body).not.toContain('data-native-oauth-unavailable');
       for (const source of ['gmail', 'google-drive'] as const) {
         const instance = fixture();
         const started = await startThroughGateway(gateway(instance, FRESH_GATEWAY), FRESH_GATEWAY, LOCAL_BROWSER, source);

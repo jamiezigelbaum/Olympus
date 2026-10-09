@@ -2881,11 +2881,10 @@ function coverageSentence(covered: boolean, percent: number, eligibleItems: numb
 /*
  * The "not read by policy" clause used to be appended here, right after
  * "88% covered". Owner ruling, 2026-08-23/24: the exclusion count must not sit
- * beside the percentage anywhere, and this label is read in the detail page's
- * foot and as a failing check's cause — both places a percentage is standing
- * next to it. The count now has exactly one home, the foot's own footnote line
- * in pages/detail.ts, which is also why it must not be repeated here: the foot
- * prints this label too, and the reader would have been told twice.
+ * beside the percentage anywhere, and this label is read as a failing check's
+ * cause, where a percentage stands next to it. (Its other reader, the old
+ * per-source page's foot, went with that page in the unified dashboard,
+ * 2026-10-09; the panel says the count in words, never beside the ratio.)
  *
  * coverageSentence still says it in words, with no number, when the policy
  * leaves nothing eligible at all — that is a fact about the corpus rather than
