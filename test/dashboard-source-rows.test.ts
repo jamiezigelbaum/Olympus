@@ -339,7 +339,9 @@ describe('rule 5: the Models row', () => {
     expect(render({ state: 'verifying', percent: 100 })).toContain('Checking the private model…');
     const failed = render({ state: 'failed', failedReason: 'disk_full' });
     expect(failed).toContain('<summary>Models — Built-in · Needs you</summary>');
-    expect(failed).toContain('Couldn&#39;t download the private model: the disk is full');
+    // Said once, in Needs you (with how much to free); Models does not repeat it.
+    expect(failed).not.toContain('Couldn&#39;t download the private model');
+    expect(failed).toContain('Answers: Built-in · Not working');
     const ready = render({ state: 'ready' });
     expect(ready).toContain('<summary>Models — Built-in · Ready</summary>');
     expect(ready).not.toContain('class="minstall');

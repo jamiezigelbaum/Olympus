@@ -747,7 +747,12 @@ export function builtInEmbeddingDashboardState(
   failedReason?: ModelInstallFailedReason;
 } {
   if (status.state === 'ready') return { kind: 'built_in', state: 'ready' };
-  if (status.state === 'failed') return { kind: 'built_in', state: 'failed', failedReason: modelInstallFailedReason(status.failure) };
+  if (status.state === 'failed') {
+    const failedReason = modelInstallFailedReason(status.failure);
+    // A full disk keeps the download's size, so the dashboard can say how much to free.
+    const bytes = failedReason === 'disk_full' && status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {};
+    return { kind: 'built_in', state: 'failed', failedReason, ...bytes };
+  }
   // Loading the verified model into memory is the last step of checking it.
   const state = status.state === 'verifying' || status.state === 'loading' ? 'verifying' : 'downloading';
   return {

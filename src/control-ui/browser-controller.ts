@@ -1847,6 +1847,66 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
   }
 
+  /**
+   * Where an `olympus://` link asked the dashboard to open
+   * (core/open-targets.ts): `#olympus-open=connect.x` opens that source's
+   * Connect panel, `fix.models` (or answers, search) opens Models, and
+   * `fix.connect` / `fix.reconnect` go to the sources. Showing only: the panel
+   * opens as if its toggle were pressed, but nothing in it is submitted, so
+   * not even the one-click sign-in a publisher panel starts on a real click.
+   * The fragment is read against literal names (this controller is serialized
+   * into the page and imports nothing) and cleared at once.
+   */
+  function applyOpenTarget(): void {
+    const view = root.ownerDocument.defaultView;
+    if (!view || !view.location.hash.startsWith('#olympus-open=')) return;
+    const wanted = view.location.hash.slice('#olympus-open='.length);
+    try {
+      view.history.replaceState(null, '', view.location.pathname + view.location.search);
+    } catch {
+      // An unchangeable history keeps the fragment; it is only a place to look.
+    }
+    const sources: Record<string, string> = {
+      'connect.x': 'x.bookmarks',
+      'connect.readwise': 'readwise.library',
+      'connect.telegram': 'telegram.messages',
+      'connect.whatsapp': 'whatsapp.personal.messages',
+    };
+    let focus: HTMLElement | null = null;
+    const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
+    if (sourceId) {
+      const row = queryAll<HTMLElement>('[data-dashboard-href]').find((candidate) => {
+        const href = candidate.dataset.dashboardHref || '';
+        return new URLSearchParams(href.slice(href.indexOf('?') + 1)).get('source') === sourceId;
+      });
+      if (row) {
+        const toggle = row.querySelector<HTMLElement>('[data-sheet-toggle]');
+        const selector = toggle ? toggle.dataset.sheetToggle || '' : '';
+        const sheet = /^#[A-Za-z0-9_-]+$/.test(selector) ? query<HTMLElement>(selector) : null;
+        if (sheet) {
+          queryAll<HTMLElement>('.sheet.on').forEach((other) => { if (other !== sheet) setSheetOpen(other, false); });
+          setSheetOpen(sheet, true);
+          if (!sheet.hasAttribute('tabindex')) sheet.setAttribute('tabindex', '-1');
+          focus = sheet;
+        } else {
+          focus = row.querySelector<HTMLElement>('button:not([disabled]),a[href]') || row;
+        }
+      }
+    } else if (wanted === 'fix.models' || wanted === 'fix.answers' || wanted === 'fix.search') {
+      const models = query<HTMLDetailsElement>('details.models');
+      if (models) {
+        models.open = true;
+        focus = models.querySelector<HTMLElement>('summary');
+      }
+    } else if (wanted === 'fix.connect' || wanted === 'fix.reconnect') {
+      focus = query<HTMLElement>('.srow,.setrow');
+      if (focus && !focus.hasAttribute('tabindex')) focus.setAttribute('tabindex', '-1');
+    }
+    if (!focus) return;
+    if (typeof focus.scrollIntoView === 'function') focus.scrollIntoView({ block: 'center' });
+    focus.focus();
+  }
+
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
   root.addEventListener('input', onPrivacyInput);
@@ -1867,6 +1927,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   view.addEventListener('focus', refreshOnReturn);
   root.ownerDocument.addEventListener('visibilitychange', onVisibilityReturn);
   applyWriteCapability();
+  applyOpenTarget();
   restartPoll();
 
   const dispose = (): void => {

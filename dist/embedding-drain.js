@@ -24720,6 +24720,8 @@ var init_vocabulary = __esm(() => {
         unknown: "Couldn't download the private model."
       }
     },
+    diskFreeUp: "Free up {size}, then Try again.",
+    diskFreeUpUnknown: "Free up some space, then Try again.",
     fixOnMac: "Open Olympus on your computer to fix this.",
     privateMatches: "Some matching items are private and stay on your computer.",
     changeModelsOnMac: "Change models in Olympus on your computer."
@@ -24809,7 +24811,7 @@ var init_vocabulary = __esm(() => {
     },
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
-    howOnMac: "How to fix this on your computer",
+    howOnMac: "Fix this on your computer",
     sourcePaused: "Paused",
     syncChecking: "Checking…",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}")
@@ -25777,6 +25779,36 @@ var init_shared_privacy_logic = __esm(() => {
   };
 });
 
+// src/core/open-targets.ts
+function allOpenTargets() {
+  return [
+    { kind: "dashboard" },
+    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section }))
+  ];
+}
+function openTargetToken(target) {
+  if (target.kind === "connect")
+    return `connect.${target.source}`;
+  if (target.kind === "fix")
+    return `fix.${target.section}`;
+  return;
+}
+function openTargetTokenPattern() {
+  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var init_open_targets = __esm(() => {
+  OPEN_CONNECT_SOURCES = {
+    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
+    readwise: { sourceId: "readwise.library", label: "Readwise" },
+    telegram: { sourceId: "telegram.messages", label: "Telegram" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+});
+
 // src/workers/dashboard/shared-status.ts
 var DASHBOARD_FIXABLE_STALLS;
 var init_shared_status = __esm(() => {
@@ -25789,6 +25821,7 @@ var init_shared_status = __esm(() => {
 // src/workers/chatgpt/dashboard-view-model.ts
 var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
+  init_open_targets();
   init_shared_status();
   init_phases();
   init_source_dashboard();
@@ -27990,6 +28023,7 @@ init_request_peer();
 init_worker_auth();
 
 // src/core/dashboard-launch.ts
+init_open_targets();
 import { createHash as createHash13, randomBytes as randomBytes2 } from "node:crypto";
 var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
 var DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900;
@@ -28072,13 +28106,19 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
     <script>
       (function () {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var OPEN = /${openTargetTokenPattern()}/;
         var status = document.getElementById('status');
+        var open = '';
         function take() {
           var hash = window.location.hash.slice(1);
           // Clear even malformed fragments before parsing or making a request.
           try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
           catch (e) { return ''; }
-          return new URLSearchParams(hash).get(KEY) || '';
+          var params = new URLSearchParams(hash);
+          // Where to land: one of a closed list, or the plain dashboard.
+          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
+          if (OPEN.test(wanted)) open = wanted;
+          return params.get(KEY) || '';
         }
         var ticket = take();
         if (!ticket) {
@@ -28092,7 +28132,9 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
           if (response.ok) {
-            window.location.replace('/dashboard');
+            // A target lands on Setup, where every source and Models live; it
+            // only opens a panel there, never submits anything.
+            window.location.replace(open ? '/dashboard?setup#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403

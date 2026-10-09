@@ -14,6 +14,8 @@
  * leaves the engine.
  */
 import type { ModelSetupView } from '../../core/model-setup.ts';
+import { formatSpaceToFree, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
+import { OPEN_CONNECT_SOURCES, openPageUrl, type OpenConnectSource, type OpenFixSection } from '../../core/open-targets.ts';
 import {
   dashboardCredentialProblem as credentialProblem,
   dashboardHonestStatus,
@@ -166,6 +168,8 @@ export interface BuiltInPrivateModelView {
   bytesTotal?: number;
   /** `failed` only: a fixed code (core/model-install-failure.ts), never the installer's message. */
   failedReason?: ModelInstallFailedReason;
+  /** `disk_full` only: bytes to free before Try again can work (modelInstallSpaceToFree). */
+  spaceToFreeBytes?: number;
 }
 
 export function buildChatGptDashboardViewModel(
@@ -233,9 +237,10 @@ export function buildChatGptDashboardViewModel(
     needsYou.push({
       id: 'model:embedding',
       sentence: embedding.kind === 'built_in'
-        ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.embedding[embedding.failedReason ?? 'unknown']
+        ? withDiskFreeUp(DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.embedding[embedding.failedReason ?? 'unknown'],
+          embedding.failedReason, modelInstallSpaceToFree(embedding))
         : DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention,
-      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(onComputerHelp('search')),
+      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(openOnComputer(undefined, 'search')),
     });
   }
   const answers = answersFromModelSetup(view.model_setup) ?? builtInAnswers(options.privateModel);
@@ -246,9 +251,10 @@ export function buildChatGptDashboardViewModel(
     needsYou.push({
       id: 'model:answers',
       sentence: answers.kind === 'built_in'
-        ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.answers[options.privateModel?.failedReason ?? 'unknown']
+        ? withDiskFreeUp(DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.answers[options.privateModel?.failedReason ?? 'unknown'],
+          options.privateModel?.failedReason, options.privateModel?.spaceToFreeBytes)
         : DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention,
-      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(onComputerHelp('answers')),
+      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(openOnComputer(undefined, 'answers')),
     });
   }
 
@@ -284,7 +290,7 @@ export function buildChatGptDashboardViewModel(
         tool: DASHBOARD_TOOL_NAME,
         args: {},
         disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac,
-        href: onComputerHelp('models'),
+        href: openOnComputer(undefined, 'models'),
       },
     },
     ...(options.privacy
@@ -502,7 +508,7 @@ function reconnectFix(definition: DashboardSupportedSourceDefinition): Dashboard
   const source = oauthSource(definition);
   return source
     ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
-    : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, onComputerHelp('reconnect'));
+    : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, 'reconnect'));
 }
 
 /** A control that opens a help page section (`openHref`); the tool is only the contract's fallback. */
@@ -653,14 +659,36 @@ function checkAgainFix(href?: string): DashboardFix {
 
 /**
  * The help page naming a repair that only the computer can make (a key, a
- * pairing, a model server). A Fix carries it as `href` beside its own control,
- * so the panel can link "how" next to Check again or a disabled control.
- * Moved from /help/on-your-mac/ on 2026-10-09; the old address redirects.
+ * pairing, a model server). Moved from /help/on-your-mac/ on 2026-10-09; the
+ * old address redirects. Since option C (2026-10-09) a Fix carries the
+ * /open/ page instead (openOnComputer below), which links here as the
+ * fallback reference.
  */
 export const ON_COMPUTER_HELP_URL = 'https://olympusplugin.ai/help/on-your-computer/';
 
-function onComputerHelp(section: 'connect' | 'reconnect' | 'answers' | 'search' | 'models'): string {
-  return `${ON_COMPUTER_HELP_URL}#${section}`;
+/**
+ * The olympusplugin.ai/open/ page that opens Olympus on the computer through
+ * its olympus:// link, at that source's Connect panel or that fix's section
+ * (core/open-targets.ts); the page itself falls back to the two steps by hand
+ * and links the help page (owner decision, 2026-10-09: no Terminal step).
+ */
+function openOnComputer(definition: DashboardSupportedSourceDefinition | undefined, section: OpenFixSection): string {
+  const source = definition
+    ? (Object.keys(OPEN_CONNECT_SOURCES) as OpenConnectSource[]).find((key) => OPEN_CONNECT_SOURCES[key].sourceId === definition.source_id)
+    : undefined;
+  return source ? openPageUrl({ kind: 'connect', source }) : openPageUrl({ kind: 'fix', section });
+}
+
+/**
+ * A disk-full failure says how much to free, then points at the item's own
+ * Try again; it carries no help link (there is nothing to look up).
+ */
+function withDiskFreeUp(sentence: string, reason: ModelInstallFailedReason | undefined, bytes: number | undefined): string {
+  if (reason !== 'disk_full') return sentence;
+  const next = bytes !== undefined && bytes > 0
+    ? DASHBOARD_CHATGPT_VOCABULARY.diskFreeUp.replace('{size}', formatSpaceToFree(bytes))
+    : DASHBOARD_CHATGPT_VOCABULARY.diskFreeUpUnknown;
+  return `${sentence} ${next}`;
 }
 
 /** Starts a failed built-in install again. */
@@ -711,7 +739,7 @@ function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFi
   const source = oauthSource(definition);
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
-    : helpLinkFix(CHATGPT_SETUP_LABELS.connect, onComputerHelp('connect'));
+    : helpLinkFix(CHATGPT_SETUP_LABELS.connect, openOnComputer(definition, 'connect'));
 }
 
 function scopePending(card: DashboardSourceCard): boolean {
