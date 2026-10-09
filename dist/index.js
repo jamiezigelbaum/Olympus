@@ -7272,7 +7272,7 @@ var init_answer_ready_coverage = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
+var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -7292,6 +7292,13 @@ var init_vocabulary = __esm(() => {
     "invalid_redirect_uri",
     "redirect_uri_not_registered"
   ]);
+  DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
+  DASHBOARD_UNREADABLE_REASON_WORDS = {
+    damaged_or_unsupported: {
+      one: "{count} file is damaged or in a format Olympus can't read",
+      other: "{count} files are damaged or in a format Olympus can't read"
+    }
+  };
   DASHBOARD_CHATGPT_VOCABULARY = {
     installingNoSource: "Connect a source to begin",
     installingModel: "Getting search ready on your computer",
@@ -7412,7 +7419,11 @@ var init_vocabulary = __esm(() => {
     howOnMac: "Fix this on your computer",
     sourcePaused: "Paused",
     syncChecking: "Checking…",
-    syncCheckingLine: dashboardManualSyncPendingLine("{source}")
+    syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
+    seeWhy: "See why",
+    unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+    unreadableNote: DASHBOARD_UNREADABLE_NOTE,
+    unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",

@@ -35,6 +35,7 @@ import type {
   DashboardFix,
   DashboardItem,
   DashboardSource,
+  DashboardUnreadable,
   DashboardViewModelV1,
   DisconnectSourceResult,
   FolderScopeList,
@@ -71,6 +72,7 @@ import {
 } from './dashboard-contract.ts';
 import {
   DASHBOARD_CHATGPT_VOCABULARY,
+  DASHBOARD_UNREADABLE_REASON_CODES,
   dashboardManualSyncBusyLine,
   dashboardManualSyncPendingLine,
   dashboardManualSyncTooSoonLine,
@@ -244,7 +246,8 @@ function copySource(source: DashboardSource): DashboardSource {
   if (connectingUntil) out.connecting = { expiresAt: connectingUntil };
   if (source.progress) out.progress = copySourceProgress(source.progress);
   if (source.menu && source.menu.length > 0) out.menu = source.menu.map(copyFix);
-  if (whole(source.unreadable) > 0) out.unreadable = whole(source.unreadable);
+  const unreadable = copyUnreadable(source.unreadable);
+  if (unreadable) out.unreadable = unreadable;
   const manual = source.lastManualSync;
   const manualAt = iso(manual?.at);
   if (manual && manualAt && MANUAL_SYNC_OUTCOMES.has(manual.outcome)) {
@@ -258,6 +261,26 @@ function copySource(source: DashboardSource): DashboardSource {
 }
 
 const TRANSCRIPTION_STATES = new Set<TranscriptionModelView['state']>(['not_needed', 'not_downloaded', 'interrupted', 'downloading', 'verifying', 'ready', 'failed', 'load_failed']);
+
+/**
+ * Counts and closed reason codes only: anything else on the input (a name, a
+ * path, an unknown code) is dropped here, so none can reach the panel. A bare
+ * number from an older producer reads as one reason.
+ */
+function copyUnreadable(value: unknown): DashboardUnreadable | undefined {
+  const raw = (typeof value === 'number' ? { count: value } : value) as Partial<DashboardUnreadable> | undefined;
+  if (!raw || typeof raw !== 'object') return undefined;
+  const count = whole(raw.count);
+  if (count <= 0) return undefined;
+  const reasons = (Array.isArray(raw.reasons) ? raw.reasons : [])
+    .filter((reason) => reason && (DASHBOARD_UNREADABLE_REASON_CODES as readonly string[]).includes(reason.code) && whole(reason.count) > 0)
+    .map((reason) => ({ code: reason.code, count: whole(reason.count) }));
+  return {
+    count,
+    reasons: reasons.length > 0 ? reasons : [{ code: 'damaged_or_unsupported', count }],
+    ...(raw.many === true ? { many: true as const } : {}),
+  };
+}
 
 const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync']>['outcome']>(['checking', 'checked', 'failed', 'busy']);
 

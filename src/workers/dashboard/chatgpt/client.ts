@@ -705,6 +705,8 @@ export function chatgptDashboardClient(
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
     }
+    const why = seeWhy(source, id);
+    if (why) add(main, why);
     add(row, main);
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
@@ -739,6 +741,28 @@ export function chatgptDashboardClient(
       add(row, menuBox);
     }
     return row;
+  }
+
+  /**
+   * "See why", under a row with files that can't be read: a count per reason
+   * and one note. The data holds counts and closed reason codes only, so there
+   * is no file name here to show. An older engine's bare number has no reasons
+   * and shows nothing beyond the row's own line.
+   */
+  function seeWhy(source: Any, id: string): HTMLElement | null {
+    const unreadable = source.unreadable;
+    if (!unreadable || typeof unreadable !== 'object' || !Array.isArray(unreadable.reasons)) return null;
+    const words = P.unreadableReasons as Any;
+    const lines = unreadable.reasons
+      .filter((reason: Any) => reason && words[reason.code] && Number(reason.count) > 0)
+      .map((reason: Any) => {
+        const n = Number(reason.count);
+        return add(el('li'), document.createTextNode(fill(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count(n) })));
+      });
+    if (!lines.length) return null;
+    const box = details('why:' + id, document.createTextNode(P.seeWhy), 'why');
+    add(box, add(el('ul', 'plain'), ...lines), el('p', 'why-note', unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    return box;
   }
 
   /** Sync now was pressed and its sync has not finished: pressed here, or `checking` on the engine. */
