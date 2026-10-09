@@ -1220,6 +1220,24 @@ function childEnvironment(env: Record<string, string | undefined>): NodeJS.Proce
 }
 
 /**
+ * The daemon starts its wallet companion (`zkapi-walletd`) by name from PATH.
+ * A service manager's minimal PATH has neither the managed install nor
+ * `~/.local/bin`, so the daemon's own install folder goes first: the
+ * companion then always comes from the same install as the daemon.
+ */
+export function daemonEnvironment(base: NodeJS.ProcessEnv, daemonExecutable: string): NodeJS.ProcessEnv {
+  let real = daemonExecutable;
+  try {
+    real = realpathSync(daemonExecutable);
+  } catch {
+    // An unresolvable path keeps its own folder.
+  }
+  const installBin = dirname(real);
+  const rest = (base.PATH ?? '').split(delimiter).filter((entry) => entry && entry !== installBin);
+  return { ...base, PATH: [installBin, ...rest].join(delimiter) };
+}
+
+/**
  * Where installers put these programs when PATH does not say so: a service
  * manager starts the worker with a minimal PATH (the engine's LaunchAgent has
  * only Bun's directory and the system ones), so a Homebrew `tor` or a
@@ -2225,7 +2243,7 @@ async function runSession(
       'daemon',
       watchdog,
       perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv,
-      childEnv,
+      daemonEnvironment(childEnv, daemonExecutable),
       (line) => parseDaemonLine(facts, line),
       onChildExit,
     );
