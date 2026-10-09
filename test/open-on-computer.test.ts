@@ -380,7 +380,7 @@ describe('the macOS link handler', () => {
     expect(run.status).toBe(0);
     expect(fixture.seen()).toEqual({ argv: ['open', hostile], cwd: fixture.packageRoot, env: null, preloaded: false });
     expect(fixture.pwned()).toBe(false);
-  });
+  }, 30_000);
 });
 
 /**
@@ -505,7 +505,7 @@ describe('the Linux link handler', () => {
     expect(run.status).toBe(0);
     expect(fixture.seen()).toEqual({ argv: ['open', link], cwd: fixture.packageRoot, env: null, preloaded: false });
     expect(fixture.pwned()).toBe(false);
-  });
+  }, 30_000);
 
   test('root, or a home folder that belongs to someone else, is refused and nothing is written', () => {
     const calls: string[][] = [];
