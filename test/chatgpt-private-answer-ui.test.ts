@@ -357,8 +357,8 @@ describe('the card while the answer is prepared', () => {
     const panel = host.doc.getElementById('panel')!;
     expect(panel.querySelectorAll('section.card')).toHaveLength(1);
     expect(panel.querySelector('.card > .row > .icon > svg.lock')?.getAttribute('aria-hidden')).toBe('true');
-    expect(panel.querySelector('.title')?.textContent).toBe('Private answer from your Mac');
-    expect(panel.querySelector('.sub')?.textContent).toBe('Preparing the answer on your Mac…');
+    expect(panel.querySelector('.title')?.textContent).toBe('Private answer from your computer');
+    expect(panel.querySelector('.sub')?.textContent).toBe('Preparing the answer on your computer…');
     expect(panel.querySelector('.sub .spinner')).not.toBeNull();
     expect(panel.querySelector('.badge')).toBeNull();
     expect(host.buttons()).toHaveLength(0);
@@ -383,7 +383,7 @@ describe('the card while the answer is prepared', () => {
   test('no private model: the sentence, no button, no request', async () => {
     const host = mount();
     host.push({ content: [], _meta: meta({ v: 1, count: 4, state: 'no_model' }) });
-    expect(host.doc.querySelector('.sub')?.textContent).toBe('Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.');
+    expect(host.doc.querySelector('.sub')?.textContent).toBe('Private answers need the private model on your computer. Open the Olympus dashboard to finish setup, then ask again.');
     expect(host.buttons()).toHaveLength(0);
     await sleep(10);
     expect(host.fetched).toHaveLength(0);
@@ -462,7 +462,7 @@ describe('collecting the private answer', () => {
   test('polls with the same key on 202, then decrypts and reveals the answer in the card by itself', async () => {
     const host = mount({ replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }, { status: 202, body: { status: 'pending' } }, 'ready'] });
     host.push(ready());
-    expect(host.doc.querySelector('.card .sub')?.textContent).toBe('Preparing the answer on your Mac…');
+    expect(host.doc.querySelector('.card .sub')?.textContent).toBe('Preparing the answer on your computer…');
     expect(host.buttons()).toHaveLength(0);
     await host.until(() => host.text().includes('31 March'), 'the answer');
 
@@ -530,11 +530,11 @@ describe('collecting the private answer', () => {
   });
 
   const ERRORS: Array<[string, RelayReply, string, boolean]> = [
-    ['200 failed', { status: 200, body: { status: 'failed' } }, 'Olympus couldn\'t answer this on your Mac.', false],
+    ['200 failed', { status: 200, body: { status: 'failed' } }, 'Olympus couldn\'t answer this on your computer.', false],
     ['409 claimed', { status: 409, body: { status: 'claimed' } }, 'This answer was already opened in another window.', false],
     ['410 gone', { status: 410, body: { status: 'gone' } }, 'This answer has expired. Ask again to get a new one.', false],
     ['429', { status: 429, body: { status: 'rate_limited' }, retryAfter: '5' }, 'Too many requests — try again in a moment.', true],
-    ['503 mac offline', { status: 503, body: { status: 'mac_offline' } }, 'Your Mac is offline, so the private answer can\'t be shown.', true],
+    ['503 mac offline', { status: 503, body: { status: 'mac_offline' } }, 'Your computer is offline, so the private answer can\'t be shown.', true],
     ['network error', 'throw', W.unreachable, true],
     ['400', { status: 400, body: { status: 'invalid' } }, W.generic, false],
     ['403', { status: 403, body: { status: 'forbidden' } }, W.generic, false],

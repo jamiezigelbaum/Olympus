@@ -24693,16 +24693,16 @@ var init_vocabulary = __esm(() => {
   ]);
   DASHBOARD_CHATGPT_VOCABULARY = {
     installingNoSource: "Connect a source to begin",
-    installingModel: "Getting search ready on your Mac",
+    installingModel: "Getting search ready on your computer",
     installingFirstIndex: "Indexing your sources for the first time",
-    connectOnMac: "Connect sources in Olympus on your Mac.",
+    connectOnMac: "Connect sources in Olympus on your computer.",
     reconnect: "Reconnect",
     checkAgain: "Check again",
-    openOnMac: "Open Olympus on your Mac",
+    openOnMac: "Open Olympus on your computer",
     stageReading: "Reading",
     stageSearchable: "Indexing",
-    embeddingNeedsAttention: "Search has stopped working on your Mac.",
-    answerModelNeedsAttention: "Answers have stopped working on your Mac.",
+    embeddingNeedsAttention: "Search has stopped working on your computer.",
+    answerModelNeedsAttention: "Answers have stopped working on your computer.",
     modelInstallFailed: {
       embedding: {
         disk_full: "Couldn't download the search model: the disk is full.",
@@ -24717,20 +24717,18 @@ var init_vocabulary = __esm(() => {
         unknown: "Couldn't download the private model."
       }
     },
-    fixOnMac: "Open Olympus on your Mac to fix this.",
-    privateMatches: "Some matching items are private and stay on your Mac.",
-    changeModelsOnMac: "Change models in Olympus on your Mac."
+    fixOnMac: "Open Olympus on your computer to fix this.",
+    privateMatches: "Some matching items are private and stay on your computer.",
+    changeModelsOnMac: "Change models in Olympus on your computer."
   };
   DASHBOARD_CHATGPT_PAGE_COPY = {
     title: "Olympus",
-    loading: "Checking your Mac…",
+    loading: "Checking your computer…",
     upToDate: "Olympus is up to date.",
     needsYou: "Needs you",
     sources: "Sources",
-    sourcesLocal: "On your Mac",
+    sourcesLocal: "On your computer",
     sourcesCloud: "Accounts",
-    sourcesOnMac: "Set up on your Mac",
-    sourcesOnMacHelp: "These connect on your Mac in Olympus. They'll show up here once connected.",
     notConnected: "Not connected",
     noSources: "No sources yet.",
     progress: "Progress",
@@ -24740,7 +24738,7 @@ var init_vocabulary = __esm(() => {
     left: "{count} {unit} left",
     eta: "about {duration}",
     stalled: "stalled",
-    progressPaused: "paused while your Mac is offline",
+    progressPaused: "paused while your computer is offline",
     details: "Details",
     stageLine: "{stage}: {done} of {total} {unit}",
     models: "Models",
@@ -24755,7 +24753,13 @@ var init_vocabulary = __esm(() => {
     modelGettingReady: "Getting ready",
     modelNeedsYou: "Needs you",
     modelChecking: "Checking",
-    modelNames: { search: "the search model", answers: "the private model" },
+    modelNames: { search: "the search model", answers: "the private model", transcription: "the transcription model" },
+    modelTranscription: "Transcription",
+    modelNotNeededNoAudio: "Not needed: no audio in your chosen folders",
+    modelDownloadNow: "Download now",
+    modelNotDownloaded: "Not downloaded",
+    modelDownloadInterrupted: "Download stopped before it finished",
+    modelCouldNotStart: "Couldn't start {model}",
     modelInstallDownloading: "Downloading {model}",
     modelInstallVerifying: "Checking {model}…",
     modelInstallFailed: "Couldn't download {model}: {reason}",
@@ -24802,8 +24806,8 @@ var init_vocabulary = __esm(() => {
     },
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
-    howOnMac: "How to fix this on your Mac",
-    howConnectOnMac: "How to connect these on your Mac"
+    howOnMac: "How to fix this on your computer",
+    sourcePaused: "Paused"
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -25005,7 +25009,7 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PRIVACY_COPY = {
     back: "Back to Olympus",
     title: "What's private for you?",
-    intro: "Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your Mac and never sent to ChatGPT. Passwords and other secrets are always kept on your Mac.",
+    intro: "Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.",
     loading: "Loading your privacy settings…",
     loadFailed: "Olympus could not load your privacy settings. Try again.",
     tryAgain: "Try again",
@@ -25030,8 +25034,8 @@ var init_vocabulary = __esm(() => {
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
     pending: {
-      one: "{n} item is waiting to be checked on your Mac.",
-      many: "{n} items are waiting to be checked on your Mac."
+      one: "{n} item is waiting to be checked on your computer.",
+      many: "{n} items are waiting to be checked on your computer."
     },
     save: "Save",
     saving: "Saving…",
@@ -25060,12 +25064,12 @@ var init_vocabulary = __esm(() => {
     makePrivateFor: "Make {name} private",
     alreadyPrivate: "Already private",
     labelTitle: "Add a Gmail label",
-    labelIntro: "Mail with a private label is answered only on your Mac.",
+    labelIntro: "Mail with a private label is answered only on your computer.",
     loadingLabels: "Loading your labels…",
     noLabels: "This mailbox has no labels of its own.",
     sentLabel: "Sent",
     senderTitle: "Add a sender",
-    senderIntro: "Mail from this sender is answered only on your Mac.",
+    senderIntro: "Mail from this sender is answered only on your computer.",
     senderLabel: "Email address or @domain",
     senderPlaceholder: "name@example.com or @example.com",
     senderAdd: "Add",
@@ -25133,13 +25137,13 @@ var init_vocabulary = __esm(() => {
     modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
     modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
     modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
-    modelNames: { ...DASHBOARD_CHATGPT_PAGE_COPY.modelNames, transcription: "the transcription model" },
-    modelTranscription: "Transcription",
-    modelNotNeededNoAudio: "Not needed: no audio in your chosen folders",
-    modelDownloadNow: "Download now",
-    modelNotDownloaded: "Not downloaded",
-    modelDownloadInterrupted: "Download stopped before it finished",
-    modelCouldNotStart: "Couldn't start {model}",
+    modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+    modelTranscription: DASHBOARD_CHATGPT_PAGE_COPY.modelTranscription,
+    modelNotNeededNoAudio: DASHBOARD_CHATGPT_PAGE_COPY.modelNotNeededNoAudio,
+    modelDownloadNow: DASHBOARD_CHATGPT_PAGE_COPY.modelDownloadNow,
+    modelNotDownloaded: DASHBOARD_CHATGPT_PAGE_COPY.modelNotDownloaded,
+    modelDownloadInterrupted: DASHBOARD_CHATGPT_PAGE_COPY.modelDownloadInterrupted,
+    modelCouldNotStart: DASHBOARD_CHATGPT_PAGE_COPY.modelCouldNotStart,
     modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
     modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
     modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
@@ -25777,7 +25781,7 @@ var init_shared_status = __esm(() => {
   ]);
 });
 // src/workers/chatgpt/dashboard-view-model.ts
-var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
+var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_shared_status();
   init_phases();
@@ -25821,6 +25825,7 @@ var init_dashboard_view_model = __esm(() => {
   ]);
   KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
+  TRANSCRIPTION_DOWNLOADABLE = new Set(["not_needed", "not_downloaded", "interrupted", "failed"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
   MANUAL_SYNC_OUTCOMES = new Set(["checked", "failed", "busy"]);
 });

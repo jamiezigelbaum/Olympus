@@ -227,7 +227,7 @@ describe('the Privacy screen', () => {
     expect(text).toContain(W.rulesTitle);
     expect(ruleRows(host)).toEqual(['Medical RecordsFolder in Dropbox', 'Lawyer LettersGmail label', 'doctor@clinic.exampleSender']);
     for (const label of [W.addFolder, W.addLabel, W.addSender]) expect(host.button(label).disabled).toBe(false);
-    expect(text).toContain('12 items are waiting to be checked on your Mac.');
+    expect(text).toContain('12 items are waiting to be checked on your computer.');
     // Nothing to save yet: Save is inactive. A change makes it the one accent; Cancel is quiet.
     expect(host.button(W.save).disabled).toBe(true);
     expect(host.doc.querySelectorAll('.btn.primary')).toHaveLength(0);
@@ -258,7 +258,7 @@ describe('the Privacy screen', () => {
     expect(none.host.text()).not.toContain('waiting to be checked');
     expect(none.host.text()).toContain(W.rulesEmpty);
     const one = await openPrivacy({ pending: 1 });
-    expect(one.host.text()).toContain('1 item is waiting to be checked on your Mac.');
+    expect(one.host.text()).toContain('1 item is waiting to be checked on your computer.');
   });
 
   test('a load failure says so inline and Try again loads again', async () => {
@@ -830,7 +830,7 @@ describe('the dashboard Privacy row', () => {
     expect(host.text()).toContain('Tell Olympus what\'s private for you');
     expect(host.doc.querySelector('.privacy-row')).toBeNull();
     expect(host.hasButton(W.edit)).toBe(false);
-    expect(host.button('Set up').className).toContain('primary');
+    expect(host.button('Set up').className).toContain('warnfill');
   });
 
   test('without a count from the dashboard the row names no number until a save tells it', async () => {

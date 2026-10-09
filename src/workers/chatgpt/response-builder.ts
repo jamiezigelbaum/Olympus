@@ -26,6 +26,7 @@ import { OperationError, type OperationErrorCode } from '../../core/operation-er
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type {
+  TranscriptionModelView,
   ChatGptDisconnectSourceId,
   ChatGptOAuthSource,
   ChatGptScopeSourceId,
@@ -108,7 +109,7 @@ const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [SCOPE_LIST_TOOL_NAME]: { source_id: SCOPE_SOURCE_IDS },
   [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
   [MODEL_SET_TOOL_NAME]: { embedding: new Set(['built_in']), answers: new Set(['local', 'venice']) },
-  [MODEL_RETRY_TOOL_NAME]: { model: new Set(['embedding', 'answers']) },
+  [MODEL_RETRY_TOOL_NAME]: { model: new Set(['embedding', 'answers', 'transcription']) },
   [PRIVACY_GET_TOOL_NAME]: {},
 };
 const FIX_HREF_HOST = 'olympusplugin.ai';
@@ -178,6 +179,17 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
       out.models.answers.install = copyInstall(answers.install, 'downloading');
     }
   }
+  const transcription = view.models?.transcription;
+  if (transcription && TRANSCRIPTION_STATES.has(transcription.state)) {
+    const state = transcription.state;
+    // Percent, bytes and a fixed failure code, only in the states that carry them.
+    const install = state === 'downloading' || state === 'verifying' || state === 'failed' ? copyInstall(transcription as Partial<ModelInstall>, state) : { state };
+    out.models.transcription = {
+      ...install,
+      state,
+      ...(transcription.download ? { download: copyFix(transcription.download) } : {}),
+    };
+  }
   if (view.models?.change) out.models.change = copyFix(view.models.change);
   if (view.privacy) {
     out.privacy = {
@@ -237,6 +249,8 @@ function copySource(source: DashboardSource): DashboardSource {
   return out;
 }
 
+const TRANSCRIPTION_STATES = new Set<TranscriptionModelView['state']>(['not_needed', 'not_downloaded', 'interrupted', 'downloading', 'verifying', 'ready', 'failed', 'load_failed']);
+
 const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync']>['outcome']>(['checked', 'failed', 'busy']);
 
 const SOURCE_STAGES = new Set<SourceProgress['stage']>(['listing', 'reading', 'indexing', 'done']);
@@ -269,6 +283,7 @@ function copyFix(fix: DashboardFix): DashboardFix {
   if (href) out.href = href;
   if (fix?.disabledReason) out.disabledReason = text(fix.disabledReason);
   if (fix?.destructive === true) out.destructive = true;
+  if (fix?.openHref === true && href) out.openHref = true;
   return out;
 }
 
@@ -318,7 +333,7 @@ export function sourceStatusToolResult(view: DashboardViewModelV1): ChatGptToolR
 /* Answers                                                             */
 /* ------------------------------------------------------------------ */
 
-const PENDING_TEXT = 'Olympus is still preparing this answer on the Mac. Call source_answer_result with this job_id '
+const PENDING_TEXT = 'Olympus is still preparing this answer on the computer. Call source_answer_result with this job_id '
   + '(repeat while it says working). Do not ask the question again.';
 
 export interface ChatGptCitation {
@@ -358,9 +373,9 @@ export const NO_SOURCES_CONNECTED_TEXT = 'No sources are connected to Olympus ye
  */
 function privatePanelNote(wait: string): string {
   return 'Some items matching this question are marked Private in Olympus. '
-    + 'Olympus is answering from them privately on the user\'s Mac, in the private answer panel above, '
+    + 'Olympus is answering from them privately on the user\'s computer, in the private answer panel above, '
     + 'visible only to the user; you can\'t see that answer. '
-    + 'Keep your reply short, along the lines of: “Olympus is preparing your answer privately on your Mac; '
+    + 'Keep your reply short, along the lines of: “Olympus is preparing your answer privately on your computer; '
     + `it'll appear in the panel above, visible only to you (${wait}).” `
     + 'Don\'t comment on other search results unless they actually answer the question, '
     + 'and don\'t mention coverage counts, unread items or file names. '
@@ -375,11 +390,11 @@ export const PRIVATE_MATCH_PANEL_NOTE = privatePanelNote('it can take up to a mi
 export const PRIVATE_MATCH_PANEL_FULL_NOTE = privatePanelNote('reading the full report can take a few minutes');
 /** The same bit while the panel cannot answer yet (no private model, or it is still downloading). */
 export const PRIVATE_MATCH_PANEL_SETUP_NOTE = 'Some items matching this question are marked Private in Olympus. '
-  + 'Their contents stay on the user\'s Mac and are never shown to you; the private answer panel above '
+  + 'Their contents stay on the user\'s computer and are never shown to you; the private answer panel above '
   + 'tells the user how to get an answer from them there. Don\'t suggest changing folder settings for those items.';
 /** The same bit when no panel accompanies this result (the Private search did not finish in time). */
 export const PRIVATE_MATCH_NOTE = 'Some items matching this question are marked Private in Olympus. '
-  + 'Their contents stay on the user\'s Mac and are never shown to you. '
+  + 'Their contents stay on the user\'s computer and are never shown to you. '
   + 'Don\'t suggest changing folder settings for those items.';
 
 /**
@@ -620,7 +635,7 @@ export function copyPrivateMatch(match: (PrivateMatchSummary & { jobId?: string 
 }
 
 /** Proposed vocabulary: the whole answer when only Private items could answer. */
-export const PRIVATE_ANSWER_WITHHELD = 'Olympus can answer this only from private items, which stay on your Mac.';
+export const PRIVATE_ANSWER_WITHHELD = 'Olympus can answer this only from private items, which stay on your computer.';
 
 /** Public or Personal evidence only; the caller has already dropped the rest. */
 function citationFrom(evidence: Record<string, unknown>): ChatGptCitation | undefined {
@@ -715,7 +730,7 @@ export function disconnectToolResult(result: DisconnectSourceResult): ChatGptToo
   const sourceId = DISCONNECT_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
   if (!sourceId) return errorToolResult(new ChatGptSurfaceError('internal'));
   return {
-    content: [{ type: 'text', text: `${SOURCE_LABELS[sourceId]} is disconnected. What Olympus already indexed stays on the Mac.` }],
+    content: [{ type: 'text', text: `${SOURCE_LABELS[sourceId]} is disconnected. What Olympus already indexed stays on the computer.` }],
     structuredContent: { status: 'disconnected', source_id: sourceId },
   };
 }
@@ -728,16 +743,18 @@ export function modelSetToolResult(result: ModelSetResult): ChatGptToolResult {
   };
   if (result.answers === 'local' || result.answers === 'venice') structured.answers = result.answers;
   const parts = [structured.status === 'applied' ? 'Olympus updated its models.' : 'Olympus already uses these models.'];
-  if (structured.restarting) parts.push('It restarts on the Mac to apply them, which takes a few seconds.');
+  if (structured.restarting) parts.push('It restarts on the computer to apply them, which takes a few seconds.');
   return { content: [{ type: 'text', text: parts.join(' ') }], structuredContent: structured as unknown as Record<string, unknown> };
 }
 
 export function modelRetryToolResult(result: ModelRetryResult): ChatGptToolResult {
-  const model = result.model === 'answers' ? 'answers' : 'embedding';
+  const model = result.model === 'answers' || result.model === 'transcription' ? result.model : 'embedding';
   const structured: ModelRetryResult = { status: 'retrying', model };
   const text = model === 'answers'
-    ? 'Olympus is installing its built-in answer model again on the Mac.'
-    : 'Olympus is installing its built-in search model again on the Mac.';
+    ? 'Olympus is installing its built-in answer model again on the computer.'
+    : model === 'transcription'
+      ? 'Olympus is downloading its built-in transcription model on the computer.'
+      : 'Olympus is installing its built-in search model again on the computer.';
   return { content: [{ type: 'text', text }], structuredContent: structured as unknown as Record<string, unknown> };
 }
 
@@ -768,7 +785,7 @@ export function privacyToolResult(
         : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
   ];
   if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label or sender rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
-  if (summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the Mac.`);
+  if (summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the computer.`);
   return {
     content: [{ type: 'text', text: parts.join(' ') }],
     structuredContent: summary as unknown as Record<string, unknown>,
@@ -943,26 +960,26 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   invalid_params: 'The request was not valid. Check the arguments and try again.',
   invalid_request: 'The request was not valid. Check the arguments and try again.',
   unsupported_filter: 'That filter is not supported here.',
-  config_error: 'Olympus on the Mac needs setup before it can answer. Open Olympus on the Mac.',
-  argus_unreachable: 'The answer model on the Mac is not reachable right now. Try again shortly.',
-  argus_error: 'The answer model on the Mac could not answer. Try again shortly.',
-  email_not_configured: 'Olympus on the Mac needs setup before it can answer. Open Olympus on the Mac.',
-  email_unreachable: 'Olympus on the Mac is not reachable right now. Try again shortly.',
+  config_error: 'Olympus on the computer needs setup before it can answer. Open Olympus on the computer.',
+  argus_unreachable: 'The answer model on the computer is not reachable right now. Try again shortly.',
+  argus_error: 'The answer model on the computer could not answer. Try again shortly.',
+  email_not_configured: 'Olympus on the computer needs setup before it can answer. Open Olympus on the computer.',
+  email_unreachable: 'Olympus on the computer is not reachable right now. Try again shortly.',
   email_error: 'Olympus could not complete this request. Try again shortly.',
   email_policy_violation: 'Olympus withheld this result under the owner\'s privacy rules.',
-  source_index_not_enabled: 'Searching sources is not turned on in Olympus on the Mac.',
+  source_index_not_enabled: 'Searching sources is not turned on in Olympus on the computer.',
   source_index_policy_violation: 'Olympus withheld this result under the owner\'s privacy rules.',
   source_index_error: 'Olympus could not complete this request. Try again shortly.',
   source_answer_busy: 'Olympus is busy with another answer. Wait for it to finish, then ask again.',
   source_answer_job_not_found: 'That answer is no longer available. Ask the question again with source_answer.',
   source_answer_deadline: 'Olympus took too long to answer. Ask a narrower question or try again.',
   source_answer_too_large: 'The answer was too large to return. Ask a narrower question.',
-  unavailable: 'The Olympus dashboard is not available on the Mac right now. Try again shortly.',
-  models_not_ready: 'Search isn\'t ready on your Mac yet. Finish setting up models in Olympus on your Mac, then try again.',
-  connect_unavailable: 'This source can\'t be connected from ChatGPT on this Mac. Connect it in Olympus on your Mac.',
+  unavailable: 'The Olympus dashboard is not available on the computer right now. Try again shortly.',
+  models_not_ready: 'Search isn\'t ready on your computer yet. Finish setting up models in Olympus on your computer, then try again.',
+  connect_unavailable: 'This source can\'t be connected from ChatGPT on this computer. Connect it in Olympus on your computer.',
   already_connected: 'This source already has a connected account. Disconnect it first to connect another.',
   not_connected: 'Connect this source before choosing what Olympus may read.',
-  not_linked: 'Your Mac isn\'t linked to ChatGPT yet. Open Olympus on your Mac, then try again.',
+  not_linked: 'Your computer isn\'t linked to ChatGPT yet. Open Olympus on your computer, then try again.',
   sign_in_failed: 'Olympus couldn\'t open the sign-in page for this source. Try again.',
   source_not_connected: 'This source isn\'t connected, so there is nothing to disconnect.',
   source_busy: 'This source is finishing a read. Try again in a moment.',
@@ -970,8 +987,8 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
   privacy_owner_only: 'Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.',
-  embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the Mac.',
-  model_not_configured: 'That model is not set up on the Mac. Set it up in Olympus on the Mac first.',
+  embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the computer.',
+  model_not_configured: 'That model is not set up on the computer. Set it up in Olympus on the computer first.',
   unknown_tool: 'Olympus does not have that tool.',
   internal: 'Olympus could not complete this request. Try again shortly.',
 };

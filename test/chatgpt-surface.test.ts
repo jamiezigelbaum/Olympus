@@ -125,11 +125,11 @@ describe('dashboard view-model producer', () => {
       label: 'Change',
       tool: DASHBOARD_TOOL_NAME,
       args: {},
-      disabledReason: 'Change models in Olympus on your Mac.',
+      disabledReason: 'Change models in Olympus on your computer.',
       // Review 2026-10-02 #16: the repair is named, not only refused.
-      href: 'https://olympusplugin.ai/help/on-your-mac/#models',
+      href: 'https://olympusplugin.ai/help/on-your-computer/#models',
     });
-    expect(copyDashboardViewModel(vm).models.change!.href).toBe('https://olympusplugin.ai/help/on-your-mac/#models');
+    expect(copyDashboardViewModel(vm).models.change!.href).toBe('https://olympusplugin.ai/help/on-your-computer/#models');
     expect(vm.needsYou).toEqual([]);
     expect(vm.progress).toBeUndefined();
     expect(vm.generatedAt).toBe(NOW.toISOString());
@@ -464,10 +464,10 @@ describe('dashboard view-model producer', () => {
     for (const fix of fixes) {
       expect(typeof fix.tool).toBe('string');
       expect(fix.args).toBeDefined();
-      expect(fix.label).not.toBe('Open Olympus on your Mac');
+      expect(fix.label).not.toBe('Open Olympus on your computer');
     }
     // A repair only the Mac can make names its help section beside the control.
-    const help = 'https://olympusplugin.ai/help/on-your-mac/';
+    const help = 'https://olympusplugin.ai/help/on-your-computer/';
     expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary!.href).toBe(`${help}#connect`);
     expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix.href).toBe(`${help}#reconnect`);
     expect(vm.needsYou.find((item) => item.id === 'source:gmail.email')!.fix.href).toBeUndefined();
@@ -479,7 +479,7 @@ describe('dashboard view-model producer', () => {
       now: NOW,
       embedding: { kind: 'built_in', state: 'downloading', percent: 40 },
     });
-    expect(vm.connection).toEqual({ state: 'installing', progress: { percent: 40, label: 'Getting search ready on your Mac' } });
+    expect(vm.connection).toEqual({ state: 'installing', progress: { percent: 40, label: 'Getting search ready on your computer' } });
     expect(vm.models.embedding).toEqual({ kind: 'built_in', state: 'downloading', percent: 40 });
   });
 
@@ -511,10 +511,10 @@ describe('dashboard view-model producer', () => {
     ]);
     // A custom model that stopped is not an install: it keeps the generic sentence.
     const custom = buildChatGptDashboardViewModel(view([card('gmail.email')]), { now: NOW, embedding: { kind: 'custom', state: 'failed' } });
-    expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.sentence).toBe('Search has stopped working on your Mac.');
+    expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.sentence).toBe('Search has stopped working on your computer.');
     // Check again, plus the help section naming the repair on the Mac.
     expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.fix).toEqual({
-      label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://olympusplugin.ai/help/on-your-mac/#search',
+      label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://olympusplugin.ai/help/on-your-computer/#search',
     });
   });
 
@@ -931,7 +931,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
       const result = await client.callTool({ name: 'source_answer', arguments: { question: 'budget?' } });
       expect(result.structuredContent).toEqual({
         status: 'answered',
-        answer: 'Olympus can answer this only from private items, which stay on your Mac.',
+        answer: 'Olympus can answer this only from private items, which stay on your computer.',
         citations: [],
         // The one fixed Private note (owner decision 2026-10-02): no count, no title.
         notes: [PRIVATE_MATCH_PANEL_SETUP_NOTE],
@@ -949,7 +949,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     try {
       const result = await client.callTool({ name: 'source_answer', arguments: { question: 'budget?' } });
       // The fixture's Gmail item is tiered Private, so it still triggers the sentence.
-      expect((result.structuredContent as { notes?: string[] }).notes).toEqual(['Some matching items are private and stay on your Mac.']);
+      expect((result.structuredContent as { notes?: string[] }).notes).toEqual(['Some matching items are private and stay on your computer.']);
     } finally {
       await client.close();
     }

@@ -110,7 +110,7 @@ export interface ChatGptSetupBackend {
    * Starts a built-in model's install again (resuming a partial download);
    * answers at once. False when that model is not the built-in one here.
    */
-  retryModel(model: 'embedding' | 'answers'): boolean;
+  retryModel(model: 'embedding' | 'answers' | 'transcription'): boolean;
   /** The owner's Secrets locations; throws when the rules cannot be read. */
   secretLocations(): SecretLocations;
   /** The saved privacy settings and the privacy-check backlog; throws when the profile cannot be read. */
@@ -267,10 +267,10 @@ export const MODEL_SET_TOOL: ToolDefinition = {
 export const MODEL_RETRY_TOOL: ToolDefinition = {
   name: MODEL_RETRY_TOOL_NAME,
   title: 'Retry an Olympus model install',
-  description: 'For the Olympus panel: start the built-in search or answer model\'s install again on the Mac after it failed.',
+  description: 'For the Olympus panel: start the built-in search, answer or transcription model\'s install again on the computer after it failed, or download the transcription model ahead of any audio.',
   inputSchema: {
     type: 'object',
-    properties: { model: { type: 'string', enum: ['embedding', 'answers'] } },
+    properties: { model: { type: 'string', enum: ['embedding', 'answers', 'transcription'] } },
     required: ['model'],
     additionalProperties: false,
   },
@@ -397,7 +397,7 @@ export async function callSetupTool(
         });
       }
       case MODEL_RETRY_TOOL_NAME: {
-        const model = oneOf(args.model, ['embedding', 'answers'] as const);
+        const model = oneOf(args.model, ['embedding', 'answers', 'transcription'] as const);
         if (!backend.retryModel(model)) throw new ChatGptSurfaceError('model_not_configured');
         return modelRetryToolResult({ status: 'retrying', model });
       }

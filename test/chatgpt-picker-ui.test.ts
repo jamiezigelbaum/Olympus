@@ -976,8 +976,10 @@ describe('page rules', () => {
     expect(pinned).toEqual([]);
     expect(CHATGPT_DASHBOARD_CSS).not.toContain('.choice{');
     expect(CHATGPT_DASHBOARD_CSS).not.toContain('.sheet');
-    // No one-side accent stripe anywhere, and no underlined status text.
-    expect(CHATGPT_DASHBOARD_CSS).not.toMatch(/border-(left|right):/);
+    // No one-side accent stripe anywhere, and no underlined status text. One exception:
+    // the needs-you warning card (variant C, signed off by Jamie 2026-10-09).
+    const withoutNeedCard = CHATGPT_DASHBOARD_CSS.replace('.row.need{background:var(--warn-bg);border-left:4px solid var(--warn);', '');
+    expect(withoutNeedCard).not.toMatch(/border-(left|right):/);
     expect(CHATGPT_DASHBOARD_CSS).not.toContain('text-decoration:underline');
     // Thin rows: one line, at least 48px, segments at least 44px wide with a 44px tall hit area.
     expect(CHATGPT_DASHBOARD_CSS).toContain('.frow.seg-row{flex-direction:row;align-items:center;gap:0.25rem;min-height:3rem}');

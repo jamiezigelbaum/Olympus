@@ -21,6 +21,7 @@ import {
 } from '../dashboard/shared-status.ts';
 import { dashboardSourceProgress, type DashboardPhase } from '../dashboard/phases.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
+import type { BuiltInTranscriptionDashboardState } from '../source-index/built-in-reasoning/transcription-model.ts';
 import {
   DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
   DASHBOARD_SUPPORTED_SOURCES,
@@ -38,6 +39,7 @@ import {
   dashboardWorkingSummary,
   type DashboardStatus,
   DASHBOARD_CHATGPT_VOCABULARY,
+  DASHBOARD_CHATGPT_PAGE_COPY,
   DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
@@ -62,6 +64,7 @@ import {
   type ModelInstallFailedReason,
   type SourceProgress,
   type SourceStalledReason,
+  type TranscriptionModelView,
 } from './dashboard-contract.ts';
 
 /** Static, product-owned labels for answer models. Never the card's own text. */
@@ -146,6 +149,8 @@ export interface ChatGptDashboardOptions {
    * into `installing`; it only joins the embedding download's percent.
    */
   privateModel?: BuiltInPrivateModelView;
+  /** The built-in transcription model, when it is this machine's transcriber (models.transcription). */
+  transcription?: BuiltInTranscriptionDashboardState;
 }
 
 export interface BuiltInPrivateModelView {
@@ -174,7 +179,11 @@ export function buildChatGptDashboardViewModel(
     // exactly as an Off source has none, but it stays in Needs you.
     const measured = connecting || vocabularyStatus === 'Off' || refusedFirstConnect(scrubbed)
       ? undefined
-      : measuredSourceProgress(card, scrubbed, embedding, vocabularyStatus, credentials, now);
+      : measuredSourceProgress(card, scrubbed, embedding,
+        // A sign-in already under way is not a signed-out source: its row keeps
+        // the finish-signing-in sentence.
+        card.connection.state !== 'awaiting_consent'
+          && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
     const progress = measured?.progress;
     // Mid-sign-in reads Needs you whatever else the card says: the owner's
     // next step is finishing the sign-in.
@@ -187,23 +196,25 @@ export function buildChatGptDashboardViewModel(
     // button over work that needs nothing (owner fresh-install test,
     // 2026-10-01). A real fix (reconnect, choose folders) still stands.
     if (!connecting && !credentials && (status === 'Needs you' || status === 'Failing') && progress && progress.stage !== 'done'
-      && !progress.stalled && attentionItem(definition, scrubbed, degraded, undefined, progress).fix?.tool === DASHBOARD_TOOL_NAME) {
+      && !progress.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress).fix)) {
       status = 'Working';
     }
     return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts };
   });
 
+  // One list (owner, 2026-10-09): sources that need the owner first, then
+  // connected sources, then the ones not connected yet; roster order within.
   const sources: DashboardSource[] = rows
     .map(({ definition, card, status, actionKind, connecting, progress }, index) => ({
       entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now),
       index,
     }))
-    .sort((a, b) => groupRank(a.entry.group) - groupRank(b.entry.group) || a.index - b.index)
+    .sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index)
     .map(({ entry }) => entry);
 
   const needsYou: DashboardItem[] = rows
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
-    .map(({ definition, card, connecting, progress }) => attentionItem(definition, card, degraded, connecting, progress));
+    .map(({ definition, card, actionKind, connecting, progress }) => attentionItem(definition, card, actionKind, degraded, connecting, progress));
 
   // Models are status only in ChatGPT (owner decision 2026-10-01): a
   // configured model's fix is to check again; a built-in install that failed
@@ -214,7 +225,7 @@ export function buildChatGptDashboardViewModel(
       sentence: embedding.kind === 'built_in'
         ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.embedding[embedding.failedReason ?? 'unknown']
         : DASHBOARD_CHATGPT_VOCABULARY.embeddingNeedsAttention,
-      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(onMacHelp('search')),
+      fix: embedding.kind === 'built_in' ? retryFix('embedding') : checkAgainFix(onComputerHelp('search')),
     });
   }
   const answers = answersFromModelSetup(view.model_setup) ?? builtInAnswers(options.privateModel);
@@ -227,7 +238,7 @@ export function buildChatGptDashboardViewModel(
       sentence: answers.kind === 'built_in'
         ? DASHBOARD_CHATGPT_VOCABULARY.modelInstallFailed.answers[options.privateModel?.failedReason ?? 'unknown']
         : DASHBOARD_CHATGPT_VOCABULARY.answerModelNeedsAttention,
-      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(onMacHelp('answers')),
+      fix: answers.kind === 'built_in' ? retryFix('answers') : checkAgainFix(onComputerHelp('answers')),
     });
   }
 
@@ -240,6 +251,8 @@ export function buildChatGptDashboardViewModel(
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} },
     });
   }
+
+  const transcription = transcriptionModel(options.transcription);
 
   const progress = overallProgress(rows);
   const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
@@ -255,12 +268,13 @@ export function buildChatGptDashboardViewModel(
     models: {
       embedding,
       ...(answers ? { answers } : {}),
+      ...(transcription ? { transcription } : {}),
       change: {
         label: CHATGPT_SETUP_LABELS.changeModels,
         tool: DASHBOARD_TOOL_NAME,
         args: {},
         disabledReason: DASHBOARD_CHATGPT_VOCABULARY.changeModelsOnMac,
-        href: onMacHelp('models'),
+        href: onComputerHelp('models'),
       },
     },
     ...(options.privacy
@@ -296,8 +310,10 @@ function publicCards(cards: readonly DashboardSourceCard[]): PublicCard[] {
   return out;
 }
 
-function groupRank(group: DashboardSource['group']): number {
-  return group === 'local' ? 0 : 1;
+/** Problems first, then connected sources, then sources not connected yet. */
+function sourceRank(source: DashboardSource): number {
+  if (source.status === 'Needs you' || source.status === 'Failing') return 0;
+  return source.status === 'Off' ? 2 : 1;
 }
 
 function sourceGroup(definition: DashboardSupportedSourceDefinition): DashboardSource['group'] {
@@ -323,14 +339,12 @@ function sourceEntry(
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const reconnect = credentialProblem(card, degraded) || progress?.stalledReason === 'waiting_for_credentials'
-    ? reconnectFix(definition)
-    : undefined;
+  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition) : undefined;
   const primary = connecting
     ? connecting.fix
     : status === 'Off'
       ? (actionKind === 'none' ? undefined : connectFix(definition))
-      : reconnect ?? (scopePending(card) ? scopeFix(definition, card) : undefined);
+      : scopePending(card) ? scopeFix(definition, card) : reconnect;
   const menu: DashboardFix[] = [];
   if (status !== 'Off' && card.scope_selection && !scopePending(card)) {
     const fix = scopeFix(definition, card);
@@ -372,6 +386,7 @@ function sourceEntry(
 function attentionItem(
   definition: DashboardSupportedSourceDefinition,
   card: DashboardSourceCard,
+  actionKind: DashboardSourceAction['kind'],
   degraded: WorkerCredentialDegradation[] | undefined,
   connecting: Connecting | undefined,
   progress: SourceProgress | undefined,
@@ -381,13 +396,34 @@ function attentionItem(
   }
   const reason = dashboardAttentionLine(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const reauth = credentialProblem(card, degraded) || progress?.stalledReason === 'waiting_for_credentials';
-  const reconnect = reauth ? reconnectFix(definition) : undefined;
-  // A source ChatGPT cannot sign in again (X, Readwise) is reconnected on the Mac.
-  const fix = reconnect
-    ?? (reauth ? checkAgainFix(onMacHelp('reconnect')) : undefined)
-    ?? (scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : checkAgainFix());
+  const fix = scopePending(card)
+    ? scopeFix(definition, card) ?? checkAgainFix()
+    : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
+      ? reconnectFix(definition)
+      : checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
+}
+
+/**
+ * The owner has to sign this source in again: the same signal the local
+ * dashboard's row reads (source-rows.ts dashboardSourceRowFix and
+ * dashboardReconnectAction). A credential problem or a stall on sign-in, or a
+ * source that needs the owner while the engine's own card still carries a
+ * connect action (sign-in, setup or key): that action is the repair. Read off
+ * the unscrubbed card's action kind, which the scrubbed card drops
+ * (review 2026-10-09, bug 2: ChatGPT offered Check again where the computer
+ * offered Reconnect).
+ */
+function wantsReconnect(
+  card: DashboardSourceCard,
+  status: DashboardStatus,
+  actionKind: DashboardSourceAction['kind'],
+  degraded: WorkerCredentialDegradation[] | undefined,
+  progress: SourceProgress | undefined,
+): boolean {
+  if (credentialProblem(card, degraded) || progress?.stalledReason === 'waiting_for_credentials') return true;
+  const needsOwner = status === 'Needs you' || status === 'Failing';
+  return needsOwner && (actionKind === 'oauth' || actionKind === 'api_key' || actionKind === 'needs_setup');
 }
 
 interface Connecting {
@@ -415,9 +451,21 @@ function connectingFor(
   };
 }
 
-function reconnectFix(definition: DashboardSupportedSourceDefinition): DashboardFix | undefined {
+/**
+ * Reconnect: ChatGPT signs Gmail, Drive and Dropbox in again itself; any other
+ * source (X, Readwise) is signed in again on the computer, so its Reconnect
+ * opens the help page's steps for that.
+ */
+function reconnectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
   const source = oauthSource(definition);
-  return source ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : undefined;
+  return source
+    ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
+    : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, onComputerHelp('reconnect'));
+}
+
+/** A control that opens a help page section (`openHref`); the tool is only the contract's fallback. */
+function helpLinkFix(label: string, href: string): DashboardFix {
+  return { label, tool: DASHBOARD_TOOL_NAME, args: {}, href, openHref: true };
 }
 
 /**
@@ -464,12 +512,16 @@ function measuredSourceProgress(
   card: DashboardSourceCard,
   scrubbed: DashboardSourceCard,
   embedding: DashboardViewModelV1['models']['embedding'],
-  status: DashboardStatus,
-  credentials: boolean,
+  signIn: boolean,
   now: Date,
 ): MeasuredSourceProgress {
   const unit = unitFor(scrubbed);
-  const credentialsMissing = status === 'Needs you' && credentials;
+  // A source whose sign-in is the owner's to fix (wantsReconnect: the signal
+  // the local dashboard's Reconnect reads) is waiting on that sign-in, and its
+  // row says so (review 2026-10-09, bug 1: a signed-out Dropbox, which lost
+  // its sign-in while holding data, was stalled with no reason, so its row had
+  // no line at all).
+  const credentialsMissing = signIn;
   const found = count(scrubbed.coverage.indexed_items);
   if (scopePending(scrubbed)) {
     return {
@@ -548,25 +600,59 @@ function stalledReason(input: {
   return undefined;
 }
 
+/** The fix only re-reads the dashboard: nothing for the owner to do. */
+function checksAgainOnly(fix: DashboardFix | undefined): boolean {
+  return fix?.tool === DASHBOARD_TOOL_NAME && fix.openHref !== true;
+}
+
 function checkAgainFix(href?: string): DashboardFix {
   return { label: DASHBOARD_CHATGPT_VOCABULARY.checkAgain, tool: DASHBOARD_TOOL_NAME, args: {}, ...(href ? { href } : {}) };
 }
 
 /**
- * The help page naming a repair that only the Mac can make (a key, a pairing,
- * a model server). A Fix carries it as `href` beside its own control, so the
- * panel can link "how" next to Check again or a disabled control.
+ * The help page naming a repair that only the computer can make (a key, a
+ * pairing, a model server). A Fix carries it as `href` beside its own control,
+ * so the panel can link "how" next to Check again or a disabled control.
+ * Moved from /help/on-your-mac/ on 2026-10-09; the old address redirects.
  */
-export const ON_MAC_HELP_URL = 'https://olympusplugin.ai/help/on-your-mac/';
+export const ON_COMPUTER_HELP_URL = 'https://olympusplugin.ai/help/on-your-computer/';
 
-function onMacHelp(section: 'connect' | 'reconnect' | 'answers' | 'search' | 'models'): string {
-  return `${ON_MAC_HELP_URL}#${section}`;
+function onComputerHelp(section: 'connect' | 'reconnect' | 'answers' | 'search' | 'models'): string {
+  return `${ON_COMPUTER_HELP_URL}#${section}`;
 }
 
 /** Starts a failed built-in install again. */
 function retryFix(model: 'embedding' | 'answers'): DashboardFix {
   return { label: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain, tool: MODEL_RETRY_TOOL_NAME, args: { model } };
 }
+
+/**
+ * The built-in transcription model's line in Models, when it is this
+ * machine's transcriber. Download now while it is not needed yet (no audio
+ * chosen: the owner may add some), not downloaded, stopped part way or
+ * failed; Try again when it downloaded but would not start. Moved here from
+ * the local dashboard's own row (source-rows.ts) on 2026-10-09 so both
+ * surfaces read one model.
+ */
+function transcriptionModel(state: BuiltInTranscriptionDashboardState | undefined): TranscriptionModelView | undefined {
+  if (!state) return undefined;
+  const out: TranscriptionModelView = { state: state.state };
+  if (state.state === 'downloading' || state.state === 'verifying') {
+    if (Number.isFinite(state.percent)) out.percent = clampPercent(state.percent!);
+    if (Number.isFinite(state.bytesTotal) && (state.bytesTotal ?? 0) > 0 && Number.isFinite(state.bytesDone)) {
+      out.bytesTotal = Math.floor(state.bytesTotal!);
+      out.bytesDone = Math.min(Math.max(0, Math.floor(state.bytesDone!)), out.bytesTotal);
+    }
+  }
+  if (state.state === 'failed') out.failedReason = state.failedReason ?? 'unknown';
+  const label = state.state === 'load_failed'
+    ? DASHBOARD_CHATGPT_PICKER_COPY.tryAgain
+    : TRANSCRIPTION_DOWNLOADABLE.has(state.state) ? DASHBOARD_CHATGPT_PAGE_COPY.modelDownloadNow : undefined;
+  if (label) out.download = { label, tool: MODEL_RETRY_TOOL_NAME, args: { model: 'transcription' } };
+  return out;
+}
+
+const TRANSCRIPTION_DOWNLOADABLE: ReadonlySet<TranscriptionModelView['state']> = new Set(['not_needed', 'not_downloaded', 'interrupted', 'failed']);
 
 /** The publisher-app OAuth source for a definition, when ChatGPT can connect it. */
 function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptOAuthSource | undefined {
@@ -577,19 +663,13 @@ function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptOAu
 /**
  * Connect from ChatGPT: Gmail, Drive and Dropbox through Olympus's own apps.
  * X (bring-your-own app), Readwise (API key) and paired chats are set up on
- * the Mac; their control says so and checks again.
+ * the computer for now: their Connect opens the help page's steps for that.
  */
 function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
   const source = oauthSource(definition);
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
-    : {
-        label: CHATGPT_SETUP_LABELS.connect,
-        tool: DASHBOARD_TOOL_NAME,
-        args: {},
-        disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac,
-        href: onMacHelp('connect'),
-      };
+    : helpLinkFix(CHATGPT_SETUP_LABELS.connect, onComputerHelp('connect'));
 }
 
 function scopePending(card: DashboardSourceCard): boolean {

@@ -4633,6 +4633,12 @@ export async function main(): Promise<void> {
       || safeModelCredential(profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) }) !== undefined,
     requestReload: () => requestModelReload(),
     retryModel: (model) => {
+      if (model === 'transcription') {
+        // Download now (or again) for the built-in transcriber; the local
+        // dashboard's /dashboard/models/retry route does the same.
+        const engine = process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env);
+        return (engine?.downloadNow?.() ?? 'unavailable') !== 'unavailable';
+      }
       if (model === 'answers') {
         if (!workerBuiltInModel) return false;
         void workerBuiltInModel.model.prepare();
@@ -4815,6 +4821,7 @@ export async function main(): Promise<void> {
             answerModelAvailable: chatgptAnswerModelAvailable,
             embedding: chatgptEmbeddingState,
             privateModel: chatgptPrivateModelState,
+            transcription: dashboardTranscriptionState,
             privacy: () => {
               const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
               return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };

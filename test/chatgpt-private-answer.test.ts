@@ -569,7 +569,7 @@ describe('the response builder', () => {
     // 2026-10-02 live: with the panel answering, ChatGPT still recited
     // coverage counts and a name-only match ("returned only its filename").
     // The ready note steers it to a short "see the panel" reply instead.
-    expect(PRIVATE_MATCH_PANEL_NOTE).toContain('Olympus is preparing your answer privately on your Mac; '
+    expect(PRIVATE_MATCH_PANEL_NOTE).toContain('Olympus is preparing your answer privately on your computer; '
       + "it'll appear in the panel above, visible only to you (it can take up to a minute).");
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain("Don't comment on other search results unless they actually answer the question");
     expect(PRIVATE_MATCH_PANEL_NOTE).toContain("don't mention coverage counts, unread items or file names");
