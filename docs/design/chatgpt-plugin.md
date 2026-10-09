@@ -134,8 +134,10 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
     and a relay Content-Security-Policy beside the install's own:
     `sandbox; default-src 'none'` (opaque origin, no script) everywhere but
     the operator's demo sign-in, which keeps its origin and may submit its
-    form but runs no script. API routes serve JSON, event streams or text
-    and never redirect; browser routes (`/go/…`, `/oauth/callback/…`) serve
+    form but runs no script, and `/go/…`, whose pages stay opaque-origin
+    sandboxed but may run the one pinned connect-page script and post a
+    form back to `/go/` (docs/design/connect-pages.md). API routes serve
+    JSON, event streams or text and never redirect; browser routes (`/go/…`, `/oauth/callback/…`) serve
     HTML, text or JSON and redirect only to Google's and Dropbox's sign-in,
     the engine's loopback port, or the relay. Anything else, and any header
     the platform would refuse, is a 502 and the install is told to stop. A
@@ -359,10 +361,14 @@ contract (`src/workers/chatgpt/dashboard-contract.ts`).
   the signed state's nonce, and the engine verifies signature, nonce, origin
   (fixed at start) and freshness. This works from a phone and from any
   desktop, not only on the Mac; the non-loopback interstitial on the bounce
-  page asks for one click. X (owner app) and the paired chats are set up on
-  the Mac.
-- **Keys:** none through ChatGPT (owner decision). Venice and Readwise are
-  configured on the Mac only; `olympus_model_set` switches between models
+  page asks for one click. Readwise and X bookmarks connect through a
+  one-time link to a key-entry page the engine serves, where the key is
+  encrypted in the browser to the engine (docs/design/connect-pages.md; X's
+  final sign-in step returns to the computer). The paired chats are set up
+  on the computer.
+- **Keys:** none through ChatGPT (owner decision). Readwise's token and X's
+  app values are typed only on the engine's connect page; Venice is
+  configured on the computer only; `olympus_model_set` switches between models
   already set up there and never takes a key. Models are status only in the
   panel.
 - **Privacy is the owner's** (review P-1, 2026-10-02): `olympus_privacy_set`

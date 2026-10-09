@@ -10,17 +10,24 @@
  *
  * - `api` (`/mcp`, `/connect/token`, `/connect/revoke`, `/private/…`): JSON,
  *   event streams or plain text; no redirects.
- * - `browser` (`/go/…` hand-offs and `/oauth/callback/…` provider returns):
- *   HTML, plain text or JSON (the install client's own error answers); a
- *   redirect only to the provider sign-ins the engine starts (Google,
- *   Dropbox), the engine's loopback port, or the relay itself.
+ * - `browser` (`/oauth/callback/…` provider returns): HTML, plain text or
+ *   JSON (the install client's own error answers); a redirect only to the
+ *   provider sign-ins the engine starts (Google, Dropbox), the engine's
+ *   loopback port, or the relay itself.
+ * - `handoff` (`/go/…` one-time links): as `browser`, except that a page may
+ *   run exactly one script, the connect-page script pinned by its SHA-256
+ *   (connect-relay/shared/connect-page.ts), and may post a form only back to
+ *   `/go/` on the relay. Still an opaque-origin sandbox: the script cannot
+ *   read the relay origin's storage or call it with credentials, and opens no
+ *   connections of its own (`connect-src` falls back to `'none'`).
  * - `demo` (`/connect/demo/authorize`, routed only to the operator's demo
  *   install): the reviewer sign-in form, redirecting back to ChatGPT.
  *
  * Every install answer gets `X-Content-Type-Options: nosniff`,
  * `Referrer-Policy: no-referrer` and the relay's own Content-Security-Policy
  * in addition to the install's (browsers enforce both). `api` and `browser`
- * answers are sandboxed with no script and an opaque origin; the demo form
+ * answers are sandboxed with no script and an opaque origin, `handoff`
+ * answers with the one pinned script and an opaque origin; the demo form
  * keeps its origin (the engine checks it, and its consent cookie is
  * SameSite=Strict) and may submit, but runs no script.
  *
@@ -28,9 +35,10 @@
  * caller: a value the platform would refuse fails the stream with a 502
  * instead of leaving the request waiting.
  */
-import { AUTHENTICATED_RESPONSE_HEADER } from '../shared/tokens.ts';
+import { AUTHENTICATED_RESPONSE_HEADER, HANDOFF_PATH_PREFIX } from '../shared/tokens.ts';
+import { CONNECT_PAGE_SCRIPT_HASH } from '../shared/connect-page.ts';
 
-export type RouteKind = 'api' | 'browser' | 'demo';
+export type RouteKind = 'api' | 'browser' | 'handoff' | 'demo';
 
 export interface ResponsePolicy {
   readonly kind: RouteKind;
@@ -97,6 +105,21 @@ export function createResponsePolicies(input: { relayOrigin: string; enginePort:
       baseOrigin: relayOrigin,
       redirectAllowed: (target) => browserTargets.has(target.origin),
       csp: SANDBOXED_CSP,
+    },
+    handoff: {
+      kind: 'handoff',
+      contentTypes: new Set(text),
+      baseOrigin: relayOrigin,
+      redirectAllowed: (target) => browserTargets.has(target.origin),
+      csp: [
+        'sandbox allow-scripts allow-forms',
+        "default-src 'none'",
+        `script-src ${CONNECT_PAGE_SCRIPT_HASH}`,
+        "style-src 'unsafe-inline'",
+        `form-action ${relayOrigin}${HANDOFF_PATH_PREFIX}`,
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+      ].join('; '),
     },
     demo: {
       kind: 'demo',

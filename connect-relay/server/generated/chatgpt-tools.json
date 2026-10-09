@@ -188,7 +188,7 @@
     {
       "name": "olympus_connect_source",
       "title": "Connect a source to Olympus",
-      "description": "Start connecting Gmail, Google Drive or Dropbox to Olympus on the user's Mac. Returns {openUrl}: a one-time sign-in link (10 minutes) the user opens to sign in with the provider and allow Olympus. Afterwards the user chooses which folders or mail Olympus may read in the Olympus panel.",
+      "description": "Start connecting a source to Olympus on the user's computer. Returns {openUrl}: a one-time link (10 minutes) the user opens in a browser. For Gmail, Google Drive or Dropbox it signs in with the provider; afterwards the user chooses which folders or mail Olympus may read in the Olympus panel. For Readwise or X bookmarks it opens a page served by Olympus on the user's computer where the user types the key; never ask for or accept a key in chat.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -197,7 +197,9 @@
             "enum": [
               "gmail",
               "google-drive",
-              "dropbox"
+              "dropbox",
+              "readwise",
+              "x"
             ],
             "description": "The source to connect."
           }

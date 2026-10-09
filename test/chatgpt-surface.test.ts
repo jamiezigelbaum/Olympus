@@ -453,6 +453,7 @@ describe('dashboard view-model producer', () => {
       card('gmail.email', { connection: { state: 'reauth_required', label: 'reauth required' } }),
       offCard('dropbox.files'),
       offCard('x.bookmarks'),
+      offCard('telegram.messages'),
       card('readwise.library', { connection: { state: 'reauth_required', label: 'reauth required' } }),
     ]), { now: NOW, embedding: { kind: 'built_in', state: 'failed' } });
     const fixes = [
@@ -468,8 +469,11 @@ describe('dashboard view-model producer', () => {
     }
     // A repair only the Mac can make names its help section beside the control.
     const help = 'https://olympusplugin.ai/help/on-your-mac/';
-    expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary!.href).toBe(`${help}#connect`);
-    expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix.href).toBe(`${help}#reconnect`);
+    expect(vm.sources.find((source) => source.id === 'telegram.messages')!.primary!.href).toBe(`${help}#connect`);
+    // Keyed sources connect through a key page the computer serves (connect-page.ts).
+    expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary).toEqual({ label: 'Connect', tool: 'olympus_connect_source', args: { source: 'x' } });
+    expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix).toMatchObject({ tool: 'olympus_connect_source', args: { source: 'readwise' } });
+    expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix.href).toBeUndefined();
     expect(vm.needsYou.find((item) => item.id === 'source:gmail.email')!.fix.href).toBeUndefined();
     expect(copyDashboardViewModel(vm)).toEqual(vm);
   });

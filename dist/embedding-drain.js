@@ -25777,7 +25777,7 @@ var init_shared_status = __esm(() => {
   ]);
 });
 // src/workers/chatgpt/dashboard-view-model.ts
-var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
+var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, CHATGPT_KEY_PAGE_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_shared_status();
   init_phases();
@@ -25791,6 +25791,7 @@ var init_dashboard_view_model = __esm(() => {
     indexing: DASHBOARD_CHATGPT_VOCABULARY.stageSearchable
   };
   CHATGPT_OAUTH_SOURCES = new Set(["gmail", "google-drive", "dropbox"]);
+  CHATGPT_KEY_PAGE_SOURCES = new Set(["readwise", "x"]);
   SCOPE_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files"]);
   DISCONNECT_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   KNOWN_CONNECTION_LABELS = new Set([

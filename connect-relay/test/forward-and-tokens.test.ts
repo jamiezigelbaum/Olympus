@@ -33,13 +33,17 @@ describe('the forwarded surface', () => {
     }
   });
 
-  test('setup browser routes are forwarded for GET only, in their exact shapes', () => {
+  test('setup browser routes are forwarded in their exact shapes: GET, and a /go/ link\'s connect-page POST', () => {
     const link = `/go/${mintCredential('handoff', INSTALL)}`;
     expect(forwardPath(link, undefined, 'GET')).toBe(link);
+    // A connect page posts its one submission to its own link, exactly, with no query.
+    expect(forwardPath(link, undefined, 'POST')).toBe(link);
+    expect(forwardPath(`${link}?x=1`, undefined, 'POST')).toBeUndefined();
+    expect(forwardPath(`${link}/open`, undefined, 'POST')).toBeUndefined();
     expect(forwardPath('/oauth/callback/gmail?code=c&state=s', undefined, 'GET')).toBe('/oauth/callback/gmail?code=c&state=s');
     expect(forwardPath('/oauth/callback/dropbox?code=c', undefined, 'GET')).toBe('/oauth/callback/dropbox?code=c');
     for (const [path, method] of [
-      [link, 'POST'],
+      [link, 'PUT'],
       ['/oauth/callback/gmail?code=c', 'POST'],
       ['/oauth/callback/x?code=c', 'GET'],
       ['/oauth/callback/gmail/done', 'GET'],

@@ -51,6 +51,7 @@ import {
   DISCONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   type ChatGptDisconnectSourceId,
+  type ChatGptConnectSource,
   type ChatGptOAuthSource,
   type ChatGptScopeSourceId,
   type ConnectionState,
@@ -92,6 +93,8 @@ const STAGE_DETAIL: Readonly<Record<Exclude<SourceProgress['stage'], 'done'>, st
 
 /** Sources ChatGPT can connect: Olympus's own (publisher) OAuth apps, which return through the relay. */
 const CHATGPT_OAUTH_SOURCES = new Set<string>(['gmail', 'google-drive', 'dropbox']);
+/** Keyed sources ChatGPT connects through an engine-served key page (connect-page.ts). */
+const CHATGPT_KEY_PAGE_SOURCES = new Set<string>(['readwise', 'x']);
 const SCOPE_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files']);
 const DISCONNECT_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
 
@@ -568,16 +571,18 @@ function retryFix(model: 'embedding' | 'answers'): DashboardFix {
   return { label: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain, tool: MODEL_RETRY_TOOL_NAME, args: { model } };
 }
 
-/** The publisher-app OAuth source for a definition, when ChatGPT can connect it. */
-function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptOAuthSource | undefined {
+/** The source ChatGPT's Connect takes for a definition: a publisher-app sign-in or a key page. */
+function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptConnectSource | undefined {
   const action = definition.connect_action;
-  return action.kind === 'oauth' && CHATGPT_OAUTH_SOURCES.has(action.source) ? action.source as ChatGptOAuthSource : undefined;
+  if (action.kind === 'oauth' && CHATGPT_OAUTH_SOURCES.has(action.source)) return action.source as ChatGptOAuthSource;
+  if ((action.kind === 'oauth' || action.kind === 'api_key') && CHATGPT_KEY_PAGE_SOURCES.has(action.source)) return action.source as ChatGptConnectSource;
+  return undefined;
 }
 
 /**
- * Connect from ChatGPT: Gmail, Drive and Dropbox through Olympus's own apps.
- * X (bring-your-own app), Readwise (API key) and paired chats are set up on
- * the Mac; their control says so and checks again.
+ * Connect from ChatGPT: Gmail, Drive and Dropbox through Olympus's own apps;
+ * Readwise and X bookmarks through a key page the computer serves. Paired
+ * chats are set up on the computer; their control says so and checks again.
  */
 function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
   const source = oauthSource(definition);

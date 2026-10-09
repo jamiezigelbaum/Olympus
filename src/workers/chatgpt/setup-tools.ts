@@ -11,9 +11,12 @@
  *
  * Privacy:
  * - No API key is ever entered through ChatGPT (owner decision 2026-10-01):
- *   sign-ins are OAuth through one-time links (handoff.ts), and
+ *   sign-ins are OAuth through one-time links (handoff.ts); a keyed source
+ *   (Readwise, X bookmarks) gets a one-time link to a key-entry page the
+ *   owner's own engine serves, where the key is encrypted in the browser to
+ *   that engine (connect-page.ts, owner decision 2026-10-09); and
  *   `olympus_model_set` only switches between models already set up on the
- *   Mac.
+ *   computer.
  * - Folder, label and sender names reach ChatGPT only in the picker tools'
  *   result `_meta` (owner decision 2026-10-01), never in text or
  *   structuredContent, and never Secrets-tier locations (scope-privacy.ts),
@@ -48,6 +51,7 @@ import {
   type ScopeList,
 } from './dashboard-contract.ts';
 import type { HandoffTarget } from './handoff.ts';
+import { KEY_PAGE_SOURCES, isKeyPageSource } from './connect-page.ts';
 import { ModelChoiceRefusal, type ChatGptModelChoice } from './model-choice.ts';
 import {
   ChatGptSurfaceError,
@@ -131,6 +135,7 @@ interface ToolDefinition {
 
 const OAUTH2_REQUIRED = [{ type: 'oauth2', scopes: [] }] as const;
 const OAUTH_SOURCES = ['gmail', 'google-drive', 'dropbox'] as const;
+const CONNECT_SOURCES = [...OAUTH_SOURCES, ...KEY_PAGE_SOURCES] as const;
 const FOLDER_SOURCE_IDS = ['google_drive.docs', 'dropbox.files'] as const;
 const SCOPE_SOURCE_IDS = ['gmail.email', ...FOLDER_SOURCE_IDS] as const;
 const DISCONNECT_SOURCE_IDS = ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library'] as const;
@@ -172,13 +177,14 @@ export const CONNECT_SOURCE_TOOL: ToolDefinition = {
   name: CONNECT_SOURCE_TOOL_NAME,
   title: 'Connect a source to Olympus',
   description: [
-    'Start connecting Gmail, Google Drive or Dropbox to Olympus on the user\'s Mac.',
-    'Returns {openUrl}: a one-time sign-in link (10 minutes) the user opens to sign in with the provider and allow Olympus.',
-    'Afterwards the user chooses which folders or mail Olympus may read in the Olympus panel.',
+    'Start connecting a source to Olympus on the user\'s computer.',
+    'Returns {openUrl}: a one-time link (10 minutes) the user opens in a browser.',
+    'For Gmail, Google Drive or Dropbox it signs in with the provider; afterwards the user chooses which folders or mail Olympus may read in the Olympus panel.',
+    'For Readwise or X bookmarks it opens a page served by Olympus on the user\'s computer where the user types the key; never ask for or accept a key in chat.',
   ].join(' '),
   inputSchema: {
     type: 'object',
-    properties: { source: { type: 'string', enum: [...OAUTH_SOURCES], description: 'The source to connect.' } },
+    properties: { source: { type: 'string', enum: [...CONNECT_SOURCES], description: 'The source to connect.' } },
     required: ['source'],
     additionalProperties: false,
   },
@@ -369,7 +375,12 @@ export async function callSetupTool(
   try {
     switch (name) {
       case CONNECT_SOURCE_TOOL_NAME: {
-        const source = oneOf(args.source, OAUTH_SOURCES);
+        const source = oneOf(args.source, CONNECT_SOURCES);
+        if (isKeyPageSource(source)) {
+          const page = backend.handoffLink({ kind: 'key_page', source });
+          if (!page) throw new ChatGptSurfaceError('not_linked');
+          return connectSourceToolResult({ status: 'open_link', source, openUrl: page.url, expiresAt: page.expiresAt });
+        }
         const started = await backend.startOAuth(source);
         const link = backend.handoffLink({ kind: 'redirect', location: started.authorizationUrl });
         if (!link) throw new ChatGptSurfaceError('not_linked');

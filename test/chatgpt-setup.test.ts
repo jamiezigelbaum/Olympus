@@ -67,7 +67,12 @@ describe('one-time sign-in links', () => {
     const handoffs = createChatGptHandoffs({ now: () => now });
     const handler = createChatGptHandoffHandler(handoffs);
     const { id } = handoffs.mint(INSTALL_ID, { kind: 'redirect', location: 'https://www.dropbox.com/oauth2/authorize' });
-    expect((await handler(new Request(`http://127.0.0.1:8010/go/${id}`, { method: 'POST' }))).status).toBe(405);
+    // A POST opens nothing (only a served key page takes one), and does not spend the link.
+    expect((await handler(new Request(`http://127.0.0.1:8010/go/${id}`, { method: 'POST' }))).status).toBe(404);
+    expect((await handler(new Request(`http://127.0.0.1:8010/go/${id}`, { method: 'PUT' }))).status).toBe(405);
+    const still = handoffs.mint(INSTALL_ID, { kind: 'redirect', location: 'https://www.dropbox.com/oauth2/authorize' });
+    expect((await handler(new Request(`http://127.0.0.1:8010/go/${still.id}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'epk=a' }))).status).toBe(404);
+    expect((await handler(new Request(`http://127.0.0.1:8010/go/${still.id}`))).status).toBe(302);
     now += 10 * 60_000 + 1;
     expect((await handler(new Request(`http://127.0.0.1:8010/go/${id}`))).status).toBe(404);
     // Another install's link (routed here by mistake or forged) is unknown here.
@@ -532,7 +537,11 @@ describe('setup tools over the remote handler', () => {
         expiresAt: '2026-10-01T12:10:00.000Z',
       });
       expect(result.content[0]!.text).toContain('/go/oly2g.');
-      expect((await call(client, 'olympus_connect_source', { source: 'x' })).isError).toBe(true);
+      // Keyed sources get a one-time key page link (connect-page.ts); never a key argument.
+      const keyed = await call(client, 'olympus_connect_source', { source: 'x' });
+      expect(keyed.isError).toBeFalsy();
+      expect((keyed.structuredContent as { source: string }).source).toBe('x');
+      expect((await call(client, 'olympus_connect_source', { source: 'telegram' })).isError).toBe(true);
       expect((await call(client, 'olympus_connect_source', { source: 'readwise', apiKey: 'k' })).isError).toBe(true);
     } finally {
       await client.close();

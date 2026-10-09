@@ -4600,8 +4600,17 @@ export async function main(): Promise<void> {
   // picker and model switching through the dashboard's own routes, and
   // retrieval-only search for ChatGPT's model to answer from.
   const { createChatGptHandoffs, createChatGptHandoffHandler, withChatGptHandoffRoutes } = await import('../chatgpt/handoff.ts');
-  const { createChatGptSetupBackend, readChatGptPrivacySettings } = await import('../chatgpt/setup-backend.ts');
+  const { createChatGptSetupBackend, createKeyPageConnector, readChatGptPrivacySettings } = await import('../chatgpt/setup-backend.ts');
   const chatgptHandoffs = createChatGptHandoffs();
+  // Connect pages (Readwise, X): the key typed in the owner's browser
+  // arrives encrypted to this engine and goes into the dashboard's own
+  // connect route, in process (workers/chatgpt/connect-page.ts).
+  const chatgptLoopbackOrigin = `http://127.0.0.1:${port}`;
+  const chatgptConnectPage = {
+    publicOrigin: () => remotePublicUrls()?.origin,
+    xCallbackUri: () => `${chatgptLoopbackOrigin}/oauth/callback/x`,
+    submit: createKeyPageConnector({ workerFetch: worker.fetch, loopbackOrigin: chatgptLoopbackOrigin }),
+  };
   // Items held for the privacy check (pending, Private, not embedded), every
   // tier ledger counted once per corpus. Counts only.
   const pendingClassificationCount = (): number => {
@@ -4768,12 +4777,12 @@ export async function main(): Promise<void> {
     // OAuth metadata and `/connect/*` routes serve the approval flow; every
     // other route keeps the worker bearer. See workers/remote-mcp.ts,
     // workers/remote-openapi.ts and workers/remote-oauth/handler.ts. One-time
-    // `/go/<id>` sign-in links answer their stored redirect once
-    // (workers/chatgpt/handoff.ts); `/private/<id>` is the private answer
+    // `/go/<id>` links answer their stored redirect or key page once, and
+    // a key page's one encrypted submission (workers/chatgpt/handoff.ts); `/private/<id>` is the private answer
     // panel's one-time sealed collection (workers/chatgpt/private-answer-jobs.ts).
     // Each request's peer address is recorded for the routes that check it
     // (relay-mode OAuth approval: core/request-peer.ts).
-    fetch: withRequestPeer(withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs), withPrivateAnswerRoute(createPrivateAnswerHandler({
+    fetch: withRequestPeer(withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs, chatgptConnectPage), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
       isRelayed: isRelayedRequest,
       extraOrigins: () => [DASHBOARD_UI_DOMAIN],

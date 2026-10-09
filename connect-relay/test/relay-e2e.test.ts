@@ -825,7 +825,7 @@ describe('sessions and revocation', () => {
 });
 
 describe('setup hand-offs', () => {
-  test('a one-time /go link reaches only the install it names, GET only', async () => {
+  test('a one-time /go link reaches only the install it names; a POST only as a small form', async () => {
     const relay = await makeRelay();
     const workerA = fakeWorker('A');
     const workerB = fakeWorker('B');
@@ -837,7 +837,10 @@ describe('setup hand-offs', () => {
     expect(await response.json()).toMatchObject({ worker: 'A', path: link });
     expect(workerB.requests).toHaveLength(0);
     expect(workerA.requests[0]!.headers['x-olympus-relay']).toBe(a.secret);
-    expect((await fetch(`${relay.url}${link}`, { method: 'POST' })).status).toBe(405);
+    // A connect page's submission is a form; anything else stays at the relay.
+    expect((await fetch(`${relay.url}${link}`, { method: 'POST' })).status).toBe(415);
+    expect((await fetch(`${relay.url}${link}`, { method: 'PUT' })).status).toBe(405);
+    expect(workerA.requests).toHaveLength(1);
   });
 
   test('an unknown install, a malformed id or an offline Mac gets a plain page, never another engine', async () => {

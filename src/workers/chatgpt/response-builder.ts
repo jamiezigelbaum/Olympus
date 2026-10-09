@@ -26,7 +26,9 @@ import { OperationError, type OperationErrorCode } from '../../core/operation-er
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type {
+  ChatGptConnectSource,
   ChatGptDisconnectSourceId,
+  ChatGptKeyPageSource,
   ChatGptOAuthSource,
   ChatGptScopeSourceId,
   ConnectionState,
@@ -100,11 +102,13 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009fâ€‹-â€
  * may carry (enum values). Anything else falls back to checking again.
  */
 const OAUTH_SOURCES = new Set<ChatGptOAuthSource>(['gmail', 'google-drive', 'dropbox']);
+const KEY_PAGE_SOURCES = new Set<ChatGptKeyPageSource>(['readwise', 'x']);
+const CONNECT_SOURCES = new Set<ChatGptConnectSource>([...OAUTH_SOURCES, ...KEY_PAGE_SOURCES]);
 const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files']);
 const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
 const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [DASHBOARD_TOOL_NAME]: {},
-  [CONNECT_SOURCE_TOOL_NAME]: { source: OAUTH_SOURCES },
+  [CONNECT_SOURCE_TOOL_NAME]: { source: CONNECT_SOURCES },
   [SCOPE_LIST_TOOL_NAME]: { source_id: SCOPE_SOURCE_IDS },
   [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
   [MODEL_SET_TOOL_NAME]: { embedding: new Set(['built_in']), answers: new Set(['local', 'venice']) },
@@ -663,15 +667,20 @@ const SOURCE_LABELS: Record<string, string> = {
   'dropbox.files': 'Dropbox',
   'x.bookmarks': 'X bookmarks',
   'readwise.library': 'Readwise',
+  readwise: 'Readwise',
+  x: 'X bookmarks',
 };
 
 export function connectSourceToolResult(result: ConnectSourceResult): ChatGptToolResult {
-  const source = OAUTH_SOURCES.has(result.source) ? result.source : undefined;
+  const source = CONNECT_SOURCES.has(result.source) ? result.source : undefined;
   const openUrl = handoffUrl(result.openUrl);
   if (!source || !openUrl) return errorToolResult(new ChatGptSurfaceError('internal'));
   const structured: ConnectSourceResult = { status: 'open_link', source, openUrl, expiresAt: iso(result.expiresAt) ?? '' };
+  const text = KEY_PAGE_SOURCES.has(source as ChatGptKeyPageSource)
+    ? `Open this link to connect ${SOURCE_LABELS[source]}: ${openUrl} (works once, for 10 minutes). It opens a page from Olympus on your computer; type the key there, never in this chat.`
+    : `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.`;
   return {
-    content: [{ type: 'text', text: `Open this link to sign in to ${SOURCE_LABELS[source]} and allow Olympus: ${openUrl} (works once, for 10 minutes). Then choose what Olympus may read in the Olympus panel.` }],
+    content: [{ type: 'text', text }],
     structuredContent: structured as unknown as Record<string, unknown>,
   };
 }

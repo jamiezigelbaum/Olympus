@@ -27,17 +27,19 @@ export const FORWARDED_PATHS = ['/mcp', '/connect/token', '/connect/revoke'] as 
  * (verified against the signed state the engine minted). Nothing else under
  * either prefix is forwarded.
  */
+const HANDOFF_PATH_PATTERN = /^\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
 const BROWSER_GET_PATHS: readonly RegExp[] = [
-  /^\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/,
+  HANDOFF_PATH_PATTERN,
   /^\/oauth\/callback\/(gmail|google-drive|dropbox)$/,
 ];
 /**
- * The private answer panel's one-time collection and its source-open
- * request, POST only and exactly `/private/oly2p.<installId>.<secret>` or
- * that path plus `/open`, with no query
- * (src/workers/chatgpt/private-answer-jobs.ts). Nothing else under the prefix.
+ * POST only, with no query: the private answer panel's one-time collection
+ * and its source-open request, exactly `/private/oly2p.<installId>.<secret>`
+ * or that path plus `/open` (src/workers/chatgpt/private-answer-jobs.ts); and
+ * a connect page's one encrypted submission to its own hand-off path
+ * (src/workers/chatgpt/handoff.ts). Nothing else under either prefix.
  */
-const POST_PATH_PATTERNS: readonly RegExp[] = [PRIVATE_ANSWER_PATH_PATTERN];
+const POST_PATH_PATTERNS: readonly RegExp[] = [PRIVATE_ANSWER_PATH_PATTERN, HANDOFF_PATH_PATTERN];
 /**
  * Reviewer sign-in, forwarded only by a demo install (its data directory
  * carries the demo marker; src/core/remote-access.ts `demoInstallMarked`).

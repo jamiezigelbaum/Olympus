@@ -26,6 +26,12 @@
  *   carries; the relay learns a token only when the panel uses it, so it
  *   could at most repeat an open the owner just asked for (rate limited,
  *   until the job expires), never open anything else.
+ * - `GET /go/<id>` and `POST /go/<id>`: one-time hand-off links (a provider
+ *   sign-in redirect, or a connect page for a keyed source) and a connect
+ *   page's one submission, routed by the install the id names. A connect
+ *   page may run only the pinned connect-page script (response-policy.ts),
+ *   which encrypts the typed key to the engine in the page; the relay
+ *   forwards ciphertext it holds no key for (shared/connect-page.ts).
  *
  * The relay mints, validates and stores no token: the install does. A caller
  * with no token, and an authorized request for an install that is registered
@@ -58,6 +64,7 @@ import {
 } from '../shared/protocol.ts';
 import { INSTALL_URL } from '../shared/dashboard-contract.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey, prefixKey } from '../shared/rate-limit.ts';
+import { CONNECT_PAGE_MAX_REQUEST_BYTES } from '../shared/connect-page.ts';
 import { HANDOFF_PATH_PREFIX, OAUTH_HANDBACK_PATHS, credentialInstallId, oauthHandbackInstallId } from '../shared/tokens.ts';
 import {
   PRIVATE_ANSWER_MAX_REQUEST_BYTES,
@@ -620,19 +627,34 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   /**
    * `GET /go/<oly2g.installId.secret>`: a one-time hand-off link, routed by
    * the install it names. The engine owns single use and expiry.
+   * `POST /go/<id>`: a connect page's one submission, a small form of
+   * ciphertext sealed in the page to the engine (connect-relay/shared/
+   * connect-page.ts), routed the same way and never logged. The relay holds
+   * no key that opens it.
    */
   const handoff = async (request: Request, path: string, ip: string): Promise<Response> => {
-    if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+    if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
     const installId = credentialInstallId('handoff', path.slice(HANDOFF_PATH_PREFIX.length));
     if (!installId) return expiredLink();
+    let body: Uint8Array = new Uint8Array();
+    let releaseBody: (() => void) | undefined;
+    if (request.method === 'POST') {
+      const type = (request.headers.get('content-type') ?? '').split(';', 1)[0]!.trim().toLowerCase();
+      if (type !== 'application/x-www-form-urlencoded') return browserPage(415, 'This link opens in a browser.');
+      const read = await readBody(request, CONNECT_PAGE_MAX_REQUEST_BYTES, ip);
+      if (!read.ok) return read.response;
+      body = read.body;
+      releaseBody = read.release;
+    }
     return toInstall({
       installId,
       request,
       path,
-      body: new Uint8Array(),
+      body,
+      ...(releaseBody ? { releaseBody } : {}),
       // Owner browser hand-offs: the control lane, paced per address.
       lane: 'control',
-      route: 'browser',
+      route: 'handoff',
       ip,
       dashboard: false,
       offline: macOffline,

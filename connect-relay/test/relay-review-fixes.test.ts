@@ -27,6 +27,8 @@ import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import { createChatGptHandoffHandler, createChatGptHandoffs } from '../../src/workers/chatgpt/handoff.ts';
+import { CONNECT_PAGE_SCRIPT_HASH } from '../shared/connect-page.ts';
+import { submitThroughScript } from './fixtures/connect-page-browser.ts';
 
 setDefaultTimeout(20_000);
 
@@ -173,11 +175,15 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     expect(page.headers.get('content-type')).toBe('text/html');
     expect(page.headers.get('x-content-type-options')).toBe('nosniff');
     expect(page.headers.get('referrer-policy')).toBe('no-referrer');
-    // Both policies are enforced; the relay's sandboxes the page with no script.
+    // Both policies are enforced. The relay's sandboxes the page with an
+    // opaque origin and allows exactly one script, the pinned connect-page
+    // script, so the install's own `unsafe-inline` runs nothing.
     const csp = page.headers.get('content-security-policy')!;
     expect(csp).toContain("script-src 'unsafe-inline'");
-    expect(csp).toMatch(/(^|, )sandbox; default-src 'none'/);
-    expect(csp).not.toContain('allow-scripts');
+    const relayPolicy = csp.split(', ').find((policy) => policy.startsWith('sandbox'))!;
+    expect(relayPolicy).toMatch(/^sandbox allow-scripts allow-forms; default-src 'none'; script-src 'sha256-[A-Za-z0-9+/]+=*';/);
+    expect(relayPolicy).toContain(`script-src ${CONNECT_PAGE_SCRIPT_HASH};`);
+    expect(relayPolicy).toContain(`form-action https://${PUBLIC_HOST}/go/;`);
     expect(csp).not.toContain('allow-same-origin');
 
     const state = handbackState(rogue.identity.installId);
@@ -283,6 +289,61 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     expect(used.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(await used.text()).toContain('expired or was already used');
     expect(used.headers.get('content-security-policy')).toContain("style-src 'unsafe-inline'");
+  });
+
+  test('a connect page round trip through the relay: the page, then one sealed POST the relay cannot read', async () => {
+    const handoffs = createChatGptHandoffs();
+    const received: Array<{ source: string; fields: Record<string, string> }> = [];
+    const handler = createChatGptHandoffHandler(handoffs, {
+      publicOrigin: () => `https://${PUBLIC_HOST}`,
+      submit: async (source, fields) => {
+        received.push({ source, fields });
+        return { status: 'connected' };
+      },
+    });
+    const worker = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
+    cleanups.push(() => worker.stop(true));
+    const relay = await makeRelay();
+    const install = await connectClient(relay, `http://127.0.0.1:${worker.port}`);
+    await until(() => install.statuses.at(-1)?.state === 'online');
+    const link = handoffs.mint(install.identity.installId, { kind: 'key_page', source: 'readwise' });
+    const page = await fetch(`${relay.url}/go/${link.id}`);
+    expect(page.status).toBe(200);
+    const csp = page.headers.get('content-security-policy')!;
+    expect(csp).toContain(CONNECT_PAGE_SCRIPT_HASH);
+    const token = 'SENTINEL_RELAY_TOKEN_7f3a';
+    const sent = await submitThroughScript(await page.text(), { token });
+    expect(sent.body).not.toContain(token);
+    const posted = await fetch(`${relay.url}/go/${link.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'null' },
+      body: sent.body,
+    });
+    expect(posted.status).toBe(200);
+    expect(await posted.text()).toContain('Readwise is connected');
+    expect(received).toEqual([{ source: 'readwise', fields: { token } }]);
+    // Replayed through the relay: spent.
+    const replay = await fetch(`${relay.url}/go/${link.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'null' },
+      body: sent.body,
+    });
+    expect(replay.status).toBe(404);
+    expect(received).toHaveLength(1);
+    expect(logLines.join('\n')).not.toContain('SENTINEL');
+    expect(logLines.join('\n')).not.toContain(sent.body.slice(0, 40));
+  });
+
+  test('the relay forwards a /go/ POST only as a small form', async () => {
+    const relay = await makeRelay();
+    const rogue = await rogueInstall(relay, () => ({ status: 200, headers: [['content-type', 'text/plain']], body: 'ok' }));
+    const link = `${relay.url}/go/${mintCredential('handoff', rogue.identity.installId)}`;
+    expect((await fetch(link, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(415);
+    expect((await fetch(link, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `ct=${'a'.repeat(9000)}` })).status).toBe(413);
+    expect((await fetch(link, { method: 'PUT', body: 'x' })).status).toBe(405);
+    expect(rogue.seen).toEqual([]);
+    expect((await fetch(link, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'ct=a' })).status).toBe(200);
+    expect(rogue.seen).toEqual([`POST /go/${link.split('/go/')[1]}`]);
   });
 
   test('the demo sign-in keeps its origin and may submit its form, but runs no script', async () => {

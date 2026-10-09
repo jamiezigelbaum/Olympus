@@ -22,7 +22,8 @@ import type {
 import { HANDOFF_PATH_PREFIX } from '../../../connect-relay/shared/tokens.ts';
 import type { ChatGptDisconnectSourceId, ChatGptOAuthSource, PrivacyRuleView, PrivacySettings } from './dashboard-contract.ts';
 import { readPrivacyProfile, writePrivacyProfile, type PrivacyRule } from '../classification/privacy-profile.ts';
-import type { ChatGptHandoffs } from './handoff.ts';
+import type { ChatGptHandoffs, KeyPageOutcome } from './handoff.ts';
+import type { KeyPageSource } from './connect-page.ts';
 import {
   ANSWER_PROFILE_IDS,
   ModelChoiceRefusal,
@@ -272,6 +273,63 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
       }, { env: options.env ?? process.env });
       return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
     },
+  };
+}
+
+/**
+ * Feeds a connect page's opened fields into the dashboard's own connect
+ * routes, in process, exactly as the computer's dashboard sends them:
+ * Readwise to `/dashboard/connect/api-key` (validated with Readwise, then
+ * stored in the secret store), X to `/dashboard/connect/oauth/start` with the
+ * owner's own app (stored as their registration; the start answers X's
+ * authorize URL, whose callback is the computer's own dashboard address).
+ *
+ * Only a fixed outcome comes back: no worker message, no provider text and
+ * no field value ever reaches the page, and nothing here logs.
+ */
+export function createKeyPageConnector(options: {
+  workerFetch: (request: Request) => Promise<Response>;
+  /** The computer's own dashboard origin (`http://127.0.0.1:<port>`): X's callback is registered there. */
+  loopbackOrigin: string;
+}): (source: KeyPageSource, fields: Record<string, string>) => Promise<KeyPageOutcome> {
+  const post = async (path: string, body: Record<string, unknown>): Promise<{ ok: boolean; code?: string; result?: Record<string, unknown> }> => {
+    const response = await options.workerFetch(new Request(`${options.loopbackOrigin}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+    const parsed = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+    if (response.ok && parsed) return { ok: true, result: parsed };
+    const code = (parsed?.error as { code?: unknown } | undefined)?.code;
+    return { ok: false, ...(typeof code === 'string' ? { code } : {}) };
+  };
+  const refusal = (code: string | undefined): KeyPageOutcome => {
+    if (code === 'model_setup_required') return { status: 'models_not_ready' };
+    if (code === 'dashboard_account_cardinality_violation') return { status: 'already_connected' };
+    if (code === 'api_key_validation_failed' || code === 'invalid_request'
+      || code === 'oauth_client_id_missing' || code === 'oauth_client_secret_missing') return { status: 'rejected' };
+    return { status: 'failed' };
+  };
+  return async (source, fields) => {
+    if (source === 'readwise') {
+      const answer = await post('/dashboard/connect/api-key', { source: 'readwise', api_key: fields.token });
+      return answer.ok ? { status: 'connected' } : refusal(answer.code);
+    }
+    const answer = await post('/dashboard/connect/oauth/start', {
+      source: 'x',
+      client_id: fields.client_id,
+      client_secret: fields.client_secret,
+    });
+    if (!answer.ok) return refusal(answer.code);
+    const location = answer.result?.authorization_url;
+    // The route already checked it is X's own authorize origin; checked again here.
+    if (typeof location !== 'string') return { status: 'failed' };
+    try {
+      if (new URL(location).origin !== 'https://x.com') return { status: 'failed' };
+    } catch {
+      return { status: 'failed' };
+    }
+    return { status: 'continue', location };
   };
 }
 

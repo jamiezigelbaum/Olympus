@@ -229,8 +229,11 @@ export const DASHBOARD_RESOURCE_URI = 'ui://olympus/dashboard';
  * Secrets-tier locations (owner tier rules with tier Secrets) are left out
  * even there, and their saved choices are kept on save. No API key is ever
  * entered through ChatGPT (owner decision 2026-10-01): v1 runs keyless on the
- * built-in models, and keyed providers (Venice, Readwise) are set up only on
- * the Mac, in Olympus's own settings.
+ * built-in models. A keyed source (Readwise, X bookmarks) connects through a
+ * one-time link to a key-entry page served by Olympus on the computer, where
+ * the key is encrypted in the browser to that engine (owner decision
+ * 2026-10-09, docs/design/connect-pages.md); other keyed providers (Venice)
+ * are set up only on the computer.
  *
  * Links: every `openUrl` is `https://mcp.olympusplugin.ai/go/<one-time id>`
  * (single use, 10 minutes). Open it with `openExternal`; the plugin's only
@@ -250,6 +253,10 @@ export const SCOPE_UI_META_KEY = 'olympus/scope';
 
 /** Sources a person can connect from ChatGPT with Olympus's own (publisher) apps. */
 export type ChatGptOAuthSource = 'gmail' | 'google-drive' | 'dropbox';
+/** Sources connected from ChatGPT through a key-entry page served by the engine. */
+export type ChatGptKeyPageSource = 'readwise' | 'x';
+/** Every source `olympus_connect_source` takes. */
+export type ChatGptConnectSource = ChatGptOAuthSource | ChatGptKeyPageSource;
 export type ChatGptFolderSourceId = 'google_drive.docs' | 'dropbox.files';
 export type ChatGptMailSourceId = 'gmail.email';
 export type ChatGptScopeSourceId = ChatGptFolderSourceId | ChatGptMailSourceId;
@@ -268,7 +275,7 @@ export type ChatGptDisconnectSourceId =
  */
 export interface ConnectSourceResult {
   status: 'open_link';
-  source: ChatGptOAuthSource;
+  source: ChatGptConnectSource;
   openUrl: string;
   expiresAt: string;
 }
