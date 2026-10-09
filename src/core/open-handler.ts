@@ -20,10 +20,17 @@
  *   made the default with `xdg-mime`.
  *
  * Both run Olympus as it is installed: an absolute Bun and the package's
- * dist/cli.js, the same pair the engine's LaunchAgent runs.
+ * dist/cli.js, the same pair the engine's LaunchAgent runs, and the same way:
+ * from the package's own folder with `--no-env-file`. A browser can start the
+ * handler from any folder, and Bun would otherwise read that folder's `.env`
+ * and `bunfig.toml` (whose `preload` runs code).
+ *
+ * Neither is ever written as root, or into a home folder the user running it
+ * does not own: a root-owned handler or applications folder would break the
+ * user's own desktop.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform as osPlatform } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { OLYMPUS_URL_SCHEME, OPEN_URL_MAX_LENGTH } from './open-targets.ts';
@@ -47,6 +54,8 @@ export type OpenHandlerExec = (command: string, args: string[]) => OpenHandlerEx
 export interface OpenHandlerProgram {
   runtimePath: string;
   entryPath: string;
+  /** The folder it runs in; the package root (two folders above dist/cli.js) when absent. */
+  workingDirectory?: string;
 }
 
 export interface OpenHandlerOptions {
@@ -55,6 +64,8 @@ export interface OpenHandlerOptions {
   env?: Record<string, string | undefined>;
   exec?: OpenHandlerExec;
   program?: OpenHandlerProgram;
+  /** The effective user id; process.getuid() when absent. */
+  uid?: number;
 }
 
 export interface OpenHandlerResult {
@@ -90,6 +101,7 @@ export function openHandlerPaths(platform: string, homeDir: string, env: Record<
 /** The applet's source. The link reaches the shell only as `quoted form of`, and only `olympus open` reads it. */
 export function renderMacOpenHandlerScript(program: OpenHandlerProgram): string {
   assertProgram(program);
+  const workDir = programWorkingDirectory(program);
   return [
     `-- ${OPEN_HANDLER_MARK}. It hands an ${OLYMPUS_URL_SCHEME}:// link to`,
     '-- `olympus open`, which opens the Olympus dashboard and changes nothing.',
@@ -105,8 +117,9 @@ export function renderMacOpenHandlerScript(program: OpenHandlerProgram): string 
     `\tif (length of theURL) > ${OPEN_URL_MAX_LENGTH} then return`,
     `\tset runtimePath to ${appleScriptString(program.runtimePath)}`,
     `\tset cliPath to ${appleScriptString(program.entryPath)}`,
+    `\tset workDir to ${appleScriptString(workDir)}`,
     '\ttry',
-    '\t\tdo shell script quoted form of runtimePath & " " & quoted form of cliPath & " open " & quoted form of theURL & " >/dev/null 2>&1"',
+    '\t\tdo shell script "cd " & quoted form of workDir & " && " & quoted form of runtimePath & " --no-env-file " & quoted form of cliPath & " open " & quoted form of theURL & " >/dev/null 2>&1"',
     '\tend try',
     'end handOff',
     '',
@@ -116,7 +129,8 @@ export function renderMacOpenHandlerScript(program: OpenHandlerProgram): string 
 /** The Linux entry: hidden from menus, `%u` the only thing the desktop passes. */
 export function renderLinuxDesktopEntry(program: OpenHandlerProgram): string {
   assertProgram(program);
-  for (const path of [program.runtimePath, program.entryPath]) {
+  const workDir = programWorkingDirectory(program);
+  for (const path of [program.runtimePath, program.entryPath, workDir]) {
     // Desktop-entry quoting has its own escapes; a path that needs one is refused, not escaped.
     if (/["`$\\%]/.test(path)) throw new Error(`The path ${path} cannot be written into a desktop entry.`);
   }
@@ -126,7 +140,8 @@ export function renderLinuxDesktopEntry(program: OpenHandlerProgram): string {
     'Type=Application',
     'Name=Olympus',
     'Comment=Opens the Olympus dashboard on this computer',
-    `Exec="${program.runtimePath}" "${program.entryPath}" open %u`,
+    `Exec="${program.runtimePath}" --no-env-file "${program.entryPath}" open %u`,
+    `Path=${workDir}`,
     'Terminal=false',
     'NoDisplay=true',
     `MimeType=${OPEN_HANDLER_MIME_TYPE};`,
@@ -137,6 +152,8 @@ export function renderLinuxDesktopEntry(program: OpenHandlerProgram): string {
 export function installOpenHandler(options: OpenHandlerOptions = {}): OpenHandlerResult {
   const platform = options.platform ?? osPlatform();
   try {
+    const refused = refuseForeignUser(platform, options);
+    if (refused) return refused;
     if (platform === 'darwin') return installMac(options);
     if (platform === 'linux') return installLinux(options);
     return { ok: true, platform, action: 'unsupported', detail: 'olympus:// links are handled on macOS and Linux only.' };
@@ -148,6 +165,8 @@ export function installOpenHandler(options: OpenHandlerOptions = {}): OpenHandle
 export function uninstallOpenHandler(options: OpenHandlerOptions = {}): OpenHandlerResult {
   const platform = options.platform ?? osPlatform();
   try {
+    const refused = refuseForeignUser(platform, options);
+    if (refused) return refused;
     if (platform === 'darwin') return uninstallMac(options);
     if (platform === 'linux') return uninstallLinux(options);
     return { ok: true, platform, action: 'unsupported' };
@@ -170,6 +189,9 @@ function installMac(options: OpenHandlerOptions): OpenHandlerResult {
   const exec = options.exec ?? defaultExec;
   const program = options.program ?? defaultProgram();
   const { handlerPath } = openHandlerPaths('darwin', home(options));
+  if (existsSync(handlerPath) && !ownedHandler('darwin', handlerPath)) {
+    return { ok: false, platform: 'darwin', action: 'failed', path: handlerPath, detail: `${handlerPath} is not the Olympus link handler, so it was left alone.` };
+  }
   const script = renderMacOpenHandlerScript(program);
   const support = dirname(handlerPath);
   mkdirSync(support, { recursive: true, mode: 0o700 });
@@ -302,11 +324,41 @@ function ownedHandler(platform: string, handlerPath: string): boolean {
 }
 
 function defaultProgram(): OpenHandlerProgram {
-  return { runtimePath: process.execPath, entryPath: join(olympusPackageRoot(), 'dist', 'cli.js') };
+  const root = olympusPackageRoot();
+  return { runtimePath: process.execPath, entryPath: join(root, 'dist', 'cli.js'), workingDirectory: root };
+}
+
+function programWorkingDirectory(program: OpenHandlerProgram): string {
+  return program.workingDirectory ?? dirname(dirname(program.entryPath));
+}
+
+/**
+ * Root, or a home folder that belongs to someone else (sudo keeps HOME on
+ * macOS), would leave root-owned files in the user's own folders. Status
+ * only reads, so it is never refused.
+ */
+function refuseForeignUser(platform: string, options: OpenHandlerOptions): OpenHandlerResult | undefined {
+  if (platform !== 'darwin' && platform !== 'linux') return undefined;
+  const uid = options.uid ?? process.getuid?.();
+  if (uid === undefined) return undefined;
+  if (uid === 0) {
+    return { ok: false, platform, action: 'failed', detail: 'The link handler is per user; run this as yourself, not as root.' };
+  }
+  const homeDir = home(options);
+  let owner: number | undefined;
+  try {
+    owner = statSync(homeDir).uid;
+  } catch {
+    owner = undefined;
+  }
+  if (owner !== undefined && owner !== uid) {
+    return { ok: false, platform, action: 'failed', detail: `${homeDir} belongs to another user; run this as that user.` };
+  }
+  return undefined;
 }
 
 function assertProgram(program: OpenHandlerProgram): void {
-  for (const path of [program.runtimePath, program.entryPath]) {
+  for (const path of [program.runtimePath, program.entryPath, programWorkingDirectory(program)]) {
     if (!isAbsolute(path) || /[\x00-\x1f\x7f]/.test(path)) throw new Error('The link handler needs absolute paths to Bun and the Olympus CLI.');
   }
 }

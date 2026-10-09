@@ -6,7 +6,8 @@
  * static /open/ pages with the by-hand fallback.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Window } from 'happy-dom';
@@ -300,6 +301,10 @@ describe('the macOS link handler', () => {
     expect(script).toContain('set cliPath to "/Users/a\\\\b/cli.js"');
     expect(script).toContain('" open " & quoted form of theURL');
     expect(script).toContain('if (length of theURL) > 128 then return');
+    // Run from the package folder, never from wherever the browser was started, and with no .env.
+    expect(script).toContain('set workDir to "/Users"');
+    expect(script).toContain('do shell script "cd " & quoted form of workDir & " && " & quoted form of runtimePath & " --no-env-file " & quoted form of cliPath');
+    expect(renderMacOpenHandlerScript(PROGRAM)).toContain('set workDir to "/Users/a/Library/Application Support/Olympus/app"');
     expect(() => renderMacOpenHandlerScript({ runtimePath: 'bun', entryPath: '/x/cli.js' })).toThrow();
     expect(() => renderMacOpenHandlerScript({ runtimePath: '/x/bun\n', entryPath: '/x/cli.js' })).toThrow();
   });
@@ -337,7 +342,7 @@ describe('the macOS link handler', () => {
     expect(uninstallOpenHandler(options).action).toBe('absent');
   });
 
-  test('a failed build is reported, never thrown, and an Olympus.app that is not ours is left alone', () => {
+  test('a failed build is reported, never thrown, and neither install nor uninstall touches an Olympus.app that is not ours', () => {
     const failing: OpenHandlerExec = (command) => ({ status: command === '/usr/bin/osacompile' ? 1 : 0, stdout: '', stderr: 'osacompile: nope' });
     const failed = installOpenHandler({ platform: 'darwin', homeDir: home, exec: failing, program: PROGRAM });
     expect(failed.ok).toBe(false);
@@ -350,10 +355,72 @@ describe('the macOS link handler', () => {
     const calls: string[][] = [];
     const refused = uninstallOpenHandler({ platform: 'darwin', homeDir: home, exec: macExec(calls) });
     expect(refused.ok).toBe(false);
-    expect(existsSync(bundle)).toBe(true);
+    const notReplaced = installOpenHandler({ platform: 'darwin', homeDir: home, exec: macExec(calls), program: PROGRAM });
+    expect(notReplaced).toMatchObject({ ok: false, action: 'failed', path: bundle });
+    expect(readFileSync(join(bundle, 'Contents', 'Info.plist'), 'utf8')).toBe('<plist>com.example.other</plist>');
     expect(calls).toEqual([]);
   });
+
+  // Mac-specific: compiles the real applet source with osacompile and runs its
+  // handOff through osascript (nothing is registered with LaunchServices).
+  test.skipIf(process.platform !== 'darwin')('a hostile link reaches olympus open as one argument, from the package folder, with no .env or preload', () => {
+    const fixture = hostileFixture(home);
+    const scriptPath = join(home, 'handler.applescript');
+    writeFileSync(scriptPath, renderMacOpenHandlerScript(fixture.program));
+    const compiled = join(home, 'handler.scpt');
+    expect(spawnSync('/usr/bin/osacompile', ['-o', compiled, scriptPath]).status).toBe(0);
+    const hostile = "olympus://open/x';touch pwned;'$(touch pwned)`touch pwned`";
+    const run = spawnSync('/usr/bin/osascript', [
+      '-e', 'on run argv',
+      '-e', `set applet to load script POSIX file "${compiled}"`,
+      '-e', 'tell applet to handOff(item 1 of argv)',
+      '-e', 'end run',
+      hostile,
+    ], { cwd: fixture.hostileDir, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(fixture.seen()).toEqual({ argv: ['open', hostile], cwd: fixture.packageRoot, env: null, preloaded: false });
+    expect(fixture.pwned()).toBe(false);
+  });
 });
+
+/**
+ * A package whose dist/cli.js records how it was run, and a hostile folder
+ * whose .env and bunfig.toml preload would show up if Bun read them.
+ */
+function hostileFixture(base: string) {
+  const packageRoot = join(base, 'pkg');
+  const hostileDir = join(base, 'hostile');
+  const seenPath = join(packageRoot, 'seen.json');
+  mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+  mkdirSync(hostileDir, { recursive: true });
+  writeFileSync(join(packageRoot, 'dist', 'cli.js'), [
+    "import { writeFileSync } from 'node:fs';",
+    `writeFileSync(${JSON.stringify(seenPath)}, JSON.stringify({`,
+    '  argv: process.argv.slice(2), cwd: process.cwd(),',
+    '  env: process.env.OLYMPUS_HOSTILE_ENV ?? null, preloaded: globalThis.__olympusHostilePreload === true,',
+    '}));',
+    '',
+  ].join('\n'));
+  writeFileSync(join(hostileDir, '.env'), 'OLYMPUS_HOSTILE_ENV=from-the-hostile-folder\n');
+  writeFileSync(join(hostileDir, 'evil.ts'), `globalThis.__olympusHostilePreload = true;\nrequire('node:fs').writeFileSync(${JSON.stringify(join(hostileDir, 'pwned'))}, '');\n`);
+  writeFileSync(join(hostileDir, 'bunfig.toml'), 'preload = ["./evil.ts"]\n');
+  return {
+    packageRoot: realpathSync(packageRoot),
+    hostileDir,
+    program: { runtimePath: process.execPath, entryPath: join(packageRoot, 'dist', 'cli.js') },
+    seen: () => (existsSync(seenPath) ? JSON.parse(readFileSync(seenPath, 'utf8')) : undefined),
+    pwned: () => existsSync(join(hostileDir, 'pwned')) || existsSync(join(packageRoot, 'pwned')),
+    reset: () => { rmSync(seenPath, { force: true }); rmSync(join(hostileDir, 'pwned'), { force: true }); },
+  };
+}
+
+/** What a desktop launcher does with an entry: split Exec, put the link in for %u, run it in Path= (else where it was started). */
+function launchDesktopEntry(entry: string, link: string, startedIn: string) {
+  const exec = /^Exec=(.*)$/m.exec(entry)![1]!;
+  const path = /^Path=(.*)$/m.exec(entry)?.[1];
+  const argv = [...exec.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => (m[1] ?? m[2]) === '%u' ? link : (m[1] ?? m[2])!);
+  return spawnSync(argv[0]!, argv.slice(1), { cwd: path ?? startedIn, encoding: 'utf8' });
+}
 
 describe('the Linux link handler', () => {
   let home: string;
@@ -364,7 +431,10 @@ describe('the Linux link handler', () => {
 
   test('the desktop entry passes the link as %u, hidden from menus', () => {
     const entry = renderLinuxDesktopEntry(program);
-    expect(entry).toContain('Exec="/home/a/.bun/bin/bun" "/home/a/olympus/dist/cli.js" open %u');
+    expect(entry).toContain('Exec="/home/a/.bun/bin/bun" --no-env-file "/home/a/olympus/dist/cli.js" open %u');
+    expect(entry).toContain('Path=/home/a/olympus\n');
+    expect(renderLinuxDesktopEntry({ ...program, workingDirectory: '/opt/olympus' })).toContain('Path=/opt/olympus\n');
+    expect(() => renderLinuxDesktopEntry({ ...program, workingDirectory: '/opt/$HOME' })).toThrow();
     expect(entry).toContain('MimeType=x-scheme-handler/olympus;');
     expect(entry).toContain('NoDisplay=true');
     for (const bad of ['/home/a$HOME/bun', '/home/a"/bun', '/home/`id`/bun', '/home/a%u/bun', '/home/a\\/bun']) {
@@ -418,6 +488,42 @@ describe('the Linux link handler', () => {
     expect(installOpenHandler({ platform: 'linux', homeDir: home, env, exec: missing, program }).ok).toBe(false);
     expect(uninstallOpenHandler({ platform: 'linux', homeDir: home, env, exec: missing }).ok).toBe(false);
     expect(readFileSync(entryPath, 'utf8')).toBe('[Desktop Entry]\nName=Someone else\n');
+  });
+
+  test('a link launched from a hostile folder runs in the package folder and reads neither its .env nor its bunfig.toml preload', () => {
+    const fixture = hostileFixture(home);
+    const link = "olympus://open/x';touch pwned;'";
+    // The check can see the attack: the same program without Path= and --no-env-file picks up both.
+    const naive = renderLinuxDesktopEntry(fixture.program)
+      .replace(/^Path=.*\n/m, '')
+      .replace(' --no-env-file', '');
+    launchDesktopEntry(naive, link, fixture.hostileDir);
+    expect(fixture.seen()).toMatchObject({ env: 'from-the-hostile-folder', preloaded: true });
+    fixture.reset();
+
+    const run = launchDesktopEntry(renderLinuxDesktopEntry(fixture.program), link, fixture.hostileDir);
+    expect(run.status).toBe(0);
+    expect(fixture.seen()).toEqual({ argv: ['open', link], cwd: fixture.packageRoot, env: null, preloaded: false });
+    expect(fixture.pwned()).toBe(false);
+  });
+
+  test('root, or a home folder that belongs to someone else, is refused and nothing is written', () => {
+    const calls: string[][] = [];
+    const exec: OpenHandlerExec = (command, args) => { calls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; };
+    const env = { XDG_DATA_HOME: join(home, 'data'), XDG_CONFIG_HOME: join(home, 'config') };
+    const owner = statSync(home).uid;
+    for (const uid of [0, owner + 1]) {
+      for (const platform of ['linux', 'darwin']) {
+        const options: OpenHandlerOptions = { platform, homeDir: home, env, exec, program, uid };
+        expect(installOpenHandler(options)).toMatchObject({ ok: false, action: 'failed' });
+        expect(uninstallOpenHandler(options)).toMatchObject({ ok: false, action: 'failed' });
+      }
+    }
+    expect(calls).toEqual([]);
+    expect(existsSync(join(home, 'data'))).toBe(false);
+    expect(existsSync(join(home, 'Library'))).toBe(false);
+    // The owner, as themself, is not refused.
+    expect(installOpenHandler({ platform: 'linux', homeDir: home, env, exec, program, uid: owner }).ok).toBe(true);
   });
 
   test('other platforms have no handler', () => {

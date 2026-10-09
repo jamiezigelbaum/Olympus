@@ -82,7 +82,7 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     // that could not be built is a warning, and the Terminal fallback stays.
     const handler = options.dryRun ? undefined : openHandlerFor(deps)?.install({
       ...openHandlerOptions(deps, service),
-      program: { runtimePath: result.program.runtimePath, entryPath: result.program.entryPath },
+      program: { runtimePath: result.program.runtimePath, entryPath: result.program.entryPath, workingDirectory: result.program.workingDirectory },
     });
     if (handler && !handler.ok) summary.warnings.push(`olympus:// links will not open Olympus: ${handler.detail ?? 'the link handler could not be installed.'}`);
     return {
