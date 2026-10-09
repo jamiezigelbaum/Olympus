@@ -6,7 +6,7 @@
  * the link to `olympus open` (cli.ts runOpenCommand), and that command reads
  * it against a closed list (open-targets.ts) and opens the local dashboard
  * there through the same one-time opening link `olympus dashboard` mints.
- * Nothing here interprets the link. docs/OPEN_ON_COMPUTER.md holds the threat
+ * Nothing here interprets the link. docs/design/open-on-computer.md holds the threat
  * model.
  *
  * - macOS: a small AppleScript applet, `Olympus.app`, in Olympus's own

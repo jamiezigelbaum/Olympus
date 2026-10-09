@@ -10,7 +10,7 @@
  *
  * Pure and dependency-free: the CLI, the opening page, the olympusplugin.ai
  * /open/ pages and the ChatGPT view model all read the same list.
- * docs/OPEN_ON_COMPUTER.md holds the threat model.
+ * docs/design/open-on-computer.md holds the threat model.
  */
 
 export const OLYMPUS_URL_SCHEME = 'olympus';

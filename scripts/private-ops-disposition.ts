@@ -44,6 +44,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/consult-m1-results/runs-2-10.json',
   'docs/design/consult-writer-instructions.md',
   'docs/design/hosted-agent-compatibility.md',
+  'docs/design/open-on-computer.md',
   'docs/connector-templates/connector.test.ts.template',
   'docs/connector-templates/connector.ts.template',
   'docs/connector-templates/live-control.ts.template',

@@ -1,6 +1,6 @@
 /**
  * Option C (owner decision, 2026-10-09): olympus:// links open Olympus on the
- * computer with no Terminal step. docs/OPEN_ON_COMPUTER.md is the design and
+ * computer with no Terminal step. docs/design/open-on-computer.md is the design and
  * threat model; these tests hold its claims: a closed target list, no state
  * change from a link, a handler that installs and uninstalls cleanly, and
  * static /open/ pages with the by-hand fallback.
