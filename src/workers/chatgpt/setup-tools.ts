@@ -84,6 +84,12 @@ export interface ChatGptSetupBackend {
   startOAuth(source: ChatGptOAuthSource): Promise<{ authorizationUrl: string; expiresAt: string }>;
   /** A one-time `https://<relay>/go/<id>` link; undefined when this engine is not linked to the relay. */
   handoffLink(target: HandoffTarget): { url: string; expiresAt: string } | undefined;
+  /**
+   * The person is at the computer (an Olympus host's panel, never ChatGPT):
+   * sign-in starts and returns here, so Connect answers with the provider's
+   * own sign-in page instead of a relay link.
+   */
+  directSignIn?: boolean;
   browseFolders(input: { sourceId: ChatGptFolderSourceId; parentKey?: string; cursor?: string }): Promise<OlympusFolderScopeBrowseResult>;
   approveFolders(input: {
     sourceId: ChatGptFolderSourceId;
@@ -400,6 +406,9 @@ export async function callSetupTool(
       case CONNECT_SOURCE_TOOL_NAME: {
         const source = oneOf(args.source, OAUTH_SOURCES);
         const started = await backend.startOAuth(source);
+        if (backend.directSignIn) {
+          return connectSourceToolResult({ status: 'open_link', source, openUrl: started.authorizationUrl, expiresAt: started.expiresAt }, { direct: true });
+        }
         const link = backend.handoffLink({ kind: 'redirect', location: started.authorizationUrl });
         if (!link) throw new ChatGptSurfaceError('not_linked');
         return connectSourceToolResult({ status: 'open_link', source, openUrl: link.url, expiresAt: link.expiresAt });

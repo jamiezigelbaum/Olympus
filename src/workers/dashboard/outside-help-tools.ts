@@ -12,7 +12,7 @@
  */
 import type { ManagedToolName, ManagedToolsErrorCode, ManagedToolsPhase, ManagedToolSource } from '../../core/managed-tools.ts';
 import { escapeHtml, escapeScriptJson } from './components.ts';
-import { fill } from './source-rows.ts';
+import { fill } from './vocabulary.ts';
 
 export interface DashboardOutsideHelpTool {
   readonly tool: ManagedToolName;

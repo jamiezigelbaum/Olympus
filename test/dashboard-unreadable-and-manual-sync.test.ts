@@ -29,8 +29,6 @@ import {
   dashboardWorkingSummary,
 } from '../src/workers/dashboard/vocabulary.ts';
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
-import { renderDashboardDetailBody } from '../src/workers/dashboard/pages/detail.ts';
-import { dashboardSyncNowAction } from '../src/workers/dashboard/attention.ts';
 import { actionButton } from '../src/workers/dashboard/components.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 
@@ -80,10 +78,6 @@ describe('unreadable files are stated, not alarmed', () => {
     expect(dashboardAttentionLine(parked)).toBe('paused — reading files has stalled');
   });
 
-  test('the detail page gives the plain reason and names no file', () => {
-    const html = renderDashboardDetailBody(finishedWithUnreadable(), { now: NOW });
-    expect(html).toContain("2 files can&#39;t be read: extraction failed permanently — the file is damaged or in a format Olympus can&#39;t read.");
-  });
 });
 
 describe('reading finishes when every in-scope file is read or unreadable', () => {
@@ -149,12 +143,6 @@ describe('reading finishes when every in-scope file is read or unreadable', () =
 });
 
 describe('Sync now says what it found', () => {
-  test('the button words its own wait', () => {
-    const action = dashboardSyncNowAction(card(), { readOnly: false, setupPath: '/dashboard?setup' })!;
-    expect(action.pendingMessage).toBe('Checking Dropbox…');
-    expect(dashboardManualSyncPendingLine('Dropbox')).toBe('Checking Dropbox…');
-    expect(actionButton(action)).toContain('data-pending-message="Checking Dropbox…"');
-  });
 
   test('the result reads from the run\'s changed-item count, never items seen', () => {
     const before = schedulerStatus([syncTask({ last_attempt_at: '2026-10-08T11:00:00.000Z' })]);

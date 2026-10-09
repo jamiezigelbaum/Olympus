@@ -8,9 +8,7 @@
  * that everything self-healing gets.
  */
 import { describe, expect, test } from 'bun:test';
-import { renderDashboardDetailBody } from '../src/workers/dashboard/pages/detail.ts';
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
-import { dashboardAttentionBanner } from '../src/workers/dashboard/attention.ts';
 import { dashboardSubLine } from '../src/workers/dashboard/vocabulary.ts';
 import {
   DASHBOARD_SUPPORTED_SOURCES,
@@ -259,55 +257,6 @@ describe('embedding waterfall', () => {
     expect(embedding?.unmeasured).toBeUndefined();
   });
 
-  test('states no share for an unmeasured row and explains it once', () => {
-    const html = renderDashboardDetailBody(settledPassCard({
-      coverage: {
-        indexed_items: 100,
-        content_ready_items: 50,
-        embedded_items: 800,
-        needs_review_items: 0,
-        answer_ready_eligible_items: 100,
-      },
-      embedding_backlog: {
-        chunks: 1_000,
-        embedded_chunks: 800,
-        missing_chunks: 200,
-        refresh_needed: true,
-      },
-    }), { now: NOW });
-
-    expect(html).toContain('this store does not publish a per-item count yet');
-    expect(html).toContain('data-phase-state="waiting">Not measured by this store');
-    expect(html).toContain('This store does not yet publish a per-item embedding count, so the embedding row states no share rather than deriving one from chunk totals.');
-    // Explained once, and never dressed up as a measured share: no derived
-    // figure, no approximation mark, no percentage for this row.
-    expect(html.split('so the embedding row states no share').length).toBe(2);
-    expect(html).not.toContain('derived from chunk parity');
-    expect(html).not.toContain('≈');
-    expect(html).not.toContain('40% · 40 of 100 files');
-    // The stacked bar is gone: one colour per row, three rows.
-    expect(html).not.toContain('bar composition');
-    expect(html).not.toContain('extracted, waiting');
-  });
-
-  test('an empty population states there is nothing in scope instead of 100%', () => {
-    // A completed pass that found nothing to read has a real denominator of
-    // zero. Dividing by it would print "100%", which reads as work finished.
-    const html = renderDashboardDetailBody(settledPassCard({
-      coverage: {
-        indexed_items: 0,
-        content_ready_items: 0,
-        embedded_items: 0,
-        needs_review_items: 0,
-        answer_ready_eligible_items: 0,
-      },
-    }), { now: NOW });
-
-    expect(html).toContain('nothing in scope yet');
-    expect(html).not.toContain('0 of 0');
-    expect(html).not.toContain('100% · 0');
-  });
-
   test('a keyword-only source says the stage does not apply and still settles', () => {
     const progress = dashboardSourceProgress(settledPassCard({
       embedding_required: false,
@@ -503,16 +452,6 @@ describe('phase model indeterminate state', () => {
     expect(progress.settled).toBe(false);
   });
 
-  test('renders the indeterminate bar with no value and no fill', () => {
-    const html = renderDashboardDetailBody(firstIngestCard(), { now: NOW });
-
-    expect(html).toContain('4,806 files so far · total not known yet');
-    expect(html).toContain('<div class="bar indet ');
-    // The denominator is unknown, so the bar states the observed count and
-    // carries no position at all: no valuenow, and no fill to read one off.
-    expect(html).not.toMatch(/class="bar indet [^"]*"[^>]*aria-valuenow/);
-    expect(html).not.toMatch(/class="bar indet [^"]*"[^>]*>\s*<i style="width/);
-  });
 });
 
 describe('phase model delta scoping', () => {
@@ -615,17 +554,6 @@ describe('phase model delta scoping', () => {
     expect(progress.phases.find((phase) => phase.id === 'extraction')?.scope).toBe('corpus');
   });
 
-  test('renders the batch as a ratio of new files and drops the no-percentage note', () => {
-    const html = renderDashboardDetailBody(updatePassCard(), { now: NOW });
-
-    expect(html).toContain('58.3% · 7 of 12 new files');
-    expect(html).toContain('16.7% · 2 of 12 new files');
-    expect(html).toContain('These counts cover only new or changed material');
-    // Every delta on this page has a denominator, so the sentence that exists
-    // for the ones that do not must not appear.
-    expect(html).not.toContain('No percentage is shown');
-  });
-
   test('scopes a settled corpus to the delta rather than rendering 99.99%', () => {
     const progress = dashboardSourceProgress(settledPassCard({
       coverage: {
@@ -643,27 +571,6 @@ describe('phase model delta scoping', () => {
     // The ruling's own instruction for a delta with no derivable denominator.
     expect(extraction?.denominator_unavailable).toBe(true);
     expect(progress.delta).toBe(true);
-  });
-
-  test('renders a delta phase as a count and never as a percentage', () => {
-    const html = renderDashboardDetailBody(settledPassCard({
-      coverage: {
-        indexed_items: 27_000,
-        content_ready_items: 26_997,
-        embedded_items: 0,
-        needs_review_items: 0,
-        answer_ready_eligible_items: 27_000,
-      },
-    }), { now: NOW });
-
-    expect(html).toContain('3 files remaining · share not measured');
-    expect(html).toContain('These counts cover only new or changed material');
-    expect(html).toContain('Existing indexed material remains searchable');
-    // No baseline was ever recorded for this corpus, so the page says the
-    // starting total is missing instead of quietly omitting the share.
-    expect(html).toContain('No percentage is shown when the update');
-    expect(html).not.toContain('99.9%');
-    expect(html).not.toContain('100% · 26,997');
   });
 
   // NEGATIVE CHECK. Delta scoping exists to stop a percentage lying; it must
@@ -720,56 +627,6 @@ describe('phase model delta scoping', () => {
   });
 });
 
-describe('phase model settled state', () => {
-  test('keeps completed stages visible and says what it is watching for', () => {
-    const card = settledCard();
-    expect(dashboardSourceProgress(card).settled).toBe(true);
-
-    const html = renderDashboardDetailBody(card, { now: NOW });
-    expect(html).toContain('Fully synced · watching for changes · last change picked up 41m ago');
-    expect(html).toContain('class="phase done"');
-    expect(html).toContain('Embedding');
-    expect(html).toContain('100% · 12,812 of 12,812 files');
-    expect(html).toContain('data-phase-state="done"');
-  });
-
-  test('degrades the settled clause to the last check when no sync stamp exists', () => {
-    const { last_sync_at: _dropped, ...withoutStamp } = settledCard();
-    const html = renderDashboardDetailBody(withoutStamp as DashboardSourceCard, { now: NOW });
-
-    // The page has never had a last-new-item time and does not invent one.
-    expect(html).toContain('Fully synced · watching for changes · last checked 40m ago');
-    expect(html).not.toContain('last change picked up');
-  });
-
-  test('refuses to claim it is watching for changes on a lane Olympus parked', () => {
-    const html = renderDashboardDetailBody(settledCard({
-      schedule: { running: false, consecutive_failures: 0, degraded_reason: 'daily_cost_guard' },
-    }), { now: NOW });
-
-    expect(html).toContain('Fully synced · sync paused · last change picked up 41m ago');
-    expect(html).not.toContain('watching for changes');
-  });
-
-  test('new material re-opens the bars and completing it settles them again', () => {
-    const settled = settledCard();
-    const reopened = settledCard({
-      coverage: {
-        indexed_items: 12_812,
-        content_ready_items: 12_598,
-        embedded_items: 100_000,
-        needs_review_items: 0,
-        answer_ready_eligible_items: 12_812,
-      },
-    });
-
-    expect(dashboardSourceProgress(settled).settled).toBe(true);
-    expect(dashboardSourceProgress(reopened).settled).toBe(false);
-    expect(renderDashboardDetailBody(reopened, { now: NOW })).toContain('class="phase ');
-    expect(renderDashboardDetailBody(reopened, { now: NOW })).not.toContain('Fully synced');
-  });
-});
-
 describe('per-source phase applicability', () => {
   test('a source whose text arrives with the item tracks sync instead of hiding its extraction row', () => {
     const progress = dashboardSourceProgress(settledPassCard({
@@ -795,35 +652,6 @@ describe('per-source phase applicability', () => {
     expect(extraction?.tracks_sync).toBe(true);
     expect(extraction?.measure).toEqual(sync?.measure);
     expect(extraction?.unit).toBe('messages');
-  });
-
-  test('a settled inline-text source still renders its embedding stage', () => {
-    const source = settledPassCard({
-      label: 'Readwise',
-      source_id: 'readwise.library',
-      content_arrives_extracted: true,
-      coverage: {
-        indexed_items: 250,
-        content_ready_items: 250,
-        embedded_items: 1_000,
-        needs_review_items: 0,
-        answer_ready_eligible_items: 250,
-      },
-      embedding_backlog: {
-        chunks: 1_000,
-        embedded_chunks: 1_000,
-        missing_chunks: 0,
-        refresh_needed: false,
-      },
-    });
-
-    const html = renderDashboardDetailBody(source, { now: NOW });
-    expect(html).toContain('Embedding');
-    // The extraction row is present and says what it is: the sync row again,
-    // plus the sentence explaining why there is no separate lane.
-    expect(html).toContain('Extraction progress');
-    expect(html).toContain(' · with sync');
-    expect(html).toContain('delivers its text with each item, so there is no separate extraction step');
   });
 
   // The declaration is a display hint and the counts outrank it. A wrong
@@ -860,204 +688,6 @@ describe('per-source phase applicability', () => {
     expect(declared.get('dropbox.files')).toBe(false);
     expect(declared.get('google_drive.docs')).toBe(false);
     expect(declared.get('gmail.email')).toBe(false);
-  });
-});
-
-describe('attention banner classes', () => {
-  test('the credential class arms and carries the existing reconnect control', () => {
-    const banner = dashboardAttentionBanner(settledPassCard({
-      connection: {
-        state: 'reauth_required',
-        label: 'reauth required',
-        action: { kind: 'oauth', source: 'dropbox', label: 'Reauthenticate' },
-        handles: [],
-      },
-    }), { now: NOW, setupPath: '/dashboard?setup' });
-
-    expect(banner?.kind).toBe('credential');
-    expect(banner?.action).toEqual({ label: 'Reauthenticate', kind: 'oauth', source: 'dropbox', primary: true });
-  });
-
-  test('the terminal-extraction class arms with the count and the one real action', () => {
-    const banner = dashboardAttentionBanner(terminalExtractionCard(), {
-      now: NOW,
-      setupPath: '/dashboard?setup',
-      folderPickerPath: '/dashboard?folders',
-    });
-
-    expect(banner?.kind).toBe('terminal_extraction');
-    expect(banner?.sentence).toContain('Your folder choices are fine');
-    expect(banner?.sentence).toContain('194 files inside them are unreadable');
-    expect(banner?.action).toEqual({ label: 'Exclude unreadable files', kind: 'link', href: '/dashboard?folders' });
-  });
-
-  test('the stuck-lane class arms past the grace window and names the governing condition', () => {
-    const banner = dashboardAttentionBanner(settledPassCard({
-      // The source's own refresh window is 26h; this lane is at 40h.
-      freshness: { label: 'Last checked 40 hours ago; refresh is late', hours: 40, threshold_hours: 26, stale: true },
-      schedule: { running: false, consecutive_failures: 4, last_error_kind: 'reconcile_incomplete' },
-    }), { now: NOW, setupPath: '/dashboard?setup' });
-
-    expect(banner?.kind).toBe('lane_stuck');
-    expect(banner?.sentence).toContain('has not moved for 1d 16h');
-    expect(banner?.sentence).toContain('the last reconcile did not cover everything it was asked to');
-  });
-
-  test('a switched-off lane outranks a scheduler marker as the governing condition', () => {
-    // The drain is held; the scheduler is carrying a budget marker from a
-    // different lane. Naming the budget would describe the lane that is not the
-    // one that has stopped.
-    const banner = dashboardAttentionBanner(settledPassCard({
-      ingestion_health: {
-        coverage_percent: 66,
-        stuck_count: 0,
-        drain_state: 'held',
-        drain_unit: 'olympus-vlm.timer',
-        label: '66% covered; nothing stuck',
-      },
-      schedule: { running: false, consecutive_failures: 0, degraded_reason: 'daily_cost_guard' },
-    }), { now: NOW, setupPath: '/dashboard?setup' });
-
-    expect(banner?.kind).toBe('lane_stuck');
-    expect(banner?.sentence).toContain('the extraction lane is held, so no new text is being extracted');
-    expect(banner?.sentence).not.toContain('daily budget');
-  });
-
-  test('a credential outranks a terminal-extraction bucket on the same source', () => {
-    const banner = dashboardAttentionBanner({
-      ...terminalExtractionCard(),
-      connection: {
-        state: 'reauth_required',
-        label: 'reauth required',
-        action: { kind: 'oauth', source: 'dropbox', label: 'Reauthenticate' },
-        handles: [],
-      },
-    }, { now: NOW, setupPath: '/dashboard?setup', folderPickerPath: '/dashboard?folders' });
-
-    expect(banner?.kind).toBe('credential');
-  });
-
-  test('renders as one banner at the very top of the page', () => {
-    const html = renderDashboardDetailBody(terminalExtractionCard(), {
-      now: NOW,
-      folderPickerPath: '/dashboard?folders',
-    });
-
-    expect(html.split('class="attncard banner"')).toHaveLength(2);
-    expect(html.indexOf('class="attncard banner"')).toBeLessThan(html.indexOf('<div class="dsect">Ingestion</div>'));
-  });
-});
-
-// The silence is the feature. Every case here is a fault that clears on
-// somebody else's clock, and not one of them may reach the reader.
-describe('attention banner never arms for a self-healing condition', () => {
-  const options = { now: NOW, setupPath: '/dashboard?setup' };
-
-  test('a provider rate limit says nothing', () => {
-    expect(dashboardAttentionBanner(settledPassCard({
-      schedule: { running: false, consecutive_failures: 6, degraded_reason: 'provider_rate_limit' },
-    }), options)).toBeUndefined();
-  });
-
-  test('a daily budget pause says nothing', () => {
-    expect(dashboardAttentionBanner(settledPassCard({
-      schedule: {
-        running: false,
-        consecutive_failures: 3,
-        last_error_kind: 'daily_cost_guard',
-        degraded_reason: 'daily_cost_guard',
-      },
-    }), options)).toBeUndefined();
-  });
-
-  test('transient backend failures inside the grace window say nothing', () => {
-    expect(dashboardAttentionBanner(settledPassCard({
-      queue_health: { label: 'Needs attention', waiting: 40, active: 2, needs_attention: 9, retrying_tasks: 3 },
-      schedule: { running: false, consecutive_failures: 2, last_error_kind: 'provider_timeout' },
-    }), options)).toBeUndefined();
-  });
-
-  test('a ledger attention reason on its own says nothing', () => {
-    expect(dashboardAttentionBanner(settledPassCard({
-      attention_reasons: ['dropbox.files failing: provider_timeout'],
-    }), options)).toBeUndefined();
-  });
-
-  test('a stale lane with a healthy run due inside its window says nothing', () => {
-    expect(dashboardAttentionBanner(settledPassCard({
-      freshness: { label: 'Last checked 40 hours ago; refresh is late', hours: 40, threshold_hours: 26, stale: true },
-      schedule: {
-        running: false,
-        consecutive_failures: 0,
-        next_run_at: new Date(NOW.getTime() + 20 * 60_000).toISOString(),
-      },
-    }), options)).toBeUndefined();
-  });
-
-  test('a source with nothing left to do says nothing, however stale its clock', () => {
-    expect(dashboardAttentionBanner(settledCard({
-      freshness: { label: 'Last checked 90 hours ago; refresh is late', hours: 90, threshold_hours: 26, stale: true },
-    }), options)).toBeUndefined();
-  });
-
-  test('an unmeasured lane is never called stuck', () => {
-    // Open work, but nothing on the card measures how long it has been still.
-    expect(dashboardAttentionBanner(settledPassCard({
-      coverage: {
-        indexed_items: 9_000,
-        content_ready_items: 4_000,
-        embedded_items: 0,
-        needs_review_items: 0,
-        answer_ready_eligible_items: 9_000,
-      },
-    }), options)).toBeUndefined();
-  });
-});
-
-describe('advanced relocation', () => {
-  const html = renderDashboardDetailBody(advancedCard(), { now: NOW, degradedCredentials: [fixtureDegradation()] });
-  const advanced = html.slice(html.indexOf('<details class="advanced" data-poll-key="advanced">'));
-
-  test('is a real disclosure, closed before any script runs', () => {
-    expect(html).toContain('<details class="advanced" data-poll-key="advanced"><summary>Advanced</summary>');
-    // No `open` attribute: closed is the default state of a <details>.
-    expect(html).not.toContain('<details class="advanced" open>');
-  });
-
-  test('carries the four relocated sections, with their content intact', () => {
-    expect(advanced).toContain('<div class="dsect">Sensitivity</div>');
-    expect(advanced).toContain('<td>Secure local</td><td>4,806</td><td>3,201</td>');
-    expect(advanced).toContain('<div class="dsect">Last run</div>');
-    expect(advanced).toContain('>✓ Completed</td>');
-    expect(advanced).toContain('<div class="dsect">Checks</div>');
-    expect(advanced).toContain('[CREDENTIAL]');
-    expect(advanced).toContain('<div class="dsect">Needs review — 194</div>');
-  });
-
-  test('keeps the about-tiers link reachable inside the fold', () => {
-    expect(advanced).toContain('href="/dashboard?sensitivity"');
-    expect(advanced).toContain('About tiers →');
-  });
-
-  test('leaves progress and scope outside it, in the owner\'s order', () => {
-    const fold = html.indexOf('<details class="advanced" data-poll-key="advanced">');
-    expect(html.indexOf('<div class="dsect">Progress</div>')).toBeLessThan(fold);
-    expect(html.indexOf('<div class="dsect">Scope</div>')).toBeLessThan(fold);
-  });
-
-  test('renders nothing at all when it would hold nothing', () => {
-    const bare = renderDashboardDetailBody(settledPassCard({
-      tier_composition: [],
-      coverage: {
-        indexed_items: 100,
-        content_ready_items: 40,
-        embedded_items: 0,
-        needs_review_items: 0,
-        answer_ready_eligible_items: 100,
-      },
-    }), { now: NOW });
-
-    expect(bare).not.toContain('<details class="advanced" data-poll-key="advanced">');
   });
 });
 

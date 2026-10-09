@@ -13,11 +13,18 @@ import {
   DASHBOARD_CHATGPT_PAGE_COPY,
   DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_PRIVACY_COPY,
+  DASHBOARD_COMPUTER_PANEL_COPY,
   DASHBOARD_STATUS_PRESENTATION,
   type DashboardStatus,
   type DashboardStatusColorToken,
 } from '../vocabulary.ts';
-import { DASHBOARD_TOOL_NAME, SYNC_SOURCE_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
+import {
+  COMPUTER_META_KEY,
+  DASHBOARD_TOOL_NAME,
+  INDEX_FASTER_TOOL_NAME,
+  OLYMPUS_HOST_CONTEXT_KEY,
+  SYNC_SOURCE_TOOL_NAME,
+} from '../../chatgpt/dashboard-contract.ts';
 import { chatgptDashboardClient, type ChatGptDashboardClientConfig } from './client.ts';
 import { privacyLogic } from '../shared-privacy-logic.ts';
 import {
@@ -151,6 +158,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .reason{color:var(--muted);font-size:0.875rem}
 .reason.strong{color:var(--text);font-weight:600}
 .actions{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center}
+.tag{font-size:0.75rem;font-weight:400;padding:0 0.4rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);margin-left:0.25rem}
+.index-faster{margin-top:0.5rem}
 .btn{font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
 .btn:hover:not(:disabled){background:var(--surface)}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
@@ -322,6 +331,12 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
       copy: DASHBOARD_CHATGPT_PRIVACY_COPY,
     },
     inlineErrorCodes: CHATGPT_INLINE_ERROR_CODES,
+    host: {
+      contextKey: OLYMPUS_HOST_CONTEXT_KEY,
+      computerMetaKey: COMPUTER_META_KEY,
+      indexFasterTool: INDEX_FASTER_TOOL_NAME,
+      copy: DASHBOARD_COMPUTER_PANEL_COPY,
+    },
   };
   return [
     '<!doctype html>',

@@ -354,6 +354,27 @@ export interface ComputerDashboardMeta {
  */
 export const INDEX_FASTER_TOOL_NAME = 'olympus_index_faster';
 
+/**
+ * Every tool the panel calls, and so the only tools an Olympus host runs for
+ * it (POST /dashboard/tools/call, the Control UI's gateway method). Search and
+ * the answer tools are the conversation's, not the panel's.
+ */
+export const PANEL_TOOL_NAMES = [
+  DASHBOARD_TOOL_NAME,
+  CONNECT_SOURCE_TOOL_NAME,
+  SCOPE_LIST_TOOL_NAME,
+  SCOPE_SET_TOOL_NAME,
+  DISCONNECT_SOURCE_TOOL_NAME,
+  MODEL_SET_TOOL_NAME,
+  MODEL_RETRY_TOOL_NAME,
+  'olympus_privacy_get',
+  'olympus_privacy_set',
+  SYNC_SOURCE_TOOL_NAME,
+] as const;
+
+/** The computer adds Index faster to the panel's tools. */
+export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME];
+
 /** The `_meta` key carrying the picker's names to the widget only. */
 export const SCOPE_UI_META_KEY = 'olympus/scope';
 

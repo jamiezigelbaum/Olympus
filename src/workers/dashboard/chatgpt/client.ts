@@ -504,7 +504,7 @@ export function chatgptDashboardClient(
   }
   function globalReason(): string {
     // The computer's controls are locked: every control waits for them.
-    if (state.hostReadOnly) return H.copy.locked;
+    if (state.hostReadOnly) return state.hostKind === 'openclaw' ? H.copy.readOnlyOpenClaw : H.copy.locked;
     const current = connectionState();
     if (GLOBAL_STATES.indexOf(current) < 0) return '';
     return ((C as Any)[current] || C.relay_unavailable).disabledReason;
@@ -1504,6 +1504,9 @@ export function chatgptDashboardClient(
   }, config.resultTimeoutMs).then((result) => {
     if (result && result.hostContext) applyHostContext(result.hostContext);
     notify('ui/notifications/initialized');
+    // ChatGPT delivers the first result itself; an Olympus host has no
+    // conversation turn behind it, so the page reads the dashboard once.
+    if (state.hostKind && !state.data) refresh();
   }, () => undefined);
   if (!state.data) waitForResult();
 }

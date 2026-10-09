@@ -21,7 +21,7 @@ import { zkapiFenceScope } from '../src/core/consult-transport-zkapi.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import { ZKAPI_RISK_ACKNOWLEDGEMENTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION } from '../src/core/zkapi-consult-settings.ts';
-import { renderDashboardHtmlRoute, dashboardHtmlRoutePage, renderDashboardControlUi } from '../src/workers/dashboard/index.ts';
+import { dashboardHtmlRoutePage } from '../src/workers/dashboard/index.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_PATHS,
   outsideHelpBlockerWords,
@@ -30,7 +30,6 @@ import {
   type DashboardOutsideHelpStatus,
 } from '../src/workers/dashboard/outside-help.ts';
 import { renderDashboardOutsideHelpPage } from '../src/workers/dashboard/pages/outside-help.ts';
-import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardConsultAdapter, DASHBOARD_ZKAPI_PROFILE_ID, type DashboardConsultBackend } from '../src/workers/email-source/dashboard-consult.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -140,7 +139,7 @@ function configuredRoute(input: { complete?: boolean; ready?: ZkapiConsultReadin
 }
 
 function page(value: DashboardOutsideHelpStatus, extra: Record<string, unknown> = {}): string {
-  return renderDashboardOutsideHelpPage(buildDashboardPreviewView('review'), { now: NOW, controlSessionCsrfToken: 'csrf', outsideHelpLocalSession: true, outsideHelp: value, ...extra });
+  return renderDashboardOutsideHelpPage({ now: NOW, controlSessionCsrfToken: 'csrf', outsideHelpLocalSession: true, outsideHelp: value, ...extra });
 }
 
 /** Every word a reader sees: visible text plus accessible names, scripts and styles removed. */
@@ -539,30 +538,6 @@ describe('the Outside help page: states and copy', () => {
     expect(page(status())).not.toContain('data-outside-unlock');
   });
 
-  test('locked and native readers get one sentence and no controls; the dash_ token reads as locked', () => {
-    const view = buildDashboardPreviewView('review');
-    const locked = renderDashboardOutsideHelpPage(view, { now: NOW });
-    expect(locked).toContain('data-outside-locked');
-    expect(locked).toContain(W.locked);
-    expect(locked).not.toContain('data-outside-form');
-    expect(locked).not.toContain('<script');
-    const native = renderDashboardOutsideHelpPage(view, { now: NOW, format: 'fragment', controlMode: 'native', canWrite: true, outsideHelp: status() });
-    expect(native).toContain('data-outside-native');
-    expect(native).toContain(W.native.replace(/'/g, '&#39;'));
-    expect(native).not.toContain('data-outside-form');
-    expect(native).not.toContain('name="acknowledged"');
-    // Through the route: the query flag, and the dash_ token reads read-only.
-    const url = new URL('http://worker.test/dashboard?outside-help&token=dash_abc');
-    expect(dashboardHtmlRoutePage(url)).toBe('outside_help');
-    const routed = renderDashboardHtmlRoute({ url, view, options: { now: NOW, outsideHelp: status() } });
-    expect(routed.status).toBe(200);
-    expect(routed.html).toContain('data-outside-locked');
-    // The native Control UI has no view that reaches this page at all.
-    const ui = renderDashboardControlUi({ params: { view: 'setup' }, view, canWrite: true, options: { now: NOW, outsideHelp: status(), outsideHelpSummary: { state: 'off' } } });
-    expect(ui.body).not.toContain('data-outside-help');
-    expect(ui.body).not.toContain('data-outside-help-row');
-  });
-
   test('the card speaks the owner\'s language: no implementation jargon, no legacy tier words, no content', () => {
     for (const value of [status(), status({ settings: { state: 'invalid' } }), status({ route: { state: 'not_configured', policyWritable: true } })]) {
       const text = visibleText(page(value));
@@ -580,23 +555,6 @@ describe('the Outside help page: states and copy', () => {
     expect(html).not.toContain("'/dashboard/control/session'");
     expect(html).toContain('window.confirm(confirmText)');
     expect(html).toContain('replace_invalid');
-  });
-});
-
-describe('Setup\'s Outside help row', () => {
-  test('appears only on the standalone page with a summary, after Privacy, linking to the card', () => {
-    const view = buildDashboardPreviewView('review');
-    const html = renderDashboardSetupPage(view, { now: NOW, controlSessionCsrfToken: 'csrf', privacy: { configured: true, pendingCount: 0, ruleCount: 1 }, outsideHelpSummary: { state: 'off' } });
-    expect(html).toContain('data-outside-help-row');
-    expect(html).toContain(`<p class="sline strong">${W.row.off}</p>`);
-    expect(html).toContain(`id="outside-help">${W.sectionTitle}</div>`);
-    expect(html).toContain('href="/dashboard?outside-help">Edit</a>');
-    expect(html.indexOf('id="privacy"')).toBeLessThan(html.indexOf('id="outside-help"'));
-    expect(renderDashboardSetupPage(view, { now: NOW, controlSessionCsrfToken: 'csrf' })).not.toContain('data-outside-help-row');
-    const native = renderDashboardSetupPage(view, { now: NOW, format: 'fragment', controlMode: 'native', canWrite: true, outsideHelpSummary: { state: 'on' } });
-    expect(native).not.toContain('data-outside-help-row');
-    expect(renderOutsideHelpSection({ state: 'route_not_configured' }, '/dashboard?token=dash_x')).toContain('href="/dashboard?token=dash_x&amp;outside-help">Set up</a>');
-    expect(renderOutsideHelpSection(undefined)).toBe('');
   });
 });
 
@@ -742,16 +700,10 @@ describe('the worker serves the card only inside a local control session', () =>
     expect(offered).toContain('data-outside-unlock');
     expect(offered).not.toContain('data-outside-enabled="true">');
     expect(calls).toEqual(['status', 'status']);
-    calls.length = 0;
-    calls.push('status');
-    // Setup reads the one-word summary only.
-    const setup = await (await fetcher(new Request(`${ORIGIN}/dashboard?setup`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
-    expect(setup).toContain(`<p class="sline strong">${W.row.on}</p>`);
-    expect(calls).toEqual(['status', 'summary']);
     // The bearer's own GET has write authority elsewhere, but this card needs the control session.
     const bearer = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
     expect(bearer).toContain('data-outside-locked');
-    expect(calls).toEqual(['status', 'summary']);
+    expect(calls).toEqual(['status', 'status']);
   });
 });
 

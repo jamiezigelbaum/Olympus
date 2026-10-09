@@ -635,6 +635,13 @@ export function dashboardSetupLead(sourceId: string, instructions: string): { su
 }
 
 /** The control that speeds indexing up, and what it costs. */
+/** Fills `{name}` placeholders in a fixed sentence. */
+export function fill(template: string, values: Record<string, string | number>): string {
+  let out = template;
+  for (const key of Object.keys(values)) out = out.split(`{${key}}`).join(String(values[key]));
+  return out;
+}
+
 export const DASHBOARD_INDEX_FASTER = {
   on: 'Index faster',
   off: 'Stop indexing faster',
@@ -1491,6 +1498,31 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
  * computer" section, the locked-controls reason, and Index faster under
  * Progress → Details. Nothing else on the page has words of its own here.
  */
+/** Opening-link handoff for the host-owning agent; never request a durable secret. */
+export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
+  'Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, '
+  + 'resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, '
+  + 'run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. '
+  + 'Do not read or print the worker token. Do not change configuration or connect sources.';
+
+/** The computer host page's banner while the local controls are locked (Setup's gate, moved). */
+export const DASHBOARD_HOST_GATE_COPY = {
+  title: 'Open dashboard controls',
+  line: 'Ask your agent for a fresh opening link. No token copying needed.',
+  button: 'Get opening link',
+  how: 'Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.',
+  copy: 'Copy prompt',
+  copied: 'Copied',
+  copyFailed: 'Select the text and copy it.',
+  advanced: 'Advanced: use a worker token',
+  tokenField: 'Worker token',
+  unlock: 'Unlock',
+  unlocking: 'Unlocking…',
+  pasteToken: 'Paste the worker bearer token.',
+  readToken: 'That is the read-only view token; use the worker bearer token from setup.',
+  refused: 'That token was not accepted.',
+} as const;
+
 export const DASHBOARD_COMPUTER_PANEL_COPY = {
   section: 'On this computer',
   onlyHere: 'only here',
@@ -1503,6 +1535,8 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   },
   /** Beside every control while the local dashboard controls are locked. */
   locked: 'Open dashboard controls first',
+  /** The OpenClaw tab for a connection without operator.write. */
+  readOnlyOpenClaw: 'Reconnect OpenClaw with operator.write access to change this',
   indexFaster: DASHBOARD_INDEX_FASTER,
 } as const;
 
@@ -2335,7 +2369,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** No answer at all, usually because Olympus is restarting. */
   saveUnreachable: 'Olympus did not answer. If it is restarting, wait a moment and try again.',
   restarting: 'Restarting Olympus to apply it…',
-  locked: 'Unlock dashboard controls in Setup to see and change anonymous answers.',
+  locked: 'Open dashboard controls to see and change anonymous answers.',
   unlockIntro: 'Changing anonymous answers needs a session opened on this computer itself, not one an agent or the launch link opened. One click, in this browser.',
   unlock: 'Unlock anonymous answers on this computer',
   native: 'Anonymous answers are set up on this computer\'s own dashboard only, never from an agent or ChatGPT.',

@@ -44,7 +44,7 @@ describe('worker HTTP bind and auth', () => {
         [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
       },
     }));
-    await guarded(new Request('http://worker.test/dashboard/ui', {
+    await guarded(new Request('http://worker.test/dashboard/panel', {
       headers: {
         Authorization: 'Bearer worker-secret',
         [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'http://non-loopback.example',
@@ -176,16 +176,16 @@ describe('worker HTTP bind and auth', () => {
     expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(payload.csrf_token);
     seen.length = 0;
 
-    const directRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions'));
+    const directRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions.json'));
     expect(directRead.status).toBe(401);
 
-    const wrongReadOrigin = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions', {
+    const wrongReadOrigin = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions.json', {
       headers: { Cookie: cookie, Referer: 'http://attacker.test/dashboard' },
     }));
     expect(wrongReadOrigin.status).toBe(403);
 
-    const allowedRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions', {
-      headers: { Cookie: cookie, Referer: 'http://127.0.0.1:17777/dashboard?source=dropbox.files' },
+    const allowedRead = await fetch(new Request('http://127.0.0.1:17777/dashboard/dispositions.json', {
+      headers: { Cookie: cookie, Referer: 'http://127.0.0.1:17777/dashboard' },
     }));
     expect(allowedRead.status).toBe(200);
     expect(seen).toHaveLength(1);

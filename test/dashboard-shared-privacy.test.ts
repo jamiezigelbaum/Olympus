@@ -134,9 +134,9 @@ describe('one implementation in both pages', () => {
     expect(inlined.validRule({ kind: 'folder', source_id: 'dropbox.files', key: '/x' })).toBe(true);
   });
 
-  test('the ChatGPT page and the standalone dashboard both carry it', () => {
+  // Unified dashboard phase 4: the panel is the only privacy editor.
+  test('the ChatGPT panel carries it', () => {
     const source = privacyLogic.toString().split('\n')[0]!.trim();
     expect(chatgptDashboardPageHtml()).toContain(source);
-    expect(standaloneDashboardControllerScript({ csrfToken: '', signature: '', session: '', intervalMs: 0 })).toContain(source);
   });
 });

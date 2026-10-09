@@ -217,9 +217,9 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
           if (response.ok) {
-            // A target lands on Setup, where every source and Models live; it
+            // A target lands on Keys, where the computer's setup sheets and Models live; it
             // only opens a panel there, never submits anything.
-            window.location.replace(open ? '/dashboard?setup#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            window.location.replace(open ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403

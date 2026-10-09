@@ -154,20 +154,28 @@ import {
   GOOGLE_DRIVE_DOCS_CORPUS_ID,
   INTERNAL_EMAIL_CORPUS_ID,
 } from '../google-connectors/corpora.ts';
-import { dashboardHtmlRoutePage, renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
-import type { DashboardModelInstalls } from '../dashboard/source-rows.ts';
+import {
+  COMPUTER_HOST_PAGE_CSP,
+  DASHBOARD_TOOLS_CALL_PATH,
+  dashboardHtmlRoutePage,
+  dashboardLegacyRedirect,
+  dashboardReadToken,
+  renderComputerHostPage,
+  renderDashboardLocalPage,
+} from '../dashboard/index.ts';
+import { dashboardResourceHtml } from '../chatgpt/dashboard-resource.ts';
+import { DASHBOARD_TOOL_NAME } from '../chatgpt/dashboard-contract.ts';
+import type { DashboardPanelCallContext, DashboardPanelTools } from './dashboard-panel-tools.ts';
 import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine } from '../dashboard/vocabulary.ts';
 import type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 import type { DashboardConsultBackend } from './dashboard-consult.ts';
 
 export type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
-import {
-  OLYMPUS_DASHBOARD_VIEWS,
-  type OlympusFolderScopeBrowseResult,
-  type OlympusFolderScopeSourceId,
-  type OlympusMailScopeDraft,
-  type OlympusSourceScopeSelection,
-  type OlympusDashboardReadParams,
+import type {
+  OlympusFolderScopeBrowseResult,
+  OlympusFolderScopeSourceId,
+  OlympusMailScopeDraft,
+  OlympusSourceScopeSelection,
 } from '../../control-ui-contract.ts';
 import { parseMailScopeDraft } from '../../core/mail-source-scope.ts';
 import {
@@ -177,22 +185,16 @@ import {
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
 } from '../http.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-import { renderEmbeddingLedgerPage } from '../dashboard/pages/embedding-ledger.ts';
-import { readEmbeddingLedger, resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 import {
   readEmbeddingRuntime,
   resolveEmbeddingOverridePath,
   writeEmbeddingOperatorOverride,
 } from '../dashboard/embedding-runtime.ts';
-import { readBackgroundRuntime } from '../dashboard/background-runtime.ts';
 import {
   dashboardAgentsView,
   handleDashboardAgentRequest,
   type DashboardAgentConnectionsBackend,
 } from '../agent-connections.ts';
-import type { DashboardBackgroundPageOptions } from '../dashboard/pages/background.ts';
 import {
   DASHBOARD_SAVED_SECRET_FIELD_VALUE,
   DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS,
@@ -213,8 +215,6 @@ import {
 } from '../credential-health.ts';
 import {
   buildSourceDispositionsView,
-  renderSourceDispositionsControlUi,
-  renderSourceDispositionsHtml,
   resolveSourceIngestionExclusionsPath,
   readSourceIngestionExclusionsFile,
   saveSourceDispositions,
@@ -515,8 +515,12 @@ export interface EmailSourceWorkerOptions {
      * control session (workers/http.ts), never to the Gateway bearer.
      */
     consult?: DashboardConsultBackend;
-    /** The built-in models' installs, for the Models row (status only). */
-    modelInstalls?: () => DashboardModelInstalls;
+    /**
+     * The panel's tools on the computer (dashboard-panel-tools.ts): the same
+     * in-process handlers ChatGPT's /mcp reaches, for POST /dashboard/tools/call
+     * and the locked read. Absent: the route answers 501.
+     */
+    panelTools?: DashboardPanelTools;
     /** Starts a built-in model's failed install again; false when that model is not built in here. */
     retryModel?: (model: 'embedding' | 'answers') => boolean;
     /**
@@ -883,9 +887,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (dashboardNamespace && !isV04PublicDashboardRoute(request.method, url.pathname)) {
           return new Response('Not Found', { status: 404 });
         }
-        const dashboardUi = request.method === 'GET' && url.pathname === '/dashboard/ui'
-          ? parseDashboardControlUiRequest(url, request.headers)
-          : undefined;
 
         // The family-scoped extraction paths are aliases of the generic
         // `/source/index/files/*` ones, and the rewrite below is what makes the
@@ -1097,15 +1098,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json({ ok: true });
         }
 
-        // The folder-disposition picker. Three routes, and NONE of them is in
-        // the dash_ query-token allowlist in workers/http.ts: that token exists
-        // for the two counts-only reads a browser address bar can reach, and
-        // this page is made of folder names. It is opened from the dashboard by
-        // an authorized fetch, so the strong credential is the only way in.
-        if ((request.method === 'GET'
-          && (url.pathname === '/dashboard/dispositions' || url.pathname === '/dashboard/dispositions.json'))
-          || (request.method === 'POST' && url.pathname === '/dashboard/dispositions')
-          || dashboardUi?.params.view === 'dispositions') {
+        // The folder and mail pickers' data. Two routes, and NEITHER is in the
+        // dash_ query-token allowlist in workers/http.ts: they are made of
+        // folder names. The panel's picker reaches them in process through the
+        // setup tools (chatgpt/setup-backend.ts); the strong credential is the
+        // only other way in.
+        if ((request.method === 'GET' && url.pathname === '/dashboard/dispositions.json')
+          || (request.method === 'POST' && url.pathname === '/dashboard/dispositions')) {
           if (!sourceDashboard?.ingestionDispositions) {
             throw new EmailSourceWorkerError(
               501,
@@ -1113,17 +1112,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the ingestion-dispositions picker configured.',
             );
           }
-          const nativeBrowse = dashboardUi?.params.view === 'dispositions'
-            && 'action' in dashboardUi.params
-            && dashboardUi.params.action === 'browse_folder_scope'
-            ? dashboardUi.params
-            : undefined;
           const postBody = request.method === 'POST' ? await parseObjectBody(request) : undefined;
-          if (nativeBrowse || postBody?.action === 'browse_folder_scope') {
+          if (postBody?.action === 'browse_folder_scope') {
             if (!sourceDashboard.fileSourceScopes) {
               throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Folder scope browsing is not configured.');
             }
-            const input = nativeBrowse ?? postBody!;
+            const input = postBody;
             const sourceId = parseFolderScopeSourceId(input.source_id);
             const parentKey = asOptionalString(input.parent_key);
             const cursor = asOptionalString(input.cursor);
@@ -1223,236 +1217,227 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               rulesPath,
               rulesPresent: file.present,
             });
-            if (dashboardUi?.params.view === 'dispositions') {
-              return json(renderSourceDispositionsControlUi(view, dashboardUi.canWrite, dashboardUi.params.source_id));
-            }
-            if (url.pathname === '/dashboard/dispositions.json') return json(view);
-            return html(renderSourceDispositionsHtml(view, {
-              selectedSourceId: url.searchParams.get('source_id') ?? undefined,
-              csrfToken: request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined,
-            }));
+            return json(view);
           } finally {
             runtime.close?.();
           }
         }
 
-        // The embedding decision ledger. A query parameter on /dashboard rather
-        // than a path of its own, for the same reason ?background is one: the
-        // read-only dash_ token is allowlisted by PATHNAME in workers/http.ts,
-        // so a /dashboard/embedding-ledger path would 401 for exactly the
-        // reader this page is for. Sitting on /dashboard gives it the same auth
-        // as every other dashboard page with no auth code of its own.
-        //
-        // It is matched ahead of the /dashboard block below and returns without
-        // falling through, because it needs none of what that block builds — no
-        // view model, no registry, no secret store, no OAuth pruning. This page
-        // reads one file. It also stays reachable when the source dashboard is
-        // not configured at all, which matters: "what happened to the
-        // embeddings" is a question that outlives any particular worker's setup.
-        // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-        if (request.method === 'GET'
-          && url.pathname === '/dashboard'
-          && url.searchParams.has(DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM)) {
-          const ledger = await readEmbeddingLedger(resolveEmbeddingLedgerPath(process.env));
-          const ledgerBasePath = embeddingLedgerBasePath(url);
-          return html(renderEmbeddingLedgerPage(ledger, {
-            ...(ledgerBasePath === undefined ? {} : { basePath: ledgerBasePath }),
-          }));
-        }
-        // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
-        if (request.method === 'GET'
-          && (url.pathname === '/dashboard' || url.pathname === '/dashboard.json' || url.pathname === '/dashboard/ui')) {
-          if (!sourceIndexStatus || !sourceDashboard) {
-            throw new EmailSourceWorkerError(
-              501,
-              'source_dashboard_not_supported',
-              'Private source worker does not have the source dashboard configured.',
-            );
+        // GET /dashboard: the computer's host page around the panel, its local
+        // pages, the locked panel read, and redirects for every older page
+        // (dashboard/index.ts). Only Keys and the JSON view build the view
+        // model; the host page is the panel's own HTML and reads through the
+        // panel's tools like ChatGPT does.
+        if (request.method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/dashboard.json')) {
+          const page = url.pathname === '/dashboard.json' ? 'json' as const : dashboardHtmlRoutePage(url);
+          if (page === 'legacy') {
+            return new Response(null, { status: 302, headers: { Location: dashboardLegacyRedirect(url), 'Cache-Control': 'no-store' } });
           }
-          pruneDashboardOAuthAttempts(dashboardOAuthAttempts, new Date());
-          // The worker's tick for noticing that another process re-paired a
-          // source this dashboard had parked. Unpair stops the lane; the
-          // re-pair runs in the CLI with no channel into this process, so
-          // without this the lane stayed stopped until a restart.
-          await refreshDashboardSchedulerOnRegistryChange();
-          const registryRead = readDashboardRegistryOutcome(sourceDashboard.registryPath);
-          const registry = registryRead.registry;
-          const secretStore = dashboardSecretStore(sourceDashboard);
-          const dashboardOAuthOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
-          const nativeDashboardOAuthOrigin = dashboardUi?.nativeOAuthAvailable === false
-            ? undefined
-            : dashboardOAuthOrigin;
-          const dashboardClientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
-          const googleCloudProjectId = dashboardGoogleCloudProjectId();
-          const sourceIndexDashboardStatus = withCredentialDegradations(
-            // include_readiness_ledger: without it the status answers with no
-            // policy counts at all, and the owner-ruled "count only what
-            // Olympus reads" denominator has nothing to subtract (live 55% on
-            // 2026-08-21 while the corrected ratio code sat deployed). The
-            // per-item numerator is NOT gated on this flag — a status that
-            // omits it has no honest coverage ratio at all, which is how the
-            // same page later saturated at 100%.
-            // readiness_ledger_max_age_ms: the staleness this caller would
-            // accept, stated rather than assumed. Nothing caches against it
-            // today; it is the standing allowance for a readiness owner too
-            // expensive to score on every one of this page's polls.
-            await sourceIndexStatus.status({
-              include_items: false,
-              include_readiness_ledger: true,
-              readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
-            }),
-            credentialDegradations?.() ?? [],
-          );
-          const schedulerDashboardStatus = sourceScheduler?.status();
-          // The owner's exclusion rules live behind the same runtime the picker
-          // opens. Without them every count in the page's "excluded by
-          // configuration" section is summarized from an empty list, so the
-          // page reported zero excluded folders while the rules were enforced.
-          const exclusionSources = await dashboardExclusionSources(sourceDashboard, dashboardExclusionDebt);
-          const credentialHealth = readCredentialHealthReport(
-            sourceDashboard.credentialHealthReportPath
-              ?? process.env.OLYMPUS_CREDENTIAL_HEALTH_REPORT_PATH?.trim()
-              ?? defaultCredentialHealthReportPath(),
-          );
-          const view = buildSourceDashboardViewModel({
-            sourceIndexStatus: sourceIndexDashboardStatus,
-            ingestionLedger: buildSourceIngestionLedgerSnapshot(sourceIndexDashboardStatus, {
-              exclusions: exclusionSources,
-              ...(schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {}),
-              // Same registry the page uses, so the health line and the cards
-              // agree on which source owns which corpus.
-              ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
-              safeForCastor: true,
-            }),
-            ...(schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {}),
-            sovereigntyEngine: sourceDashboard.sovereigntyEngine,
-            ...(sourceDashboard.modelSetup ? { modelSetup: sourceDashboard.modelSetup() } : {}),
-            ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
-            ...(sourceDashboard.history ? { history: sourceDashboard.history } : {}),
-            connectedHandleRegistry: registry,
-            ...(registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {}),
-            unpairedSources: dashboardUnpairedSourceStates(
-              dashboardUnpairedSources,
-              sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
-            ),
-            manualSyncs: Object.fromEntries(dashboardManualSyncs),
-            ...(credentialHealth ? { credentialHealth } : {}),
-            oauthClientIds: dashboardClientIdSets.all,
-            oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
-            ...(googleCloudProjectId ? { googleCloudProjectId } : {}),
-            googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
-            ...(nativeDashboardOAuthOrigin ? { oauthRedirectBaseUrl: nativeDashboardOAuthOrigin } : {}),
-            // Which sources connect through Olympus's own app, so their card can
-            // offer one Connect button instead of a walkthrough for an app the
-            // owner does not have to register. Names sources only — no client
-            // id, no relay URL, no state: this rides on the read-only surface.
-            // Which card a source gets depends on the publisher app, never on
-            // whether this native render has an OAuth origin: gating it there
-            // handed every fresh native install the bring-your-own walkthrough
-            // (beta.5, 2026-09-24). A native page without an origin keeps the
-            // one-click card and marks its button unavailable instead.
-            publisherOAuthSources: dashboardPublisherOAuthSources(dashboardClientIdSets.own),
-            apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
-            pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
-            contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
-            ingestionDispositionsAvailable: sourceDashboard.ingestionDispositions !== undefined,
-            // The dispatch chain is this worker's to know. Without it the card
-            // offered Sync now for a source nothing here can sync.
-            syncNowAvailable: dashboardSourceSyncAvailable,
-            ...(sourceDashboard.fileSourceScopes
-              ? {
-                  fileSourceScopeStatus: Object.fromEntries(
-                    sourceDashboard.fileSourceScopes.summaries()
-                      .map((scope) => [scope.source_id, scope.status]),
-                  ),
-                  fileSourceScopeIngestionEnabled: Object.fromEntries(
-                    sourceDashboard.fileSourceScopes.summaries().map((scope) => [
-                      scope.source_id,
-                      scope.ingestion_enabled ?? (scope.status === 'approved' && (
-                        scope.whole_account_selected === true
-                        || scope.selections?.some((selection) => selection.state !== 'exclude') === true
-                      )),
-                    ]),
-                  ),
-                }
-              : {}),
-          });
-          assertNoRawEmailFields(view);
-          if (url.pathname === '/dashboard.json') return json(view);
-          // The embedding lane's run state, schedule and model, read off the
-          // overnight guard's and the drain's own report files. Read here rather
-          // than inside the renderers because those are synchronous and pure;
-          // every failure inside comes back as a stated state, so this never
-          // throws and never blocks the page on the router.
-          const embeddingRuntime = await readEmbeddingRuntime({ env: process.env });
-          // Every background lane's own report, read the same way and for the
-          // same reason: these are synchronous file reads, the renderers are
-          // pure, and a lane that cannot be read costs the reader a line of
-          // text rather than the page. The sample store this appends to is what
-          // gives the lanes a trailing rate — one reading per render.
-          const backgroundRuntime = readBackgroundRuntime({ env: process.env });
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
-          // The owner's privacy settings, counts only, for the Privacy row; the
-          // full settings only for the Privacy editor itself.
-          // Only the pages that name privacy read it (Home's one ask, Setup's
-          // row, Sensitivity, the editor): Background and source pages poll
-          // without it. Counts for the row; the full settings only for the
-          // editor, and only for a reader with write authority.
-          // The renderer's own precedence, so `?background&privacy` reads no
-          // privacy because it renders Background.
-          const dashboardPage = dashboardUi ? dashboardUi.params.view : dashboardHtmlRoutePage(url);
-          const privacyShown = dashboardPage === 'home' || dashboardPage === 'setup' || dashboardPage === 'sensitivity' || dashboardPage === 'privacy';
-          const writeAuthority = dashboardUi ? dashboardUi.canWrite : request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-          const privacySummary = sourceDashboard.privacy && privacyShown
-            ? await sourceDashboard.privacy.summary().catch(() => undefined)
-            : undefined;
-          const privacyRead = sourceDashboard.privacy && dashboardPage === 'privacy' && writeAuthority
-            ? await sourceDashboard.privacy.read().catch(() => undefined)
-            : undefined;
-          // Outside help: the card's facts only for the standalone page with
-          // the control session (never the native Control UI, whose readers
-          // cannot reach the card); Setup's one-word row for standalone Setup.
-          const outsideHelp = sourceDashboard.consult && !dashboardUi && dashboardPage === 'outside_help' && controlSessionCsrfToken !== undefined
-            ? await sourceDashboard.consult.status().catch(() => undefined)
-            : undefined;
-          // Whether this session was minted locally (the only grade the
-          // consult routes take); a bearer-grade session is offered the
-          // local unlock on the card instead of controls that would 403.
-          const outsideHelpLocalSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local';
-          const outsideHelpSummary = sourceDashboard.consult && !dashboardUi && dashboardPage === 'setup'
-            ? safeOutsideHelpSummary(sourceDashboard.consult)
-            : undefined;
-          let modelInstalls: DashboardModelInstalls | undefined;
-          try {
-            modelInstalls = sourceDashboard.modelInstalls?.();
-          } catch {
-            modelInstalls = undefined;
+          if (page === 'host') {
+            return new Response(renderComputerHostPage({
+              panelHtml: dashboardResourceHtml(),
+              origin: dashboardOAuthRedirectOrigin(url, request.headers),
+              ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),
+              ...(dashboardReadToken(url) ? { readToken: dashboardReadToken(url)! } : {}),
+            }), {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Cache-Control': 'no-store',
+                'Content-Security-Policy': COMPUTER_HOST_PAGE_CSP,
+                'X-Frame-Options': 'DENY',
+                'Referrer-Policy': 'no-referrer',
+              },
+            });
           }
-          const options: DashboardBackgroundPageOptions = {
-            ...(modelInstalls ? { modelInstalls } : {}),
-            ...(sourceDashboard.privacy && privacyShown
-              ? { privacy: privacySummary?.ok ? privacySummary.summary : 'unreadable' as const }
-              : {}),
-            ...(privacyRead?.ok ? { privacySettings: privacyRead.settings } : {}),
-            ...(outsideHelp ? { outsideHelp, outsideHelpLocalSession } : {}),
-            ...(outsideHelpSummary ? { outsideHelpSummary } : {}),
-            embeddingRuntime,
-            backgroundRuntime,
-            ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
-            ...(dashboardUi ? { nativeOAuthAvailable: dashboardUi.nativeOAuthAvailable } : {}),
-            ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
-          };
-          if (dashboardUi) {
-            return json(renderDashboardControlUi({
-              params: dashboardUi.params,
-              view,
-              canWrite: dashboardUi.canWrite,
-              options,
+          if (page === 'panel_read') {
+            if (!sourceDashboard?.panelTools) {
+              throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'The dashboard panel is not configured.');
+            }
+            return json(await sourceDashboard.panelTools.call(DASHBOARD_TOOL_NAME, {}, dashboardPanelCallContext(url, request)));
+          }
+          if (page === 'connector') return html(renderDashboardLocalPage('connector', { url, options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) } }));
+          if (page === 'agents') {
+            return html(renderDashboardLocalPage('agents', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
+              },
             }));
           }
-          const page = renderDashboardHtmlRoute({ url, view, options });
-          return html(page.html, page.status);
+          if (page === 'outside_help') {
+            // The card's facts (a daemon version call and two port probes) only
+            // with the control session; whether it was minted locally, the
+            // only grade the consult routes take.
+            const outsideHelp = sourceDashboard?.consult && controlSessionCsrfToken !== undefined
+              ? await sourceDashboard.consult.status().catch(() => undefined)
+              : undefined;
+            const outsideHelpLocalSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local';
+            return html(renderDashboardLocalPage('outside_help', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                ...(outsideHelp ? { outsideHelp, outsideHelpLocalSession } : {}),
+              },
+            }));
+          }
+          if (page === 'json' || page === 'keys') {
+            if (!sourceIndexStatus || !sourceDashboard) {
+              throw new EmailSourceWorkerError(
+                501,
+                'source_dashboard_not_supported',
+                'Private source worker does not have the source dashboard configured.',
+              );
+            }
+            pruneDashboardOAuthAttempts(dashboardOAuthAttempts, new Date());
+            // The worker's tick for noticing that another process re-paired a
+            // source this dashboard had parked. Unpair stops the lane; the
+            // re-pair runs in the CLI with no channel into this process, so
+            // without this the lane stayed stopped until a restart.
+            await refreshDashboardSchedulerOnRegistryChange();
+            const registryRead = readDashboardRegistryOutcome(sourceDashboard.registryPath);
+            const registry = registryRead.registry;
+            const secretStore = dashboardSecretStore(sourceDashboard);
+            const dashboardOAuthOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+            const dashboardClientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
+            const googleCloudProjectId = dashboardGoogleCloudProjectId();
+            const sourceIndexDashboardStatus = withCredentialDegradations(
+              // include_readiness_ledger: without it the status answers with no
+              // policy counts at all, and the owner-ruled "count only what
+              // Olympus reads" denominator has nothing to subtract (live 55% on
+              // 2026-08-21 while the corrected ratio code sat deployed). The
+              // per-item numerator is NOT gated on this flag — a status that
+              // omits it has no honest coverage ratio at all, which is how the
+              // same page later saturated at 100%.
+              // readiness_ledger_max_age_ms: the staleness this caller would
+              // accept, stated rather than assumed. Nothing caches against it
+              // today; it is the standing allowance for a readiness owner too
+              // expensive to score on every one of this page's polls.
+              await sourceIndexStatus.status({
+                include_items: false,
+                include_readiness_ledger: true,
+                readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+              }),
+              credentialDegradations?.() ?? [],
+            );
+            const schedulerDashboardStatus = sourceScheduler?.status();
+            // The owner's exclusion rules live behind the same runtime the picker
+            // opens. Without them every count in the page's "excluded by
+            // configuration" section is summarized from an empty list, so the
+            // page reported zero excluded folders while the rules were enforced.
+            const exclusionSources = await dashboardExclusionSources(sourceDashboard, dashboardExclusionDebt);
+            const credentialHealth = readCredentialHealthReport(
+              sourceDashboard.credentialHealthReportPath
+                ?? process.env.OLYMPUS_CREDENTIAL_HEALTH_REPORT_PATH?.trim()
+                ?? defaultCredentialHealthReportPath(),
+            );
+            const view = buildSourceDashboardViewModel({
+              sourceIndexStatus: sourceIndexDashboardStatus,
+              ingestionLedger: buildSourceIngestionLedgerSnapshot(sourceIndexDashboardStatus, {
+                exclusions: exclusionSources,
+                ...(schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {}),
+                // Same registry the page uses, so the health line and the cards
+                // agree on which source owns which corpus.
+                ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
+                safeForCastor: true,
+              }),
+              ...(schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {}),
+              sovereigntyEngine: sourceDashboard.sovereigntyEngine,
+              ...(sourceDashboard.modelSetup ? { modelSetup: sourceDashboard.modelSetup() } : {}),
+              ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
+              ...(sourceDashboard.history ? { history: sourceDashboard.history } : {}),
+              connectedHandleRegistry: registry,
+              ...(registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {}),
+              unpairedSources: dashboardUnpairedSourceStates(
+                dashboardUnpairedSources,
+                sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
+              ),
+              manualSyncs: Object.fromEntries(dashboardManualSyncs),
+              ...(credentialHealth ? { credentialHealth } : {}),
+              oauthClientIds: dashboardClientIdSets.all,
+              oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
+              ...(googleCloudProjectId ? { googleCloudProjectId } : {}),
+              googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
+              oauthRedirectBaseUrl: dashboardOAuthOrigin,
+              // Which sources connect through Olympus's own app, so their card can
+              // offer one Connect button instead of a walkthrough for an app the
+              // owner does not have to register. Names sources only — no client
+              // id, no relay URL, no state: this rides on the read-only surface.
+              // Which card a source gets depends on the publisher app, never on
+              // the request's OAuth origin (beta.5, 2026-09-24).
+              publisherOAuthSources: dashboardPublisherOAuthSources(dashboardClientIdSets.own),
+              apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
+              pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
+              contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
+              ingestionDispositionsAvailable: sourceDashboard.ingestionDispositions !== undefined,
+              // The dispatch chain is this worker's to know. Without it the card
+              // offered Sync now for a source nothing here can sync.
+              syncNowAvailable: dashboardSourceSyncAvailable,
+              ...(sourceDashboard.fileSourceScopes
+                ? {
+                    fileSourceScopeStatus: Object.fromEntries(
+                      sourceDashboard.fileSourceScopes.summaries()
+                        .map((scope) => [scope.source_id, scope.status]),
+                    ),
+                    fileSourceScopeIngestionEnabled: Object.fromEntries(
+                      sourceDashboard.fileSourceScopes.summaries().map((scope) => [
+                        scope.source_id,
+                        scope.ingestion_enabled ?? (scope.status === 'approved' && (
+                          scope.whole_account_selected === true
+                          || scope.selections?.some((selection) => selection.state !== 'exclude') === true
+                        )),
+                      ]),
+                    ),
+                  }
+                : {}),
+            });
+            assertNoRawEmailFields(view);
+            if (page === 'json') return json(view);
+            return html(renderDashboardLocalPage('keys', {
+              url,
+              view,
+              options: { ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}) },
+            }));
+          }
+        }
+
+        // The panel page itself, for the OpenClaw Control UI tab's frame (the
+        // Gateway serves it at its own path with the worker bearer). Static:
+        // the same HTML ChatGPT loads, no data.
+        if (request.method === 'GET' && url.pathname === '/dashboard/panel') {
+          return new Response(dashboardResourceHtml(), {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store',
+              'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+              'X-Frame-Options': 'DENY',
+            },
+          });
+        }
+
+        // One panel tool call from the computer's /dashboard (the control
+        // session and its CSRF token are checked at the boundary,
+        // workers/http.ts) or from the OpenClaw Control UI tab's gateway method
+        // (the worker bearer). The same in-process handlers ChatGPT's /mcp
+        // reaches, and only the panel's own tools (dashboard-panel-tools.ts).
+        if (request.method === 'POST' && url.pathname === DASHBOARD_TOOLS_CALL_PATH) {
+          if (!sourceDashboard?.panelTools) {
+            throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'The dashboard panel is not configured.');
+          }
+          const record = await parseObjectBody(request);
+          const name = typeof record.name === 'string' ? record.name : '';
+          const args = record.arguments === undefined ? {} : record.arguments;
+          if (!args || typeof args !== 'object' || Array.isArray(args)) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'arguments must be an object.');
+          }
+          if (!sourceDashboard.panelTools.allows(name)) {
+            throw new EmailSourceWorkerError(404, 'unknown_tool', 'That tool is not available to the dashboard.');
+          }
+          return json(await sourceDashboard.panelTools.call(name, args as Record<string, unknown>, dashboardPanelCallContext(url, request)));
         }
 
         // The query-free landing the successful callback redirects to (MINOR 2,
@@ -3752,14 +3737,6 @@ async function retrySqliteBusy<T>(operation: () => T | Promise<T>): Promise<T> {
   throw lastError;
 }
 
-function safeOutsideHelpSummary(backend: DashboardConsultBackend): ReturnType<DashboardConsultBackend['summary']> | undefined {
-  try {
-    return backend.summary();
-  } catch {
-    return undefined;
-  }
-}
-
 function sqliteBusyRetryDelays(): readonly number[] {
   const configured = process.env.OLYMPUS_SQLITE_BUSY_RETRY_DELAYS_MS;
   if (!configured) return DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS;
@@ -5850,51 +5827,6 @@ function dashboardReturnTo(): string {
 /** Where a sign-in started from ChatGPT sends the person back to. */
 const CHATGPT_RETURN_TO = 'https://chatgpt.com/';
 
-function parseDashboardControlUiRequest(
-  url: URL,
-  headers: Headers,
-): {
-  params: OlympusDashboardReadParams;
-  canWrite: boolean;
-  nativeOAuthAvailable: boolean;
-} {
-  const allowed = new Set(['native', 'view', 'can_write', 'source_id']);
-  for (const key of url.searchParams.keys()) {
-    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
-      throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request contains an unknown or repeated field.');
-    }
-  }
-  if (url.searchParams.get('native') !== '1') {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard requests must declare native=1.');
-  }
-  const requestedView = url.searchParams.get('view');
-  if (!requestedView || !OLYMPUS_DASHBOARD_VIEWS.includes(requestedView as never)) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request names an unknown view.');
-  }
-  const view = requestedView as OlympusDashboardReadParams['view'];
-  const writeValue = url.searchParams.get('can_write');
-  if (writeValue !== '0' && writeValue !== '1') {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request must declare can_write=0 or can_write=1.');
-  }
-  const sourceId = url.searchParams.get('source_id')?.trim() || undefined;
-  if (sourceId && (sourceId.length > 256 || sourceId.includes('\0'))) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard source_id is invalid.');
-  }
-  if (view === 'source' && !sourceId) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source view requires source_id.');
-  }
-  if (view !== 'source' && view !== 'dispositions' && sourceId) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source_id is allowed only for the source or dispositions view.');
-  }
-  return {
-    params: { view, ...(sourceId ? { source_id: sourceId } : {}) },
-    canWrite: writeValue === '1',
-    // workers/http.ts has already stripped any untrusted value and restores
-    // this header only beside a valid worker bearer.
-    nativeOAuthAvailable: headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER),
-  };
-}
-
 function dashboardSecretStore(sourceDashboard: NonNullable<EmailSourceWorkerOptions['sourceDashboard']>): SecretStore {
   return sourceDashboard.secretStore ?? createDefaultSecretStore();
 }
@@ -6364,6 +6296,16 @@ function dashboardOAuthClientSecretRequired(source: DashboardOAuthSource | 'goog
  * may be. The host stays the one the request carried, so a forged header can
  * never point a callback at another origin.
  */
+/** Where a panel tool call came from: the browser's origin, and the gateway's when it came through one. */
+function dashboardPanelCallContext(url: URL, request: Request): DashboardPanelCallContext {
+  const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
+  return {
+    origin: dashboardOAuthRedirectOrigin(url, request.headers),
+    ...(gateway ? { gatewayOrigin: gateway } : {}),
+    signal: request.signal,
+  };
+}
+
 function dashboardOAuthRedirectOrigin(url: URL, headers?: Headers): string {
   const gatewayPublicOrigin = headers?.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
   if (gatewayPublicOrigin) {
@@ -6876,28 +6818,10 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
-/** ?embedding-ledger serves the embedding decision ledger. Same path, same auth. */
-const DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = 'embedding-ledger';
-
 /**
- * The prefix the ledger page builds its own links from.
- *
- * A browser reaches this page with a dash_ token in the query string, because
- * an address bar cannot send an Authorization header. Its one link — back to
- * Background — has to carry that token or the first click dead-ends on a 401.
- * This mirrors withTokenBasePath in dashboard/index.ts, which does the same job
- * for the pages that route through there; undefined means no token was
- * presented, and the page falls back to a bare /dashboard prefix.
- */
-function embeddingLedgerBasePath(url: URL): string | undefined {
-  const token = url.searchParams.get('token');
-  if (token === null || token === '') return undefined;
-  return `/dashboard?token=${encodeURIComponent(token)}`;
-}
-
-/**
- * The one place this worker emits HTML: the dashboard pages, the dispositions
- * page, the embedding ledger, and both OAuth landing pages.
+ * The one place this worker emits HTML: the computer's local dashboard pages
+ * and both OAuth landing pages. (The host page around the panel sets its own,
+ * stricter policy.)
  *
  * The framing refusal is stated LAST so no caller can drop it by passing its
  * own header map. `SameSite=Strict` on the control cookie stops a cross-SITE

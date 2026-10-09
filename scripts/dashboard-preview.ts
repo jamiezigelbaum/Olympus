@@ -1,43 +1,43 @@
 import { ModelSetupService } from '../src/core/model-setup.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
-// Local design-iteration harness for the source dashboard.
-// Serves renderDashboardHtmlRoute with fixture data in three states so the
-// pages can be audited in a real browser without a live worker or real
-// credentials. Never used in production; carries no secrets.
+// Local design-iteration harness for the dashboard (unified dashboard phase
+// 4, 2026-10-09: the ChatGPT panel is the only dashboard). Serves the
+// computer's /dashboard host page around the exact panel ChatGPT loads, and
+// answers the panel's dashboard read from fixture data, so the page can be
+// audited in a real browser without a live worker or real credentials. Never
+// used in production; carries no secrets.
 //
 //   bun scripts/dashboard-preview.ts            # http://127.0.0.1:8930
-//   /            mid-onboarding state (default)
-//   /fresh       brand-new install, nothing connected
-//   /full        everything connected incl. tier splits + attention states
-//   /connect-google, /connect-google-loopback, /connect-dropbox, /connect-x
-//                one provider's connect walkthrough on its own route, and
-//   /connect-dropbox-refused the same card after the provider refused the
-//                callback. Add ?setup to read them on the setup page.
-//   /connect-dropbox-publisher, /connect-google-publisher
-//                publisher-app mode: one Connect button, with the
-//                bring-your-own walkthrough behind "Use my own app instead".
-//   ?source=<id> / ?setup / ?background select the same subpages the worker
-//   serves on any of the three states.
-//   Append ?token=dash_<anything> to carry the read-only dashboard URL, and
-//   &controls=connected to preview the short-lived browser control session.
+//   /<state>     picks a fixture (a cookie remembers it), then redirects to
+//                /dashboard. States: see the 404 at an unknown path.
+//   /dashboard            the host page, locked (the Open dashboard controls banner)
+//   /dashboard?controls   the same page with a pretend control session
+//   /dashboard?state=<name>  that preview state, in one load
+//   /dashboard?keys | ?agents | ?outside-help | ?connector
+//                the computer's own pages, as the worker renders them.
+//   &agents=off|not-connected|relay-unavailable|awaiting-terms|worker-env
+//                picks the Agents fixture.
 //
-// TRACKED FOR V2, registered and not built (owner ruling, 2026-08-18): naming
-// these three fixtures in the reader's terms rather than the harness's —
-// "mid-onboarding" is what /partial actually is, and the route names should
-// say so.
+// Only the dashboard read answers; every other panel tool says it needs a
+// worker.
 import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
 import { buildSourceDashboardViewModel, type SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
-import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
-import { renderEmbeddingLedgerPage } from '../src/workers/dashboard/pages/embedding-ledger.ts';
+import {
+  COMPUTER_HOST_PAGE_CSP,
+  dashboardHtmlRoutePage,
+  renderComputerHostPage,
+  renderDashboardLocalPage,
+} from '../src/workers/dashboard/index.ts';
+import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
+import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { dashboardToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
-import { buildSourceDispositionsView, renderSourceDispositionsHtml } from '../src/workers/source-dispositions.ts';
-import { estimateMailScope, mailScopeDraftView } from '../src/core/mail-source-scope.ts';
-import type { OlympusMailScopeDraft } from '../src/control-ui-contract.ts';
 import type { DashboardAgentsView } from '../src/workers/agent-connections.ts';
 
 export const DASHBOARD_PREVIEW_NOW = new Date('2026-07-07T21:00:00.000Z');
@@ -299,43 +299,17 @@ function reviewPreview(variant: 'review' | 'review-unconfigured' | 'review-index
 }
 
 /**
- * The page options the worker reads for a preview state: the built-in models'
- * installs and the owner's privacy settings. Empty for the older states.
+ * The panel options the worker reads for a preview state: the built-in
+ * private model's download and the owner's privacy counts. Empty for the
+ * older states.
  */
-export function buildDashboardPreviewOptions(state: string): {
-  modelInstalls?: { embedding?: { kind: 'built_in'; state: 'ready' | 'downloading'; percent?: number; bytesDone?: number; bytesTotal?: number }; privateModel?: { state: 'downloading' | 'ready'; percent?: number; bytesDone?: number; bytesTotal?: number } };
-  privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
-  privacySettings?: {
-    configured: boolean;
-    description: string;
-    pendingCount: number;
-    rules: Array<{ kind: 'folder'; source_id: 'dropbox.files'; key: string; display: string }
-      | { kind: 'label'; source_id: 'gmail.email'; key: string; value: string }
-      | { kind: 'sender'; source_id: 'gmail.email'; value: string }>;
-  };
-} {
+export function buildDashboardPreviewOptions(state: string): Pick<ChatGptDashboardOptions, 'privacy' | 'privateModel'> {
   if (!state.startsWith('review')) return {};
   const configured = state !== 'review-unconfigured';
-  const rules = configured
-    ? [
-        { kind: 'folder' as const, source_id: 'dropbox.files' as const, key: '/medical-records', display: 'Medical Records' },
-        { kind: 'label' as const, source_id: 'gmail.email' as const, key: 'Label_12', value: 'Lawyer' },
-        { kind: 'sender' as const, source_id: 'gmail.email' as const, value: 'billing@clinic.example' },
-      ]
-    : [];
   return {
-    modelInstalls: {
-      embedding: { kind: 'built_in', state: 'ready' },
-      // The private model downloading: 40%, 1.2 of 3.0 GB.
-      privateModel: { state: 'downloading', percent: 40, bytesDone: 1_200_000_000, bytesTotal: 3_000_000_000 },
-    },
-    privacy: { configured, pendingCount: 12, ruleCount: rules.length },
-    privacySettings: {
-      configured,
-      description: configured ? 'My health and therapy, money and taxes, anything about my kids' : '',
-      pendingCount: 12,
-      rules,
-    },
+    // The private model downloading: 40%, 1.2 of 3.0 GB.
+    privateModel: { state: 'downloading', percent: 40, bytesDone: 1_200_000_000, bytesTotal: 3_000_000_000 },
+    privacy: { configured, pendingCount: 12, ruleCount: configured ? 3 : 0 },
   };
 }
 
@@ -583,107 +557,6 @@ function withPreviewMovement(view: ReturnType<typeof buildSourceDashboardViewMod
   return view;
 }
 
-const PREVIEW_MAIL_GENERATION = 'a'.repeat(64);
-
-/** The mail picker page as the worker renders it, with Drive beside Gmail in Locations. */
-export function renderMailPickerPreview(approved = false): string {
-  const draft: OlympusMailScopeDraft = approved
-    ? {
-      window: '1y',
-      skipped_categories: ['promotions', 'social'],
-      skipped_labels: [{ id: 'Label_7', name: 'Newsletters' }],
-      always_private_senders: ['@clinic.example'],
-      skip_senders: ['notifications@saas.example'],
-    }
-    : mailScopeDraftView(undefined);
-  const view = buildSourceDispositionsView({
-    sources: [],
-    folderScopes: [
-      {
-        kind: 'folders',
-        source_id: 'google_drive.docs',
-        disposition_source_id: 'google_drive.personal',
-        label: 'Google Drive',
-        connected: true,
-        status: 'approved',
-        account_generation: 'b'.repeat(64),
-        scope_revision: '00000000-0000-4000-8000-000000000001',
-        selections: [],
-        whole_account_selected: false,
-      },
-      {
-        kind: 'mail',
-        source_id: 'gmail.email',
-        disposition_source_id: 'gmail.email',
-        label: 'Gmail',
-        connected: true,
-        status: approved ? 'approved' : 'scope_pending',
-        account_generation: PREVIEW_MAIL_GENERATION,
-        scope_revision: approved ? '00000000-0000-4000-8000-000000000002' : `missing:${PREVIEW_MAIL_GENERATION}`,
-        ingestion_enabled: approved,
-        mail_scope: draft,
-        ...(approved ? { content_after: '2025-09-23T00:00:00.000Z' } : {}),
-      },
-    ],
-    document: { schemaVersion: 1, rules: [] },
-    rulesPath: '/preview/ingestion-dispositions.json',
-    now: NOW,
-  });
-  return renderSourceDispositionsHtml(view, { csrfToken: 'preview-csrf-token', selectedSourceId: 'gmail.email' });
-}
-
-/** A fixture mailbox: what browse_mail_scope returns for `draft`. Never contacts Gmail. */
-export function mailPickerBrowseFixture(draft: OlympusMailScopeDraft | undefined) {
-  const current = draft ?? mailScopeDraftView(undefined);
-  const windowShare: Record<OlympusMailScopeDraft['window'], number> = { '6m': 0.12, '1y': 0.22, '2y': 0.4, '5y': 0.75, all: 1 };
-  const categoryShare: Record<string, number> = { primary: 0.3, updates: 0.25, forums: 0.05, social: 0.1, promotions: 0.3 };
-  const mailbox = 84_000;
-  const kept = 1 - current.skipped_categories.reduce((sum, category) => sum + (categoryShare[category] ?? 0), 0);
-  const inScope = Math.round(mailbox * kept);
-  const content = Math.round(inScope * windowShare[current.window]);
-  return {
-    ok: true,
-    kind: 'mail_scope_browse',
-    source_id: 'gmail.email',
-    account_generation: PREVIEW_MAIL_GENERATION,
-    scope_revision: `missing:${PREVIEW_MAIL_GENERATION}`,
-    status: 'scope_pending',
-    draft: current,
-    summary: {
-      labels: [
-        { id: 'Label_3', name: 'Family', system: false },
-        { id: 'Label_4', name: 'Finance/Taxes', system: false },
-        { id: 'Label_5', name: 'Kids School', system: false },
-        { id: 'Label_7', name: 'Newsletters', system: false },
-        { id: 'Label_9', name: 'Travel', system: false },
-        { id: 'Label_12', name: 'Work/Olympus', system: false },
-        { id: 'SENT', name: 'SENT', system: true },
-      ],
-      categories: [
-        { category: 'primary', label: 'Primary', messages_total: 25_200 },
-        { category: 'social', label: 'Social', messages_total: 8_400 },
-        { category: 'promotions', label: 'Promotions', messages_total: 25_200 },
-        { category: 'updates', label: 'Updates', messages_total: 21_000 },
-        { category: 'forums', label: 'Forums', messages_total: 4_200 },
-      ],
-      sender_suggestions: [
-        { sender: 'notifications@github.com', sample_messages: 14 },
-        { sender: 'no-reply@bank.example', sample_messages: 9 },
-        { sender: 'team@newsletter.example', sample_messages: 7 },
-        { sender: 'portal@clinic.example', sample_messages: 5 },
-        { sender: 'orders@shop.example', sample_messages: 4 },
-        { sender: 'alex@family.example', sample_messages: 3 },
-      ],
-      sample_size: 100,
-      estimate: estimateMailScope({
-        contentMessages: content,
-        metadataMessages: inScope - content,
-      }),
-      provider_requests: 108,
-    },
-  };
-}
-
 function dropboxPreview(mode: 'initial' | 'update') {
   const status = emptyStatus();
   const dropbox = corpus('secure_local.dropbox.files', 'file', 'secure_local', 'dropbox', 30_012, 600_000);
@@ -828,33 +701,62 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
   };
 }
 
+export const DASHBOARD_PREVIEW_STATES = [
+  'review', 'review-unconfigured', 'review-indexing',
+  'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+  'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
+  'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
+] as const;
+
+/** The dashboard tool's result for a preview state, with the computer's Index faster state. */
+export function previewDashboardToolResult(state: string, indexFasterOn: boolean) {
+  const result = dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) }));
+  return { ...result, _meta: { ...(result._meta ?? {}), [COMPUTER_META_KEY]: { indexFaster: { on: indexFasterOn } } } };
+}
+
+function previewState(request: Request): string {
+  const match = /(?:^|;\s*)olympus_preview_state=([a-z-]+)/.exec(request.headers.get('cookie') ?? '');
+  const state = match?.[1] ?? 'partial';
+  return (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(state) ? state : 'partial';
+}
+
+function withCookies(response: Response, cookies: readonly string[]): Response {
+  for (const cookie of cookies) response.headers.append('set-cookie', cookie);
+  return response;
+}
+
+function html(body: string, csp?: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8', ...(csp ? { 'content-security-policy': csp } : {}) },
+  });
+}
+
 if (import.meta.main) {
   const port = Number(process.env.DASHBOARD_PREVIEW_PORT ?? 8930);
   Bun.serve({
   port,
   async fetch(request) {
     const url = new URL(request.url);
+    const state = previewState(request);
+    const previewUnlocked = /(?:^|;\s*)olympus_preview_controls=1/.test(request.headers.get('cookie') ?? '');
     // The page's own unlock form posts here. There is no worker behind this
     // harness, so ANY non-empty paste mints a pretend control session (a
-    // cookie), and the pages then render unlocked exactly as they would on a
-    // real worker. Nothing is verified and nothing is stored: the point is to
-    // walk the unlocked flow in a browser, not to authenticate.
+    // cookie). Nothing is verified and nothing is stored.
     if (request.method === 'POST' && url.pathname === '/dashboard/control/session') {
       return new Response(JSON.stringify({ csrf_token: 'preview-csrf-token' }), {
         status: 200,
-        headers: {
-          'content-type': 'application/json',
-          'set-cookie': 'olympus_preview_controls=1; Path=/; SameSite=Strict',
-        },
+        headers: { 'content-type': 'application/json', 'set-cookie': 'olympus_preview_controls=1; Path=/; SameSite=Strict' },
       });
     }
-    // The mail picker's read-only browse answers from a fixture mailbox, so
-    // the picker renders populated; saving still needs a worker.
-    if (request.method === 'POST' && url.pathname === '/dashboard/dispositions') {
-      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
-      if (body.action === 'browse_mail_scope') {
-        return Response.json(mailPickerBrowseFixture(body.draft as OlympusMailScopeDraft));
-      }
+    if (request.method === 'POST' && url.pathname === '/dashboard/tools/call') {
+      const body = await request.json().catch(() => ({})) as { name?: unknown };
+      if (body.name === DASHBOARD_TOOL_NAME) return Response.json(previewDashboardToolResult(state, false));
+      return Response.json({
+        content: [{ type: 'text', text: 'Preview only: there is no worker behind this page, so this action cannot run here.' }],
+        structuredContent: { error: 'preview_only' },
+        isError: true,
+      });
     }
     // The Agents section's controls answer with obviously fake values, so the
     // show-once field can be walked in a browser. Nothing is minted.
@@ -867,105 +769,57 @@ if (import.meta.main) {
     if (request.method === 'POST' && url.pathname === '/dashboard/agents/revoke') {
       return Response.json({ ok: true, status_message: 'Preview only: nothing was revoked.' });
     }
-    // Turn on shows the agreement first, as the worker does before any
-    // acceptance; accepting or turning off changes nothing here.
-    if (request.method === 'POST' && url.pathname === '/dashboard/agents/remote-access') {
-      const body = await request.json().catch(() => ({})) as { enabled?: boolean; accept_terms?: unknown };
-      if (body.enabled === true && body.accept_terms === undefined) {
-        return Response.json({
-          ok: false,
-          error: { code: 'terms_required', message: 'Read Let\'s Encrypt\'s subscriber agreement, then accept it to turn on remote access.' },
-          // Preview only: the worker names the CA directory's current agreement here.
-          terms: { url: 'https://letsencrypt.org/repository/', read_url: 'https://letsencrypt.org/repository/' },
-        }, { status: 409 });
-      }
-      return Response.json({
-        ok: true,
-        enabled: body.enabled === true,
-        status_message: body.enabled === true
-          ? 'Preview only: remote access would now be turning on.'
-          : 'Preview only: remote access would now be off.',
-      });
-    }
-    // Every other control POST (connect, sync now, disconnect, embedding
-    // priority) needs a worker. Say so in the words the page prints, instead
-    // of a bare "Request failed." that reads as a broken credential.
+    // Every other control POST needs a worker. Say so in the words the page
+    // prints, instead of a bare "Request failed.".
     if (request.method === 'POST' && url.pathname.startsWith('/dashboard/')) {
-      return new Response(JSON.stringify({
+      return Response.json({
         ok: false,
-        error: {
-          code: 'preview_only',
-          message: 'Preview only: there is no worker behind this page, so this action cannot run here. It works on your real Olympus dashboard.',
-        },
-      }), { status: 501, headers: { 'content-type': 'application/json' } });
+        error: { code: 'preview_only', message: 'Preview only: there is no worker behind this page, so this action cannot run here.' },
+      }, { status: 501 });
     }
-    const previewUnlocked = url.searchParams.has('controls')
-      || /(?:^|;\s*)olympus_preview_controls=1/.test(request.headers.get('cookie') ?? '');
-    // The Gmail mail picker, served as the worker serves /dashboard/dispositions
-    // (?approved shows a saved scope instead of the defaults).
-    if (url.pathname === '/mail-picker' || url.pathname === '/dashboard/dispositions') {
-      return new Response(renderMailPickerPreview(url.searchParams.has('approved')), {
-        status: 200,
-        headers: { 'content-type': 'text/html; charset=utf-8' },
+    if (url.pathname === '/dashboard') {
+      // ?state=<name> and ?controls apply to this response and are remembered
+      // in cookies for the panel's own calls, so one load renders a state
+      // (headless screenshots need no redirect).
+      const namedState = url.searchParams.get('state') ?? '';
+      const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
+      const unlocked = previewUnlocked || url.searchParams.has('controls');
+      const cookies = [
+        ...(stateOverride ? [`olympus_preview_state=${stateOverride}; Path=/; SameSite=Strict`] : []),
+        ...(url.searchParams.has('controls') ? ['olympus_preview_controls=1; Path=/; SameSite=Strict'] : []),
+      ];
+      const pageState = stateOverride ?? state;
+      const page = dashboardHtmlRoutePage(url);
+      if (page === 'legacy') return new Response(null, { status: 302, headers: { location: '/dashboard' } });
+      if (page === 'panel_read') return Response.json(previewDashboardToolResult(pageState, false));
+      if (page === 'host') {
+        return withCookies(html(renderComputerHostPage({
+          panelHtml: dashboardResourceHtml(),
+          origin: url.origin,
+          ...(unlocked ? { csrfToken: 'preview-csrf-token' } : {}),
+        }), COMPUTER_HOST_PAGE_CSP), cookies);
+      }
+      return withCookies(html(renderDashboardLocalPage(page, {
+        url,
+        view: view(pageState),
+        options: {
+          now: NOW,
+          ...(unlocked ? { controlSessionCsrfToken: 'preview-csrf-token' } : {}),
+          agents: previewAgentsView(url.searchParams.get('agents')),
+        },
+      })), cookies);
+    }
+    const named = url.pathname.replace(/^\//, '');
+    if ((DASHBOARD_PREVIEW_STATES as readonly string[]).includes(named)) {
+      return new Response(null, {
+        status: 302,
+        headers: { location: '/dashboard', 'set-cookie': `olympus_preview_state=${named}; Path=/; SameSite=Strict` },
       });
     }
-    const state = url.pathname.replace(/^\//, '') || 'partial';
-    const states = [
-      'review', 'review-unconfigured', 'review-indexing',
-      'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
-      'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
-      'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
-    ];
-    if (!states.includes(state)) {
-      return new Response(`states: ${states.map((name) => `/${name}`).join(' ')}`, { status: 404 });
-    }
-    if (url.searchParams.has('embedding-ledger')) {
-      const page = renderEmbeddingLedgerPage({
-        skipped: 0,
-        path: '/preview/embedding-ledger.jsonl',
-        entries: [{
-          recorded_at: '2026-07-07T18:00:00.000Z',
-          kind: 'model_decision',
-          what: 'Keep the approved local embedding model for secure Dropbox material.',
-          model_id: 'preview/local-embedding-model',
-          epoch: 'preview-v1',
-          endpoint: 'http://127.0.0.1:8000/v1',
-          scope: { corpora: ['secure_local.dropbox.files'], chunks: { 'secure_local.dropbox.files': 600_000 } },
-          why: 'Preserve semantic search without sending secure Dropbox material to a public endpoint.',
-          approved_by: 'jamie',
-          status: 'complete',
-        }],
-      }, { now: NOW, basePath: `/${state}` });
-      return new Response(page, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
-    }
-    const page = renderDashboardHtmlRoute({
-      url,
-      view: view(state),
-      options: {
-        basePath: `/${state}`,
-        now: NOW,
-        embeddingRuntime: {
-          state: 'running',
-          stateLine: 'Embeddings: running now (metadata caught up)',
-          scheduleLine: 'Runs whenever the source-processing guard admits the lane.',
-          model: { name: 'preview/local-embedding-model', live: true, local: true, text: 'preview/local-embedding-model · local' },
-          overrideOn: false,
-          override: 'none',
-          overridePath: '/preview/operator-override',
-        },
-        ...(previewUnlocked ? { controlSessionCsrfToken: 'preview-csrf-token' } : {}),
-        agents: previewAgentsView(url.searchParams.get('agents')),
-        ...buildDashboardPreviewOptions(state),
-      },
-    });
-    return new Response(page.html, { status: page.status, headers: { 'content-type': 'text/html; charset=utf-8' } });
+    return new Response(`states: ${DASHBOARD_PREVIEW_STATES.map((name) => `/${name}`).join(' ')}`, { status: 404 });
   },
   });
-  console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
-  console.log('  ChatGPT-rules port: /review /review-unconfigured /review-indexing (add ?setup, ?privacy)');
-  console.log('  states: /models /models-applying /first-install /gmail-scope-pending /tier-migration /fresh /partial /full /dropbox-initial /dropbox-update');
-  console.log('  mail scope picker: /mail-picker (add ?approved for a saved scope)');
-  console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
-  console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');
-  console.log('  agents (add ?setup): remote access on by default; &agents=off, &agents=not-connected, &agents=relay-unavailable, &agents=awaiting-terms or &agents=worker-env');
+  console.log(`dashboard preview listening on http://127.0.0.1:${port}/dashboard`);
+  console.log(`  states (open one, then /dashboard): ${DASHBOARD_PREVIEW_STATES.map((name) => `/${name}`).join(' ')}`);
+  console.log('  /dashboard?controls unlocks; ?keys ?agents ?outside-help ?connector are the computer\'s own pages');
 }

@@ -1,15 +1,16 @@
 import { describe, expect, test } from 'bun:test';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
-  OLYMPUS_DASHBOARD_CONTROL_METHOD,
-  OLYMPUS_DASHBOARD_READ_METHOD,
+  OLYMPUS_DASHBOARD_PANEL_PATH,
+  OLYMPUS_DASHBOARD_TOOL_METHOD,
 } from '../src/control-ui-contract.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import {
-  parseDashboardControlParams,
-  parseDashboardReadParams,
+  OLYMPUS_PANEL_FRAME_CSP,
+  OLYMPUS_TAB_TOOL_NAMES,
+  parseDashboardToolParams,
   registerOlympusDashboardGateway,
-  requestDashboardRead,
+  requestDashboardTool,
   resolveGatewayPublicOrigin,
   resolveNativeOAuthOrigin,
   type DashboardFetch,
@@ -18,6 +19,7 @@ import {
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
 } from '../src/workers/http.ts';
+import { PANEL_TOOL_NAMES } from '../src/workers/chatgpt/dashboard-contract.ts';
 
 type RegisteredHandler = (input: {
   params: Record<string, unknown>;
@@ -28,7 +30,7 @@ type RegisteredHandler = (input: {
 }) => Promise<void> | void;
 
 describe('OpenClaw native dashboard Gateway bridge', () => {
-  test('registers read and write RPCs with exact scopes and profile custody', () => {
+  test('registers one tool method, the panel page and the callbacks, with profile custody', () => {
     const methods: Array<{ method: string; options: unknown }> = [];
     const routes: string[] = [];
     registerOlympusDashboardGateway({
@@ -42,15 +44,12 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
 
     expect(methods).toEqual([
       {
-        method: OLYMPUS_DASHBOARD_READ_METHOD,
+        method: OLYMPUS_DASHBOARD_TOOL_METHOD,
         options: { scope: 'operator.read', profileAccess: 'required' },
-      },
-      {
-        method: OLYMPUS_DASHBOARD_CONTROL_METHOD,
-        options: { scope: 'operator.write', profileAccess: 'required' },
       },
     ]);
     expect(routes).toEqual([
+      OLYMPUS_DASHBOARD_PANEL_PATH,
       '/oauth/callback/gmail',
       '/oauth/callback/gmail/done',
       '/oauth/callback/google-drive',
@@ -62,115 +61,88 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     ]);
   });
 
-  test('read RPC derives write presentation from the live client and keeps worker auth server-side', async () => {
+  test('the tab runs exactly the panel\'s tools (the native bundle keeps its own copy of the list)', () => {
+    expect([...OLYMPUS_TAB_TOOL_NAMES]).toEqual([...PANEL_TOOL_NAMES]);
+  });
+
+  test('the dashboard read needs operator.read and keeps worker auth server-side', async () => {
     const registrations = gatewayRegistrations(async (url, init) => {
-      expect(String(url)).toBe('http://source-worker.test/dashboard/ui?native=1&view=source&can_write=1&source_id=dropbox.files');
+      expect(String(url)).toBe('http://source-worker.test/dashboard/tools/call');
+      expect(init?.method).toBe('POST');
       const headers = new Headers(init?.headers);
       expect(headers.get('Authorization')).toBe('Bearer worker-secret');
       expect(headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)).toBe('https://gateway.example');
-      return Response.json({
-        status: 200,
-        title: 'Dropbox',
-        body: '<main class="frame">Dropbox</main>',
-        controller: 'dashboard',
-        can_write: true,
-        signature: 'a'.repeat(64),
-        poll_interval_ms: 5_000,
-      });
+      expect(JSON.parse(String(init?.body))).toEqual({ name: 'olympus_dashboard', arguments: {} });
+      return Response.json({ content: [{ type: 'text', text: 'ok' }], structuredContent: { kind: 'dashboard' } });
     });
     const calls: unknown[][] = [];
-    await registrations.methods.get(OLYMPUS_DASHBOARD_READ_METHOD)!({
-      params: { view: 'source', source_id: 'dropbox.files' },
-      // OpenClaw's operator.write scope implies operator.read.
-      client: { connect: { scopes: ['operator.write'] } },
+    await registrations.methods.get(OLYMPUS_DASHBOARD_TOOL_METHOD)!({
+      params: { name: 'olympus_dashboard' },
+      client: { connect: { scopes: ['operator.read'] } },
       context: { getRuntimeConfig: () => ({ gateway: { publicOrigin: 'https://gateway.example' } }) },
       respond: (...args) => calls.push(args),
     });
-    expect(calls).toEqual([[true, expect.objectContaining({ can_write: true, title: 'Dropbox' })]]);
+    expect(calls).toEqual([[true, { content: [{ type: 'text', text: 'ok' }], structuredContent: { kind: 'dashboard' } }]]);
     expect(JSON.stringify(calls)).not.toContain('worker-secret');
   });
 
-  test('folder browse uses a POST body and preserves the validated scope envelope', async () => {
-    const result = await requestDashboardRead({
-      params: {
-        view: 'dispositions', action: 'browse_folder_scope', source_id: 'dropbox.files',
-        parent_key: '/private folder', cursor: 'opaque-cursor',
-      },
-      canWrite: true,
-      config: configuredWorker(),
-      fetchImpl: async (url, init) => {
-        expect(String(url)).toBe('http://source-worker.test/dashboard/dispositions');
-        expect(init?.method).toBe('POST');
-        expect(String(url)).not.toContain('private');
-        expect(JSON.parse(String(init?.body))).toEqual({
-          action: 'browse_folder_scope', source_id: 'dropbox.files',
-          parent_key: '/private folder', cursor: 'opaque-cursor',
-        });
-        return Response.json({
-          status: 200,
-          title: 'Olympus / Choose folders',
-          body: '<main></main>',
-          controller: 'dispositions',
-          can_write: true,
-          signature: 'revision-1',
-          poll_interval_ms: 15_000,
-          scope_browser: {
-            source_id: 'dropbox.files',
-            account_generation: 'a'.repeat(64),
-            scope_revision: 'revision-1',
-            status: 'scope_pending',
-            nodes: [{ key: '/work', name: 'Work', kind: 'folder', has_children: true, selectable: true }],
-            selections: [],
-            whole_account_selected: false,
-          },
-        });
-      },
+  test('every other panel tool needs operator.write; a missing scope never reaches the worker', async () => {
+    let fetched = 0;
+    const registrations = gatewayRegistrations(async () => {
+      fetched += 1;
+      return Response.json({ content: [] });
     });
-    expect(result.scope_browser).toEqual(expect.objectContaining({
-      source_id: 'dropbox.files',
-      nodes: [expect.objectContaining({ key: '/work', name: 'Work' })],
-    }));
-  });
-
-  test('callbacks defensively reject missing scopes and executable worker markup', async () => {
-    const registrations = gatewayRegistrations(async () => Response.json({
-      status: 200,
-      title: 'Olympus',
-      body: '<main>ok</main><script>alert(1)</script>',
-      controller: 'dashboard',
-      can_write: false,
-      signature: 'b'.repeat(64),
-      poll_interval_ms: 5_000,
-    }));
     const missing: unknown[][] = [];
-    await registrations.methods.get(OLYMPUS_DASHBOARD_READ_METHOD)!({
-      params: { view: 'home' },
-      client: { connect: { scopes: [] } },
+    await registrations.methods.get(OLYMPUS_DASHBOARD_TOOL_METHOD)!({
+      params: { name: 'olympus_disconnect_source', arguments: { source_id: 'dropbox.files' } },
+      client: { connect: { scopes: ['operator.read'] } },
       respond: (...args) => missing.push(args),
     });
-    expect(missing).toEqual([[false, undefined, {
-      code: 'INVALID_REQUEST',
-      message: 'Operator read scope is required.',
-    }]]);
-
-    const executable: unknown[][] = [];
-    await registrations.methods.get(OLYMPUS_DASHBOARD_READ_METHOD)!({
-      params: { view: 'home' },
-      client: { connect: { scopes: ['operator.read'] } },
-      respond: (...args) => executable.push(args),
+    expect(missing).toEqual([[false, undefined, { code: 'INVALID_REQUEST', message: 'Operator write scope is required.' }]]);
+    const none: unknown[][] = [];
+    await registrations.methods.get(OLYMPUS_DASHBOARD_TOOL_METHOD)!({
+      params: { name: 'olympus_dashboard' },
+      client: { connect: { scopes: [] } },
+      respond: (...args) => none.push(args),
     });
-    expect(executable).toEqual([[false, undefined, {
-      code: 'UNAVAILABLE',
-      message: 'Olympus dashboard worker returned executable markup.',
-    }]]);
+    expect(none).toEqual([[false, undefined, { code: 'INVALID_REQUEST', message: 'Operator read scope is required.' }]]);
+    expect(fetched).toBe(0);
+
+    const allowed: unknown[][] = [];
+    await registrations.methods.get(OLYMPUS_DASHBOARD_TOOL_METHOD)!({
+      params: { name: 'olympus_disconnect_source', arguments: { source_id: 'dropbox.files' } },
+      // OpenClaw's operator.write scope implies operator.read.
+      client: { connect: { scopes: ['operator.write'] } },
+      respond: (...args) => allowed.push(args),
+    });
+    expect(allowed[0]?.[0]).toBe(true);
+    expect(fetched).toBe(1);
+  });
+
+  test('only the panel\'s tools pass, with closed params; a worker refusal is a tool error', async () => {
+    expect(() => parseDashboardToolParams({ name: 'olympus_search', arguments: {} })).toThrow();
+    expect(() => parseDashboardToolParams({ name: 'olympus_index_faster', arguments: { on: true } })).toThrow();
+    expect(() => parseDashboardToolParams({ name: 'olympus_dashboard', path: '/arbitrary' })).toThrow('unknown field');
+    expect(() => parseDashboardToolParams({ name: 'olympus_dashboard', arguments: 'x' })).toThrow('must be an object');
+    expect(parseDashboardToolParams({ name: 'olympus_dashboard' })).toEqual({ name: 'olympus_dashboard', arguments: {} });
+
+    const refused = await requestDashboardTool({
+      call: { name: 'olympus_dashboard', arguments: {} },
+      config: configuredWorker(),
+      fetchImpl: async () => Response.json({ error: { code: 'unknown_tool', message: 'This tool is not available here.' } }, { status: 404 }),
+    });
+    expect(refused).toEqual({
+      isError: true,
+      content: [{ type: 'text', text: 'This tool is not available here.' }],
+      structuredContent: { error: 'unknown_tool' },
+    });
   });
 
   test('worker deadline remains active while a response body is stalled', async () => {
-    const partial = new TextEncoder().encode('{"status":200');
+    const partial = new TextEncoder().encode('{"content":');
     const started = Date.now();
-    await expect(requestDashboardRead({
-      params: { view: 'home' },
-      canWrite: false,
+    await expect(requestDashboardTool({
+      call: { name: 'olympus_dashboard', arguments: {} },
       config: configuredWorker(),
       timeoutMs: 20,
       fetchImpl: async () => new Response(new ReadableStream({
@@ -184,34 +156,34 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     expect(Date.now() - started).toBeLessThan(500);
   });
 
-  test('write RPC maps only declared actions and never forwards caller headers or routes', async () => {
+  test('the panel page is the worker\'s own panel, served with a frame-only policy, and fails closed', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
+    let html = '<!doctype html><html><body>panel</body></html>';
     const registrations = gatewayRegistrations(async (url, init) => {
       requests.push({ url: String(url), ...(init ? { init } : {}) });
-      return Response.json({ ok: true, source: 'readwise', policy: { api_key_returned: false } });
+      return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html' } });
     });
-    const calls: unknown[][] = [];
-    await registrations.methods.get(OLYMPUS_DASHBOARD_CONTROL_METHOD)!({
-      params: { action: 'connect_api_key', source: 'readwise', api_key: 'rk-secret' },
-      client: { connect: { scopes: ['operator.write'] } },
-      context: { getRuntimeConfig: () => ({ gateway: { publicOrigin: 'https://gateway.example' } }) },
-      respond: (...args) => calls.push(args),
-    });
-    expect(requests[0]?.url).toBe('http://source-worker.test/dashboard/connect/api-key');
+    const route = registrations.routes.get(OLYMPUS_DASHBOARD_PANEL_PATH)!;
+    const served = mockResponse();
+    await route({ method: 'GET', url: OLYMPUS_DASHBOARD_PANEL_PATH, headers: {} } as unknown as IncomingMessage, served.value);
+    expect(served.statusCode()).toBe(200);
+    expect(served.body()).toBe(html);
+    expect(served.headers.get('content-security-policy')).toBe(OLYMPUS_PANEL_FRAME_CSP);
+    expect(OLYMPUS_PANEL_FRAME_CSP).toContain("frame-ancestors 'self'");
+    expect(OLYMPUS_PANEL_FRAME_CSP).toContain("default-src 'none'");
+    expect(requests[0]?.url).toBe('http://source-worker.test/dashboard/panel');
     expect(new Headers(requests[0]?.init?.headers).get('Authorization')).toBe('Bearer worker-secret');
-    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({ source: 'readwise', api_key: 'rk-secret' });
-    expect(calls).toEqual([[true, {
-      status: 200,
-      body: { ok: true, source: 'readwise', policy: { api_key_returned: false } },
-    }]]);
-    expect(JSON.stringify(calls)).not.toContain('rk-secret');
 
-    expect(() => parseDashboardControlParams({
-      action: 'connect_api_key',
-      source: 'readwise',
-      api_key: 'key',
-      path: '/arbitrary',
-    })).toThrow('unknown field');
+    const post = mockResponse();
+    await route({ method: 'POST', url: OLYMPUS_DASHBOARD_PANEL_PATH, headers: {} } as unknown as IncomingMessage, post.value);
+    expect(post.statusCode()).toBe(405);
+
+    html = 'not a page';
+    const broken = gatewayRegistrations(async () => new Response(html, { status: 200 }));
+    const failed = mockResponse();
+    await broken.routes.get(OLYMPUS_DASHBOARD_PANEL_PATH)!({ method: 'GET', url: OLYMPUS_DASHBOARD_PANEL_PATH, headers: {} } as unknown as IncomingMessage, failed.value);
+    expect(failed.statusCode()).toBe(503);
+    expect(failed.body()).not.toContain('not a page');
   });
 
   test('the OAuth callback reads OpenClaw\'s live config, like start, not the registration-time copy', async () => {
@@ -238,23 +210,23 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
       .toBe('https://gateway.example');
   });
 
-  test('OAuth start fails actionably when Gateway public origin is absent', async () => {
+  test('Connect fails actionably when the Gateway has no public origin', async () => {
     let fetched = false;
     const registrations = gatewayRegistrations(async () => {
       fetched = true;
-      return Response.json({ ok: true });
+      return Response.json({ content: [] });
     }, undefined);
     const calls: unknown[][] = [];
-    await registrations.methods.get(OLYMPUS_DASHBOARD_CONTROL_METHOD)!({
-      params: { action: 'start_oauth', source: 'dropbox' },
+    await registrations.methods.get(OLYMPUS_DASHBOARD_TOOL_METHOD)!({
+      params: { name: 'olympus_connect_source', arguments: { source: 'dropbox' } },
       client: { connect: { scopes: ['operator.write'] } },
       context: { getRuntimeConfig: () => ({ gateway: {} }) },
       respond: (...args) => calls.push(args),
     });
     expect(fetched).toBe(false);
     expect(calls).toEqual([[true, expect.objectContaining({
-      status: 409,
-      body: expect.objectContaining({ error: expect.objectContaining({ code: 'gateway_public_origin_required' }) }),
+      isError: true,
+      structuredContent: { error: 'gateway_public_origin_required' },
     })]]);
   });
 
@@ -399,13 +371,7 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     expect(forwarded).toBe(31);
   });
 
-  test('read/action schemas and public origin parser are closed', () => {
-    expect(() => parseDashboardReadParams({ view: 'embedding_ledger' })).toThrow('Unknown Olympus dashboard view');
-    expect(() => parseDashboardReadParams({ view: 'source' })).toThrow('source_id is required');
-    expect(() => parseDashboardReadParams({ view: 'home', source_id: 'x' })).toThrow('only for the source view');
-    expect(() => parseDashboardReadParams({
-      view: 'dispositions', action: 'browse_folder_scope', source_id: 'gmail.email',
-    })).toThrow('source_id');
+  test('the public origin parser is closed', () => {
     expect(resolveGatewayPublicOrigin({ gateway: { publicOrigin: 'https://gateway.example/' } }))
       .toBe('https://gateway.example');
     expect(resolveGatewayPublicOrigin({ gateway: { publicOrigin: 'http://gateway.example' } })).toBeUndefined();

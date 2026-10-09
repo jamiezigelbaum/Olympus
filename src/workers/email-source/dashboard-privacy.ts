@@ -19,7 +19,13 @@ import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME, type Pr
 import { ChatGptSurfaceError, errorMessage } from '../chatgpt/response-builder.ts';
 import { callSetupTool, type ChatGptSetupBackend } from '../chatgpt/setup-tools.ts';
 import { lowersPrivacy, visiblePrivacy } from '../dashboard/shared-privacy.ts';
-import type { DashboardPrivacySummary } from '../dashboard/source-rows.ts';
+
+/** The owner's privacy settings, counts only (the same counts ChatGPT reads). */
+export interface DashboardPrivacySummary {
+  configured: boolean;
+  pendingCount: number;
+  ruleCount: number;
+}
 
 export type DashboardPrivacyOutcome =
   | { ok: true; status: 'current' | 'saved' | 'conflict'; settings: PrivacySettings }

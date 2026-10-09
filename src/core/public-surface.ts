@@ -204,8 +204,8 @@ export interface PublicDashboardRoute {
 export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'GET', path: '/dashboard' },
   { method: 'GET', path: '/dashboard.json' },
-  { method: 'GET', path: '/dashboard/ui' },
   { method: 'GET', path: '/dashboard/auth-check' },
+  { method: 'GET', path: '/dashboard/panel' },
   // The standalone opening handoff: a public constant page, a bearer-only
   // mint, and a ticket-authenticated redeem. See core/dashboard-launch.ts.
   { method: 'GET', path: '/dashboard/launch' },
@@ -215,7 +215,6 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // The local-only mint behind the Outside help card: no bearer accepted,
   // loopback origin only; its sessions alone reach the consult routes.
   { method: 'POST', path: '/dashboard/control/session/local' },
-  { method: 'GET', path: '/dashboard/dispositions' },
   { method: 'GET', path: '/dashboard/dispositions.json' },
   { method: 'POST', path: '/dashboard/dispositions' },
   { method: 'GET', path: '/oauth/callback/', prefix: true },
@@ -229,6 +228,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/privacy' },
   { method: 'POST', path: '/dashboard/sync-now' },
   { method: 'POST', path: '/dashboard/embedding-priority' },
+  { method: 'POST', path: '/dashboard/tools/call' },
   { method: 'POST', path: '/dashboard/disconnect' },
   { method: 'POST', path: '/dashboard/unpair' },
   // Remote agent connections: mint a pairing code, create a key (shown once),

@@ -5,11 +5,9 @@ import { expect, test } from 'bun:test';
 import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
 import { createModelKeyReload, workerRestartsItself } from '../src/core/model-key-reload.ts';
 import type { ModelSetupView } from '../src/core/model-setup.ts';
-import { parseDashboardControlParams } from '../src/core/control-ui-gateway.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
-import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
 
 function modelView(ready = false): ModelSetupView {
   return { ready, checked_at: '2026-09-14T12:00:00.000Z', cards: [
@@ -18,105 +16,11 @@ function modelView(ready = false): ModelSetupView {
   ] };
 }
 
-test('a model blocker leads the page and every source connection says why it is locked', () => {
-  const view = buildDashboardPreviewView('fresh');
-  view.model_setup = modelView();
-  const html = renderDashboardSetupPage(view);
-  // One banner at the top: the cause, and the one button that clears it.
-  const banner = segment(html, 'class="attncard banner blocker"', '</div></div>');
-  expect(banner).toContain('Add your Gemini API key to start connecting sources.');
-  expect(banner).toContain('data-focus-target="#model-key-field-gemini"');
-  expect(html.indexOf('data-blocker')).toBeLessThan(html.indexOf('aria-label="Models"'));
-  expect(html).toContain('id="model-key-field-gemini"');
-  // The Models row opens by itself while models need the owner, so the
-  // banner's button lands on a field the reader can see.
-  expect(html).toContain('<details class="models" data-poll-key="models" open><summary>Models — Custom · Needs you</summary>');
-  expect(html).toContain('name="source" value="gemini"');
-  expect(html).toContain('name="source" value="venice"');
-  // Blocked controls look blocked and carry the reason beside themselves.
-  expect(html).toContain('<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">Connect</button><span class="hint">Locked until models are ready</span></span>');
-  expect(html).not.toContain('Finish the required model setup above');
-  expect(html).toContain('Check readiness');
-  expect(html).toContain('method="post" action="/dashboard/connect/api-key"');
-  view.model_setup = modelView(true);
-  const ready = renderDashboardSetupPage(view);
-  expect(ready).not.toContain('data-blocker');
-  expect(ready).not.toContain('Locked until models are ready');
-  expect(ready).toContain('Replace key');
-  expect(ready).toContain('Models are ready.');
-});
-
-test('ready models collapse to source-style rows; a model without its key keeps the full card', () => {
-  const view = buildDashboardPreviewView('fresh');
-  view.model_setup = modelView(true);
-  const ready = renderDashboardSetupPage(view);
-  for (const [id, label] of [['gemini', 'Gemini'], ['venice', 'Venice']] as const) {
-    const row = segment(ready, `<div class="attncard plain modelrow" data-model-card="${id}"`, `id="model-key-${id}"`);
-    expect(row).toContain(`<span class="name">${label}</span>`);
-    expect(row).toContain('Ready · key connected');
-    expect(row).not.toContain('modelcard"');
-    // Replace key lives in the row's ⋯ menu and still opens the same key
-    // form, in a sheet that also carries the "Get a key" link.
-    expect(row).toContain(`<details class="rowmenu"><summary class="btn" aria-label="More actions for ${label}">⋯</summary>`);
-    expect(row).toContain(`class="btn" data-sheet-toggle="#model-key-${id}"`);
-    const sheet = segment(ready, `id="model-key-${id}"`, '</div>');
-    expect(sheet).toContain(`data-model-provider="${id}"`);
-    expect(sheet).toContain('name="api_key"');
-    expect(sheet).toContain(`Get a ${label} API key`);
-  }
-  expect(ready).not.toContain('<section class="modelcard"');
-  expect(ready).not.toContain('Add the keys required by your privacy choice');
-  // One line on the page; the setup inside it no longer points at sources below.
-  expect(ready).toContain('<summary>Models — Custom · Ready</summary>');
-  expect(ready).toContain('Models are ready.');
-  expect(ready).not.toContain('<details class="models" data-poll-key="models" open>');
-  // The optional local-model help and the re-check stay reachable on one quiet line.
-  const extras = segment(ready, 'class="modelextras"', '</section>');
-  expect(extras).toContain('data-sheet-toggle="#local-model-setup-sheet"');
-  expect(extras).toContain('Connect existing local models');
-  expect(extras).toContain('data-model-check');
-  expect(extras).toContain('Check readiness');
-  expect(ready).toContain('id="local-model-setup-sheet"');
-
-  view.model_setup = {
-    ready: false,
-    checked_at: '2026-09-14T12:00:00.000Z',
-    cards: [
-      { id: 'gemini', label: 'Gemini', required: true, state: 'ready', detail: 'Public and Personal embeddings.' },
-      { id: 'venice', label: 'Venice', required: true, state: 'not_configured', detail: 'Private model processing.' },
-    ],
-  };
-  const partial = renderDashboardSetupPage(view);
-  expect(partial).toContain('class="attncard plain modelrow" data-model-card="gemini"');
-  const venice = segment(partial, '<section class="modelcard" data-model-card="venice"', '</section>');
-  expect(venice).toContain('Not configured');
-  expect(venice).toContain('class="keyfield" id="model-key-field-venice" type="password" name="api_key"');
-  expect(venice).toContain('Get a Venice API key');
-  expect(partial).toContain('Add the keys required by your privacy choice');
-  expect(partial).toContain('Optional: your agent can help connect models you already run');
-  expect(partial).not.toContain('class="modelextras"');
-  // One wrapping row per provider: key field, Connect and the key link side
-  // by side; the two optional controls share one row too (owner, 2026-09-24).
-  const action = segment(venice, '<div class="modelaction">', 'Get a Venice API key</a></div>');
-  expect(action).toContain('aria-label="Venice API key"');
-  expect(action).toContain('<button class="btn primary" type="submit">Connect</button>');
-  const tools = segment(partial, '<div class="modeltools">', '</form></div>');
-  expect(tools).toContain('Connect existing local models');
-  expect(tools).toContain('Check readiness');
-});
-
 function segment(html: string, from: string, to: string): string {
   const start = html.indexOf(from);
   expect(start).toBeGreaterThan(-1);
   return html.slice(start, html.indexOf(to, start + from.length) + to.length);
 }
-
-test('model controls reject extra input and accept Gemini through the existing key boundary', () => {
-  expect(parseDashboardControlParams({ action: 'connect_api_key', source: 'gemini', api_key: 'fixture' }))
-    .toEqual({ action: 'connect_api_key', source: 'gemini', api_key: 'fixture' });
-  expect(parseDashboardControlParams({ action: 'check_model_setup' })).toEqual({ action: 'check_model_setup' });
-  expect(() => parseDashboardControlParams({ action: 'check_model_setup', api_key: 'must-not-be-accepted' })).toThrow();
-});
 
 test('model gate is enforced before source credential writes while model keys remain available', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-model-gate-'));

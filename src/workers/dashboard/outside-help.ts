@@ -15,7 +15,7 @@ import type { ZkapiConsultErrorCode } from '../../core/consult-transport-zkapi.t
 import { ZKAPI_RISK_ACKNOWLEDGEMENTS } from '../../core/zkapi-consult-settings.ts';
 import { escapeHtml, escapeScriptJson } from './components.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from './vocabulary.ts';
-import { fill } from './source-rows.ts';
+import { fill } from './vocabulary.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
   DASHBOARD_OUTSIDE_HELP_TOOLS_COPY,

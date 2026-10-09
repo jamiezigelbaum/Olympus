@@ -1,31 +1,53 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
-  OLYMPUS_DASHBOARD_CONTROL_METHOD,
-  OLYMPUS_DASHBOARD_READ_METHOD,
-  OLYMPUS_DASHBOARD_VIEWS,
-  type OlympusDashboardControlParams,
-  type OlympusDashboardControlResult,
+  OLYMPUS_DASHBOARD_PANEL_PATH,
+  OLYMPUS_DASHBOARD_TOOL_METHOD,
   type OlympusDashboardOAuthSource,
-  type OlympusFolderScopeBrowseResult,
-  type OlympusMailScopeDraft,
-  type OlympusFolderScopeNode,
-  type OlympusSourceScopeSelection,
-  type OlympusDashboardReadParams,
-  type OlympusDashboardReadResult,
-  type OlympusDashboardSourceId,
-  type OlympusPrivacyRule,
 } from '../control-ui-contract.ts';
 import type { OlympusConfig } from './config.ts';
 import { workerAuthTokenFromConfig } from './worker-auth.ts';
-import { PRIVACY_FOLDER_SOURCE_NAMES, privacyLogic } from '../workers/dashboard/shared-privacy-logic.ts';
-
-/** The privacy rules both editors use: a rule must have its kind's shape before it reaches the engine. */
-const PRIVACY_RULES = privacyLogic({ mailSourceId: 'gmail.email', folderSources: { ...PRIVACY_FOLDER_SOURCE_NAMES } });
 import {
   createGatewayCallbackPeerHeader,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
 } from '../workers/http.ts';
+
+/**
+ * The tools the Olympus tab's panel may call through the Gateway: the
+ * panel's own (workers/chatgpt/dashboard-contract.ts PANEL_TOOL_NAMES),
+ * spelled here so the native plugin does not bundle the ChatGPT contract.
+ * The worker checks its own list again (dashboard-panel-tools.ts).
+ */
+export const OLYMPUS_TAB_TOOL_NAMES = [
+  'olympus_dashboard',
+  'olympus_connect_source',
+  'olympus_scope_list',
+  'olympus_scope_set',
+  'olympus_disconnect_source',
+  'olympus_model_set',
+  'olympus_model_retry',
+  'olympus_privacy_get',
+  'olympus_privacy_set',
+  'olympus_sync_source',
+] as const;
+
+/** The one tool an operator.read connection may call: the dashboard read. */
+const OLYMPUS_TAB_READ_TOOL = 'olympus_dashboard';
+
+/**
+ * The framed panel's own policy: its inline script and style, data: images,
+ * no network (it talks only through postMessage), framed only by the
+ * Control UI on this same Gateway origin.
+ */
+export const OLYMPUS_PANEL_FRAME_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  'img-src data:',
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
+].join('; ');
 
 type GatewayErrorCode = 'INVALID_REQUEST' | 'UNAVAILABLE';
 type GatewayRespond = (
@@ -78,9 +100,13 @@ export interface OlympusDashboardGatewayOptions {
 
 export type DashboardFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-const DASHBOARD_READ_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+/** A tool result (the dashboard view model, a picker page) is bounded like the old page reads were. */
+const DASHBOARD_TOOL_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+const DASHBOARD_TOOL_REQUEST_MAX_BYTES = 256 * 1024;
 const DASHBOARD_CONTROL_RESPONSE_MAX_BYTES = 256 * 1024;
-const DASHBOARD_CONTROL_REQUEST_MAX_BYTES = 256 * 1024;
+const DASHBOARD_PANEL_MAX_BYTES = 2 * 1024 * 1024;
+/** The panel HTML changes only with the worker's build; one read serves many opens. */
+const DASHBOARD_PANEL_CACHE_MS = 5 * 60_000;
 const OAUTH_CALLBACK_URL_MAX_BYTES = 16 * 1024;
 const DASHBOARD_TIMEOUT_MAX_MS = 180_000;
 const DASHBOARD_TIMEOUT_MIN_MS = 1_000;
@@ -88,9 +114,6 @@ const OAUTH_CALLBACK_SOURCES = ['gmail', 'google-drive', 'dropbox', 'x'] as cons
 const OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60_000;
 const OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30;
 const OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS = 1_024;
-/** The engine's own caps (classification/privacy-profile.ts); the engine validates the rest. */
-const PRIVACY_DESCRIPTION_MAX = 2_000;
-const PRIVACY_RULES_MAX = 100;
 
 interface OAuthCallbackRateLimitBucket {
   windowStart: number;
@@ -100,7 +123,11 @@ interface OAuthCallbackRateLimitBucket {
 class DashboardGatewayInvalidRequestError extends Error {}
 class DashboardGatewayUnavailableError extends Error {}
 
-/** Register the two scoped RPC methods and the state-authenticated OAuth callbacks. */
+/**
+ * Register the Olympus tab's Gateway surface: the panel page its frame loads,
+ * the one tool method the panel's calls go through, and the
+ * state-authenticated OAuth callbacks.
+ */
 export function registerOlympusDashboardGateway(
   api: OlympusDashboardGatewayApi,
   config: OlympusConfig,
@@ -108,20 +135,27 @@ export function registerOlympusDashboardGateway(
 ): void {
   if (!api.registerGatewayMethod) return;
   const fetchImpl = options.fetchImpl ?? fetch;
+  // operator.read to reach the method at all; each tool then needs its own
+  // scope: the dashboard read needs read, everything else needs write.
   api.registerGatewayMethod(
-    OLYMPUS_DASHBOARD_READ_METHOD,
+    OLYMPUS_DASHBOARD_TOOL_METHOD,
     async ({ params, client, respond, context, signal }) => {
-      if (!gatewayClientHasScope(client, 'operator.read')) {
-        respond(false, undefined, { code: 'INVALID_REQUEST', message: 'Operator read scope is required.' });
-        return;
-      }
       try {
-        const result = await requestDashboardRead({
-          params: parseDashboardReadParams(params),
-          canWrite: gatewayClientHasScope(client, 'operator.write'),
+        const call = parseDashboardToolParams(params);
+        const scope = call.name === OLYMPUS_TAB_READ_TOOL ? 'operator.read' : 'operator.write';
+        if (!gatewayClientHasScope(client, scope)) {
+          respond(false, undefined, { code: 'INVALID_REQUEST', message: scope === 'operator.read' ? 'Operator read scope is required.' : 'Operator write scope is required.' });
+          return;
+        }
+        const gatewayPublicOrigin = resolveNativeOAuthOrigin(currentOpenClawConfig(api, context), client?.browserOrigin);
+        if (call.name === 'olympus_connect_source' && !gatewayPublicOrigin) {
+          respond(true, gatewayPublicOriginRequiredResult());
+          return;
+        }
+        const result = await requestDashboardTool({
+          call,
           config,
-          openClawConfig: currentOpenClawConfig(api, context),
-          browserOrigin: client?.browserOrigin,
+          ...(gatewayPublicOrigin ? { gatewayPublicOrigin } : {}),
           fetchImpl,
           ...(signal ? { signal } : {}),
         });
@@ -133,133 +167,42 @@ export function registerOlympusDashboardGateway(
     { scope: 'operator.read', profileAccess: 'required' },
   );
 
-  api.registerGatewayMethod(
-    OLYMPUS_DASHBOARD_CONTROL_METHOD,
-    async ({ params, client, respond, context, signal }) => {
-      if (!gatewayClientHasScope(client, 'operator.write')) {
-        respond(false, undefined, { code: 'INVALID_REQUEST', message: 'Operator write scope is required.' });
-        return;
-      }
-      try {
-        const parsed = parseDashboardControlParams(params);
-        const openClawConfig = currentOpenClawConfig(api, context);
-        const gatewayPublicOrigin = resolveNativeOAuthOrigin(openClawConfig, client?.browserOrigin);
-        if (parsed.action === 'start_oauth' && !gatewayPublicOrigin) {
-          respond(true, gatewayPublicOriginRequiredResult());
-          return;
-        }
-        const result = await requestDashboardControl({
-          params: parsed,
-          config,
-          ...(gatewayPublicOrigin ? { gatewayPublicOrigin } : {}),
-          fetchImpl,
-          ...(signal ? { signal } : {}),
-        });
-        respond(true, result);
-      } catch (error) {
-        respondDashboardGatewayError(respond, error);
-      }
-    },
-    { scope: 'operator.write', profileAccess: 'required' },
-  );
-
+  registerPanelRoute(api, config, fetchImpl);
   registerOAuthCallbackRoutes(api, config, fetchImpl);
 }
 
-export async function requestDashboardRead(input: {
-  params: OlympusDashboardReadParams;
-  canWrite: boolean;
-  config: OlympusConfig;
-  openClawConfig?: unknown;
-  /** The reading client's handshake browser-origin facts, when OpenClaw supplies them. */
-  browserOrigin?: unknown;
-  fetchImpl?: DashboardFetch;
-  signal?: AbortSignal;
-  /** Test seam; production callers use the configured, capped worker timeout. */
-  timeoutMs?: number;
-}): Promise<OlympusDashboardReadResult> {
-  const authToken = requireWorkerAuthToken(input.config);
-  const oauthOrigin = resolveNativeOAuthOrigin(input.openClawConfig, input.browserOrigin);
-  if (input.params.view === 'dispositions'
-    && 'action' in input.params
-    && input.params.action === 'browse_folder_scope') {
-    if (!input.canWrite) {
-      throw new DashboardGatewayInvalidRequestError('Operator write scope is required to browse private folders.');
-    }
-    const encoded = JSON.stringify({
-      action: input.params.action,
-      source_id: input.params.source_id,
-      ...(input.params.parent_key ? { parent_key: input.params.parent_key } : {}),
-      ...(input.params.cursor ? { cursor: input.params.cursor } : {}),
-    });
-    const { response, text: body } = await boundedWorkerRequest({
-      fetchImpl: input.fetchImpl ?? fetch,
-      url: workerRootUrl(input.config, '/dashboard/dispositions'),
-      init: {
-        method: 'POST',
-        headers: workerHeaders(authToken, oauthOrigin, true),
-        body: encoded,
-        redirect: 'error',
-      },
-      timeoutMs: input.timeoutMs ?? dashboardTimeoutMs(input.config),
-      maxResponseBytes: DASHBOARD_CONTROL_RESPONSE_MAX_BYTES,
-      ...(input.signal ? { signal: input.signal } : {}),
-    });
-    if (!response.ok) {
-      throw new DashboardGatewayUnavailableError(`Olympus dashboard worker returned HTTP ${response.status}.`);
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
-    }
-    return parseDashboardReadResult(parsed, input.canWrite);
-  }
-  const url = workerRootUrl(input.config, '/dashboard/ui');
-  url.searchParams.set('native', '1');
-  url.searchParams.set('view', input.params.view);
-  url.searchParams.set('can_write', input.canWrite ? '1' : '0');
-  if (input.params.source_id !== undefined) url.searchParams.set('source_id', input.params.source_id);
-  const headers = workerHeaders(authToken, oauthOrigin);
-  const { response, text: body } = await boundedWorkerRequest({
-    fetchImpl: input.fetchImpl ?? fetch,
-    url,
-    init: { method: 'GET', headers, redirect: 'error' },
-    timeoutMs: input.timeoutMs ?? dashboardTimeoutMs(input.config),
-    maxResponseBytes: DASHBOARD_READ_RESPONSE_MAX_BYTES,
-    ...(input.signal ? { signal: input.signal } : {}),
-  });
-  if (!response.ok) {
-    throw new DashboardGatewayUnavailableError(`Olympus dashboard worker returned HTTP ${response.status}.`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
-  }
-  return parseDashboardReadResult(parsed, input.canWrite);
+export interface DashboardToolCall {
+  name: typeof OLYMPUS_TAB_TOOL_NAMES[number];
+  arguments: Record<string, unknown>;
 }
 
-export async function requestDashboardControl(input: {
-  params: OlympusDashboardControlParams;
+/** `{name, arguments?}`, the name one of the panel's tools, the arguments an object. */
+export function parseDashboardToolParams(value: unknown): DashboardToolCall {
+  const record = exactRecord(value, ['name', 'arguments']);
+  const name = enumValue(record.name, OLYMPUS_TAB_TOOL_NAMES, 'name');
+  const args = record.arguments === undefined ? {} : record.arguments;
+  if (!isRecord(args)) throw new DashboardGatewayInvalidRequestError('Dashboard tool arguments must be an object.');
+  return { name, arguments: args };
+}
+
+/** One panel tool call, forwarded to the worker's POST /dashboard/tools/call with the worker bearer. */
+export async function requestDashboardTool(input: {
+  call: DashboardToolCall;
   config: OlympusConfig;
   gatewayPublicOrigin?: string;
   fetchImpl?: DashboardFetch;
   signal?: AbortSignal;
   /** Test seam; production callers use the configured, capped worker timeout. */
   timeoutMs?: number;
-}): Promise<OlympusDashboardControlResult> {
+}): Promise<Record<string, unknown>> {
   const authToken = requireWorkerAuthToken(input.config);
-  const mapped = dashboardControlWorkerRequest(input.params);
-  const encoded = JSON.stringify(mapped.body);
-  if (Buffer.byteLength(encoded, 'utf8') > DASHBOARD_CONTROL_REQUEST_MAX_BYTES) {
-    throw new DashboardGatewayInvalidRequestError('Dashboard control request is too large.');
+  const encoded = JSON.stringify({ name: input.call.name, arguments: input.call.arguments });
+  if (Buffer.byteLength(encoded, 'utf8') > DASHBOARD_TOOL_REQUEST_MAX_BYTES) {
+    throw new DashboardGatewayInvalidRequestError('Dashboard tool request is too large.');
   }
   const { response, text } = await boundedWorkerRequest({
     fetchImpl: input.fetchImpl ?? fetch,
-    url: workerRootUrl(input.config, mapped.path),
+    url: workerRootUrl(input.config, '/dashboard/tools/call'),
     init: {
       method: 'POST',
       headers: workerHeaders(authToken, input.gatewayPublicOrigin, true),
@@ -267,281 +210,74 @@ export async function requestDashboardControl(input: {
       redirect: 'error',
     },
     timeoutMs: input.timeoutMs ?? dashboardTimeoutMs(input.config),
-    maxResponseBytes: DASHBOARD_CONTROL_RESPONSE_MAX_BYTES,
+    maxResponseBytes: DASHBOARD_TOOL_RESPONSE_MAX_BYTES,
     ...(input.signal ? { signal: input.signal } : {}),
   });
   let body: unknown;
   try {
-    body = text === '' ? {} : JSON.parse(text);
+    body = JSON.parse(text);
   } catch {
     throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
   }
-  if (!isRecord(body)) {
-    throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
+  if (!isRecord(body)) throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
+  if (response.status < 200 || response.status >= 300) {
+    // The worker refused (an unknown tool, models not ready): the panel shows
+    // a tool error, not a dead connection.
+    const error = isRecord(body.error) ? body.error : {};
+    const message = typeof error.message === 'string' ? error.message.slice(0, 400) : 'Olympus could not do that.';
+    return { isError: true, content: [{ type: 'text', text: message }], structuredContent: { error: typeof error.code === 'string' ? error.code : 'internal' } };
   }
-  return { status: response.status, body };
+  return body;
 }
 
-export function parseDashboardReadParams(value: unknown): OlympusDashboardReadParams {
-  const record = exactRecord(value, ['view', 'source_id', 'action', 'parent_key', 'cursor']);
-  if (!OLYMPUS_DASHBOARD_VIEWS.includes(record.view as never)) {
-    throw new DashboardGatewayInvalidRequestError('Unknown Olympus dashboard view.');
-  }
-  const view = record.view as OlympusDashboardReadParams['view'];
-  if (record.action === 'browse_folder_scope') {
-    if (view !== 'dispositions') {
-      throw new DashboardGatewayInvalidRequestError('Folder browsing is available only in the dispositions view.');
-    }
-    const parentKey = optionalBoundedString(record.parent_key, 4_096, 'parent_key', false);
-    const cursor = optionalBoundedString(record.cursor, 8_192, 'cursor', false);
-    return {
-      view,
-      action: 'browse_folder_scope',
-      source_id: enumValue(record.source_id, ['google_drive.docs', 'dropbox.files'] as const, 'source_id'),
-      ...(parentKey ? { parent_key: parentKey } : {}),
-      ...(cursor ? { cursor } : {}),
-    };
-  }
-  if (record.action !== undefined || record.parent_key !== undefined || record.cursor !== undefined) {
-    throw new DashboardGatewayInvalidRequestError('Unexpected folder browse parameters.');
-  }
-  const sourceId = record.source_id === undefined ? undefined : boundedString(record.source_id, 256, 'source_id');
-  if (view === 'source' && sourceId === undefined) {
-    throw new DashboardGatewayInvalidRequestError('source_id is required for the source view.');
-  }
-  if (view !== 'source' && view !== 'dispositions' && sourceId !== undefined) {
-    throw new DashboardGatewayInvalidRequestError('source_id is allowed only for the source view or dispositions view.');
-  }
-  return { view, ...(sourceId ? { source_id: sourceId } : {}) };
-}
-
-export function parseDashboardControlParams(value: unknown): OlympusDashboardControlParams {
-  const outer = recordValue(value);
-  const action = outer.action;
-  if (action === 'browse_mail_scope') {
-    const record = exactRecord(outer, ['action', 'source_id', 'draft']);
-    return {
-      action,
-      source_id: enumValue(record.source_id, ['gmail.email'] as const, 'source_id'),
-      draft: parseMailScopeDraftParam(record.draft),
-    };
-  }
-  if (action === 'approve_mail_scope_and_start') {
-    const record = exactRecord(outer, ['action', 'source_id', 'account_generation', 'expected_scope_revision', 'scope']);
-    return {
-      action,
-      source_id: enumValue(record.source_id, ['gmail.email'] as const, 'source_id'),
-      account_generation: boundedString(record.account_generation, 128, 'account_generation', false),
-      expected_scope_revision: boundedString(record.expected_scope_revision, 256, 'expected_scope_revision', false),
-      scope: parseMailScopeDraftParam(record.scope),
-    };
-  }
-  if (action === 'save_privacy') {
-    const record = exactRecord(outer, ['action', 'description', 'rules', 'revision', 'confirm']);
-    // Always the revision the editor was built from: without it a save would
-    // skip the compare-and-swap (the empty profile has one too).
-    const revision = boundedString(record.revision, 64, 'revision', false);
-    if (record.confirm !== undefined && typeof record.confirm !== 'boolean') {
-      throw new DashboardGatewayInvalidRequestError('confirm must be true or false.');
-    }
-    const description = record.description === undefined
-      ? undefined
-      : boundedText(record.description, PRIVACY_DESCRIPTION_MAX, 'description');
-    let rules: OlympusPrivacyRule[] | undefined;
-    if (record.rules !== undefined) {
-      if (!Array.isArray(record.rules) || record.rules.length > PRIVACY_RULES_MAX) {
-        throw new DashboardGatewayInvalidRequestError(`rules must be a list of at most ${PRIVACY_RULES_MAX} rules.`);
+/**
+ * GET OLYMPUS_DASHBOARD_PANEL_PATH: the panel HTML the tab frames, read from
+ * the worker (GET /dashboard/panel) so it is always the running engine's own
+ * page. It is the same static page ChatGPT loads and carries no data: the
+ * data arrives only through the tool method, under the operator's scopes.
+ */
+function registerPanelRoute(api: OlympusDashboardGatewayApi, config: OlympusConfig, fetchImpl: DashboardFetch): void {
+  if (!api.registerHttpRoute) return;
+  let cached: { html: string; at: number } | undefined;
+  api.registerHttpRoute({
+    path: OLYMPUS_DASHBOARD_PANEL_PATH,
+    auth: 'plugin',
+    match: 'exact',
+    handler: async (request, response) => {
+      if (request.method !== 'GET') {
+        response.statusCode = 405;
+        response.end();
+        return true;
       }
-      rules = record.rules.map((value): OlympusPrivacyRule => {
-        const rule = exactRecord(value, ['kind', 'source_id', 'key', 'value', 'display']);
-        const key = optionalBoundedString(rule.key, 1_024, 'key', false);
-        const ruleValue = optionalBoundedString(rule.value, 240, 'value', false);
-        const display = optionalBoundedString(rule.display, 200, 'display', false);
-        const parsed: OlympusPrivacyRule = {
-          kind: enumValue(rule.kind, ['folder', 'label', 'sender'] as const, 'kind'),
-          source_id: enumValue(rule.source_id, ['dropbox.files', 'google_drive.docs', 'gmail.email'] as const, 'source_id'),
-          ...(key ? { key } : {}),
-          ...(ruleValue ? { value: ruleValue } : {}),
-          ...(display ? { display } : {}),
-        };
-        if (!PRIVACY_RULES.validRule(parsed)) {
-          throw new DashboardGatewayInvalidRequestError('A privacy rule does not have the shape of its kind.');
+      try {
+        if (!cached || Date.now() - cached.at > DASHBOARD_PANEL_CACHE_MS) {
+          const authToken = requireWorkerAuthToken(config);
+          const { response: worker, text } = await boundedWorkerRequest({
+            fetchImpl,
+            url: workerRootUrl(config, '/dashboard/panel'),
+            init: { method: 'GET', headers: workerHeaders(authToken), redirect: 'error' },
+            timeoutMs: dashboardTimeoutMs(config),
+            maxResponseBytes: DASHBOARD_PANEL_MAX_BYTES,
+          });
+          if (worker.status !== 200 || !text.startsWith('<!doctype html>')) throw new DashboardGatewayUnavailableError('panel unavailable');
+          cached = { html: text, at: Date.now() };
         }
-        return parsed;
-      });
-    }
-    return {
-      action,
-      ...(description !== undefined ? { description } : {}),
-      ...(rules ? { rules } : {}),
-      revision,
-      ...(record.confirm === true ? { confirm: true } : {}),
-    };
-  }
-  if (action === 'retry_model') {
-    const record = exactRecord(outer, ['action', 'model']);
-    return { action, model: enumValue(record.model, ['embedding', 'answers', 'transcription'] as const, 'model') };
-  }
-  if (action === 'browse_folder_scope') {
-    const record = exactRecord(outer, ['action', 'source_id', 'parent_key', 'cursor']);
-    const parentKey = optionalBoundedString(record.parent_key, 4_096, 'parent_key', false);
-    const cursor = optionalBoundedString(record.cursor, 8_192, 'cursor', false);
-    return {
-      action,
-      source_id: enumValue(record.source_id, ['google_drive.docs', 'dropbox.files'] as const, 'source_id'),
-      ...(parentKey ? { parent_key: parentKey } : {}),
-      ...(cursor ? { cursor } : {}),
-    };
-  }
-  if (action === 'approve_source_scope_and_start') {
-    const record = exactRecord(outer, [
-      'action',
-      'source_id',
-      'account_generation',
-      'expected_scope_revision',
-      'selections',
-      'whole_account',
-      'explicit_whole_account_confirmation',
-    ]);
-    if (!Array.isArray(record.selections) || record.selections.length > 100) {
-      throw new DashboardGatewayInvalidRequestError('selections must be an array of at most 100 folders.');
-    }
-    const selections = record.selections.map((value): OlympusSourceScopeSelection => {
-      const selection = exactRecord(value, ['key', 'state', 'ancestor_keys']);
-      if (selection.state !== 'ingest' && selection.state !== 'metadata_only' && selection.state !== 'exclude') {
-        throw new DashboardGatewayInvalidRequestError('Unknown source scope disposition.');
+        response.statusCode = 200;
+        response.setHeader('Content-Type', 'text/html; charset=utf-8');
+        response.setHeader('Cache-Control', 'no-store');
+        response.setHeader('Referrer-Policy', 'no-referrer');
+        response.setHeader('X-Content-Type-Options', 'nosniff');
+        response.setHeader('Content-Security-Policy', OLYMPUS_PANEL_FRAME_CSP);
+        response.end(cached.html);
+      } catch {
+        response.statusCode = 503;
+        response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        response.setHeader('Cache-Control', 'no-store');
+        response.end('Olympus is not reachable right now.');
       }
-      let ancestorKeys: string[] | undefined;
-      if (selection.ancestor_keys !== undefined) {
-        if (!Array.isArray(selection.ancestor_keys) || selection.ancestor_keys.length > 100) {
-          throw new DashboardGatewayInvalidRequestError('ancestor_keys must be an array of at most 100 folder keys.');
-        }
-        ancestorKeys = selection.ancestor_keys.map((key) => boundedString(key, 4_096, 'ancestor_keys[]', false));
-      }
-      return {
-        key: boundedString(selection.key, 4_096, 'key', false),
-        state: selection.state,
-        ...(ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}),
-      };
-    });
-    if (typeof record.whole_account !== 'boolean'
-      || typeof record.explicit_whole_account_confirmation !== 'boolean') {
-      throw new DashboardGatewayInvalidRequestError('Whole-account fields must be true or false.');
-    }
-    return {
-      action,
-      source_id: enumValue(record.source_id, ['google_drive.docs', 'dropbox.files'] as const, 'source_id'),
-      account_generation: boundedString(record.account_generation, 128, 'account_generation', false),
-      expected_scope_revision: boundedString(record.expected_scope_revision, 256, 'expected_scope_revision', false),
-      selections,
-      whole_account: record.whole_account,
-      explicit_whole_account_confirmation: record.explicit_whole_account_confirmation,
-    };
-  }
-  if (action === 'save_dispositions') {
-    const record = exactRecord(outer, ['action', 'source', 'edits']);
-    const source = boundedString(record.source, 256, 'source');
-    if (!Array.isArray(record.edits) || record.edits.length === 0 || record.edits.length > 1_000) {
-      throw new DashboardGatewayInvalidRequestError('edits must contain between 1 and 1000 changes.');
-    }
-    const edits = record.edits.map((entry) => {
-      const edit = exactRecord(entry, ['path', 'state']);
-      const path = boundedString(edit.path, 4_096, 'path', false);
-      if (edit.state !== 'ingest' && edit.state !== 'metadata_only' && edit.state !== 'exclude') {
-        throw new DashboardGatewayInvalidRequestError('Unknown source disposition state.');
-      }
-      return { path, state: edit.state as 'ingest' | 'metadata_only' | 'exclude' };
-    });
-    return { action, source, edits };
-  }
-  if (action === 'start_oauth') {
-    const record = exactRecord(outer, ['action', 'source', 'client_id', 'client_secret']);
-    const source = enumValue(record.source, OAUTH_CALLBACK_SOURCES, 'source');
-    const clientId = optionalBoundedString(record.client_id, 2_048, 'client_id', false);
-    const clientSecret = optionalBoundedString(record.client_secret, 8_192, 'client_secret', false);
-    return { action, source, ...(clientId ? { client_id: clientId } : {}), ...(clientSecret ? { client_secret: clientSecret } : {}) };
-  }
-  if (action === 'cancel_oauth') {
-    const record = exactRecord(outer, ['action', 'source']);
-    return { action, source: enumValue(record.source, OAUTH_CALLBACK_SOURCES, 'source') };
-  }
-  if (action === 'check_model_setup') {
-    exactRecord(outer, ['action']);
-    return { action };
-  }
-  if (action === 'connect_api_key') {
-    const record = exactRecord(outer, ['action', 'source', 'api_key']);
-    return {
-      action,
-      source: enumValue(record.source, ['gemini', 'venice', 'readwise'] as const, 'source'),
-      api_key: boundedString(record.api_key, 8_192, 'api_key', false),
-    };
-  }
-  if (action === 'sync_now') {
-    const record = exactRecord(outer, ['action', 'source']);
-    return {
-      action,
-      source: enumValue(record.source, ['gmail', 'google-drive', 'dropbox', 'x', 'readwise'] as const, 'source'),
-    };
-  }
-  if (action === 'set_embedding_priority') {
-    const record = exactRecord(outer, ['action', 'on']);
-    if (typeof record.on !== 'boolean') throw new DashboardGatewayInvalidRequestError('on must be true or false.');
-    return { action, on: record.on };
-  }
-  if (action === 'disconnect') {
-    const record = exactRecord(outer, ['action', 'source_id', 'acknowledge']);
-    if (record.acknowledge !== true) throw new DashboardGatewayInvalidRequestError('Disconnect acknowledgement is required.');
-    return {
-      action,
-      source_id: enumValue(record.source_id, [
-        'gmail.email',
-        'google_drive.docs',
-        'dropbox.files',
-        'x.bookmarks',
-        'telegram.messages',
-        'whatsapp.personal.messages',
-        'readwise.library',
-      ] as const, 'source_id') as OlympusDashboardSourceId,
-      acknowledge: true,
-    };
-  }
-  if (action === 'unpair') {
-    const record = exactRecord(outer, ['action', 'source_id', 'acknowledge']);
-    if (record.acknowledge !== true) throw new DashboardGatewayInvalidRequestError('Unpair acknowledgement is required.');
-    return {
-      action,
-      source_id: enumValue(record.source_id, ['telegram.messages', 'whatsapp.personal.messages'] as const, 'source_id'),
-      acknowledge: true,
-    };
-  }
-  if (action === 'mint_agent_pairing_code') {
-    exactRecord(outer, ['action']);
-    return { action };
-  }
-  if (action === 'create_agent_key') {
-    const record = exactRecord(outer, ['action', 'name']);
-    return { action, name: boundedString(record.name, 128, 'name') };
-  }
-  if (action === 'revoke_agent_connection') {
-    const record = exactRecord(outer, ['action', 'connection_id']);
-    const connectionId = boundedString(record.connection_id, 64, 'connection_id', false);
-    if (!/^[a-f0-9]{18}$/.test(connectionId)) throw new DashboardGatewayInvalidRequestError('connection_id is not a connection id.');
-    return { action, connection_id: connectionId };
-  }
-  if (action === 'set_remote_access') {
-    const record = exactRecord(outer, ['action', 'enabled', 'accept_terms']);
-    if (typeof record.enabled !== 'boolean') throw new DashboardGatewayInvalidRequestError('enabled must be true or false.');
-    if (record.accept_terms === undefined) return { action, enabled: record.enabled };
-    if (!record.enabled) throw new DashboardGatewayInvalidRequestError('Only turning remote access on accepts an agreement.');
-    const accept = exactRecord(record.accept_terms, ['url']);
-    if (!('url' in accept)) throw new DashboardGatewayInvalidRequestError('accept_terms.url is required.');
-    if (accept.url === null) return { action, enabled: true, accept_terms: { url: null } };
-    const url = boundedString(accept.url, 2048, 'accept_terms.url', false);
-    if (!url.startsWith('https://')) throw new DashboardGatewayInvalidRequestError('accept_terms.url must be an https URL.');
-    return { action, enabled: true, accept_terms: { url } };
-  }
-  throw new DashboardGatewayInvalidRequestError('Unknown Olympus dashboard control action.');
+      return true;
+    },
+  });
 }
 
 export function resolveGatewayPublicOrigin(value: unknown): string | undefined {
@@ -826,242 +562,6 @@ function writeCallbackRedirect(response: ServerResponse, location: string): void
   response.end();
 }
 
-function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
-  path: string;
-  body: Record<string, unknown>;
-} {
-  switch (params.action) {
-    case 'browse_folder_scope':
-      return {
-        path: '/dashboard/dispositions',
-        body: {
-          action: params.action,
-          source_id: params.source_id,
-          ...(params.parent_key ? { parent_key: params.parent_key } : {}),
-          ...(params.cursor ? { cursor: params.cursor } : {}),
-        },
-      };
-    case 'save_dispositions':
-      return { path: '/dashboard/dispositions', body: { source: params.source, edits: params.edits } };
-    case 'start_oauth':
-      return {
-        path: '/dashboard/connect/oauth/start',
-        body: {
-          source: params.source,
-          ...(params.client_id ? { client_id: params.client_id } : {}),
-          ...(params.client_secret ? { client_secret: params.client_secret } : {}),
-        },
-      };
-    case 'cancel_oauth':
-      return { path: '/dashboard/connect/oauth/cancel', body: { source: params.source } };
-    case 'check_model_setup':
-      return { path: '/dashboard/models/check', body: {} };
-    case 'connect_api_key':
-      return { path: '/dashboard/connect/api-key', body: { source: params.source, api_key: params.api_key } };
-    case 'sync_now':
-      return { path: '/dashboard/sync-now', body: { source: params.source } };
-    case 'approve_source_scope_and_start':
-      return {
-        path: '/dashboard/dispositions',
-        body: {
-          action: params.action,
-          source_id: params.source_id,
-          account_generation: params.account_generation,
-          expected_scope_revision: params.expected_scope_revision,
-          selections: params.selections,
-          whole_account: params.whole_account,
-          explicit_whole_account_confirmation: params.explicit_whole_account_confirmation,
-        },
-      };
-    case 'browse_mail_scope':
-      return {
-        path: '/dashboard/dispositions',
-        body: { action: params.action, source_id: params.source_id, draft: params.draft },
-      };
-    case 'approve_mail_scope_and_start':
-      return {
-        path: '/dashboard/dispositions',
-        body: {
-          action: params.action,
-          source_id: params.source_id,
-          account_generation: params.account_generation,
-          expected_scope_revision: params.expected_scope_revision,
-          scope: params.scope,
-        },
-      };
-    case 'set_embedding_priority':
-      return { path: '/dashboard/embedding-priority', body: { on: params.on } };
-    case 'save_privacy':
-      return {
-        path: '/dashboard/privacy',
-        body: {
-          ...(params.description !== undefined ? { description: params.description } : {}),
-          ...(params.rules ? { rules: params.rules } : {}),
-          revision: params.revision,
-          ...(params.confirm === true ? { confirm: true } : {}),
-        },
-      };
-    case 'retry_model':
-      return { path: '/dashboard/models/retry', body: { model: params.model } };
-    case 'disconnect':
-      return { path: '/dashboard/disconnect', body: { source_id: params.source_id, acknowledge: true } };
-    case 'unpair':
-      return { path: '/dashboard/unpair', body: { source_id: params.source_id, acknowledge: true } };
-    case 'mint_agent_pairing_code':
-      return { path: '/dashboard/agents/pairing-code', body: {} };
-    case 'create_agent_key':
-      return { path: '/dashboard/agents/keys', body: { name: params.name } };
-    case 'revoke_agent_connection':
-      return { path: '/dashboard/agents/revoke', body: { connection_id: params.connection_id } };
-    case 'set_remote_access':
-      return {
-        path: '/dashboard/agents/remote-access',
-        body: { enabled: params.enabled, ...(params.accept_terms ? { accept_terms: { url: params.accept_terms.url } } : {}) },
-      };
-  }
-}
-
-function parseDashboardReadResult(value: unknown, expectedCanWrite: boolean): OlympusDashboardReadResult {
-  const record = exactRecord(value, [
-    'status',
-    'title',
-    'body',
-    'controller',
-    'can_write',
-    'signature',
-    'poll_interval_ms',
-    'scope_browser',
-  ]);
-  if (!Number.isInteger(record.status) || (record.status as number) < 100 || (record.status as number) > 599) {
-    throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
-  }
-  const title = boundedString(record.title, 256, 'title', false);
-  const body = boundedString(record.body, DASHBOARD_READ_RESPONSE_MAX_BYTES, 'body', false);
-  if (containsExecutableMarkup(body)) {
-    throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned executable markup.');
-  }
-  if (record.controller !== 'dashboard' && record.controller !== 'dispositions') {
-    throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
-  }
-  if (record.can_write !== expectedCanWrite) {
-    throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned mismatched control authority.');
-  }
-  const signature = boundedString(record.signature, 128, 'signature');
-  if (!Number.isInteger(record.poll_interval_ms)
-    || (record.poll_interval_ms as number) < 1_000
-    || (record.poll_interval_ms as number) > 300_000) {
-    throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
-  }
-  return {
-    status: record.status as number,
-    title,
-    body,
-    controller: record.controller,
-    can_write: expectedCanWrite,
-    signature,
-    poll_interval_ms: record.poll_interval_ms as number,
-    ...(record.scope_browser === undefined
-      ? {}
-      : { scope_browser: parseFolderScopeBrowseResult(record.scope_browser) }),
-  };
-}
-
-/** Shape-only; the worker re-validates every sender, label and window before saving. */
-function parseMailScopeDraftParam(value: unknown): OlympusMailScopeDraft {
-  const record = exactRecord(value, ['window', 'skipped_categories', 'skipped_labels', 'always_private_senders', 'skip_senders']);
-  const list = (entries: unknown, max: number, field: string): unknown[] => {
-    if (!Array.isArray(entries) || entries.length > max) {
-      throw new DashboardGatewayInvalidRequestError(`${field} must be an array of at most ${max} entries.`);
-    }
-    return entries;
-  };
-  return {
-    window: enumValue(record.window, ['6m', '1y', '2y', '5y', 'all'] as const, 'window'),
-    skipped_categories: list(record.skipped_categories, 5, 'skipped_categories').map((category) =>
-      enumValue(category, ['primary', 'social', 'promotions', 'updates', 'forums'] as const, 'skipped_categories[]')),
-    skipped_labels: list(record.skipped_labels, 500, 'skipped_labels').map((entry) => {
-      const label = exactRecord(entry, ['id', 'name']);
-      return {
-        id: boundedString(label.id, 256, 'skipped_labels[].id', false),
-        name: boundedString(label.name, 256, 'skipped_labels[].name', false),
-      };
-    }),
-    always_private_senders: list(record.always_private_senders, 500, 'always_private_senders')
-      .map((sender) => boundedString(sender, 320, 'always_private_senders[]', false)),
-    skip_senders: list(record.skip_senders, 500, 'skip_senders')
-      .map((sender) => boundedString(sender, 320, 'skip_senders[]', false)),
-  };
-}
-
-function parseFolderScopeBrowseResult(value: unknown): OlympusFolderScopeBrowseResult {
-  const record = exactRecord(value, [
-    'source_id', 'account_generation', 'scope_revision', 'status', 'nodes',
-    'next_cursor', 'selections', 'whole_account_selected',
-  ]);
-  if (record.status !== 'scope_pending' && record.status !== 'approved') {
-    throw new DashboardGatewayUnavailableError('Olympus folder scope status is invalid.');
-  }
-  if (!Array.isArray(record.nodes) || record.nodes.length > 1_000) {
-    throw new DashboardGatewayUnavailableError('Olympus folder scope nodes are invalid.');
-  }
-  const nodes = record.nodes.map((value): OlympusFolderScopeNode => {
-    const node = exactRecord(value, ['key', 'parent_key', 'name', 'kind', 'has_children', 'selectable']);
-    if (node.kind !== 'folder' || typeof node.has_children !== 'boolean' || typeof node.selectable !== 'boolean') {
-      throw new DashboardGatewayUnavailableError('Olympus folder scope node is invalid.');
-    }
-    const parentKey = optionalBoundedString(node.parent_key, 4_096, 'parent_key', false);
-    return {
-      key: boundedString(node.key, 4_096, 'key', false),
-      ...(parentKey ? { parent_key: parentKey } : {}),
-      name: boundedString(node.name, 1_024, 'name', false),
-      kind: 'folder',
-      has_children: node.has_children,
-      selectable: node.selectable,
-    };
-  });
-  if (!Array.isArray(record.selections) || record.selections.length > 100) {
-    throw new DashboardGatewayUnavailableError('Olympus folder scope selections are invalid.');
-  }
-  const selections = record.selections.map((value): OlympusSourceScopeSelection => {
-    const selection = exactRecord(value, ['key', 'state', 'ancestor_keys']);
-    if (selection.state !== 'ingest' && selection.state !== 'metadata_only' && selection.state !== 'exclude') {
-      throw new DashboardGatewayUnavailableError('Olympus folder scope selection is invalid.');
-    }
-    let ancestorKeys: string[] | undefined;
-    if (selection.ancestor_keys !== undefined) {
-      if (!Array.isArray(selection.ancestor_keys) || selection.ancestor_keys.length > 100) {
-        throw new DashboardGatewayUnavailableError('Olympus folder scope ancestry is invalid.');
-      }
-      ancestorKeys = selection.ancestor_keys.map((key) => boundedString(key, 4_096, 'ancestor_keys[]', false));
-    }
-    return {
-      key: boundedString(selection.key, 4_096, 'key', false),
-      state: selection.state,
-      ...(ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}),
-    };
-  });
-  if (typeof record.whole_account_selected !== 'boolean') {
-    throw new DashboardGatewayUnavailableError('Olympus whole-account scope state is invalid.');
-  }
-  const nextCursor = optionalBoundedString(record.next_cursor, 8_192, 'next_cursor', false);
-  return {
-    source_id: enumValue(record.source_id, ['google_drive.docs', 'dropbox.files'] as const, 'source_id'),
-    account_generation: boundedString(record.account_generation, 128, 'account_generation', false),
-    scope_revision: boundedString(record.scope_revision, 256, 'scope_revision', false),
-    status: record.status,
-    nodes,
-    ...(nextCursor ? { next_cursor: nextCursor } : {}),
-    selections,
-    whole_account_selected: record.whole_account_selected,
-  };
-}
-
-function containsExecutableMarkup(html: string): boolean {
-  return /<(?:script|style|iframe|object|embed|link|meta|base)\b/i.test(html)
-    || /\son[a-z]+\s*=/i.test(html)
-    || /\b(?:href|src)\s*=\s*["']?\s*javascript:/i.test(html);
-}
-
 function gatewayClientHasScope(client: GatewayClientLike | null, scope: 'operator.read' | 'operator.write'): boolean {
   if (!client || client.invalidated === true) return false;
   const scopes = Array.isArray(client.connect?.scopes) ? client.connect.scopes : [];
@@ -1081,17 +581,12 @@ function respondDashboardGatewayError(respond: GatewayRespond, error: unknown): 
   respond(false, undefined, { code: 'UNAVAILABLE', message });
 }
 
-function gatewayPublicOriginRequiredResult(): OlympusDashboardControlResult {
+/** Connect from OpenClaw with nowhere for the provider to send the person back to. */
+function gatewayPublicOriginRequiredResult(): Record<string, unknown> {
   return {
-    status: 409,
-    body: {
-      error: {
-        code: 'gateway_public_origin_required',
-        status: 409,
-        message: 'Set gateway.publicOrigin to the externally reachable Gateway origin before connecting an OAuth source from OpenClaw.',
-      },
-      policy: { guessed_browser_origin: false, arbitrary_return_to_accepted: false },
-    },
+    isError: true,
+    content: [{ type: 'text', text: 'Set gateway.publicOrigin to the externally reachable Gateway origin before connecting a source from OpenClaw.' }],
+    structuredContent: { error: 'gateway_public_origin_required' },
   };
 }
 
@@ -1207,38 +702,6 @@ function recordValue(value: unknown): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function boundedString(
-  value: unknown,
-  maxLength: number,
-  label: string,
-  trim = true,
-): string {
-  if (typeof value !== 'string') throw new DashboardGatewayInvalidRequestError(`${label} must be a string.`);
-  const normalized = trim ? value.trim() : value;
-  if (!normalized.trim() || normalized.length > maxLength || normalized.includes('\0')) {
-    throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
-  }
-  return normalized;
-}
-
-/** Free text that may be empty (the owner clearing their privacy description). */
-function boundedText(value: unknown, maxLength: number, label: string): string {
-  if (typeof value !== 'string' || value.length > maxLength || value.includes('\0')) {
-    throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
-  }
-  return value;
-}
-
-function optionalBoundedString(
-  value: unknown,
-  maxLength: number,
-  label: string,
-  trim = true,
-): string | undefined {
-  if (value === undefined) return undefined;
-  return boundedString(value, maxLength, label, trim);
 }
 
 function enumValue<const T extends readonly string[]>(value: unknown, values: T, label: string): T[number] {

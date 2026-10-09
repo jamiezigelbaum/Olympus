@@ -35,7 +35,6 @@ import {
 } from '../src/workers/source-scope-runtime.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { SourceScheduler } from '../src/workers/source-scheduler.ts';
-import { parseDashboardControlParams } from '../src/core/control-ui-gateway.ts';
 import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
 
 const NOW = new Date('2026-09-23T12:00:00.000Z');
@@ -373,25 +372,6 @@ describe('no Gmail ingestion before approval', () => {
     expect(response.status).toBe(state === 'approved' ? 200 : 403);
     expect(runs).toBe(state === 'approved' ? 1 : 0);
     worker.close();
-  });
-});
-
-describe('native gateway mail scope actions', () => {
-  test('browse and approve parse strictly and carry only the draft', () => {
-    const draft = mailScopeDraftView(undefined);
-    expect(parseDashboardControlParams({ action: 'browse_mail_scope', source_id: 'gmail.email', draft }))
-      .toEqual({ action: 'browse_mail_scope', source_id: 'gmail.email', draft });
-    expect(parseDashboardControlParams({
-      action: 'approve_mail_scope_and_start', source_id: 'gmail.email',
-      account_generation: 'a'.repeat(64), expected_scope_revision: 'missing:x', scope: draft,
-    })).toMatchObject({ action: 'approve_mail_scope_and_start', scope: draft });
-    expect(() => parseDashboardControlParams({ action: 'browse_mail_scope', source_id: 'dropbox.files', draft })).toThrow();
-    expect(() => parseDashboardControlParams({
-      action: 'browse_mail_scope', source_id: 'gmail.email', draft: { ...draft, extra: true },
-    })).toThrow('unknown field');
-    expect(() => parseDashboardControlParams({
-      action: 'browse_mail_scope', source_id: 'gmail.email', draft: { ...draft, skipped_categories: ['spam'] },
-    })).toThrow();
   });
 });
 

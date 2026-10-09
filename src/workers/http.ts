@@ -316,7 +316,7 @@ export function withWorkerBearerAuth(
 function isDashboardControlReadRoute(request: Request): boolean {
   if (request.method !== 'GET') return false;
   const path = new URL(request.url).pathname;
-  return path === '/dashboard/dispositions' || path === '/dashboard/dispositions.json';
+  return path === '/dashboard/dispositions.json';
 }
 
 /**
@@ -607,6 +607,8 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/agents/keys',
     '/dashboard/agents/revoke',
     '/dashboard/agents/remote-access',
+    // The panel's tools on the computer (dashboard-panel-tools.ts).
+    '/dashboard/tools/call',
   ]).has(new URL(request.url).pathname);
 }
 
@@ -909,8 +911,7 @@ function normalizeGatewayCallbackPeer(value: string): string {
 
 function isGatewayPublicOriginContextRoute(request: Request): boolean {
   const path = new URL(request.url).pathname;
-  return (request.method === 'GET' && path === '/dashboard/ui')
-    || (request.method === 'POST' && path === '/dashboard/connect/oauth/start');
+  return request.method === 'POST' && (path === '/dashboard/connect/oauth/start' || path === '/dashboard/tools/call');
 }
 
 function withGatewayPublicOriginContext(request: Request, origin: string | null): Request {

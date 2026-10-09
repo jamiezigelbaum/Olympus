@@ -19,7 +19,6 @@ import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/co
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { isV04PublicDashboardRoute, V0_4_PUBLIC_PACKAGE_FILES } from '../src/core/public-surface.ts';
 import { AGENT_INSTRUCTION_TEXT, AGENT_SKILL_PATH, agentSkillMarkdown } from '../src/core/agent-instructions.ts';
-import { requestDashboardControl, parseDashboardControlParams } from '../src/core/control-ui-gateway.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { AGENT_MINT_LIMIT, withWorkerBearerAuth } from '../src/workers/http.ts';
@@ -169,8 +168,8 @@ describe('agent control routes carry dashboard custody', () => {
     // Same store as `olympus connections`: the token verifies there.
     expect(store.verifyToken(body.token)).toMatchObject({ ok: true });
 
-    // The Setup page lists the connection and never carries the token.
-    const page = await guarded(new Request(`${ORIGIN}/dashboard?setup`, { headers: { Authorization: 'Bearer worker-secret' } }));
+    // The Agents page lists the connection and never carries the token.
+    const page = await guarded(new Request(`${ORIGIN}/dashboard?agents`, { headers: { Authorization: 'Bearer worker-secret' } }));
     const html = await page.text();
     expect(html).toContain(`data-agent-connection="${body.connection.id}"`);
     expect(html).not.toContain(body.token);
@@ -185,7 +184,7 @@ describe('agent control routes carry dashboard custody', () => {
     const revoked = await guarded(post('/dashboard/agents/revoke', { connection_id: body.connection.id }, custody));
     expect(revoked.status).toBe(200);
     expect(store.verifyToken(body.token)).toEqual({ ok: false, reason: 'revoked' });
-    const after = await (await guarded(new Request(`${ORIGIN}/dashboard?setup`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
+    const after = await (await guarded(new Request(`${ORIGIN}/dashboard?agents`, { headers: { Authorization: 'Bearer worker-secret' } }))).text();
     expect(after).not.toContain(`data-agent-connection="${body.connection.id}"`);
   });
 
@@ -291,33 +290,6 @@ describe('request validation', () => {
     expect(store.list()).toEqual([]);
   });
 
-  test('the Gateway bridge accepts exactly the agent actions and maps them to the routes', async () => {
-    expect(parseDashboardControlParams({ action: 'mint_agent_pairing_code' })).toEqual({ action: 'mint_agent_pairing_code' });
-    expect(parseDashboardControlParams({ action: 'create_agent_key', name: ' Muse ' })).toEqual({ action: 'create_agent_key', name: 'Muse' });
-    expect(() => parseDashboardControlParams({ action: 'create_agent_key', name: 'Muse', token: 'x' })).toThrow();
-    expect(() => parseDashboardControlParams({ action: 'revoke_agent_connection', connection_id: '../etc' })).toThrow();
-    const seen: Array<{ url: string; body: string }> = [];
-    const config = defaultConfig();
-    config.worker.authToken = 'worker-secret';
-    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-      seen.push({ url: String(url), body: String(init?.body) });
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    }) as typeof fetch;
-    const params: OlympusDashboardControlParams[] = [
-      { action: 'mint_agent_pairing_code' },
-      { action: 'create_agent_key', name: 'Muse' },
-      { action: 'revoke_agent_connection', connection_id: 'c'.repeat(18) },
-      { action: 'set_remote_access', enabled: true, accept_terms: { url: 'https://letsencrypt.org/documents/LE-SA-v1.6.pdf' } },
-    ];
-    for (const param of params) await requestDashboardControl({ params: param, config, fetchImpl });
-    expect(seen.map((entry) => new URL(entry.url).pathname)).toEqual([...DASHBOARD_AGENT_CONTROL_PATHS]);
-    expect(seen.map((entry) => JSON.parse(entry.body))).toEqual([
-      {},
-      { name: 'Muse' },
-      { connection_id: 'c'.repeat(18) },
-      { enabled: true, accept_terms: { url: 'https://letsencrypt.org/documents/LE-SA-v1.6.pdf' } },
-    ]);
-  });
 });
 
 describe('remote access follows the relay status', () => {
