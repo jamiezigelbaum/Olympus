@@ -442,7 +442,7 @@ export function chatgptDashboardClient(
     return host === 'olympusplugin.ai' || host === 'www.olympusplugin.ai' ? parsed.href : '';
   }
 
-  /** "How to fix this on your computer": the fix's help page, beside its control (not on the inline card). */
+  /** "Fix this on your computer": the fix's open page, beside its control (not on the inline card). */
   function howLink(fix: Any, key: string): HTMLElement | null {
     const href = helpHref(fix && fix.href);
     if (!href || compact()) return null;
@@ -1088,7 +1088,9 @@ export function chatgptDashboardClient(
     add(list, transcriptionItem(models));
     add(box, list);
     if (models.change) add(box, add(el('div', 'actions'), fixControl(models.change, 'models:change', 'plain', true)));
-    const installs = installLines(models);
+    // A failed search or private-model install is said once, in Needs you with
+    // its Try again; transcription has no Needs-you item, so its line stays.
+    const installs = installLines(models).filter((entry) => entry.state !== 'failed' || entry.which === 'transcription');
     if (!installs.length) return box;
     const wrap = add(el('div', 'models-wrap'), box);
     const lines = el('div', 'model-installs');

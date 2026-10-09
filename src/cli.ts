@@ -11,6 +11,8 @@ import { resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
 import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './core/dashboard-launch.ts';
+import { DASHBOARD_LAUNCH_OPEN_KEY, openTargetPath, openTargetToken, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
+import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
 import {
   deleteAllConfirmationPrompts,
   deleteOlympusDataWithCustody,
@@ -136,6 +138,7 @@ const PUBLIC_CLI_HELP_GROUPS = new Set([
   'data',
   'tier',
   'zkapi',
+  'open-handler',
 ]);
 
 async function main(): Promise<void> {
@@ -345,6 +348,36 @@ async function main(): Promise<void> {
       }
       throw error;
     }
+    return;
+  }
+
+  if (args[0] === 'open') {
+    // What the olympus:// handler runs. Never a state change: it only mints
+    // the same one-time opening link as `olympus dashboard` and opens it.
+    try {
+      const result = await runOpenCommand(args.slice(1));
+      console.log(JSON.stringify(result, null, 2));
+      if (!result.opened) process.exitCode = 1;
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
+  if (args[0] === 'open-handler') {
+    const action = args[1];
+    if (args.length !== 2 || (action !== 'install' && action !== 'uninstall' && action !== 'status')) {
+      console.error('Usage: olympus open-handler install|uninstall|status');
+      process.exit(2);
+    }
+    const result = action === 'install' ? installOpenHandler() : action === 'uninstall' ? uninstallOpenHandler() : openHandlerStatus();
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = 1;
     return;
   }
 
@@ -714,7 +747,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
   if (operation) return operation.cliHints.name;
 
   const [group, command] = commandArgs;
-  if (group === 'setup' || group === 'dashboard' || group === 'serve') return group;
+  if (group === 'setup' || group === 'dashboard' || group === 'serve' || group === 'open') return group;
   if (group === 'source' && command === 'extract-pdfs') return 'source extract-pdfs';
   if (
     group === 'sovereignty'
@@ -725,6 +758,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
     || group === 'data'
     || group === 'tier'
     || group === 'zkapi'
+    || group === 'open-handler'
   ) {
     return command ? `${group} ${command}` : undefined;
   }
@@ -1154,6 +1188,8 @@ function printHelp(): void {
   console.log('  olympus engine uninstall|status|start|stop|restart|rollback|logs');
   console.log('  olympus dashboard [--read-only] [--no-open]');
   console.log('  olympus dashboard token');
+  console.log('  olympus open olympus://open/<target>');
+  console.log('  olympus open-handler install|uninstall|status');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -1204,6 +1240,10 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections revoke': 'olympus connections revoke <id>',
   'connections status': 'olympus connections status',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
+  open: 'olympus open olympus://open/<target>',
+  'open-handler install': 'olympus open-handler install',
+  'open-handler uninstall': 'olympus open-handler uninstall',
+  'open-handler status': 'olympus open-handler status',
   'source extract-pdfs': 'olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
@@ -1305,6 +1345,13 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Usage: olympus zkapi <command>',
     'Commands:',
     '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
+  ],
+  'open-handler': [
+    'Usage: olympus open-handler <command>',
+    'Commands:',
+    '  olympus open-handler install     Let olympus:// links open the Olympus dashboard on this computer',
+    '  olympus open-handler uninstall   Remove that link handler',
+    '  olympus open-handler status      Say whether it is installed',
   ],
 };
 
@@ -1603,7 +1650,9 @@ async function runWorkerCommand(args: string[]): Promise<void> {
   if (command === 'install' || command === 'upgrade') {
     const parsed = parseWorkerInstallArgs(command, args.slice(1));
     const options = command === 'install' ? withWorkerInstallAuth(parsed) : parsed;
-    console.log(JSON.stringify(runWorkerLifecycle(command, options), null, 2));
+    const result = runWorkerLifecycle(command, options);
+    const handler = command === 'install' && !options.dryRun ? linuxDesktopOpenHandler('install', options) : undefined;
+    console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
   if (['status', 'start', 'stop', 'restart', 'uninstall'].includes(command)) {
@@ -1623,10 +1672,28 @@ async function runWorkerCommand(args: string[]): Promise<void> {
       }, null, 2));
       return;
     }
-    console.log(JSON.stringify(result, null, 2));
+    const handler = command === 'uninstall' ? linuxDesktopOpenHandler('uninstall', actionOptions) : undefined;
+    console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
   throw new OperationError('invalid_params', `Unknown worker command: ${command}`);
+}
+
+/**
+ * On a Linux desktop the worker service is how Olympus runs, so the
+ * olympus:// link handler comes and goes with it (macOS's comes with
+ * `olympus engine install`). A headless host (no display) gets none on
+ * install; uninstall always removes one that is there.
+ */
+function linuxDesktopOpenHandler(
+  action: 'install' | 'uninstall',
+  options: { platform?: WorkerServicePlatform; homeDir?: string },
+): OpenHandlerResult | undefined {
+  if ((options.platform ?? process.platform) !== 'linux') return undefined;
+  const handlerOptions = { platform: 'linux', ...(options.homeDir ? { homeDir: options.homeDir } : {}) };
+  if (action === 'uninstall') return uninstallOpenHandler(handlerOptions);
+  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return undefined;
+  return installOpenHandler(handlerOptions);
 }
 
 export async function runWorkerForeground(options: {
@@ -2667,6 +2734,8 @@ export interface DashboardCommandDependencies {
   openImpl?: (url: string) => boolean;
   /** Mint and return the link without consuming it in a local browser. */
   noOpen?: boolean;
+  /** Where the opened dashboard lands (an `olympus://` link's target); the plain dashboard when absent. */
+  target?: OpenTarget;
 }
 
 const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
@@ -2716,6 +2785,29 @@ export async function runDashboardCommand(
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
         + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
   };
+}
+
+/**
+ * `olympus open <link>`: what the olympus:// handler runs (core/open-handler.ts).
+ *
+ * The link only ever chooses WHERE the dashboard opens, from a closed list
+ * (core/open-targets.ts); an unknown `olympus:` link opens the plain
+ * dashboard, and anything else opens nothing. The rest is exactly
+ * `olympus dashboard`: a fresh single-use ticket from this install's own
+ * worker, opened in the default browser. It changes no setting, starts no
+ * sign-in and submits nothing; the page it opens only shows a panel.
+ */
+export async function runOpenCommand(
+  args: string[],
+  dependencies: Omit<DashboardCommandDependencies, 'target' | 'noOpen'> = {},
+): Promise<{ opened: boolean; target?: string; reason?: string }> {
+  if (args.length !== 1) {
+    throw new OperationError('invalid_params', 'olympus open takes exactly one olympus:// link.', 'Usage: olympus open olympus://open/dashboard');
+  }
+  const target = parseOlympusOpenUrl(args[0]);
+  if (!target) return { opened: false, reason: 'not_an_olympus_link' };
+  const result = await runDashboardCommand({ ...dependencies, target });
+  return { opened: result.opened, target: openTargetPath(target) };
 }
 
 /**
@@ -2855,7 +2947,9 @@ async function mintDashboardOpeningUrl(
       'This worker predates the standalone opening handoff; upgrade it, then run this again.',
     );
   }
-  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`;
+  const openToken = dependencies.target ? openTargetToken(dependencies.target) : undefined;
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`
+    + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : '');
 }
 
 /** Open in the desktop browser. Bun.spawnSync rather than a shell, always. */

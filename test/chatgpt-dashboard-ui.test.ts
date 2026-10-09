@@ -314,8 +314,8 @@ describe('connection states', () => {
 });
 
 describe('ready page', () => {
-  test('a fix only the computer can make links its help page beside the control: How to fix this on your computer', () => {
-    const help = (section: string) => `https://olympusplugin.ai/help/on-your-computer/#${section}`;
+  test('a fix only the computer can make links its open page beside the control: Fix this on your computer', () => {
+    const help = (section: string) => `https://olympusplugin.ai/open/fix/${section}/`;
     const host = mount({ openai: {} });
     host.push({ structuredContent: model({
       needsYou: [{ id: 'search', sentence: 'Search has stopped working on your computer.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {}, href: help('search') } }],
@@ -327,7 +327,7 @@ describe('ready page', () => {
     }) });
     const links = host.buttons().filter((node) => node.className === 'btn link');
     expect(links.map((node) => node.textContent)).toEqual([DASHBOARD_CHATGPT_PAGE_COPY.howOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howOnMac]);
-    expect(DASHBOARD_CHATGPT_PAGE_COPY.howOnMac).toBe('How to fix this on your computer');
+    expect(DASHBOARD_CHATGPT_PAGE_COPY.howOnMac).toBe('Fix this on your computer');
     // Check again still runs its tool; the link sits beside it.
     expect(host.button('Check again').disabled).toBe(false);
     links[0]!.click();
@@ -689,19 +689,16 @@ describe('ready page', () => {
       expect(host.win.document.querySelector('.model-install .bar')!.getAttribute('aria-valuenow')).toBe('70');
     });
 
-    test('a failed install says why, the summary says Needs you, and no second fix button appears', () => {
-      const reasons: Array<[string | undefined, string]> = [
-        ['disk_full', 'the disk is full'], ['network', 'the connection dropped'], ['checksum', 'the download was damaged'],
-        ['unknown', 'something went wrong'], [undefined, 'something went wrong'], ['surprise', 'something went wrong'],
-      ];
-      for (const [reason, words] of reasons) {
+    test('a failed install is said once, in Needs you: the summary says Needs you, Models repeats no line and no fix', () => {
+      const reasons: Array<string | undefined> = ['disk_full', 'network', 'checksum', 'unknown', undefined, 'surprise'];
+      for (const reason of reasons) {
         const host = mount();
         host.push({ structuredContent: withModels({
           embedding: { kind: 'built_in', state: 'ready' },
           answers: { kind: 'built_in', label: 'Built-in', ready: false, install: { state: 'failed', failedReason: reason } },
         }) });
         expect(summary(host)).toBe('Models — Built-in · Needs you');
-        expect(lines(host)).toEqual([`Couldn't download the private model: ${words}`]);
+        expect(lines(host)).toEqual([]);
         expect(host.win.document.querySelectorAll('.models-wrap button').length).toBe(0);
         expect(host.win.document.querySelector('.model-install .bar')).toBeNull();
       }

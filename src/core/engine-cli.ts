@@ -26,6 +26,7 @@ import {
   type EngineExec,
   type EngineHealthDeps,
 } from './engine-service.ts';
+import { installOpenHandler, uninstallOpenHandler, type OpenHandlerOptions, type OpenHandlerResult } from './open-handler.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
 import { readRemoteAccessStatus, relayProcessRunning, remoteAccessDirForCli, resolveRemoteAccessMode } from './remote-access.ts';
@@ -52,7 +53,18 @@ export interface EngineCliDeps {
   openclawPath?: () => string | undefined;
   /** Test seam for the post-install health proof. */
   health?: EngineHealthDeps;
+  /**
+   * The olympus:// link handler (open-handler.ts), installed beside the agent
+   * and removed with it. A caller that injects `exec` (a test) gets no handler
+   * unless it passes this too, so a fake launchctl never builds an applet.
+   */
+  openHandler?: {
+    install(options: OpenHandlerOptions): OpenHandlerResult;
+    uninstall(options: OpenHandlerOptions): OpenHandlerResult;
+  };
 }
+
+const DEFAULT_OPEN_HANDLER = { install: installOpenHandler, uninstall: uninstallOpenHandler };
 
 export async function runEngineCommand(args: string[], deps: EngineCliDeps = {}): Promise<unknown> {
   const [command, ...rest] = args;
@@ -66,8 +78,16 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     const options = parseInstallArgs(rest);
     const result = await installEngineVerified({ ...service, ...options, ...(deps.health ? { health: deps.health } : {}) });
     const { plist, ...summary } = result;
+    // The link handler never decides whether the install worked: a handler
+    // that could not be built is a warning, and the Terminal fallback stays.
+    const handler = options.dryRun ? undefined : openHandlerFor(deps)?.install({
+      ...openHandlerOptions(deps, service),
+      program: { runtimePath: result.program.runtimePath, entryPath: result.program.entryPath },
+    });
+    if (handler && !handler.ok) summary.warnings.push(`olympus:// links will not open Olympus: ${handler.detail ?? 'the link handler could not be installed.'}`);
     return {
       ...summary,
+      ...(handler ? { open_handler: handler } : {}),
       ...(options.dryRun ? { plist } : {}),
       next: result.action === 'dry_run'
         ? 'Rerun without --dry-run to write and load the agent.'
@@ -81,7 +101,9 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
   }
   if (command === 'uninstall') {
     expectNoArgs('uninstall', rest);
-    return uninstallEngine(service);
+    const result = uninstallEngine(service);
+    const handler = openHandlerFor(deps)?.uninstall(openHandlerOptions(deps, service));
+    return handler ? { ...result, open_handler: handler } : result;
   }
   if (command === 'restart') {
     expectNoArgs('restart', rest);
@@ -112,6 +134,18 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     return readEngineLogs({ ...(deps.homeDir ? { homeDir: deps.homeDir } : {}), lines: options.lines });
   }
   throw new OperationError('invalid_params', `Unknown engine command: ${command ?? ''}`.trim(), 'Run olympus engine --help.');
+}
+
+function openHandlerFor(deps: EngineCliDeps): EngineCliDeps['openHandler'] {
+  return deps.openHandler ?? (deps.exec ? undefined : DEFAULT_OPEN_HANDLER);
+}
+
+function openHandlerOptions(deps: EngineCliDeps, service: { homeDir?: string; platform?: string }): OpenHandlerOptions {
+  return {
+    ...(service.homeDir ? { homeDir: service.homeDir } : {}),
+    ...(service.platform ? { platform: service.platform } : {}),
+    ...(deps.env ? { env: deps.env } : {}),
+  };
 }
 
 /** Everything a person needs to know about this install, with OpenClaw absent or present. */

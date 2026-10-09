@@ -2,6 +2,18 @@
 
 ## 1.0.0-rc.3 - unreleased
 
+- **"Do this on your computer" opens Olympus there, with no Terminal step.**
+  Connect for X bookmarks, Readwise, Telegram and WhatsApp, and every "Fix
+  this on your computer" link in ChatGPT, open an olympusplugin.ai/open/ page
+  that opens Olympus on the computer at that source's Connect panel (or
+  Models) through a new `olympus://` link handler, which `olympus engine
+  install` sets up (`olympus open-handler install|uninstall|status` by hand;
+  the uninstaller removes it). A link only opens a page; it changes nothing.
+  The page keeps the two steps by hand for a phone or an older install.
+- **A full disk says how much to free.** A model download that failed for
+  space reads "Free up 3 GB, then Try again", and Models no longer repeats
+  the Needs-you line.
+
 - **A first question before anything is connected says so.** With no source
   connected, an empty `olympus_search` tells ChatGPT nothing is connected yet
   and how to connect one, instead of "no evidence in 4 searched sources".

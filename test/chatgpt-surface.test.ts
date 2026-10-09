@@ -126,10 +126,11 @@ describe('dashboard view-model producer', () => {
       tool: DASHBOARD_TOOL_NAME,
       args: {},
       disabledReason: 'Change models in Olympus on your computer.',
-      // Review 2026-10-02 #16: the repair is named, not only refused.
-      href: 'https://olympusplugin.ai/help/on-your-computer/#models',
+      // Review 2026-10-02 #16: the repair is named, not only refused; since
+      // option C (2026-10-09) the link opens Olympus on the computer there.
+      href: 'https://olympusplugin.ai/open/fix/models/',
     });
-    expect(copyDashboardViewModel(vm).models.change!.href).toBe('https://olympusplugin.ai/help/on-your-computer/#models');
+    expect(copyDashboardViewModel(vm).models.change!.href).toBe('https://olympusplugin.ai/open/fix/models/');
     expect(vm.needsYou).toEqual([]);
     expect(vm.progress).toBeUndefined();
     expect(vm.generatedAt).toBe(NOW.toISOString());
@@ -466,10 +467,10 @@ describe('dashboard view-model producer', () => {
       expect(fix.args).toBeDefined();
       expect(fix.label).not.toBe('Open Olympus on your computer');
     }
-    // A repair only the Mac can make names its help section beside the control.
-    const help = 'https://olympusplugin.ai/help/on-your-computer/';
-    expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary!.href).toBe(`${help}#connect`);
-    expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix.href).toBe(`${help}#reconnect`);
+    // A repair only the computer can make opens Olympus there, at that source.
+    const open = 'https://olympusplugin.ai/open/';
+    expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary!.href).toBe(`${open}connect/x/`);
+    expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix.href).toBe(`${open}connect/readwise/`);
     expect(vm.needsYou.find((item) => item.id === 'source:gmail.email')!.fix.href).toBeUndefined();
     expect(copyDashboardViewModel(vm)).toEqual(vm);
   });
@@ -485,7 +486,7 @@ describe('dashboard view-model producer', () => {
 
   test('a failed built-in install says why in install words and retries with olympus_model_retry', () => {
     const cases = [
-      ['disk_full', 'the disk is full.'],
+      ['disk_full', 'the disk is full. Free up some space, then Try again.'],
       ['network', 'the network dropped.'],
       ['checksum', 'the download was damaged.'],
     ] as const;
@@ -512,10 +513,42 @@ describe('dashboard view-model producer', () => {
     // A custom model that stopped is not an install: it keeps the generic sentence.
     const custom = buildChatGptDashboardViewModel(view([card('gmail.email')]), { now: NOW, embedding: { kind: 'custom', state: 'failed' } });
     expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.sentence).toBe('Search has stopped working on your computer.');
-    // Check again, plus the help section naming the repair on the Mac.
+    // Check again, plus the link that opens Olympus on the computer at the repair.
     expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.fix).toEqual({
-      label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://olympusplugin.ai/help/on-your-computer/#search',
+      label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://olympusplugin.ai/open/fix/search/',
     });
+  });
+
+  test('a full disk says how much to free, then Try again, with no help link', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('gmail.email')]), {
+      now: NOW,
+      embedding: { kind: 'built_in', state: 'failed', failedReason: 'disk_full', bytesDone: 25e6, bytesTotal: 225e6 },
+      privateModel: { state: 'failed', failedReason: 'disk_full', spaceToFreeBytes: 2.6e9 },
+    });
+    const items = vm.needsYou.filter((item) => item.id.startsWith('model:'));
+    expect(items.map((item) => item.sentence)).toEqual([
+      'Couldn\'t download the search model: the disk is full. Free up 200 MB, then Try again.',
+      'Couldn\'t download the private model: the disk is full. Free up 3 GB, then Try again.',
+    ]);
+    for (const item of items) {
+      expect(item.fix.label).toBe('Try again');
+      expect(item.fix.href).toBeUndefined();
+    }
+  });
+
+  test('every source set up on the computer opens Olympus there, at its own Connect', () => {
+    const vm = buildChatGptDashboardViewModel(view([
+      offCard('x.bookmarks'), offCard('readwise.library'), offCard('telegram.messages'), offCard('whatsapp.personal.messages'),
+    ]), { now: NOW });
+    const hrefs = Object.fromEntries(vm.sources.map((source) => [source.id, [source.primary?.href, source.primary?.openHref]]));
+    expect(hrefs).toEqual({
+      'x.bookmarks': ['https://olympusplugin.ai/open/connect/x/', true],
+      'readwise.library': ['https://olympusplugin.ai/open/connect/readwise/', true],
+      'telegram.messages': ['https://olympusplugin.ai/open/connect/telegram/', true],
+      'whatsapp.personal.messages': ['https://olympusplugin.ai/open/connect/whatsapp/', true],
+    });
+    // The panel's sanitizer keeps them: olympusplugin.ai, https.
+    expect(copyDashboardViewModel(vm).sources.map((source) => source.primary?.href)).toEqual(vm.sources.map((source) => source.primary?.href));
   });
 
   test('cards off the product roster and model lanes never appear', () => {

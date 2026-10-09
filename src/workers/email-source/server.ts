@@ -1,4 +1,4 @@
-import { modelInstallFailedReason } from '../../core/model-install-failure.ts';
+import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import {
@@ -4735,12 +4735,16 @@ export async function main(): Promise<void> {
     if (!workerBuiltInModel) return undefined;
     const status = builtInPrivateModelStatus(process.env);
     if (!status.enabled) return undefined;
+    const spaceToFree = status.state === 'failed' && modelInstallFailedReason(status.failure) === 'disk_full'
+      ? modelInstallSpaceToFree(status)
+      : undefined;
     return {
       state: status.state,
       percent: status.percent,
       bytesDone: status.bytesDone,
       bytesTotal: status.bytesTotal,
       ...(status.state === 'failed' ? { failedReason: modelInstallFailedReason(status.failure) } : {}),
+      ...(spaceToFree !== undefined ? { spaceToFreeBytes: spaceToFree } : {}),
     };
   };
   // The built-in transcription model, where it is this machine's transcriber

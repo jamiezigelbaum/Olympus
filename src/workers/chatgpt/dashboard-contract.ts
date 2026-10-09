@@ -37,10 +37,11 @@ export interface DashboardFix {
   args?: Record<string, unknown>;
   /**
    * olympusplugin.ai only: openExternal needs the plugin's redirect domains.
-   * Beside a tool, it is the help page naming a repair only the computer can
-   * make (help/on-your-computer/#connect, #reconnect, #answers, #search,
-   * #models; the old help/on-your-mac/ address redirects): the UI links it
-   * next to the control ("How to fix this on your computer").
+   * Beside a tool, it is the page for a repair only the computer can make:
+   * since 2026-10-09 the /open/ page that opens Olympus on the computer
+   * there (open/connect/<source>/, open/fix/<section>/; core/open-targets.ts),
+   * which falls back to help/on-your-computer/. The UI links it next to the
+   * control ("Fix this on your computer").
    */
   href?: string;
   /**

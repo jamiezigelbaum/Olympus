@@ -1656,6 +1656,61 @@ function mountDashboardController(options) {
       options.navigate(href);
     }
   }
+  function applyOpenTarget() {
+    const view2 = root.ownerDocument.defaultView;
+    if (!view2 || !view2.location.hash.startsWith("#olympus-open="))
+      return;
+    const wanted = view2.location.hash.slice("#olympus-open=".length);
+    try {
+      view2.history.replaceState(null, "", view2.location.pathname + view2.location.search);
+    } catch {}
+    const sources = {
+      "connect.x": "x.bookmarks",
+      "connect.readwise": "readwise.library",
+      "connect.telegram": "telegram.messages",
+      "connect.whatsapp": "whatsapp.personal.messages"
+    };
+    let focus = null;
+    const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
+    if (sourceId) {
+      const row = queryAll("[data-dashboard-href]").find((candidate) => {
+        const href = candidate.dataset.dashboardHref || "";
+        return new URLSearchParams(href.slice(href.indexOf("?") + 1)).get("source") === sourceId;
+      });
+      if (row) {
+        const toggle = row.querySelector("[data-sheet-toggle]");
+        const selector = toggle ? toggle.dataset.sheetToggle || "" : "";
+        const sheet = /^#[A-Za-z0-9_-]+$/.test(selector) ? query(selector) : null;
+        if (sheet) {
+          queryAll(".sheet.on").forEach((other) => {
+            if (other !== sheet)
+              setSheetOpen(other, false);
+          });
+          setSheetOpen(sheet, true);
+          if (!sheet.hasAttribute("tabindex"))
+            sheet.setAttribute("tabindex", "-1");
+          focus = sheet;
+        } else {
+          focus = row.querySelector("button:not([disabled]),a[href]") || row;
+        }
+      }
+    } else if (wanted === "fix.models" || wanted === "fix.answers" || wanted === "fix.search") {
+      const models = query("details.models");
+      if (models) {
+        models.open = true;
+        focus = models.querySelector("summary");
+      }
+    } else if (wanted === "fix.connect" || wanted === "fix.reconnect") {
+      focus = query(".srow,.setrow");
+      if (focus && !focus.hasAttribute("tabindex"))
+        focus.setAttribute("tabindex", "-1");
+    }
+    if (!focus)
+      return;
+    if (typeof focus.scrollIntoView === "function")
+      focus.scrollIntoView({ block: "center" });
+    focus.focus();
+  }
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
   root.addEventListener("input", onPrivacyInput);
@@ -1675,6 +1730,7 @@ function mountDashboardController(options) {
   view.addEventListener("focus", refreshOnReturn);
   root.ownerDocument.addEventListener("visibilitychange", onVisibilityReturn);
   applyWriteCapability();
+  applyOpenTarget();
   restartPoll();
   const dispose = () => {
     if (disposed)

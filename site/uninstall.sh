@@ -8,8 +8,10 @@
 #   - stops Olympus with launchctl and removes its login item
 #     (~/Library/LaunchAgents/ai.olympusplugin.engine.plist), but only once
 #     launchd confirms it no longer has the agent;
+#   - takes the olympus:// link handler (Olympus.app in the folder below)
+#     out of LaunchServices, so olympus:// links stop opening anything;
 #   - deletes ~/Library/Application Support/Olympus (the app, the previous
-#     app and the Bun runtime the installer downloaded);
+#     app, the link handler and the Bun runtime the installer downloaded);
 #   - deletes ~/.local/bin/olympus when the installer wrote it, and the one
 #     PATH line the installer added to ~/.zprofile or ~/.bash_profile.
 #
@@ -131,6 +133,9 @@ main() {
   PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
   LOGDIR="$HOME/Library/Logs/Olympus"
   LAUNCHER="$HOME/.local/bin/olympus"
+  # The olympus:// link handler `olympus engine install` builds (src/core/open-handler.ts).
+  HANDLER="$SUPPORT/Olympus.app"
+  LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
   # The engine's record of the helper processes it started (as it runs, with HOME only).
   CHILDREN="$HOME/.local/share/openclaw/olympus/engine/children.json"
 
@@ -154,7 +159,12 @@ main() {
     step "Some Olympus helper processes may still be running; log out or restart the Mac to clear them."
   fi
 
-  # 2. Remove the app, the runtime and the command.
+  # 2. Forget the olympus:// link handler, then remove the app, the runtime
+  #    and the command. lsregister is macOS's own; a missing one is not fatal.
+  if [ ! -L "$SUPPORT" ] && [ -d "$HANDLER" ] && [ -x "$LSREGISTER" ]; then
+    "$LSREGISTER" -u "$HANDLER" >/dev/null 2>&1 || true
+    step "Removed the olympus:// link handler."
+  fi
   if [ -L "$SUPPORT" ]; then
     rm -f "$SUPPORT"
     step "Deleted the link $SUPPORT."

@@ -879,7 +879,10 @@ export function dashboardModelsSection(
   options?: DashboardRowOptions,
 ): string {
   const models = states.models;
-  const installs = modelInstallLines(states);
+  // A failed search or private-model install is said once, in Needs you with
+  // its Try again; Models keeps the downloads under way (its summary still
+  // says Needs you). Transcription has no Needs-you item, so its line stays.
+  const installs = modelInstallLines(states).filter((line) => line.state !== 'failed' || line.which === 'transcription');
   const summary = dashboardModelsSummary(states, view);
   const open = view.model_setup !== undefined && !view.model_setup.ready;
   const search = `${models.embedding.kind === 'built_in' ? C.modelBuiltIn : C.modelCustom} · ${modelStateWord(models.embedding.state)}`;

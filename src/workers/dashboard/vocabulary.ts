@@ -1271,6 +1271,9 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
       unknown: 'Couldn\'t download the private model.',
     },
   },
+  /** After a disk-full install failure: how much to free, then the item's own Try again. */
+  diskFreeUp: 'Free up {size}, then Try again.',
+  diskFreeUpUnknown: 'Free up some space, then Try again.',
   fixOnMac: 'Open Olympus on your computer to fix this.',
   privateMatches: 'Some matching items are private and stay on your computer.',
   changeModelsOnMac: 'Change models in Olympus on your computer.',
@@ -1438,7 +1441,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   linkExpires: 'link expires in {n} min',
   linkExpired: 'link expired',
   /** Beside a control whose fix only the Mac can make: the fix's olympusplugin.ai help page. */
-  howOnMac: 'How to fix this on your computer',
+  howOnMac: 'Fix this on your computer',
   /** A source that is not moving and whose reason the engine did not send (never a blank row). */
   sourcePaused: 'Paused',
   /**
