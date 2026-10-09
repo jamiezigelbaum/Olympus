@@ -1028,10 +1028,24 @@ export function dashboardManualSyncPendingLine(label: string): string {
   return `Checking ${label}…`;
 }
 
+/** A Sync now press that found a sync of this source already running, so started nothing new. */
+export function dashboardManualSyncBusyLine(label: string): string {
+  return `Already checking ${label}`;
+}
+
+/**
+ * A Sync now pressed again within a minute of the last one (2026-10-09): the
+ * press starts nothing, and says why.
+ */
+export function dashboardManualSyncTooSoonLine(label: string): string {
+  return `${label} was checked a moment ago — try again in a minute`;
+}
+
 /**
  * What the last Sync now press found, while the card still carries it
  * (DASHBOARD_MANUAL_SYNC_SHOWN_MS): "Checked just now — no new files",
- * "Checked 3m ago — 12 new files, reading them now". Never provider text.
+ * "Checked 3m ago — 12 new files, reading them now". While the press's sync
+ * still runs: "Checking Dropbox…". Never provider text.
  */
 export function dashboardManualSyncLine(
   source: Pick<DashboardSourceCard, 'label' | 'family' | 'last_manual_sync'>,
@@ -1044,8 +1058,10 @@ export function dashboardManualSyncLine(
   const elapsed = now.getTime() - at;
   const when = elapsed < 60_000 ? 'just now' : dashboardRelativeFromMs(elapsed);
   switch (sync.outcome) {
+    case 'checking':
+      return dashboardManualSyncPendingLine(source.label);
     case 'busy':
-      return `Already checking ${source.label}`;
+      return dashboardManualSyncBusyLine(source.label);
     case 'failed':
       return when === 'just now'
         ? dashboardManualSyncFailedLine(source.label)
@@ -1425,6 +1441,14 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   howOnMac: 'How to fix this on your computer',
   /** A source that is not moving and whose reason the engine did not send (never a blank row). */
   sourcePaused: 'Paused',
+  /**
+   * Sync now, pressed (2026-10-09): the control while its sync runs, and the
+   * row's line until the dashboard's next read says the same ("Checking
+   * Dropbox…", dashboardManualSyncPendingLine). The result line after it is
+   * the engine's own (dashboardManualSyncLine), the same on both surfaces.
+   */
+  syncChecking: 'Checking…',
+  syncCheckingLine: dashboardManualSyncPendingLine('{source}'),
 } as const;
 
 /**
@@ -1434,6 +1458,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
  */
 export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   connect: 'Connect',
+  syncNow: 'Sync now',
   chooseFolders: 'Choose folders',
   chooseMail: 'Choose mail',
   disconnect: 'Disconnect',

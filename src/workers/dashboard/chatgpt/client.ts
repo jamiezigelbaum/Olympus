@@ -30,6 +30,11 @@ import type {
 
 export interface ChatGptDashboardClientConfig {
   toolName: string;
+  /**
+   * Sync now's tool (olympus_sync_source). It answers at once; the row says
+   * "Checking …" until the dashboard's `lastManualSync` carries the result.
+   */
+  syncTool: string;
   connection: typeof DASHBOARD_CHATGPT_CONNECTION_COPY;
   page: typeof DASHBOARD_CHATGPT_PAGE_COPY;
   statusTone: Record<DashboardStatus, DashboardStatusColorToken>;
@@ -96,6 +101,8 @@ export function chatgptDashboardClient(
     privacyRules: number;
     /** The fixed sentence of the last action's error, beside the control with this key. */
     actionError: { key: string; text: string } | null;
+    /** Sources whose Sync now was pressed and whose `checking` the page has not read back yet. */
+    syncPressed: Record<string, boolean>;
   } = {
     data: null,
     relayDown: false,
@@ -109,6 +116,7 @@ export function chatgptDashboardClient(
     notice: '',
     privacyRules: -1,
     actionError: null,
+    syncPressed: {},
   };
 
   // ---- host bridge -------------------------------------------------------
@@ -233,6 +241,8 @@ export function chatgptDashboardClient(
     if (isDashboard(content)) {
       state.data = content;
       state.relayDown = false;
+      // The engine's own `lastManualSync` now says whether a press is still checking.
+      if (!state.busy) state.syncPressed = {};
       // Any good dashboard, from any path, ends a failure streak.
       refreshFailures = 0;
       redraw();
@@ -272,6 +282,11 @@ export function chatgptDashboardClient(
       }
       const failed = inlineError(result);
       if (failed) {
+        if (name === config.syncTool) {
+          state.syncPressed = {};
+          // Pressed from the ⋯ menu, which closed: open it again so the reason shows beside Sync now.
+          if (key.indexOf('menu:') === 0) state.open[key.slice(0, key.lastIndexOf(':'))] = true;
+        }
         state.actionError = { key, text: failed };
         render(key);
         return;
@@ -280,6 +295,7 @@ export function chatgptDashboardClient(
       if (!state.relayDown && name !== config.toolName) refresh();
     }, () => {
       if (state.busy === key) state.busy = '';
+      if (name === config.syncTool) state.syncPressed = {};
       if (mine === generation) state.relayDown = true;
       redraw();
     });
@@ -477,6 +493,14 @@ export function chatgptDashboardClient(
         state.confirming = '';
         picker!.start(fix, source ? source.id : '', source ? source.label : '', key);
       };
+    } else if (fix.tool === config.syncTool && source) {
+      // Sync now: "Checking…" on the row at once; the sync's result arrives
+      // with a later read of the dashboard, never in this call's answer.
+      action = () => {
+        state.syncPressed[source.id] = true;
+        state.open['menu:' + source.id] = false;
+        callTool(fix.tool, fix.args || {}, key);
+      };
     } else if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
       // No tool, only a help page: the control is the link to it.
@@ -649,11 +673,19 @@ export function chatgptDashboardClient(
     const progress = sourceProgress(source);
     const stalledWords = progress ? stalledSentence(progress, source) : '';
     const detail = typeof source.detail === 'string' && source.detail ? source.detail : '';
+    const checking = syncChecking(source);
+    // What the last Sync now found leads the row while the engine carries it
+    // (about ten minutes): its line is the engine's `detail` then.
+    const manual = !checking && !source.connecting && syncResult(source) && !!detail;
     if (source.connecting) {
       // Waiting for sign-in: what is happening, and how long the link stays good.
       meta.push(capitalise(detail || (item ? itemReason(item, source) : '')));
       const expires = linkExpiry(source.connecting.expiresAt);
       if (expires) meta.push(expires);
+    } else if (checking) {
+      meta.push(fill(P.syncCheckingLine, { source: String(source.label || '') }));
+    } else if (manual) {
+      meta.push(capitalise(detail));
     } else if (progress) {
       // The bar and its sentence say what is happening; the line keeps only the last sync.
     } else if (item) meta.push(capitalise(itemReason(item, source)));
@@ -663,22 +695,30 @@ export function chatgptDashboardClient(
     // the detail then. Said once: when the engine's own line already says when
     // it synced, the page adds no second "Synced …" (it once printed
     // "synced 1h ago · Synced 1 hr ago").
-    if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt) && !source.connecting && !progress && !saysSynced(detail)) {
+    if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt) && !source.connecting && !progress && !checking && !manual && !saysSynced(detail)) {
       meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
     }
     const shown = meta.filter((part) => !!part);
     if (shown.length) add(main, el('p', 'muted', shown.join(' · ')));
-    if (progress) add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
+    // While a press checks, or its result is the row's line, a pause sentence
+    // under it would contradict it: only a moving bar stays.
+    if (progress && !((checking || manual) && progress.stalled)) {
+      add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
+    }
     add(row, main);
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
     // Row buttons are all outlined; the accent belongs to the page's one primary action.
     // One fix per row: the Needs-you fix when there is one, else the source's own.
     const fix = item && item.fix ? item.fix : source.primary;
-    if (fix) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
-    // The ⋯ menu keeps only secondary actions, never a copy of the row's fix.
+    const isSync = (entry: Any) => !!entry && entry.tool === config.syncTool;
+    if (fix && !(checking && isSync(fix))) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
+    // A press still checking: its button says so, disabled, in the row's place.
+    if (checking) add(controls, checkingControl('primary:' + id));
+    // The ⋯ menu keeps only secondary actions, never a copy of the row's fix,
+    // and no second Sync now while one is checking.
     const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry: Any) =>
-      !fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool);
+      (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
     let menuBox: HTMLElement | null = null;
     if (menu.length) {
       const glyph = el('span', '', '⋯');
@@ -699,6 +739,27 @@ export function chatgptDashboardClient(
       add(row, menuBox);
     }
     return row;
+  }
+
+  /** Sync now was pressed and its sync has not finished: pressed here, or `checking` on the engine. */
+  function syncChecking(source: Any): boolean {
+    if (!source || source.connecting) return false;
+    if (state.syncPressed[String(source.id)]) return true;
+    const manual = source.lastManualSync;
+    return !!manual && typeof manual === 'object' && manual.outcome === 'checking';
+  }
+
+  /** The source carries a finished Sync now result (checked, failed or busy). */
+  function syncResult(source: Any): boolean {
+    const manual = source && source.lastManualSync;
+    return !!manual && typeof manual === 'object' && ['checked', 'failed', 'busy'].indexOf(manual.outcome) >= 0;
+  }
+
+  /** "Checking…": disabled and busy while the press's sync runs. */
+  function checkingControl(key: string): HTMLElement {
+    const busy = button(P.syncChecking, key, null, 'plain');
+    busy.setAttribute('aria-busy', 'true');
+    return add(el('span', 'fix'), busy);
   }
 
   /** The engine's line already names the last sync ("synced 1h ago", "Synced 1 hr ago · …"). */
@@ -1218,7 +1279,7 @@ export function chatgptDashboardClient(
     const sources = Array.isArray(data.sources) ? data.sources : [];
     if (sources.some((source: Any) => {
       if (!source || typeof source !== 'object') return false;
-      if (source.connecting || source.status === 'Working') return true;
+      if (source.connecting || source.status === 'Working' || syncChecking(source)) return true;
       const progress = sourceProgress(source);
       return !!progress && !progress.stalled;
     })) return true;

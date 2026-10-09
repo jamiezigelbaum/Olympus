@@ -33,6 +33,7 @@ import {
 import {
   dashboardAttentionLine,
   dashboardIsConnectedSource,
+  dashboardManualSyncLine,
   dashboardStatus,
   dashboardSubLine,
   dashboardSyncKeepsFailing,
@@ -52,9 +53,11 @@ import {
   PRIVACY_GET_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
+  SYNC_SOURCE_TOOL_NAME,
   type ChatGptDisconnectSourceId,
   type ChatGptOAuthSource,
   type ChatGptScopeSourceId,
+  type ChatGptSyncSourceId,
   type ConnectionState,
   type DashboardFix,
   type DashboardItem,
@@ -97,6 +100,8 @@ const STAGE_DETAIL: Readonly<Record<Exclude<SourceProgress['stage'], 'done'>, st
 const CHATGPT_OAUTH_SOURCES = new Set<string>(['gmail', 'google-drive', 'dropbox']);
 const SCOPE_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files']);
 const DISCONNECT_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
+/** Sources Sync now runs for from ChatGPT (olympus_sync_source). */
+const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
 
 /** The only connection labels the engine writes; anything else becomes ''. */
 const KNOWN_CONNECTION_LABELS = new Set([
@@ -199,14 +204,19 @@ export function buildChatGptDashboardViewModel(
       && !progress.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress).fix)) {
       status = 'Working';
     }
-    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts };
+    // Whether this worker can sync the source at all: the raw card's own
+    // flag, which the scrubbed card does not carry.
+    const sync = connecting || status === 'Off' || card.sync_now_available !== true
+      ? undefined
+      : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress);
+    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts, sync };
   });
 
   // One list (owner, 2026-10-09): sources that need the owner first, then
   // connected sources, then the ones not connected yet; roster order within.
   const sources: DashboardSource[] = rows
-    .map(({ definition, card, status, actionKind, connecting, progress }, index) => ({
-      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now),
+    .map(({ definition, card, status, actionKind, connecting, progress, sync }, index) => ({
+      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync),
       index,
     }))
     .sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index)
@@ -214,7 +224,7 @@ export function buildChatGptDashboardViewModel(
 
   const needsYou: DashboardItem[] = rows
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
-    .map(({ definition, card, actionKind, connecting, progress }) => attentionItem(definition, card, actionKind, degraded, connecting, progress));
+    .map(({ definition, card, actionKind, connecting, progress, sync }) => attentionItem(definition, card, actionKind, degraded, connecting, progress, sync));
 
   // Models are status only in ChatGPT (owner decision 2026-10-01): a
   // configured model's fix is to check again; a built-in install that failed
@@ -329,23 +339,34 @@ function sourceEntry(
   connecting: Connecting | undefined,
   progress: SourceProgress | undefined,
   now: Date,
+  sync?: DashboardFix,
 ): DashboardSource {
   const inFlight = progress && progress.stage !== 'done' && status !== 'Needs you' && status !== 'Failing';
-  const detail = connecting
+  const ownDetail = connecting
     ? CONNECTING_DETAIL
     : inFlight
       ? STAGE_DETAIL[progress.stage as Exclude<SourceProgress['stage'], 'done'>]
       : dashboardSubLine(card, { surface: 'chatgpt', now, ...(degraded ? { degradedCredentials: degraded } : {}) });
+  // The owner's Sync now press, while it is the latest word, leads the row:
+  // "Checking Dropbox…", then what it found. The engine's own words, so the
+  // computer's row reads the same (a fresh row's line already says it).
+  const manualLine = connecting ? undefined : dashboardManualSyncLine(card, now);
+  const detail = manualLine && !(ownDetail ?? '').startsWith(manualLine) ? manualLine : ownDetail;
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition) : undefined;
+  const late = status === 'Needs you' || status === 'Failing';
   const primary = connecting
     ? connecting.fix
     : status === 'Off'
       ? (actionKind === 'none' ? undefined : connectFix(definition))
-      : scopePending(card) ? scopeFix(definition, card) : reconnect;
+      : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
   const menu: DashboardFix[] = [];
+  // Sync now sits first in the ⋯ menu of every connected source that can
+  // sync; on a late or unresponsive source it is the row's button instead
+  // (owner, 2026-10-09), and the panel keeps the menu free of the row's fix.
+  if (sync) menu.push(sync);
   if (status !== 'Off' && card.scope_selection && !scopePending(card)) {
     const fix = scopeFix(definition, card);
     if (fix) menu.push(fix);
@@ -390,18 +411,39 @@ function attentionItem(
   degraded: WorkerCredentialDegradation[] | undefined,
   connecting: Connecting | undefined,
   progress: SourceProgress | undefined,
+  sync?: DashboardFix,
 ): DashboardItem {
   if (connecting) {
     return { id: `source:${definition.source_id}`, sentence: `${definition.label} — ${CONNECTING_REASON}`, fix: connecting.fix };
   }
   const reason = dashboardAttentionLine(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
+  // A late or unresponsive source's fix is Sync now where this worker can
+  // sync it: Check again only re-read the page (owner, 2026-10-09).
   const fix = scopePending(card)
     ? scopeFix(definition, card) ?? checkAgainFix()
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition)
-      : checkAgainFix();
+      : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
+}
+
+/**
+ * Sync now for a connected source this worker can sync (the caller checks
+ * `sync_now_available`), unless the row's own fix comes first: folders or
+ * mail still to choose, or a sign-in to redo, which a sync cannot get past.
+ */
+function syncFix(
+  definition: DashboardSupportedSourceDefinition,
+  card: DashboardSourceCard,
+  status: DashboardStatus,
+  actionKind: DashboardSourceAction['kind'],
+  degraded: WorkerCredentialDegradation[] | undefined,
+  progress: SourceProgress | undefined,
+): DashboardFix | undefined {
+  if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card)) return undefined;
+  if (scopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
+  return { label: CHATGPT_SETUP_LABELS.syncNow, tool: SYNC_SOURCE_TOOL_NAME, args: { source_id: definition.source_id as ChatGptSyncSourceId } };
 }
 
 /**
@@ -970,7 +1012,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
   };
 }
 
-const MANUAL_SYNC_OUTCOMES: ReadonlySet<string> = new Set(['checked', 'failed', 'busy']);
+const MANUAL_SYNC_OUTCOMES: ReadonlySet<string> = new Set(['checking', 'checked', 'failed', 'busy']);
 
 /** Degradations reduced to what status matching reads; the name is matched, never printed. */
 function scrubDegradations(input: readonly WorkerCredentialDegradation[] | undefined): WorkerCredentialDegradation[] | undefined {

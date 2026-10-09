@@ -20,7 +20,7 @@ import type {
   OlympusSourceScopeSelection,
 } from '../../control-ui-contract.ts';
 import { HANDOFF_PATH_PREFIX } from '../../../connect-relay/shared/tokens.ts';
-import type { ChatGptDisconnectSourceId, ChatGptOAuthSource, PrivacyRuleView, PrivacySettings } from './dashboard-contract.ts';
+import type { ChatGptDisconnectSourceId, ChatGptOAuthSource, ChatGptSyncSourceId, PrivacyRuleView, PrivacySettings } from './dashboard-contract.ts';
 import { readPrivacyProfile, writePrivacyProfile, type PrivacyRule } from '../classification/privacy-profile.ts';
 import type { ChatGptHandoffs } from './handoff.ts';
 import {
@@ -41,6 +41,15 @@ const DISCONNECT_OAUTH_SOURCES: Readonly<Partial<Record<ChatGptDisconnectSourceI
   'gmail.email': 'gmail',
   'google_drive.docs': 'google-drive',
   'dropbox.files': 'dropbox',
+};
+
+/** The dashboard route's name for each source Sync now runs for. */
+const SYNC_ROUTE_SOURCES: Readonly<Record<ChatGptSyncSourceId, string>> = {
+  'gmail.email': 'gmail',
+  'google_drive.docs': 'google-drive',
+  'dropbox.files': 'dropbox',
+  'x.bookmarks': 'x',
+  'readwise.library': 'readwise',
 };
 
 export interface ChatGptSetupBackendOptions {
@@ -222,6 +231,14 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
         if (cancelled && error instanceof SetupBackendError && error.code === 'source_not_connected') return;
         throw error;
       }
+    },
+
+    async syncSource(sourceId) {
+      // The route starts the sync and answers at once (start-then-poll), so
+      // this never waits on a provider, and never holds the grant lock past
+      // the start.
+      const result = await post('/dashboard/sync-now', { source: SYNC_ROUTE_SOURCES[sourceId] });
+      return result.status === 'busy' || result.status === 'too_soon' ? result.status : 'checking';
     },
 
     async setModels(choice) {

@@ -616,11 +616,13 @@ export interface DashboardUnpairAction {
 /**
  * What one Sync now press found, counts only. `new_items` is the run's own
  * changed-item count and is absent where the lane reports none; `busy` means a
- * sync was already running, so the press started nothing new.
+ * sync was already running, so the press started nothing new. `checking`
+ * (2026-10-09): the press started a sync that is still running, since `at`;
+ * Sync now answers at once and the result replaces this when the sync ends.
  */
 export interface DashboardManualSync {
   at: string;
-  outcome: 'checked' | 'failed' | 'busy';
+  outcome: 'checking' | 'checked' | 'failed' | 'busy';
   new_items?: number;
 }
 
@@ -631,6 +633,14 @@ export interface DashboardManualSync {
  */
 export const DASHBOARD_MANUAL_SYNC_SHOWN_MS = 10 * 60_000;
 
+/**
+ * Sync now starts at most one run per source in this long (owner ruling,
+ * 2026-10-09): a second press inside it answers `too_soon` and starts nothing.
+ * The run skips Olympus's own daily budget (operator provenance), so this is
+ * what keeps a repeated press from spending a provider's quota.
+ */
+export const DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60_000;
+
 /** The press result while it is still the latest word on this source, else undefined. */
 export function dashboardLiveManualSync(
   sync: DashboardManualSync | undefined,
@@ -640,6 +650,9 @@ export function dashboardLiveManualSync(
   if (!sync) return undefined;
   const at = Date.parse(sync.at);
   if (!Number.isFinite(at)) return undefined;
+  // A press still running is news for as long as it runs: its result replaces
+  // it the moment the sync ends, and a restart drops it with the rest.
+  if (sync.outcome === 'checking') return sync;
   const age = now.getTime() - at;
   if (age < -60_000 || age > DASHBOARD_MANUAL_SYNC_SHOWN_MS) return undefined;
   // A scheduled sync that finished after the press is the newer word. A

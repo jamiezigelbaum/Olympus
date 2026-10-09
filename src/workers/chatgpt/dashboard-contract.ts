@@ -130,9 +130,15 @@ export interface DashboardSource {
    * The owner's last Sync now press, while it is still news (about ten
    * minutes, and only until a later sync). `newItems` is absent when the lane
    * reports no changed-item count. Counts and a closed outcome only.
+   * `checking` (contract v1 addition, 2026-10-09): the press started a sync
+   * that has not finished yet; `at` is when it started. Sync now answers at
+   * once (`olympus_sync_source`), and the result arrives here on a later read.
    */
-  lastManualSync?: { at: string; outcome: 'checked' | 'failed' | 'busy'; newItems?: number };
+  lastManualSync?: { at: string; outcome: ManualSyncOutcome; newItems?: number };
 }
+
+/** A Sync now press's state on the row: `checking` while its sync runs, then what it found. */
+export type ManualSyncOutcome = 'checking' | 'checked' | 'failed' | 'busy';
 
 export interface DashboardViewModelV1 {
   v: 1;
@@ -286,6 +292,16 @@ export const MODEL_SET_TOOL_NAME = 'olympus_model_set';
  */
 export const MODEL_RETRY_TOOL_NAME = 'olympus_model_retry';
 
+/**
+ * App-only (contract v1 addition, 2026-10-09): Sync now for one connected
+ * source (`{source_id}`). It starts the sync and answers at once
+ * (`SyncSourceResult`); what the sync found arrives as the source's
+ * `lastManualSync` on a later `olympus_dashboard` read. At most one run per
+ * source a minute; it skips Olympus's own daily budget (owner ruling), never
+ * the provider's.
+ */
+export const SYNC_SOURCE_TOOL_NAME = 'olympus_sync_source';
+
 /** The `_meta` key carrying the picker's names to the widget only. */
 export const SCOPE_UI_META_KEY = 'olympus/scope';
 
@@ -429,6 +445,20 @@ export type ScopeSetResult =
   | { status: 'saved'; source_id: ChatGptScopeSourceId; scope_revision: string; indexing_started: boolean }
   /** Someone changed the scope first: `current` counts the fresh list, whose data is in `_meta`. */
   | { status: 'conflict'; source_id: ChatGptScopeSourceId; current: ScopeSummary };
+
+/** Sources Sync now can run for from ChatGPT. */
+export type ChatGptSyncSourceId = ChatGptDisconnectSourceId;
+
+/**
+ * `olympus_sync_source {source_id}` → structuredContent. `checking`: a sync
+ * started; `busy`: one was already running, so nothing new started;
+ * `too_soon`: this source was pressed less than a minute ago. Counts and
+ * enums only, never a file or folder name.
+ */
+export interface SyncSourceResult {
+  status: 'checking' | 'busy' | 'too_soon';
+  source_id: ChatGptSyncSourceId;
+}
 
 /** `olympus_disconnect_source {source_id}` (destructive: the UI confirms). Indexed data stays. */
 export interface DisconnectSourceResult {

@@ -24671,6 +24671,9 @@ var init_scheduler_markers = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
+function dashboardManualSyncPendingLine(label) {
+  return `Checking ${label}…`;
+}
 var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
@@ -24807,10 +24810,13 @@ var init_vocabulary = __esm(() => {
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
     howOnMac: "How to fix this on your computer",
-    sourcePaused: "Paused"
+    sourcePaused: "Paused",
+    syncChecking: "Checking…",
+    syncCheckingLine: dashboardManualSyncPendingLine("{source}")
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
+    syncNow: "Sync now",
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
@@ -25781,7 +25787,7 @@ var init_shared_status = __esm(() => {
   ]);
 });
 // src/workers/chatgpt/dashboard-view-model.ts
-var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
+var CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_shared_status();
   init_phases();
@@ -25797,6 +25803,7 @@ var init_dashboard_view_model = __esm(() => {
   CHATGPT_OAUTH_SOURCES = new Set(["gmail", "google-drive", "dropbox"]);
   SCOPE_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files"]);
   DISCONNECT_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
+  SYNC_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   KNOWN_CONNECTION_LABELS = new Set([
     "not connected",
     "connection state unreadable",
@@ -25827,7 +25834,7 @@ var init_dashboard_view_model = __esm(() => {
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
   TRANSCRIPTION_DOWNLOADABLE = new Set(["not_needed", "not_downloaded", "interrupted", "failed"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
-  MANUAL_SYNC_OUTCOMES = new Set(["checked", "failed", "busy"]);
+  MANUAL_SYNC_OUTCOMES = new Set(["checking", "checked", "failed", "busy"]);
 });
 
 // src/core/request-peer.ts

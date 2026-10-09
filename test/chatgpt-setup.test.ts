@@ -175,6 +175,11 @@ describe('setup backend', () => {
           return Response.json({ ok: true, authorization_url: 'https://www.dropbox.com/oauth2/authorize?state=s', expires_at: '2026-10-01T12:10:00.000Z' });
         }
         if (path === '/dashboard/disconnect') return Response.json({ error: { code: 'model_setup_required', message: S('WORKER_MESSAGE') } }, { status: 409 });
+        if (path === '/dashboard/sync-now') {
+          return Response.json(body.source === 'x'
+            ? { ok: true, source: 'x', status: 'too_soon', status_message: S('WORKER_MESSAGE') }
+            : { ok: true, source: body.source, status: 'checking', last_manual_sync: { at: '2026-10-09T12:00:00.000Z', outcome: 'checking' } });
+        }
         return Response.json({ ok: true });
       },
       handoffs: createChatGptHandoffs(),
@@ -192,6 +197,16 @@ describe('setup backend', () => {
     expect(calls[0]).toEqual({ path: '/dashboard/connect/oauth/start', body: { source: 'dropbox', handback: 'relay' } });
     const link = instance.handoffLink({ kind: 'redirect', location: started.authorizationUrl })!;
     expect(link.url).toMatch(new RegExp(`^${RELAY_ORIGIN}/go/oly2g\\.${INSTALL_ID}\\.`));
+  });
+
+  test('Sync now goes to the dashboard route by its own source name and answers with the start, not the sync', async () => {
+    const { instance, calls } = backend();
+    expect(await instance.syncSource('google_drive.docs')).toBe('checking');
+    expect(await instance.syncSource('x.bookmarks')).toBe('too_soon');
+    expect(calls).toEqual([
+      { path: '/dashboard/sync-now', body: { source: 'google-drive' } },
+      { path: '/dashboard/sync-now', body: { source: 'x' } },
+    ]);
   });
 
   test('worker refusals surface as their code, never their message', async () => {
@@ -241,6 +256,10 @@ interface FakeBackendState {
   /** Built-in models this fake Mac has (retried by olympus_model_retry). */
   builtInModels?: Array<'embedding' | 'answers' | 'transcription'>;
   retried?: string[];
+  /** Sync now: what the route answers, or the worker code it refuses with. */
+  syncStatus?: 'checking' | 'busy' | 'too_soon';
+  syncError?: string;
+  synced?: string[];
 }
 
 function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
@@ -332,6 +351,11 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
       if (!(state.builtInModels ?? []).includes(model)) return false;
       (state.retried ??= []).push(model);
       return true;
+    },
+    async syncSource(sourceId) {
+      if (state.syncError) throw new SetupBackendError(state.syncError);
+      (state.synced ??= []).push(sourceId);
+      return state.syncStatus ?? 'checking';
     },
   };
 }
@@ -785,6 +809,59 @@ describe('setup tools over the remote handler', () => {
         always_private_senders: [`${S('SENDER').toLowerCase()}@example.com`, 'vault@bank.example'],
         skip_senders: [],
       });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_sync_source is panel-only, answers at once with checking, busy or too soon, and never names a file', async () => {
+    const client = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      const tool = tools.find((entry) => entry.name === 'olympus_sync_source')!;
+      // App-only, exactly like olympus_privacy_set: ChatGPT's model cannot start a budget-exempt read.
+      expect(tool._meta).toMatchObject({ 'openai/visibility': 'private', ui: { visibility: ['app'] }, 'openai/widgetAccessible': true });
+      expect(tool.annotations).toEqual({ readOnlyHint: false, destructiveHint: false, openWorldHint: false });
+      expect(tool.inputSchema).toMatchObject({
+        properties: { source_id: { enum: ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library'] } },
+        required: ['source_id'],
+      });
+
+      const started = await call(client, 'olympus_sync_source', { source_id: 'dropbox.files' });
+      expect(started.isError).toBeFalsy();
+      expect(started.structuredContent).toEqual({ status: 'checking', source_id: 'dropbox.files' });
+      expect(started.content[0]!.text).toBe('Checking Dropbox… The Olympus panel shows what it finds.');
+      expect(backendState.synced).toEqual(['dropbox.files']);
+
+      backendState.syncStatus = 'busy';
+      const busy = await call(client, 'olympus_sync_source', { source_id: 'gmail.email' });
+      expect(busy.structuredContent).toEqual({ status: 'busy', source_id: 'gmail.email' });
+      expect(busy.content[0]!.text).toBe('Already checking Gmail.');
+
+      backendState.syncStatus = 'too_soon';
+      const soon = await call(client, 'olympus_sync_source', { source_id: 'readwise.library' });
+      expect(soon.isError).toBeFalsy();
+      expect(soon.structuredContent).toEqual({ status: 'too_soon', source_id: 'readwise.library' });
+      expect(soon.content[0]!.text).toBe('Readwise was checked a moment ago — try again in a minute.');
+
+      // Counts and enums only: nothing the worker said, no file or folder name.
+      for (const result of [started, busy, soon]) {
+        const wire = JSON.stringify(result);
+        for (const marker of ['FOLDER_NAME', 'SECRET_FOLDER', 'WORKER_MESSAGE']) expect(wire).not.toContain(S(marker));
+        expect(result._meta).toBeUndefined();
+      }
+
+      // Every refusal reads as one fixed sentence beside the button, never the worker's words.
+      for (const code of ['source_disconnected', 'source_sync_not_supported', 'worker_stopping', 'source_index_policy_violation']) {
+        backendState.syncError = code;
+        const refused = await call(client, 'olympus_sync_source', { source_id: 'dropbox.files' });
+        expect(refused.isError).toBe(true);
+        expect(refused.structuredContent).toEqual({ error: 'sync_unavailable' });
+        expect(refused.content[0]!.text).toBe('Olympus can\'t check this source from here right now. It keeps checking on its own.');
+      }
+      delete backendState.syncError;
+      expect((await call(client, 'olympus_sync_source', { source_id: 'telegram.messages' })).isError).toBe(true);
+      expect((await call(client, 'olympus_sync_source', { source_id: 'dropbox.files', reason: 'scheduled' })).isError).toBe(true);
     } finally {
       await client.close();
     }

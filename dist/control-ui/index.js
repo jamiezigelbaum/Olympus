@@ -123,7 +123,7 @@ function mountDashboardController(options) {
       case "cancel_oauth":
         return "Connection attempt cancelled. Press Connect when you are ready to start a new one.";
       case "sync_now":
-        return "Checked. This card shows what was found.";
+        return "Checking. This card shows what was found.";
       case "set_embedding_priority":
         return "Saved.";
       case "disconnect":

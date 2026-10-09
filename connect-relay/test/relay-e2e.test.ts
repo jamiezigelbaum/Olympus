@@ -315,6 +315,7 @@ describe('routing', () => {
         'olympus_model_retry',
         'olympus_privacy_get',
         'olympus_privacy_set',
+        'olympus_sync_source',
       ]);
     for (const tool of list.result.tools) {
       expect(tool.securitySchemes).toEqual(tool.name === 'olympus_dashboard'

@@ -89,6 +89,7 @@ does not see them.
 | `olympus_scope_list` / `olympus_scope_set` (panel) | Folder and mail choices | yes / no / no; no / no / no | oauth2 |
 | `olympus_disconnect_source` (panel) | Stop reading a source; indexed data stays on the Mac | no / yes / no | oauth2 |
 | `olympus_model_set` / `olympus_model_retry` (panel) | Switch between models already set up on the Mac (never takes a key); retry a failed built-in install | no / no / no | oauth2 |
+| `olympus_sync_source` (panel) | Sync now for one connected source: starts the check and answers at once (at most once a minute per source); the dashboard shows what it found | no / no / no | oauth2 |
 
 ## 2. Reviewer instructions
 
