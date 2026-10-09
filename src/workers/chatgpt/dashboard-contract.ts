@@ -22,7 +22,7 @@
  * Stale status is derived by the UI from `generatedAt`. Multiple Macs per
  * ChatGPT account is v2.
  */
-import type { DashboardStatus } from '../dashboard/vocabulary.ts';
+import type { DashboardStatus, DashboardUnreadableReasonCode } from '../dashboard/vocabulary.ts';
 
 export type ConnectionState = 'not_connected' | 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
 
@@ -124,9 +124,14 @@ export interface DashboardSource {
   /**
    * In-scope items extraction gave up on for good (damaged, or a format
    * nothing reads). A fact, not a problem: `detail` already says it in words.
-   * Count only; absent when zero.
+   * Counts and reasons only, never a file name or path; absent when zero.
+   * Contract v1 addition (2026-10-09): this was a bare count. `reasons` is a
+   * closed list (today one code: the engine records a single permanent
+   * failure) whose counts add up to `count`; `many` is set past the share
+   * where it stops being a few damaged files. A reader that still gets a bare
+   * number treats it as `{count}` with no reasons.
    */
-  unreadable?: number;
+  unreadable?: DashboardUnreadable;
   /**
    * The owner's last Sync now press, while it is still news (about ten
    * minutes, and only until a later sync). `newItems` is absent when the lane
@@ -136,6 +141,12 @@ export interface DashboardSource {
    * once (`olympus_sync_source`), and the result arrives here on a later read.
    */
   lastManualSync?: { at: string; outcome: ManualSyncOutcome; newItems?: number };
+}
+
+export interface DashboardUnreadable {
+  count: number;
+  reasons: Array<{ code: DashboardUnreadableReasonCode; count: number }>;
+  many?: true;
 }
 
 /** A Sync now press's state on the row: `checking` while its sync runs, then what it found. */

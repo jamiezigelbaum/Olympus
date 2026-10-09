@@ -178,6 +178,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .model-install .bar{height:0.375rem}
 .model-install.failed{color:var(--text);font-weight:600}
 .plain{margin:0.5rem 0;padding-left:1.25rem}
+.why{margin-top:0.25rem}
+.why summary{color:var(--muted);font-size:0.875rem;padding:0.125rem 0}
+.why .plain{margin:0.25rem 0;font-size:0.875rem}
+.why-note{font-size:0.8125rem;color:var(--muted)}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .strong{font-weight:600}
 .error{color:var(--danger);font-weight:600}

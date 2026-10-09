@@ -52491,7 +52491,7 @@ function dashboardUnreadableSentence(source) {
   if (!phrase)
     return;
   const lead = `${phrase[0].toUpperCase()}${phrase.slice(1)}: extraction failed permanently — the file is damaged` + " or in a format Olympus can't read.";
-  return source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? `${lead} That is more than a healthy source has, so it may be a problem in Olympus rather than your files.` + " The other files still answer questions." : `${lead} Olympus does not retry these, and nothing is waiting on you.`;
+  return source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? `${lead} ${DASHBOARD_UNREADABLE_NOTE_MANY}` : `${lead} ${DASHBOARD_UNREADABLE_NOTE}`;
 }
 function dashboardManualSyncFailedLine(label) {
   return `Couldn't check ${label} just now — Olympus will try again on its own`;
@@ -52618,7 +52618,7 @@ function unknownStatus(value) {
 function plural(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_PICKER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_STATUS_ORDER, DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_INDEXING_NAME = "Indexing", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_PICKER_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -52687,6 +52687,14 @@ var init_vocabulary = __esm(() => {
     off: "Stop indexing faster",
     explainOn: "Syncing pauses until you turn this off.",
     explainOff: "Syncing is paused until you turn this off."
+  };
+  DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
+  DASHBOARD_UNREADABLE_REASON_CODES = ["damaged_or_unsupported"];
+  DASHBOARD_UNREADABLE_REASON_WORDS = {
+    damaged_or_unsupported: {
+      one: "{count} file is damaged or in a format Olympus can't read",
+      other: "{count} files are damaged or in a format Olympus can't read"
+    }
   };
   DASHBOARD_CHATGPT_VOCABULARY = {
     installingNoSource: "Connect a source to begin",
@@ -52849,7 +52857,11 @@ var init_vocabulary = __esm(() => {
     howOnMac: "Fix this on your computer",
     sourcePaused: "Paused",
     syncChecking: "Checking…",
-    syncCheckingLine: dashboardManualSyncPendingLine("{source}")
+    syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
+    seeWhy: "See why",
+    unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+    unreadableNote: DASHBOARD_UNREADABLE_NOTE,
+    unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -59056,7 +59068,7 @@ function daemonEnvironment(base, daemonExecutable) {
   try {
     real = realpathSync4(daemonExecutable);
   } catch {}
-  const installBin = dirname37(real);
+  const installBin = dirname38(real);
   const rest = (base.PATH ?? "").split(delimiter4).filter((entry) => entry && entry !== installBin);
   return { ...base, PATH: [installBin, ...rest].join(delimiter4) };
 }
@@ -103420,7 +103432,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     ...connecting ? { connecting: { expiresAt: connecting.expiresAt } } : {},
     ...progress ? { progress } : {},
     ...menu.length > 0 ? { menu } : {},
-    ...unreadable > 0 ? { unreadable } : {},
+    ...unreadable > 0 ? { unreadable: unreadableView(card, unreadable) } : {},
     ...manual ? {
       lastManualSync: {
         at: manual.at,
@@ -103428,6 +103440,13 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
         ...manual.new_items !== undefined ? { newItems: manual.new_items } : {}
       }
     } : {}
+  };
+}
+function unreadableView(card, count) {
+  return {
+    count,
+    reasons: [{ code: "damaged_or_unsupported", count }],
+    ...card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? { many: true } : {}
   };
 }
 function attentionItem(definition, card, actionKind, degraded, connecting, progress, sync) {
@@ -119142,6 +119161,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
+    const why = seeWhy(source, id);
+    if (why)
+      add(main, why);
     add(row, main);
     const controls = el("div", "source-actions");
     const context = { id, label: String(source.label || id) };
@@ -119171,6 +119193,21 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(row, menuBox);
     }
     return row;
+  }
+  function seeWhy(source, id) {
+    const unreadable = source.unreadable;
+    if (!unreadable || typeof unreadable !== "object" || !Array.isArray(unreadable.reasons))
+      return null;
+    const words = P.unreadableReasons;
+    const lines = unreadable.reasons.filter((reason) => reason && words[reason.code] && Number(reason.count) > 0).map((reason) => {
+      const n = Number(reason.count);
+      return add(el("li"), document.createTextNode(fill2(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count2(n) })));
+    });
+    if (!lines.length)
+      return null;
+    const box = details("why:" + id, document.createTextNode(P.seeWhy), "why");
+    add(box, add(el("ul", "plain"), ...lines), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    return box;
   }
   function syncChecking(source) {
     if (!source || source.connecting)
@@ -122038,6 +122075,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .model-install .bar{height:0.375rem}
 .model-install.failed{color:var(--text);font-weight:600}
 .plain{margin:0.5rem 0;padding-left:1.25rem}
+.why{margin-top:0.25rem}
+.why summary{color:var(--muted);font-size:0.875rem;padding:0.125rem 0}
+.why .plain{margin:0.25rem 0;font-size:0.875rem}
+.why-note{font-size:0.8125rem;color:var(--muted)}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .strong{font-weight:600}
 .error{color:var(--danger);font-weight:600}
@@ -123629,8 +123670,9 @@ function copySource(source) {
     out.progress = copySourceProgress(source.progress);
   if (source.menu && source.menu.length > 0)
     out.menu = source.menu.map(copyFix);
-  if (whole(source.unreadable) > 0)
-    out.unreadable = whole(source.unreadable);
+  const unreadable = copyUnreadable(source.unreadable);
+  if (unreadable)
+    out.unreadable = unreadable;
   const manual = source.lastManualSync;
   const manualAt = iso(manual?.at);
   if (manual && manualAt && MANUAL_SYNC_OUTCOMES2.has(manual.outcome)) {
@@ -123641,6 +123683,20 @@ function copySource(source) {
     };
   }
   return out;
+}
+function copyUnreadable(value) {
+  const raw = typeof value === "number" ? { count: value } : value;
+  if (!raw || typeof raw !== "object")
+    return;
+  const count2 = whole(raw.count);
+  if (count2 <= 0)
+    return;
+  const reasons = (Array.isArray(raw.reasons) ? raw.reasons : []).filter((reason) => reason && DASHBOARD_UNREADABLE_REASON_CODES.includes(reason.code) && whole(reason.count) > 0).map((reason) => ({ code: reason.code, count: whole(reason.count) }));
+  return {
+    count: count2,
+    reasons: reasons.length > 0 ? reasons : [{ code: "damaged_or_unsupported", count: count2 }],
+    ...raw.many === true ? { many: true } : {}
+  };
 }
 function copySourceProgress(progress) {
   const stalled = progress.stalled === true;

@@ -142,7 +142,7 @@ describe('reading finishes when every in-scope file is read or unreadable', () =
     const v1 = buildChatGptDashboardViewModel(viewOf(finishedWithUnreadable()), { now: NOW });
     const dropbox = v1.sources.find((source) => source.id === 'dropbox.files')!;
     expect(dropbox.progress?.stage).toBe('done');
-    expect(dropbox.unreadable).toBe(2);
+    expect(dropbox.unreadable).toEqual({ count: 2, reasons: [{ code: 'damaged_or_unsupported', count: 2 }] });
     expect(dropbox.detail).toContain("2 files can't be read");
     expect(dropbox.detail).not.toContain('paused');
   });

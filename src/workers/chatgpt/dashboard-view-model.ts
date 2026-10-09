@@ -64,6 +64,7 @@ import {
   type DashboardFix,
   type DashboardItem,
   type DashboardSource,
+  type DashboardUnreadable,
   type DashboardViewModelV1,
   type ModelInstall,
   type ModelInstallFailedReason,
@@ -397,7 +398,7 @@ function sourceEntry(
     ...(progress ? { progress } : {}),
     ...(menu.length > 0 ? { menu } : {}),
     // Counts only, the same facts the row's words come from; never a file name.
-    ...(unreadable > 0 ? { unreadable } : {}),
+    ...(unreadable > 0 ? { unreadable: unreadableView(card, unreadable) } : {}),
     ...(manual
       ? {
           lastManualSync: {
@@ -407,6 +408,19 @@ function sourceEntry(
           },
         }
       : {}),
+  };
+}
+
+/**
+ * Why files can't be read, as data: a count per closed reason code. The engine
+ * records one permanent failure, so one reason carries the whole count. No
+ * file name or path is read here, so none can reach the view model.
+ */
+function unreadableView(card: DashboardSourceCard, count: number): DashboardUnreadable {
+  return {
+    count,
+    reasons: [{ code: 'damaged_or_unsupported', count }],
+    ...(card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? { many: true as const } : {}),
   };
 }
 

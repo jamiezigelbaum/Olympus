@@ -1013,10 +1013,36 @@ export function dashboardUnreadableSentence(source: DashboardSourceCard): string
   // Past the alarm share the row says Needs you, so this sentence must not say
   // nothing is waiting — and the rest of the source still answers.
   return source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL
-    ? `${lead} That is more than a healthy source has, so it may be a problem in Olympus rather than your files.`
-      + ' The other files still answer questions.'
-    : `${lead} Olympus does not retry these, and nothing is waiting on you.`;
+    ? `${lead} ${DASHBOARD_UNREADABLE_NOTE_MANY}`
+    : `${lead} ${DASHBOARD_UNREADABLE_NOTE}`;
 }
+
+/** The note under See why, and the detail page's tail: nothing to do, the rest answers. */
+export const DASHBOARD_UNREADABLE_NOTE = 'Olympus does not retry these, and nothing is waiting on you.';
+
+/** The same note past DASHBOARD_UNREADABLE_ALARM_SHARE, where the row already says Needs you. */
+export const DASHBOARD_UNREADABLE_NOTE_MANY =
+  'That is more than a healthy source has, so it may be a problem in Olympus rather than your files.'
+  + ' The other files still answer questions.';
+
+/**
+ * Why files can't be read, as a closed list (phase 3 of the unified dashboard).
+ * Today extraction records one permanent failure, so one reason exists: a
+ * damaged file and a format nothing reads are the same to the engine. More
+ * codes need extraction to store one first. The view model carries a code and
+ * a count, never a file name; the panel holds these words.
+ */
+export const DASHBOARD_UNREADABLE_REASON_CODES = ['damaged_or_unsupported'] as const;
+export type DashboardUnreadableReasonCode = (typeof DASHBOARD_UNREADABLE_REASON_CODES)[number];
+
+export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
+  Record<DashboardUnreadableReasonCode, { one: string; other: string }>
+> = {
+  damaged_or_unsupported: {
+    one: "{count} file is damaged or in a format Olympus can't read",
+    other: "{count} files are damaged or in a format Olympus can't read",
+  },
+};
 
 /** A Sync now that could not run, in plain words; the provider's own text stays in the log. */
 export function dashboardManualSyncFailedLine(label: string): string {
@@ -1452,6 +1478,11 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    */
   syncChecking: 'Checking…',
   syncCheckingLine: dashboardManualSyncPendingLine('{source}'),
+  /** The disclosure under a row whose files can't be read (counts and reasons, never names). */
+  seeWhy: 'See why',
+  unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+  unreadableNote: DASHBOARD_UNREADABLE_NOTE,
+  unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY,
 } as const;
 
 /**
