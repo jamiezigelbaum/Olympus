@@ -75,6 +75,8 @@ export interface ChatGptSurfaceOptions {
   privacy?: () => ChatGptDashboardOptions['privacy'];
   /** The built-in private model's install state, when it is on for this machine. */
   privateModel?: () => ChatGptDashboardOptions['privateModel'];
+  /** The built-in transcription model, when it is this machine's transcriber (models.transcription). */
+  transcription?: () => ChatGptDashboardOptions['transcription'];
   /** Setup from ChatGPT (setup-tools.ts). Absent: the setup tools answer "unavailable". */
   setup?: ChatGptSetupBackend;
   /**
@@ -582,10 +584,17 @@ async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: Abort
   } catch {
     privateModel = undefined;
   }
+  let transcription: ChatGptDashboardOptions['transcription'];
+  try {
+    transcription = options.transcription?.();
+  } catch {
+    transcription = undefined;
+  }
   return buildChatGptDashboardViewModel(view, {
     ...(embedding ? { embedding } : {}),
     ...(privacy ? { privacy } : {}),
     ...(privateModel ? { privateModel } : {}),
+    ...(transcription ? { transcription } : {}),
   });
 }
 

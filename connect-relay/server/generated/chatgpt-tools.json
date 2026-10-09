@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=365c15d65e4d"
+          "resourceUri": "ui://olympus/dashboard?v=9d66c60d9d87"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=365c15d65e4d",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=9d66c60d9d87",
         "openai/ui": {
           "entrypoints": [
             {
@@ -81,9 +81,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=3b21852051b6"
+          "resourceUri": "ui://olympus/private-answer?v=6abaeaca84d7"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=3b21852051b6"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=6abaeaca84d7"
       }
     },
     {
@@ -145,9 +145,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=3b21852051b6"
+          "resourceUri": "ui://olympus/private-answer?v=6abaeaca84d7"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=3b21852051b6"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=6abaeaca84d7"
       }
     },
     {
@@ -180,9 +180,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=3b21852051b6"
+          "resourceUri": "ui://olympus/private-answer?v=6abaeaca84d7"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=3b21852051b6"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=6abaeaca84d7"
       }
     },
     {
@@ -607,7 +607,7 @@
     {
       "name": "olympus_model_retry",
       "title": "Retry an Olympus model install",
-      "description": "For the Olympus panel: start the built-in search or answer model's install again on the Mac after it failed.",
+      "description": "For the Olympus panel: start the built-in search, answer or transcription model's install again on the computer after it failed, or download the transcription model ahead of any audio.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -615,7 +615,8 @@
             "type": "string",
             "enum": [
               "embedding",
-              "answers"
+              "answers",
+              "transcription"
             ]
           }
         },
@@ -769,12 +770,12 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=365c15d65e4d",
+      "uri": "ui://olympus/dashboard?v=9d66c60d9d87",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-answer?v=3b21852051b6",
+      "uri": "ui://olympus/private-answer?v=6abaeaca84d7",
       "name": "Olympus private answer",
       "mimeType": "text/html;profile=mcp-app"
     }

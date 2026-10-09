@@ -31,6 +31,13 @@ olympusplugin.ai {
 	@hidden path /deploy/* /.*
 	respond @hidden 404
 
+	# The help page for fixes only the computer can make moved on 2026-10-09
+	# (Mac became computer). A server redirect keeps the #section the panel's
+	# links carry; the stub page at the old path covers a host whose Caddy
+	# configuration has not been reloaded yet.
+	redir /help/on-your-mac /help/on-your-computer/ permanent
+	redir /help/on-your-mac/ /help/on-your-computer/ permanent
+
 	encode gzip
 	file_server
 

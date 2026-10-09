@@ -59,7 +59,7 @@ export interface ChatGptSetupBackendOptions {
   /** Items held for the privacy check across every tier ledger (counts only). */
   pendingClassificationCount?: () => number;
   /** Starts a built-in model's install again; false when that model is not built in here. */
-  retryModel?: (model: 'embedding' | 'answers') => boolean;
+  retryModel?: (model: 'embedding' | 'answers' | 'transcription') => boolean;
   env?: Record<string, string | undefined>;
 }
 

@@ -807,7 +807,7 @@ describe('the card section', () => {
     const fix = card.indexOf('data-outside-tools="fix"');
     const setup = card.indexOf('data-outside-tools="setup"');
     expect(fix).toBeGreaterThan(card.indexOf('data-outside-blockers'));
-    expect(card.slice(fix, fix + 400)).toContain('Tor is not installed on this Mac.');
+    expect(card.slice(fix, fix + 400)).toContain('Tor is not installed on this computer.');
     expect(setup).toBeGreaterThan(card.indexOf('data-outside-section="steps" open'));
     expect(setup).toBeLessThan(card.indexOf('data-outside-steps'));
     expect(card.match(/<script>/g)!.length).toBe(2);
@@ -839,7 +839,7 @@ describe('the card section', () => {
     expect(toFix).toContain('was not found');
     expect(toFix).not.toContain('The program that hides your network address is not installed');
     // The installable zkAPI blocker is dropped there in favor of the parts' own To fix line.
-    expect(toFix).not.toContain('The zkAPI app is not installed on this Mac. See Set up zkAPI.');
-    expect(toFix).toContain('zkAPI is not installed on this Mac.');
+    expect(toFix).not.toContain('The zkAPI app is not installed on this computer. See Set up zkAPI.');
+    expect(toFix).toContain('zkAPI is not installed on this computer.');
   });
 });

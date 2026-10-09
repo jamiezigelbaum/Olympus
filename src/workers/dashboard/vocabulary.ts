@@ -1227,16 +1227,16 @@ function plural(count: number, word: string): string {
  */
 export const DASHBOARD_CHATGPT_VOCABULARY = {
   installingNoSource: 'Connect a source to begin',
-  installingModel: 'Getting search ready on your Mac',
+  installingModel: 'Getting search ready on your computer',
   installingFirstIndex: 'Indexing your sources for the first time',
-  connectOnMac: 'Connect sources in Olympus on your Mac.',
+  connectOnMac: 'Connect sources in Olympus on your computer.',
   reconnect: 'Reconnect',
   checkAgain: 'Check again',
-  openOnMac: 'Open Olympus on your Mac',
+  openOnMac: 'Open Olympus on your computer',
   stageReading: 'Reading',
   stageSearchable: 'Indexing',
-  embeddingNeedsAttention: 'Search has stopped working on your Mac.',
-  answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
+  embeddingNeedsAttention: 'Search has stopped working on your computer.',
+  answerModelNeedsAttention: 'Answers have stopped working on your computer.',
   /**
    * A built-in model whose install failed, by its fixed failure code
    * (ModelInstallFailedReason); the item's fix starts the install again.
@@ -1255,9 +1255,9 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
       unknown: 'Couldn\'t download the private model.',
     },
   },
-  fixOnMac: 'Open Olympus on your Mac to fix this.',
-  privateMatches: 'Some matching items are private and stay on your Mac.',
-  changeModelsOnMac: 'Change models in Olympus on your Mac.',
+  fixOnMac: 'Open Olympus on your computer to fix this.',
+  privateMatches: 'Some matching items are private and stay on your computer.',
+  changeModelsOnMac: 'Change models in Olympus on your computer.',
 } as const;
 
 /**
@@ -1301,26 +1301,26 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
   },
   /** Linked to this ChatGPT account, first-run setup (models, first index) not finished. */
   installing: {
-    title: 'Olympus is setting up on your Mac…',
+    title: 'Olympus is setting up on your computer…',
     disabledReason: 'Available once Olympus is set up',
   },
   mac_offline: {
-    title: 'Your Mac is offline or asleep, so answers are paused',
+    title: 'Your computer is offline or asleep, so answers are paused',
     lastSeen: 'Last seen {when}',
-    disabledReason: 'Your Mac is offline',
+    disabledReason: 'Your computer is offline',
   },
   relay_unavailable: {
-    title: 'Olympus can\'t reach your Mac right now.',
-    disabledReason: 'Can\'t reach your Mac',
+    title: 'Olympus can\'t reach your computer right now.',
+    disabledReason: 'Can\'t reach your computer',
   },
   /** Labels for `connection.action.id`; `help` is shown as text when the action has no link. */
   actions: {
     /** Re-reads the dashboard, whose result carries ChatGPT's own connect prompt. */
     connect: { label: 'Connect Olympus', help: '' },
-    open_olympus: { label: 'Open Olympus on your Mac', help: 'Open Olympus on your Mac, then check again here.' },
+    open_olympus: { label: 'Open Olympus on your computer', help: 'Open Olympus on your computer, then check again here.' },
     wake_mac: {
       label: 'How to keep it available',
-      help: 'Keep your Mac on, awake and online with Olympus running. Answers resume on their own when it is back.',
+      help: 'Keep your computer on, awake and online with Olympus running. Answers resume on their own when it is back.',
     },
     retry: { label: 'Try again', help: '' },
   },
@@ -1329,14 +1329,12 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
 /** Every other word the ChatGPT dashboard page prints. */
 export const DASHBOARD_CHATGPT_PAGE_COPY = {
   title: 'Olympus',
-  loading: 'Checking your Mac…',
+  loading: 'Checking your computer…',
   upToDate: 'Olympus is up to date.',
   needsYou: 'Needs you',
   sources: 'Sources',
-  sourcesLocal: 'On your Mac',
+  sourcesLocal: 'On your computer',
   sourcesCloud: 'Accounts',
-  sourcesOnMac: 'Set up on your Mac',
-  sourcesOnMacHelp: 'These connect on your Mac in Olympus. They\'ll show up here once connected.',
   notConnected: 'Not connected',
   noSources: 'No sources yet.',
   progress: 'Progress',
@@ -1346,7 +1344,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   left: '{count} {unit} left',
   eta: 'about {duration}',
   stalled: 'stalled',
-  progressPaused: 'paused while your Mac is offline',
+  progressPaused: 'paused while your computer is offline',
   details: 'Details',
   stageLine: '{stage}: {done} of {total} {unit}',
   models: 'Models',
@@ -1362,7 +1360,19 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   modelNeedsYou: 'Needs you',
   modelChecking: 'Checking',
   /** The install lines under the Models summary; {model} is one of modelNames. */
-  modelNames: { search: 'the search model', answers: 'the private model' },
+  modelNames: { search: 'the search model', answers: 'the private model', transcription: 'the transcription model' },
+  /** The built-in transcription model's line in Models (models.transcription). */
+  modelTranscription: 'Transcription',
+  /** Not installed because the chosen sources hold no audio: nothing to download yet. */
+  modelNotNeededNoAudio: 'Not needed: no audio in your chosen folders',
+  /** Starts the transcription model's download ahead of any audio, or again after a failure. */
+  modelDownloadNow: 'Download now',
+  /** No readable record that this model is on disk (an unreadable or older status file). */
+  modelNotDownloaded: 'Not downloaded',
+  /** A download that stopped part way (the engine restarted mid-download). */
+  modelDownloadInterrupted: 'Download stopped before it finished',
+  /** Downloaded, but it would not start. */
+  modelCouldNotStart: 'Couldn\'t start {model}',
   modelInstallDownloading: 'Downloading {model}',
   modelInstallVerifying: 'Checking {model}…',
   modelInstallFailed: 'Couldn\'t download {model}: {reason}',
@@ -1412,9 +1422,9 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   linkExpires: 'link expires in {n} min',
   linkExpired: 'link expired',
   /** Beside a control whose fix only the Mac can make: the fix's olympusplugin.ai help page. */
-  howOnMac: 'How to fix this on your Mac',
-  /** Under "Set up on your Mac": the help page those sources' fixes name. */
-  howConnectOnMac: 'How to connect these on your Mac',
+  howOnMac: 'How to fix this on your computer',
+  /** A source that is not moving and whose reason the engine did not send (never a blank row). */
+  sourcePaused: 'Paused',
 } as const;
 
 /**
@@ -1648,7 +1658,7 @@ export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
 export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   back: 'Back to Olympus',
   title: 'What\'s private for you?',
-  intro: 'Olympus shares your items with ChatGPT unless you say they\'re private. Private items are answered on your Mac and never sent to ChatGPT. Passwords and other secrets are always kept on your Mac.',
+  intro: 'Olympus shares your items with ChatGPT unless you say they\'re private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.',
   loading: 'Loading your privacy settings…',
   loadFailed: 'Olympus could not load your privacy settings. Try again.',
   tryAgain: 'Try again',
@@ -1676,8 +1686,8 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   needFolderSource: 'Connect Dropbox or Google Drive to add a folder.',
   needGmail: 'Connect Gmail to add a label.',
   pending: {
-    one: '{n} item is waiting to be checked on your Mac.',
-    many: '{n} items are waiting to be checked on your Mac.',
+    one: '{n} item is waiting to be checked on your computer.',
+    many: '{n} items are waiting to be checked on your computer.',
   },
   save: 'Save',
   saving: 'Saving…',
@@ -1709,12 +1719,12 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   makePrivateFor: 'Make {name} private',
   alreadyPrivate: 'Already private',
   labelTitle: 'Add a Gmail label',
-  labelIntro: 'Mail with a private label is answered only on your Mac.',
+  labelIntro: 'Mail with a private label is answered only on your computer.',
   loadingLabels: 'Loading your labels…',
   noLabels: 'This mailbox has no labels of its own.',
   sentLabel: 'Sent',
   senderTitle: 'Add a sender',
-  senderIntro: 'Mail from this sender is answered only on your Mac.',
+  senderIntro: 'Mail from this sender is answered only on your computer.',
   senderLabel: 'Email address or @domain',
   senderPlaceholder: 'name@example.com or @example.com',
   senderAdd: 'Add',
@@ -1748,7 +1758,7 @@ export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
  */
 export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   pageTitle: 'Olympus private answer',
-  title: 'Private answer from your Mac',
+  title: 'Private answer from your computer',
   /** The muted line under the title once the answer is shown. */
   notSent: 'Not sent to ChatGPT',
   /** The muted line once the person hid the answer; Show brings it back from memory. */
@@ -1760,29 +1770,29 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   hideLabel: 'Hide private answer',
   tryAgain: 'Try again',
   /** No job exists in these two states, so the panel can only say what to do and to ask again. */
-  noModel: 'Private answers need the private model on your Mac. Open the Olympus dashboard to finish setup, then ask again.',
+  noModel: 'Private answers need the private model on your computer. Open the Olympus dashboard to finish setup, then ask again.',
   downloading: 'The private model is downloading ({percent}%). Ask again when it\'s ready.',
   downloadingUnknown: 'The private model is downloading. Ask again when it\'s ready.',
   downloadingLabel: 'Private model download',
-  preparing: 'Preparing the answer on your Mac…',
+  preparing: 'Preparing the answer on your computer…',
   /** A full-detail answer reads selected parts more closely, not necessarily every page. */
-  preparingFull: 'Reading your report in more detail on your Mac…',
-  slow: 'Your Mac is taking longer than usual to prepare the answer.',
-  failed: 'Olympus couldn\'t answer this on your Mac.',
+  preparingFull: 'Reading your report in more detail on your computer…',
+  slow: 'Your computer is taking longer than usual to prepare the answer.',
+  failed: 'Olympus couldn\'t answer this on your computer.',
   claimed: 'This answer was already opened in another window.',
   expired: 'This answer has expired. Ask again to get a new one.',
   rateLimited: 'Too many requests — try again in a moment.',
-  macOffline: 'Your Mac is offline, so the private answer can\'t be shown.',
-  unreachable: 'Olympus couldn\'t reach your Mac. Try again in a moment.',
+  macOffline: 'Your computer is offline, so the private answer can\'t be shown.',
+  unreachable: 'Olympus couldn\'t reach your computer. Try again in a moment.',
   generic: 'Olympus couldn\'t show the private answer here.',
   /** The collapsed disclosure under the answer; it opens a list of titles. */
   sourcesToggle: 'Sources ({n})',
   /** Brief inline result after a source is opened on the person's Mac. */
-  openedOnMac: 'Opened on your Mac',
-  openFailed: 'Couldn\'t open it on your Mac',
+  openedOnMac: 'Opened on your computer',
+  openFailed: 'Couldn\'t open it on your computer',
   unanswered: 'Not found in your private items: {list}',
   /** The answer was withdrawn on the Mac after it was shown (an item is no longer Private-eligible). */
-  withdrawn: 'This private answer is no longer available from your Mac.',
+  withdrawn: 'This private answer is no longer available from your computer.',
   /**
    * The outside block's own container (design docs/design/frontier-consult-lane.md
    * §A.6): its application-owned attribution, pinned while the text scrolls.
@@ -1921,19 +1931,13 @@ export const DASHBOARD_LOCAL_COPY = {
   modelChecking: DASHBOARD_CHATGPT_PAGE_COPY.modelChecking,
   modelSearch: DASHBOARD_CHATGPT_PAGE_COPY.modelSearch,
   modelAnswers: DASHBOARD_CHATGPT_PAGE_COPY.modelAnswers,
-  modelNames: { ...DASHBOARD_CHATGPT_PAGE_COPY.modelNames, transcription: 'the transcription model' },
-  /** The built-in transcription model's line in Models (Mac dashboard only). */
-  modelTranscription: 'Transcription',
-  /** Not installed because the chosen sources hold no audio: nothing to download. */
-  modelNotNeededNoAudio: 'Not needed: no audio in your chosen folders',
-  /** Starts the transcription model's download ahead of any audio, or again after a failure. */
-  modelDownloadNow: 'Download now',
-  /** No readable record that this model is on disk (an unreadable or older status file). */
-  modelNotDownloaded: 'Not downloaded',
-  /** A download that stopped part way (the engine restarted mid-download). */
-  modelDownloadInterrupted: 'Download stopped before it finished',
-  /** Downloaded, but it would not start. */
-  modelCouldNotStart: 'Couldn\'t start {model}',
+  modelNames: DASHBOARD_CHATGPT_PAGE_COPY.modelNames,
+  modelTranscription: DASHBOARD_CHATGPT_PAGE_COPY.modelTranscription,
+  modelNotNeededNoAudio: DASHBOARD_CHATGPT_PAGE_COPY.modelNotNeededNoAudio,
+  modelDownloadNow: DASHBOARD_CHATGPT_PAGE_COPY.modelDownloadNow,
+  modelNotDownloaded: DASHBOARD_CHATGPT_PAGE_COPY.modelNotDownloaded,
+  modelDownloadInterrupted: DASHBOARD_CHATGPT_PAGE_COPY.modelDownloadInterrupted,
+  modelCouldNotStart: DASHBOARD_CHATGPT_PAGE_COPY.modelCouldNotStart,
   modelInstallDownloading: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallDownloading,
   modelInstallVerifying: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallVerifying,
   modelInstallFailed: DASHBOARD_CHATGPT_PAGE_COPY.modelInstallFailed,
@@ -2056,7 +2060,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** The honesty label: the network route is not verified on macOS, said plainly. */
   experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
   /** What outside help is, before anything technical (owner, 2026-10-07). */
-  intro: 'When the answer from your Mac is missing something, Olympus can ask a top AI model a short question through zkAPI. Payment is anonymous, and with Tor on the provider can\'t see where the question came from. Olympus blocks names and other identifying words before sending, but the provider reads the question.',
+  intro: 'When the answer from your computer is missing something, Olympus can ask a top AI model a short question through zkAPI. Payment is anonymous, and with Tor on the provider can\'t see where the question came from. Olympus blocks names and other identifying words before sending, but the provider reads the question.',
   /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'). */
   levelTitle: 'What may zkAPI send?',
   levels: {
@@ -2074,7 +2078,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   levelAcceptSave: 'Accept and save',
   levelAcceptIntro: 'Nothing is sent until you accept these:',
   /** The public privacy line, in plain words (design §2, §A.10). */
-  privacy: 'Your files and private answer stay on this Mac. The outside model sees only the short question, and that question could still hint at private things.',
+  privacy: 'Your files and private answer stay on this computer. The outside model sees only the short question, and that question could still hint at private things.',
   state: {
     off: 'Anonymous answers are off.',
     on: 'Anonymous answers are on.',
@@ -2114,7 +2118,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   disclosureTitle: 'Before you turn this on',
   /** Two short lines at first view; the fuller detail sits behind disclosureMore. */
   disclosureShort: [
-    'It asks on its own: when an answer from your Mac is missing something, Olympus may send one short question. You can turn it off at any time.',
+    'It asks on its own: when an answer from your computer is missing something, Olympus may send one short question. You can turn it off at any time.',
     'The provider reads the question, with names and identifying details removed; zkAPI hides who paid.',
   ],
   disclosureMore: 'Everything to know first',
@@ -2132,8 +2136,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     'Adding money and taking it out are each an Ethereum transaction with its own network fee (about $7 each when Olympus last checked). There is no top-up: each deposit starts a new balance with its own fee and its own 30-day clock.',
     'Olympus estimates the 30-day date from the funding date you enter; the exact date is set on-chain when the deposit is confirmed.',
     'When you add money, send one transfer with the deposit plus the fee buffer zkapi-clientd shows. Network fees move, so the buffer can fall short and need a second transfer.',
-    'Set zkapi-clientd to require an API key, so only Olympus on this Mac can spend the balance. Olympus refuses to send while key reuse is on, so separate questions are not linked by a shared payment key.',
-    'One operator account can pause deposits and withdrawals while the 30-day clock keeps running, and one party ran zkAPI\'s proof setup. Your balance lives in files on this Mac; losing them loses the money.',
+    'Set zkapi-clientd to require an API key, so only Olympus on this computer can spend the balance. Olympus refuses to send while key reuse is on, so separate questions are not linked by a shared payment key.',
+    'One operator account can pause deposits and withdrawals while the 30-day clock keeps running, and one party ran zkAPI\'s proof setup. Your balance lives in files on this computer; losing them loses the money.',
     'The provider reads the question; zkAPI hides who paid. On macOS, Olympus cannot yet confirm the network route is anonymous.',
   ],
   routeMissing: 'zkAPI is not set up. Add it, then follow Set up zkAPI below.',
@@ -2161,7 +2165,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   lastSession: 'Last consult: {at}, {result}.',
   /** The To fix list: plain words, each with where its fix is. Technical names stay in Set up zkAPI and Details. */
   blockers: {
-    daemon_not_found: 'The zkAPI app is not installed on this Mac. See Set up zkAPI.',
+    daemon_not_found: 'The zkAPI app is not installed on this computer. See Set up zkAPI.',
     daemon_version_unsupported: 'This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6: see Set up zkAPI.',
     tor_not_found: 'The program that hides your network address is not installed. See Set up zkAPI.',
     daemon_api_key_missing: 'Olympus does not have your zkAPI access key yet. See Set up zkAPI.',
@@ -2176,7 +2180,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     tor_port_busy: 'Another program is using the connection Olympus needs to hide your network address.',
     daily_cap_reached: 'Today\'s question limit is reached. Raise or remove it under Balance and limits.',
     spend_cap_reached: 'Another question would pass today\'s spending limit. Raise or remove it under Balance and limits.',
-    state_unavailable: 'Olympus could not read its record of questions on this Mac.',
+    state_unavailable: 'Olympus could not read its record of questions on this computer.',
     key_reuse_on: 'The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off: see Set up zkAPI.',
   },
   blockerOther: 'Not ready yet ({code}).',
@@ -2252,8 +2256,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   saveUnreachable: 'Olympus did not answer. If it is restarting, wait a moment and try again.',
   restarting: 'Restarting Olympus to apply it…',
   locked: 'Unlock dashboard controls in Setup to see and change anonymous answers.',
-  unlockIntro: 'Changing anonymous answers needs a session opened on this Mac itself, not one an agent or the launch link opened. One click, in this browser.',
-  unlock: 'Unlock anonymous answers on this Mac',
+  unlockIntro: 'Changing anonymous answers needs a session opened on this computer itself, not one an agent or the launch link opened. One click, in this browser.',
+  unlock: 'Unlock anonymous answers on this computer',
   native: 'Anonymous answers are set up on this computer\'s own dashboard only, never from an agent or ChatGPT.',
   unavailable: 'Anonymous answers are not available from this worker.',
 } as const;

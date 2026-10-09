@@ -26,7 +26,7 @@
 import type { BuiltInPrivateModelView } from '../chatgpt/dashboard-view-model.ts';
 import type { BuiltInTranscriptionDashboardState } from '../source-index/built-in-reasoning/transcription-model.ts';
 import { buildChatGptDashboardViewModel } from '../chatgpt/dashboard-view-model.ts';
-import type { DashboardViewModelV1, ModelInstall, SourceProgress } from '../chatgpt/dashboard-contract.ts';
+import type { DashboardViewModelV1, ModelInstall, SourceProgress, TranscriptionModelView } from '../chatgpt/dashboard-contract.ts';
 import type { DashboardSourceAction, DashboardSourceCard, SourceDashboardViewModel } from '../source-dashboard.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
@@ -115,8 +115,6 @@ export interface DashboardSourceStates {
   progress?: DashboardViewModelV1['progress'];
   /** The engine's items that are not about a source (models, privacy). */
   otherNeeds: DashboardViewModelV1['needsYou'];
-  /** The built-in transcription model, when it is the transcriber here (Mac dashboard only). */
-  transcription?: BuiltInTranscriptionDashboardState;
 }
 
 const DEFAULT_BASE_PATH = '/dashboard';
@@ -137,6 +135,7 @@ export function dashboardSourceStates(view: SourceDashboardViewModel, options: D
     now,
     ...(options.modelInstalls?.embedding ? { embedding: options.modelInstalls.embedding } : {}),
     ...(options.modelInstalls?.privateModel ? { privateModel: options.modelInstalls.privateModel } : {}),
+    ...(options.modelInstalls?.transcription ? { transcription: options.modelInstalls.transcription } : {}),
     ...(privacy ? { privacy } : {}),
   });
   const engine = new Map(v1.sources.map((entry) => [entry.id, entry]));
@@ -182,7 +181,6 @@ export function dashboardSourceStates(view: SourceDashboardViewModel, options: D
   return {
     rows,
     models: v1.models,
-    ...(options.modelInstalls?.transcription ? { transcription: options.modelInstalls.transcription } : {}),
     ...(v1.progress ? { progress: v1.progress } : {}),
     otherNeeds: v1.needsYou.filter((item) => !item.id.startsWith('source:')),
   };
@@ -772,7 +770,7 @@ interface InstallLine {
 
 function installLine(
   which: InstallLine['which'],
-  install: ModelInstall | DashboardViewModelV1['models']['embedding'] | BuiltInTranscriptionDashboardState | undefined,
+  install: ModelInstall | DashboardViewModelV1['models']['embedding'] | TranscriptionModelView | undefined,
 ): InstallLine | undefined {
   if (!install) return undefined;
   if (install.state !== 'downloading' && install.state !== 'verifying' && install.state !== 'failed') return undefined;
@@ -820,17 +818,13 @@ function modelStateWord(state: ModelInstall['state']): string {
 }
 
 /**
- * Download now beside the transcription line, while it is not needed (no
+ * Download now beside the transcription line: the shared view model's own
+ * control (models.transcription.download), while the model is not needed (no
  * audio chosen yet: the owner may add some later) or its download failed.
  * The same control route and session checks as Try again on a model.
  */
 function transcriptionDownloadNow(states: DashboardSourceStates, options: DashboardRowOptions | undefined): string {
-  const state = states.transcription?.state;
-  const label = state === 'load_failed'
-    ? C.modelTryAgain
-    : state === 'not_needed' || state === 'not_downloaded' || state === 'interrupted' || state === 'failed'
-      ? C.modelDownloadNow
-      : undefined;
+  const label = states.models.transcription?.download?.label;
   if (!label) return '';
   return ` ${actionButton(dashboardControlsAvailable(options)
     ? { label, kind: 'model_retry', source: 'transcription' }
@@ -838,7 +832,7 @@ function transcriptionDownloadNow(states: DashboardSourceStates, options: Dashbo
 }
 
 /** The transcription line's words after "Transcription:". */
-function transcriptionWords(transcription: BuiltInTranscriptionDashboardState): string {
+function transcriptionWords(transcription: TranscriptionModelView): string {
   switch (transcription.state) {
     case 'not_needed': return C.modelNotNeededNoAudio;
     case 'not_downloaded': return C.modelNotDownloaded;
@@ -853,7 +847,7 @@ function modelInstallLines(states: DashboardSourceStates): InstallLine[] {
   return [
     installLine('search', states.models.embedding),
     installLine('answers', states.models.answers?.install),
-    installLine('transcription', states.transcription),
+    installLine('transcription', states.models.transcription),
   ].filter((line): line is InstallLine => line !== undefined);
 }
 
@@ -863,7 +857,7 @@ export function dashboardModelsSummary(states: DashboardSourceStates, view: Sour
   const kind = models.embedding.kind === 'built_in' ? C.modelBuiltIn : C.modelCustom;
   const installs = modelInstallLines(states);
   let overall: string = C.modelReady;
-  if (installs.some((line) => line.state === 'failed') || states.transcription?.state === 'load_failed'
+  if (installs.some((line) => line.state === 'failed') || models.transcription?.state === 'load_failed'
     || (view.model_setup !== undefined && !view.model_setup.ready)
     || models.embedding.state === 'failed') {
     overall = C.modelNeedsYou;
@@ -892,7 +886,7 @@ export function dashboardModelsSection(
   const answers = models.answers
     ? `${models.answers.label} · ${models.answers.ready ? C.modelReady : models.answers.install ? modelStateWord(models.answers.install.state) : C.modelNotReady}`
     : '';
-  const transcription = states.transcription ? transcriptionWords(states.transcription) : '';
+  const transcription = models.transcription ? transcriptionWords(models.transcription) : '';
   const body = `<ul class="mlist"><li>${escapeHtml(`${C.modelSearch}: ${search}`)}</li>`
     + (answers ? `<li>${escapeHtml(`${C.modelAnswers}: ${answers}`)}</li>` : '')
     + (transcription ? `<li>${escapeHtml(`${C.modelTranscription}: ${transcription}`)}${transcriptionDownloadNow(states, options)}</li>` : '')

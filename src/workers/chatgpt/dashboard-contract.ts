@@ -37,11 +37,19 @@ export interface DashboardFix {
   args?: Record<string, unknown>;
   /**
    * olympusplugin.ai only: openExternal needs the plugin's redirect domains.
-   * Beside a tool, it is the help page naming a repair only the Mac can make
-   * (help/on-your-mac/#connect, #reconnect, #answers, #search, #models): the
-   * UI links it next to the control ("How to fix this on your Mac").
+   * Beside a tool, it is the help page naming a repair only the computer can
+   * make (help/on-your-computer/#connect, #reconnect, #answers, #search,
+   * #models; the old help/on-your-mac/ address redirects): the UI links it
+   * next to the control ("How to fix this on your computer").
    */
   href?: string;
+  /**
+   * Contract v1 addition (2026-10-09): the control itself opens `href` (Connect
+   * or Reconnect for a source set up on the computer, such as X or Readwise)
+   * instead of calling `tool`, which is then only the fallback for a panel
+   * that predates this field.
+   */
+  openHref?: true;
   /** Shown on a disabled control. */
   disabledReason?: string;
   /** The UI confirms first; matches the tool's destructive annotation. */
@@ -147,7 +155,11 @@ export interface DashboardViewModelV1 {
   blocker?: DashboardItem;
   /** Includes an unreachable local model; models never block on their own. */
   needsYou: DashboardItem[];
-  /** Server-ordered, local group first. */
+  /**
+   * Server-ordered, one list: sources that need the owner first, then
+   * connected sources, then sources not connected yet (2026-10-09). `group`
+   * stays on each source for older panels; the panel no longer heads groups.
+   */
   sources: DashboardSource[];
   /** The sum of every connected source's `progress`; absent once all are `done`. */
   progress?: {
@@ -182,7 +194,12 @@ export interface DashboardViewModelV1 {
       /** Built-in only, while it is not ready. A failed install's fix is a `model:answers` needsYou item. */
       install?: ModelInstall;
     };
-    /** Status only in ChatGPT: carries `disabledReason` (models change on the Mac). */
+    /**
+     * The built-in transcription model (contract v1 addition, 2026-10-09),
+     * when it is this machine's transcriber. Absent otherwise.
+     */
+    transcription?: TranscriptionModelView;
+    /** Status only in ChatGPT: carries `disabledReason` (models change on the computer). */
     change?: DashboardFix;
   };
   /**
@@ -194,6 +211,26 @@ export interface DashboardViewModelV1 {
    */
   privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
   generatedAt: string;
+}
+
+/**
+ * The built-in transcription model's line in Models (contract v1 addition,
+ * 2026-10-09). `not_needed`: never started because the chosen sources hold no
+ * audio; `not_downloaded`: no readable record it is on disk; `interrupted`: a
+ * download stopped part way; `load_failed`: downloaded but would not start.
+ * `download` is its one control: Download now (`olympus_model_retry {model:
+ * 'transcription'}`) while it is not needed, not downloaded, interrupted or
+ * failed, or Try again after `load_failed`.
+ */
+export interface TranscriptionModelView {
+  state: 'not_needed' | 'not_downloaded' | 'interrupted' | 'downloading' | 'verifying' | 'ready' | 'failed' | 'load_failed';
+  /** `downloading` and `verifying` only. */
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  /** `failed` only. */
+  failedReason?: ModelInstallFailedReason;
+  download?: DashboardFix;
 }
 
 /** A built-in model's install (contract v1 addition, 2026-10-01). */
@@ -242,7 +279,11 @@ export const SCOPE_LIST_TOOL_NAME = 'olympus_scope_list';
 export const SCOPE_SET_TOOL_NAME = 'olympus_scope_set';
 export const DISCONNECT_SOURCE_TOOL_NAME = 'olympus_disconnect_source';
 export const MODEL_SET_TOOL_NAME = 'olympus_model_set';
-/** App-only: restarts a built-in model's install (`{model: 'embedding' | 'answers'}`). */
+/**
+ * App-only: restarts a built-in model's install (`{model: 'embedding' |
+ * 'answers' | 'transcription'}`; `transcription` added 2026-10-09, where it
+ * also starts the first download ahead of any audio).
+ */
 export const MODEL_RETRY_TOOL_NAME = 'olympus_model_retry';
 
 /** The `_meta` key carrying the picker's names to the widget only. */
@@ -414,14 +455,16 @@ export interface ModelSetResult {
 }
 
 /**
- * `olympus_model_retry {model: 'embedding' | 'answers'}` (app-only): starts
- * the built-in model's install again after it failed (it resumes a partial
- * download). Answers at once; the dashboard shows the install's progress.
- * `model_not_configured` when that model is not the built-in one here.
+ * `olympus_model_retry {model: 'embedding' | 'answers' | 'transcription'}`
+ * (app-only): starts the built-in model's install again after it failed (it
+ * resumes a partial download); for `transcription` it is also Download now,
+ * ahead of any audio. Answers at once; the dashboard shows the install's
+ * progress. `model_not_configured` when that model is not the built-in one
+ * here.
  */
 export interface ModelRetryResult {
   status: 'retrying';
-  model: 'embedding' | 'answers';
+  model: 'embedding' | 'answers' | 'transcription';
 }
 
 /* ------------------------------------------------------------------ */

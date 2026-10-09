@@ -42,8 +42,12 @@ const SOURCES: DashboardViewModelV1['sources'] = [
     menu: [{ label: 'Disconnect', tool: 'olympus_disconnect', args: { source: 'gmail' }, destructive: true }],
   },
   { id: 'notes', label: 'Notes', group: 'local', status: 'Working', lastSyncAt: ago(2 * 60 * MIN) },
-  { id: 'drive', label: 'Google Drive', group: 'cloud', status: 'Off', primary: { label: 'Connect', disabledReason: 'Connect sources in Olympus on your Mac.' } },
+  { id: 'drive', label: 'Google Drive', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'google-drive' } } },
 ];
+
+function rowIn(host: Host, label: string) {
+  return Array.from(host.win.document.querySelectorAll('.row.source')).find((node) => node.querySelector('.source-name')!.textContent === label)!;
+}
 
 const PROGRESS: NonNullable<DashboardViewModelV1['progress']> = {
   unit: 'files', phase: 'initial', percent: 42.6, itemsLeft: 1204, etaSeconds: 7800, stalled: false,
@@ -197,14 +201,14 @@ describe('vocabulary', () => {
   test('the producer\'s strings live in vocabulary.ts', () => {
     expect(DASHBOARD_CHATGPT_VOCABULARY).toMatchObject({
       installingNoSource: 'Connect a source to begin',
-      installingModel: 'Getting search ready on your Mac',
+      installingModel: 'Getting search ready on your computer',
       installingFirstIndex: 'Indexing your sources for the first time',
       stageReading: 'Reading',
       stageSearchable: 'Indexing',
-      embeddingNeedsAttention: 'Search has stopped working on your Mac.',
-      answerModelNeedsAttention: 'Answers have stopped working on your Mac.',
-      openOnMac: 'Open Olympus on your Mac',
-      changeModelsOnMac: 'Change models in Olympus on your Mac.',
+      embeddingNeedsAttention: 'Search has stopped working on your computer.',
+      answerModelNeedsAttention: 'Answers have stopped working on your computer.',
+      openOnMac: 'Open Olympus on your computer',
+      changeModelsOnMac: 'Change models in Olympus on your computer.',
     });
   });
 });
@@ -244,11 +248,11 @@ describe('connection states', () => {
 
   test('installing: progress label and percent, no button', () => {
     const host = mount();
-    host.push({ structuredContent: model({ connection: { state: 'installing', progress: { percent: 37.4, label: 'Getting search ready on your Mac' } } }) });
+    host.push({ structuredContent: model({ connection: { state: 'installing', progress: { percent: 37.4, label: 'Getting search ready on your computer' } } }) });
     const banner = host.win.document.querySelector('.banner')!;
-    expect(banner.textContent).toContain('Olympus is setting up on your Mac…');
+    expect(banner.textContent).toContain('Olympus is setting up on your computer…');
     expect(banner.textContent).not.toContain('Installing');
-    expect(banner.textContent).toContain('Getting search ready on your Mac · 37%');
+    expect(banner.textContent).toContain('Getting search ready on your computer · 37%');
     expect(banner.querySelectorAll('button').length).toBe(0);
     expect(banner.querySelector('[role=progressbar]')!.getAttribute('aria-valuenow')).toBe('37');
   });
@@ -260,7 +264,7 @@ describe('connection states', () => {
         connection: { state: 'mac_offline', lastSeenAt: ago(2 * 60 * MIN + 5 * MIN), action: { id: 'wake_mac', href: 'https://olympusplugin.ai/help/awake' } },
       }),
     });
-    expect(host.text()).toContain('Your Mac is offline or asleep, so answers are paused');
+    expect(host.text()).toContain('Your computer is offline or asleep, so answers are paused');
     expect(host.text()).toContain('Last seen 2 hr ago');
     host.button('How to keep it available').click();
     expect(host.calls).toContainEqual(['openExternal', { href: 'https://olympusplugin.ai/help/awake' }]);
@@ -269,7 +273,7 @@ describe('connection states', () => {
   test('a link without window.openai goes through ui/open-link', () => {
     const host = mount();
     host.push({ structuredContent: model({ connection: { state: 'mac_offline', action: { id: 'open_olympus', href: 'https://olympusplugin.ai/open' } } }) });
-    host.button('Open Olympus on your Mac').click();
+    host.button('Open Olympus on your computer').click();
     expect(host.sent.find((message) => message.method === 'ui/open-link')!.params).toEqual({ url: 'https://olympusplugin.ai/open' });
   });
 
@@ -294,7 +298,7 @@ describe('connection states', () => {
 
   test('relay unavailable when no result arrives in time', async () => {
     const host = mount({ timeoutMs: 20 });
-    expect(host.text()).toContain('Checking your Mac…');
+    expect(host.text()).toContain('Checking your computer…');
     await sleep(40);
     expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
     expect(host.button('Try again').disabled).toBe(false);
@@ -302,7 +306,7 @@ describe('connection states', () => {
 
   test('an error tool result is relay unavailable too', () => {
     const host = mount();
-    host.push({ isError: true, content: [{ type: 'text', text: 'Your Mac is offline' }] });
+    host.push({ isError: true, content: [{ type: 'text', text: 'Your computer is offline' }] });
     expect(host.text()).toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
     // The banner promises nothing the page does not do.
     expect(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title).not.toMatch(/retry/i);
@@ -310,26 +314,30 @@ describe('connection states', () => {
 });
 
 describe('ready page', () => {
-  test('a fix only the Mac can make links its help page beside the control: How to fix this on your Mac', () => {
-    const help = (section: string) => `https://olympusplugin.ai/help/on-your-mac/#${section}`;
+  test('a fix only the computer can make links its help page beside the control: How to fix this on your computer', () => {
+    const help = (section: string) => `https://olympusplugin.ai/help/on-your-computer/#${section}`;
     const host = mount({ openai: {} });
     host.push({ structuredContent: model({
-      needsYou: [{ id: 'search', sentence: 'Search has stopped working on your Mac.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {}, href: help('search') } }],
-      sources: [{ id: 'x.posts', label: 'X', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_dashboard', args: {}, disabledReason: 'Connect sources in Olympus on your Mac.', href: help('connect') } }],
+      needsYou: [{ id: 'search', sentence: 'Search has stopped working on your computer.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {}, href: help('search') } }],
+      sources: [{ id: 'x.posts', label: 'X', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_dashboard', args: {}, href: help('connect'), openHref: true } }],
       models: {
         embedding: { kind: 'built_in', state: 'ready' },
-        change: { label: 'Change', tool: 'olympus_dashboard', args: {}, disabledReason: 'Change models in Olympus on your Mac.', href: help('models') },
+        change: { label: 'Change', tool: 'olympus_dashboard', args: {}, disabledReason: 'Change models in Olympus on your computer.', href: help('models') },
       },
     }) });
     const links = host.buttons().filter((node) => node.className === 'btn link');
-    expect(links.map((node) => node.textContent)).toEqual([DASHBOARD_CHATGPT_PAGE_COPY.howOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howConnectOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howOnMac]);
+    expect(links.map((node) => node.textContent)).toEqual([DASHBOARD_CHATGPT_PAGE_COPY.howOnMac, DASHBOARD_CHATGPT_PAGE_COPY.howOnMac]);
+    expect(DASHBOARD_CHATGPT_PAGE_COPY.howOnMac).toBe('How to fix this on your computer');
     // Check again still runs its tool; the link sits beside it.
     expect(host.button('Check again').disabled).toBe(false);
     links[0]!.click();
     links[1]!.click();
-    links[2]!.click();
+    // A source set up on the computer: its Connect is the link to the steps, and calls no tool.
+    const sent = host.sent.length;
+    host.button('Connect').click();
+    expect(host.sent.slice(sent).some((message) => message.method === 'tools/call')).toBe(false);
     expect(host.calls.filter(([name]) => name === 'openExternal').map(([, args]) => args)).toEqual([
-      { href: help('search') }, { href: help('connect') }, { href: help('models') },
+      { href: help('search') }, { href: help('models') }, { href: help('connect') },
     ]);
   });
 
@@ -337,24 +345,24 @@ describe('ready page', () => {
     const host = mount({ openai: {} });
     host.push({ structuredContent: model({
       needsYou: [
-        { id: 'a', sentence: 'Answers have stopped working on your Mac.', fix: { label: 'Open', href: 'https://olympusplugin.ai/help/on-your-mac/#answers' } },
+        { id: 'a', sentence: 'Answers have stopped working on your computer.', fix: { label: 'Open', href: 'https://olympusplugin.ai/help/on-your-computer/#answers' } },
         { id: 'b', sentence: 'Something else.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {}, href: 'https://evil.example/help' } },
         { id: 'c', sentence: 'Plain http.', fix: { label: 'Open', href: 'http://olympusplugin.ai/help' } },
       ],
     }) });
     expect(host.buttons().filter((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.howOnMac)).toHaveLength(1);
     host.button(DASHBOARD_CHATGPT_PAGE_COPY.howOnMac).click();
-    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://olympusplugin.ai/help/on-your-mac/#answers' }]]);
+    expect(host.calls.filter(([name]) => name === 'openExternal')).toEqual([['openExternal', { href: 'https://olympusplugin.ai/help/on-your-computer/#answers' }]]);
   });
 
   test('blocker, needs-you, sources, progress and models in that order', () => {
     const host = mount();
     host.push({
       structuredContent: model({
-        blocker: { id: 'model:embedding', sentence: 'Search has stopped working on your Mac.', fix: { label: 'Open Olympus on your Mac', disabledReason: 'Open Olympus on your Mac to fix this.' } },
+        blocker: { id: 'model:embedding', sentence: 'Search has stopped working on your computer.', fix: { label: 'Open Olympus on your computer', disabledReason: 'Open Olympus on your computer to fix this.' } },
         needsYou: [
-          { id: 'source:gmail', sentence: 'Gmail — signed out', fix: { label: 'Reconnect', disabledReason: 'Open Olympus on your Mac to fix this.' } },
-          { id: 'model:answers', sentence: 'Answers are not working on your Mac', fix: { label: 'Open Olympus on your Mac', disabledReason: 'Open Olympus on your Mac to fix this.' } },
+          { id: 'source:gmail', sentence: 'Gmail — signed out', fix: { label: 'Reconnect', disabledReason: 'Open Olympus on your computer to fix this.' } },
+          { id: 'model:answers', sentence: 'Answers are not working on your computer', fix: { label: 'Open Olympus on your computer', disabledReason: 'Open Olympus on your computer to fix this.' } },
           { id: 'account', sentence: 'Olympus needs an update', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } },
         ],
         sources: SOURCES,
@@ -363,7 +371,7 @@ describe('ready page', () => {
       }),
     });
     const text = host.text();
-    const order = ['Search has stopped working', 'Needs you', 'Answers are not working', 'Sources', 'On your Mac', 'Notes', 'Accounts', 'Gmail', 'Signed out', 'Progress', 'Models — Built-in · Ready'];
+    const order = ['Search has stopped working', 'Needs you', 'Answers are not working', 'Sources', 'Gmail', 'Signed out', 'Notes', 'Progress', 'Models — Built-in · Ready'];
     let at = -1;
     for (const marker of order) {
       const next = text.indexOf(marker, at + 1);
@@ -374,17 +382,18 @@ describe('ready page', () => {
     // Each needs-you row: one sentence, one control; a disabled one says why beside itself.
     const rows = Array.from(host.win.document.querySelectorAll('.need'));
     expect(rows.map((row) => row.querySelectorAll('button').length)).toEqual([1, 1]);
-    // Gmail's item lives only in its own row, first in its group, with an amber dot and one control.
+    // Gmail's item lives only in its own row, first in the one list, with an amber dot and one control.
     expect(host.win.document.querySelector('.need')!.parentElement!.textContent).not.toContain('Gmail');
     const gmail = host.win.document.querySelector('.row.source.need-row')!;
     expect(gmail.querySelector('.source-name')!.textContent).toBe('Gmail');
     expect(gmail.querySelector('.dot')!.className).toBe('dot tone-warn');
     expect(gmail.querySelectorAll('.source-actions button').length).toBe(1);
     expect(text.split('signed out').length + text.split('Signed out').length).toBe(3);
-    expect(rows[0]!.textContent).toContain('Open Olympus on your Mac to fix this.');
+    expect(rows[0]!.textContent).toContain('Open Olympus on your computer to fix this.');
     expect((rows[0]!.querySelector('button') as unknown as HTMLButtonElement).disabled).toBe(true);
-    // Only one accent button on the page.
-    expect(host.win.document.querySelectorAll('.btn.primary').length).toBe(1);
+    // Needs-you fixes are the warning card's filled buttons (variant C), never the accent.
+    expect(host.win.document.querySelectorAll('.need .btn.primary').length).toBe(0);
+    expect(host.win.document.querySelectorAll('.need .btn.warnfill').length).toBeGreaterThan(0);
     expectNoJargon(host);
   });
 
@@ -392,15 +401,16 @@ describe('ready page', () => {
     const host = mount();
     host.push({ structuredContent: model({ sources: SOURCES }) });
     const rows = Array.from(host.win.document.querySelectorAll('.source'));
-    expect(rows.map((row) => row.querySelector('.source-name')!.textContent)).toEqual(['Notes', 'Gmail', 'Google Drive']);
-    expect(rows[2]!.className).toBe('row source mac');
-    expect(rows[0]!.textContent).toContain('Working');
-    expect(rows[0]!.textContent).toContain('Synced 2 hr ago');
-    expect(rows[1]!.textContent).toContain('1,204 messages · Synced 5 min ago');
-    const menu = rows[1]!.querySelector('details.menu')!;
+    // One list: connected sources in server order, then the ones not connected yet.
+    expect(rows.map((row) => row.querySelector('.source-name')!.textContent)).toEqual(['Gmail', 'Notes', 'Google Drive']);
+    expect(host.win.document.querySelectorAll('.section h3').length).toBe(0);
+    expect(rows[1]!.textContent).toContain('Working');
+    expect(rows[1]!.textContent).toContain('Synced 2 hr ago');
+    expect(rows[0]!.textContent).toContain('1,204 messages · Synced 5 min ago');
+    const menu = rows[0]!.querySelector('details.menu')!;
     expect(menu.querySelector('summary')!.textContent).toContain('More actions for Gmail');
     expect(menu.querySelector('button')!.textContent).toBe('Disconnect');
-    expect(rows[2]!.textContent).toBe('Google Drive');
+    expect(rows[2]!.textContent).toBe('Google DriveNot connectedConnect');
   });
 
   test('a connecting source is one row with one button, and Check again appears once on the page', () => {
@@ -419,29 +429,35 @@ describe('ready page', () => {
     expect(host.text().toLowerCase().split(waiting.toLowerCase()).length).toBe(2);
   });
 
-  test('Mac-only sources group under one heading and sentence, with no buttons; connectable rows are outlined', () => {
+  test('one list: sources not connected are normal rows with Connect, after the connected ones; no groups', () => {
     const host = mount();
-    const onMac = (id: string, label: string) => ({ id, label, group: 'cloud' as const, status: 'Off' as const, detail: 'not connected',
-      primary: { label: 'Connect', tool: 'olympus_dashboard', args: {}, disabledReason: 'Connect sources in Olympus on your Mac.' } });
+    const help = 'https://olympusplugin.ai/help/on-your-computer/#connect';
+    const onComputer = (id: string, label: string) => ({ id, label, group: 'cloud' as const, status: 'Off' as const, detail: 'not connected',
+      primary: { label: 'Connect', tool: 'olympus_dashboard', args: {}, href: help, openHref: true as const } });
     host.push({ structuredContent: model({
       needsYou: [{ id: 'source:gmail.email', sentence: 'Gmail — choose mail', fix: { label: 'Choose mail', tool: 'olympus_scope_list', args: { source_id: 'gmail.email' } } }],
       sources: [
-        onMac('x.bookmarks', 'X'),
+        onComputer('x.bookmarks', 'X'),
         { id: 'gmail.email', label: 'Gmail', group: 'cloud', status: 'Off', detail: 'not connected', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'gmail' } } },
         { id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Off', primary: { label: 'Connect', tool: 'olympus_connect_source', args: { source: 'dropbox' } } },
-        onMac('telegram', 'Telegram'), onMac('whatsapp', 'WhatsApp'), onMac('readwise.library', 'Readwise'),
-        { id: 'x2', label: 'Readwise (connected)', group: 'cloud', status: 'Fresh', primary: { label: 'Check', disabledReason: 'Connect sources in Olympus on your Mac.' } },
+        onComputer('telegram', 'Telegram'), onComputer('whatsapp', 'WhatsApp'), onComputer('readwise.library', 'Readwise'),
+        { id: 'notes', label: 'Notes', group: 'local', status: 'Fresh', detail: 'synced 1h ago' },
       ],
     }) });
     const doc = host.win.document;
-    const mac = doc.querySelector('.rows.mac-only')!;
-    expect(Array.from(mac.querySelectorAll('.source-name')).map((node) => node.textContent)).toEqual(['X', 'Telegram', 'WhatsApp', 'Readwise']);
-    expect(mac.querySelectorAll('button').length).toBe(0);
-    expect(mac.previousElementSibling!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.sourcesOnMacHelp);
-    expect(mac.previousElementSibling!.previousElementSibling!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.sourcesOnMac);
-    expect(host.text().split('Connect sources in Olympus on your Mac.').length).toBeLessThanOrEqual(2);
-    // A connected source stays in its group even with a disabled fix.
-    expect(mac.textContent).not.toContain('connected)');
+    expect(doc.querySelectorAll('.section h3').length).toBe(0);
+    expect(doc.querySelectorAll('.rows.mac-only').length).toBe(0);
+    const names = Array.from(doc.querySelectorAll('.row.source .source-name')).map((node) => node.textContent);
+    expect(names).toEqual(['Gmail', 'Notes', 'X', 'Dropbox', 'Telegram', 'WhatsApp', 'Readwise']);
+    // Every source not connected says so and offers Connect; none says to finish elsewhere.
+    for (const label of ['X', 'Dropbox', 'Telegram', 'WhatsApp', 'Readwise']) {
+      const row = Array.from(doc.querySelectorAll('.row.source')).find((node) => node.querySelector('.source-name')!.textContent === label)!;
+      expect(row.textContent).toContain('Not connected');
+      const buttons = Array.from(row.querySelectorAll('button'));
+      expect(buttons.map((node) => node.textContent)).toEqual(['Connect']);
+      expect((buttons[0] as unknown as HTMLButtonElement).disabled).toBe(false);
+    }
+    expect(host.text()).not.toMatch(/Finish on your computer|Mac/);
     // No page-level action here (Gmail's item is in its row), so no accent at all; never on a source row.
     expect(doc.querySelectorAll('.btn.primary').length).toBe(0);
     expect(doc.querySelector('.section h2')!.textContent).toBe('Sources');
@@ -556,14 +572,66 @@ describe('ready page', () => {
     expect(narrow.slice(0, narrow.indexOf('}}'))).not.toContain('width:100%');
   });
 
-  test('a needs-you dot has its own column, beside the sentence\'s first line at any text size', () => {
+  test('a needs-you row is a warm box with an orange edge, bold words and a filled orange fix, no dot (variant C)', () => {
     const host = mount();
     host.push({ structuredContent: model({ needsYou: [{ id: 'x', sentence: 'Notes — paused', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } }] }) });
     const row = host.win.document.querySelector('.row.need')!;
-    expect(Array.from(row.children).map((node) => node.className)).toEqual(['dot tone-warn', 'need-body']);
+    expect(Array.from(row.children).map((node) => node.className)).toEqual(['need-body']);
+    expect(row.querySelector('.dot')).toBeNull();
     expect(Array.from(row.querySelector('.need-body')!.children).map((node) => node.className)).toEqual(['row-text', 'fix']);
-    expect(CHATGPT_DASHBOARD_CSS).toContain('.row.need{display:grid;grid-template-columns:0.625rem minmax(0,1fr);align-items:start');
+    expect(row.querySelector('button')!.className).toBe('btn warnfill');
+    // The fill is not the page's one accent.
+    expect(host.win.document.querySelectorAll('.btn.primary').length).toBe(0);
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.row.need .row-text{font-weight:600}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}');
     expect(CHATGPT_DASHBOARD_CSS).toContain('.need-body{display:flex;flex-wrap:wrap');
+  });
+
+  test('the ⋯ menu lays its buttons in a row that wraps, left-aligned on a narrow screen', () => {
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.menu-panel{display:flex;flex-direction:row;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:0.5rem;padding-top:0.25rem}');
+    const narrow = CHATGPT_DASHBOARD_CSS.slice(CHATGPT_DASHBOARD_CSS.indexOf('@media (max-width:30rem)'));
+    expect(narrow).toContain('.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}');
+  });
+
+  test('a stalled source the engine sent no reason for still has a line (never a blank row)', () => {
+    const host = mount();
+    const stalled = { stage: 'listing' as const, unit: 'files' as const, done: 4000, total: 0, percent: 0, stalled: true };
+    host.push({ structuredContent: model({
+      needsYou: [{ id: 'source:dropbox.files', sentence: 'Dropbox — signed out', fix: { label: 'Reconnect', tool: 'olympus_connect_source', args: { source: 'dropbox' } } }],
+      sources: [
+        { id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Needs you', detail: 'signed out', progress: stalled },
+        { id: 'notes', label: 'Notes', group: 'local', status: 'Working', progress: stalled },
+      ],
+    }) });
+    expect(rowIn(host, 'Dropbox').querySelector('.stall-line')!.textContent).toBe('Signed out');
+    expect(rowIn(host, 'Dropbox').querySelector('button')!.textContent).toBe('Reconnect');
+    expect(rowIn(host, 'Notes').querySelector('.stall-line')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.sourcePaused);
+  });
+
+  test('the last sync is said once when the engine\'s line already says it', () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [
+      { id: 'telegram', label: 'Telegram', group: 'cloud', status: 'Fresh', detail: 'synced 1h ago', lastSyncAt: ago(60 * MIN) },
+      { id: 'notes', label: 'Notes', group: 'local', status: 'Fresh', lastSyncAt: ago(60 * MIN) },
+    ] }) });
+    expect(rowIn(host, 'Telegram').querySelector('.muted')!.textContent).toBe('Synced 1h ago');
+    expect(rowIn(host, 'Notes').querySelector('.muted')!.textContent).toBe('Synced 1 hr ago');
+  });
+
+  test('Models carries the transcription line with Download now, which runs olympus_model_retry', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ models: {
+      embedding: { kind: 'built_in', state: 'ready' },
+      transcription: { state: 'not_needed', download: { label: 'Download now', tool: 'olympus_model_retry', args: { model: 'transcription' } } },
+    } }) });
+    const models = host.win.document.querySelector('details.models')!;
+    const line = Array.from(models.querySelectorAll('li')).find((node) => node.textContent!.startsWith('Transcription:'))!;
+    expect(line.textContent).toBe('Transcription: Not needed: no audio in your chosen folders Download now');
+    const sent = host.sent.length;
+    (line.querySelector('button') as unknown as HTMLButtonElement).click();
+    const call = host.sent.slice(sent).find((message) => message.method === 'tools/call')!;
+    expect(call.params).toEqual({ name: 'olympus_model_retry', arguments: { model: 'transcription' } });
   });
 
   test('models stay collapsed and summarize readiness', () => {
@@ -702,7 +770,7 @@ describe('inline card', () => {
   const fixtures: Array<[string, DashboardViewModelV1]> = [
     ['not connected', model({ connection: { state: 'not_connected', action: { id: 'connect' }, installHref: 'https://olympusplugin.ai/install/' }, sources: SOURCES })],
     ['mac offline', model({ connection: { state: 'mac_offline', action: { id: 'wake_mac', href: 'https://olympusplugin.ai/a' } }, progress: PROGRESS })],
-    ['blocker', model({ blocker: { id: 'b', sentence: 'Search has stopped working on your Mac.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } }, needsYou: [{ id: 'n', sentence: 'Gmail — signed out', fix: { label: 'Reconnect', disabledReason: 'x' } }], sources: SOURCES, progress: PROGRESS })],
+    ['blocker', model({ blocker: { id: 'b', sentence: 'Search has stopped working on your computer.', fix: { label: 'Check again', tool: 'olympus_dashboard', args: {} } }, needsYou: [{ id: 'n', sentence: 'Gmail — signed out', fix: { label: 'Reconnect', disabledReason: 'x' } }], sources: SOURCES, progress: PROGRESS })],
     ['needs you', model({ needsYou: [{ id: 'n', sentence: 'Gmail — signed out', fix: { label: 'Disconnect', tool: 't', destructive: true } }], sources: SOURCES })],
     ['all well', model({ sources: SOURCES, progress: { ...PROGRESS, stalled: true } })],
   ];

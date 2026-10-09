@@ -39,7 +39,7 @@ export const DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH = '/dashboard/consult/too
 
 export const DASHBOARD_OUTSIDE_HELP_TOOLS_COPY = {
   title: 'Install the parts',
-  intro: 'Olympus needs two small programs on your Mac: Tor, which hides where your question comes from, and zkAPI, which pays without revealing who you are. Olympus downloads the official builds, checks each against the fingerprint it ships with, and keeps them in its own folder. Installing turns nothing on.',
+  intro: 'Olympus needs two small programs on your computer: Tor, which hides where your question comes from, and zkAPI, which pays without revealing who you are. Olympus downloads the official builds, checks each against the fingerprint it ships with, and keeps them in its own folder. Installing turns nothing on.',
   source: {
     olympus: 'Installed (Olympus)',
     system: 'Installed (your system)',
@@ -63,8 +63,8 @@ export const DASHBOARD_OUTSIDE_HELP_TOOLS_COPY = {
   failedPrefix: 'Not installed.',
   starting: 'Starting…',
   failed: 'The install could not start. Reload the page and try again.',
-  fixOne: '{tools} is not installed on this Mac.',
-  fixMany: '{tools} are not installed on this Mac.',
+  fixOne: '{tools} is not installed on this computer.',
+  fixMany: '{tools} are not installed on this computer.',
   fixWorking: 'Installing Tor and zkAPI.',
 } as const;
 

@@ -60,7 +60,7 @@ type DashboardModels = DashboardViewModelV1['models'];
 
 /** One model's install line, read off the view model and validated (the values crossed the wire). */
 interface ModelInstallLine {
-  which: 'search' | 'answers';
+  which: 'search' | 'answers' | 'transcription';
   state: Exclude<ModelInstallState, 'ready'>;
   /** -1 when unknown. */
   percent: number;
@@ -364,11 +364,13 @@ export function chatgptDashboardClient(
     return parent;
   }
   let accentUsed = false;
-  function button(label: string, key: string, onClick: (() => void) | null, style: 'main' | 'plain' | 'danger'): HTMLButtonElement {
+  function button(label: string, key: string, onClick: (() => void) | null, style: 'main' | 'plain' | 'danger' | 'warn'): HTMLButtonElement {
     const node = el('button', 'btn', label) as HTMLButtonElement;
     node.type = 'button';
     node.setAttribute('data-key', key);
     if (style === 'danger') node.className = 'btn danger';
+    // A Needs-you fix: filled orange, and never the page's one accent.
+    else if (style === 'warn' && onClick) node.className = 'btn warnfill';
     else if (style === 'main' && onClick && !accentUsed) {
       node.className = 'btn primary';
       accentUsed = true;
@@ -424,7 +426,7 @@ export function chatgptDashboardClient(
     return host === 'olympusplugin.ai' || host === 'www.olympusplugin.ai' ? parsed.href : '';
   }
 
-  /** "How to fix this on your Mac": the fix's help page, beside its control (not on the inline card). */
+  /** "How to fix this on your computer": the fix's help page, beside its control (not on the inline card). */
   function howLink(fix: Any, key: string): HTMLElement | null {
     const href = helpHref(fix && fix.href);
     if (!href || compact()) return null;
@@ -442,13 +444,13 @@ export function chatgptDashboardClient(
   }
 
   /** One fix: a button, or a disabled button with its reason beside it. */
-  function fixControl(fix: Any, key: string, style: 'main' | 'plain', allowConfirm: boolean, source?: { id: string; label: string }): HTMLElement {
+  function fixControl(fix: Any, key: string, style: 'main' | 'plain' | 'warn', allowConfirm: boolean, source?: { id: string; label: string }): HTMLElement {
     const wrap = el('span', 'fix');
     if (!fix || typeof fix.label !== 'string') return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
       add(wrap, button(fix.label, key, null, style), el('span', 'reason', blocked || String(fix.disabledReason)));
-      // A repair only the Mac can make still says how, unless the whole page is waiting.
+      // A repair only the computer can make still says how, unless the whole page is waiting.
       if (!blocked) add(wrap, howLink(fix, key));
       return wrap;
     }
@@ -459,6 +461,11 @@ export function chatgptDashboardClient(
     }
     const failure = state.actionError && state.actionError.key === key ? state.actionError.text : '';
     let action: (() => void) | null = null;
+    const opens = fix.openHref === true ? helpHref(fix.href) : '';
+    if (opens) {
+      // The control is the link: Connect or Reconnect for a source set up on the computer.
+      return add(wrap, button(fix.label, key, () => openLink(opens), style));
+    }
     if (privacy && privacy.handles(fix)) {
       // Tell Olympus what's private, and the Privacy row's Edit, open the Privacy screen in place.
       action = () => openPrivacy(key);
@@ -601,9 +608,9 @@ export function chatgptDashboardClient(
     const list = el('ul', 'rows');
     items.forEach((item, index) => {
       const key = 'need:' + String(item.id || index);
-      // The dot has its own column so it stays beside the sentence's first line.
-      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(item.fix, key, 'main', true, itemSource(item)));
-      add(list, add(el('li', 'row need'), el('span', 'dot tone-warn'), body));
+      // A warm box with an orange edge carries the state, so the row has no dot.
+      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(item.fix, key, 'warn', true, itemSource(item)));
+      add(list, add(el('li', 'row need'), body));
     });
     return add(section, list);
   }
@@ -651,12 +658,17 @@ export function chatgptDashboardClient(
       // The bar and its sentence say what is happening; the line keeps only the last sync.
     } else if (item) meta.push(capitalise(itemReason(item, source)));
     else if (off) meta.push(capitalise(detail || P.notConnected));
-    else if (detail) meta.push(detail);
-    // Never synced or fresh wording while work is unfinished: the stage line is the detail then.
-    if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt) && !source.connecting && !progress) meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
+    else if (detail) meta.push(capitalise(detail));
+    // Never synced or fresh wording while work is unfinished: the stage line is
+    // the detail then. Said once: when the engine's own line already says when
+    // it synced, the page adds no second "Synced …" (it once printed
+    // "synced 1h ago · Synced 1 hr ago").
+    if (typeof source.lastSyncAt === 'string' && ago(source.lastSyncAt) && !source.connecting && !progress && !saysSynced(detail)) {
+      meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
+    }
     const shown = meta.filter((part) => !!part);
     if (shown.length) add(main, el('p', 'muted', shown.join(' · ')));
-    if (progress) add(main, sourceProgressBlock(progress, source, stalledWords));
+    if (progress) add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
     add(row, main);
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
@@ -687,6 +699,23 @@ export function chatgptDashboardClient(
       add(row, menuBox);
     }
     return row;
+  }
+
+  /** The engine's line already names the last sync ("synced 1h ago", "Synced 1 hr ago · …"). */
+  function saysSynced(detail: string): boolean {
+    const word = P.synced.split('{')[0]!.trim().toLowerCase();
+    return !!word && detail.trim().toLowerCase().indexOf(word + ' ') === 0;
+  }
+
+  /**
+   * A stalled source whose reason the engine did not send still gets a line:
+   * its Needs-you reason, else its own detail, else "Paused". Never a blank
+   * row (review 2026-10-09, bug 1: a signed-out Dropbox showed none).
+   */
+  function pauseFallback(item: Any, source: Any): string {
+    const reason = item ? itemReason(item, source) : '';
+    const detail = typeof source.detail === 'string' ? source.detail : '';
+    return capitalise(reason || detail || P.sourcePaused);
   }
 
   /** A source's progress while a stage is unfinished, else null. */
@@ -763,13 +792,6 @@ export function chatgptDashboardClient(
     return typeof source.detail === 'string' && source.detail ? source.detail : sentence;
   }
 
-  /** Not connected, and its only fix is set up on the Mac: no button here, just its name in one group. */
-  function macOnly(source: Any): boolean {
-    const fix = source && source.primary;
-    return String(source && source.status) === 'Off' && !!fix && !!fix.disabledReason && !sourceItem(source)
-      && (!fix.tool || fix.tool === config.toolName);
-  }
-
   function capitalise(text: string): string {
     return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
   }
@@ -777,36 +799,16 @@ export function chatgptDashboardClient(
   function sourcesSection(sources: Any[]): HTMLElement {
     const section = add(el('section', 'section'), el('h2', '', P.sources));
     if (!sources.length) return add(section, el('p', 'muted', P.noSources));
-    const onMac = sources.filter(macOnly);
-    const here = sources.filter((source) => !macOnly(source));
-    // Server order within each group; the local group always comes first.
-    // Server order within each group, except that sources needing the owner come first.
-    const first = (group: (source: Any) => boolean) => here.filter((source) => group(source) && sourceItem(source))
-      .concat(here.filter((source) => group(source) && !sourceItem(source)));
-    const ordered = first((source) => source.group === 'local').concat(first((source) => source.group !== 'local'));
-    let group = '';
-    let list: HTMLElement | null = null;
-    for (const source of ordered) {
-      if (source.group !== group || !list) {
-        group = source.group;
-        add(section, el('h3', '', group === 'local' ? P.sourcesLocal : P.sourcesCloud));
-        list = add(section, el('ul', 'rows')).lastChild as HTMLElement;
-      }
-      add(list, sourceRow(source));
-    }
-    if (onMac.length) {
-      add(section, el('h3', '', P.sourcesOnMac), el('p', 'muted mac-help', P.sourcesOnMacHelp));
-      const how = onMac.map((source) => helpHref(source.primary && source.primary.href)).filter((href) => !!href)[0];
-      if (how && !globalReason()) {
-        const link = button(P.howConnectOnMac, 'mac-only:how', () => openLink(how), 'plain');
-        link.className = 'btn link';
-        add(section, link);
-      }
-      const rows = el('ul', 'rows mac-only');
-      for (const source of onMac) add(rows, add(el('li', 'row source mac'), el('span', 'source-name', String(source.label || source.id || ''))));
-      add(section, rows);
-    }
-    return section;
+    // One list, no group headings (owner, 2026-10-09): sources that need the
+    // owner first, then connected ones, then the ones not connected yet, each
+    // in server order.
+    const off = (source: Any) => String(source && source.status) === 'Off' && !sourceItem(source);
+    const ordered = sources.filter((source) => sourceItem(source))
+      .concat(sources.filter((source) => !sourceItem(source) && !off(source)))
+      .concat(sources.filter((source) => !sourceItem(source) && off(source)));
+    const list = el('ul', 'rows');
+    for (const source of ordered) add(list, sourceRow(source));
+    return add(section, list);
   }
 
   function openPrivacy(returnKey: string): void {
@@ -915,8 +917,10 @@ export function chatgptDashboardClient(
    * crossed the wire, so each is checked. Null when it is not installing or
    * failed.
    */
-  function modelInstall(models: DashboardModels, which: 'search' | 'answers'): ModelInstallLine | null {
-    const source: ModelInstall | undefined = which === 'search' ? models.embedding : models.answers ? models.answers.install : undefined;
+  function modelInstall(models: DashboardModels, which: 'search' | 'answers' | 'transcription'): ModelInstallLine | null {
+    const source: Partial<ModelInstall> | undefined = which === 'search'
+      ? models.embedding
+      : which === 'answers' ? (models.answers ? models.answers.install : undefined) : models.transcription as Partial<ModelInstall> | undefined;
     if (!source || typeof source !== 'object') return null;
     const stateName = source.state;
     if (stateName !== 'downloading' && stateName !== 'verifying' && stateName !== 'failed') return null;
@@ -951,16 +955,44 @@ export function chatgptDashboardClient(
     const answersWords = answers ? String(answers.label || '') + ' · ' + (answers.ready ? P.modelReady : P.modelNotReady) : '';
     const installs = installLines(models);
     let overall: string = ready;
-    if (installs.some((entry) => entry.state === 'failed')) overall = P.modelNeedsYou;
+    const transcription = models.transcription && typeof models.transcription === 'object' ? models.transcription : null;
+    if (installs.some((entry) => entry.state === 'failed') || (transcription && transcription.state === 'load_failed')) overall = P.modelNeedsYou;
     else if (installs.length) overall = P.modelGettingReady;
     else if (embedding.state === 'ready' && answers && !answers.ready) overall = P.modelNotReady;
     return { summary: P.models + ' — ' + kind + ' · ' + overall, search: kind + ' · ' + ready, answers: answersWords };
   }
 
+  /** The transcription model's words after "Transcription:", or '' when the view model has none. */
+  function transcriptionWords(models: DashboardModels): string {
+    const entry = models.transcription;
+    if (!entry || typeof entry !== 'object') return '';
+    switch (entry.state) {
+      case 'not_needed': return P.modelNotNeededNoAudio;
+      case 'not_downloaded': return P.modelNotDownloaded;
+      case 'interrupted': return P.modelDownloadInterrupted;
+      case 'load_failed': return fill(P.modelCouldNotStart, { model: P.modelNames.transcription });
+      case 'ready': return P.modelBuiltIn + ' · ' + P.modelReady;
+      case 'failed': return P.modelBuiltIn + ' · ' + P.modelNotWorking;
+      case 'verifying': return P.modelBuiltIn + ' · ' + P.modelChecking;
+      case 'downloading': return P.modelBuiltIn + ' · ' + P.modelGettingReady;
+      default: return '';
+    }
+  }
+
+  /** "Transcription: …" with its Download now, the third line inside Models. */
+  function transcriptionItem(models: DashboardModels): HTMLElement | null {
+    const words = transcriptionWords(models);
+    if (!words) return null;
+    const item = el('li', '', P.modelTranscription + ': ' + words + ' ');
+    const fix = models.transcription && models.transcription.download;
+    if (fix) add(item, fixControl(fix, 'models:transcription', 'plain', false));
+    return item;
+  }
+
   /** One line per installing model, shown without expanding; the fix lives in Needs you, not here. */
   function installLines(models: DashboardModels): ModelInstallLine[] {
     const lines: ModelInstallLine[] = [];
-    for (const which of ['search', 'answers'] as const) {
+    for (const which of ['search', 'answers', 'transcription'] as const) {
       const entry = modelInstall(models, which);
       if (entry) lines.push(entry);
     }
@@ -992,6 +1024,7 @@ export function chatgptDashboardClient(
     const box = details('models', doc.createTextNode(words.summary), 'section models');
     const list = add(el('ul', 'plain'), el('li', '', P.modelSearch + ': ' + words.search));
     if (words.answers) add(list, el('li', '', P.modelAnswers + ': ' + words.answers));
+    add(list, transcriptionItem(models));
     add(box, list);
     if (models.change) add(box, add(el('div', 'actions'), fixControl(models.change, 'models:change', 'plain', true)));
     const installs = installLines(models);
