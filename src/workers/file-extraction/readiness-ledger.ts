@@ -24,6 +24,7 @@ import type { ContentExtractionThroughputSignal } from '../../core/ingestion-thr
 import type {
   ExtractionCorpusReadiness,
   ExtractionLaneKey,
+  ExtractionTerminalRetryPath,
   LocalFileExtractionJobStore,
 } from './job-store.ts';
 import type { ExtractionItemRef } from './types.ts';
@@ -47,6 +48,9 @@ export function createExtractionReadinessLedger(
     lanesForCorpus?: (corpusId: string) => readonly ExtractionLaneKey[] | undefined;
     // Current store identity/scope fence for scoped queue rows.
     currentItem?: (ref: ExtractionItemRef) => boolean;
+    // Terminal failures the runner will still retry: their items are not
+    // counted as unreadable until that last try has run.
+    terminalRetryPaths?: readonly ExtractionTerminalRetryPath[];
   } = {},
 ): SourceIndexReadinessLedger {
   return {
@@ -57,6 +61,7 @@ export function createExtractionReadinessLedger(
         try {
           return readinessSnapshot(jobs.scopedReadiness(lanes, {
             ...(options.currentItem ? { currentItem: options.currentItem } : {}),
+            ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
           }));
         } catch {
           return undefined;
@@ -64,7 +69,9 @@ export function createExtractionReadinessLedger(
       }
       let readiness: ExtractionCorpusReadiness;
       try {
-        readiness = jobs.corpusReadiness(corpusId);
+        readiness = jobs.corpusReadiness(corpusId, new Date(), {
+          ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
+        });
       } catch {
         // A status poll must not fail because the queue is momentarily
         // unreadable. Absent counts leave the coverage math on its own honest

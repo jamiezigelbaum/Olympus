@@ -1017,6 +1017,29 @@ describe('extraction job store: corpus readiness', () => {
     });
   });
 
+  test('a terminal failure the runner will still retry is not unreadable yet', () => {
+    const { store, dbPath } = newStore();
+    // A once-ever reread for this lane's error kind, and an escalation to OCR.
+    const paths = [
+      { extractorKind: KIND, lastErrorKinds: ['extractor_crashed'] },
+      { extractorKind: 'pdf_text', lastErrorKinds: ['extractor_crashed'], escalateToExtractorKind: 'local_ocr' },
+    ];
+    settle(store, 'reread-pending', 'failed_terminal');
+    const spent = enqueueOne(store, 'reread-spent');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId: spent, status: 'failed_terminal', errorKind: 'extractor_crashed' });
+    backdate(dbPath, spent, { janitor_terminal_requeue_count: 1 });
+    settle(store, 'escalation-pending', 'failed_terminal', 'pdf_text');
+    settle(store, 'escalation-spent', 'failed_terminal', 'pdf_text');
+    settle(store, 'escalation-spent', 'failed_terminal', 'local_ocr');
+
+    const expected = { unreadableItems: 2, failedActionableJobs: 2 };
+    expect(store.corpusReadiness(LANE.corpusId, new Date(), { terminalRetryPaths: paths })).toMatchObject(expected);
+    expect(store.scopedReadiness([LANE], { terminalRetryPaths: paths })).toMatchObject(expected);
+    // Without the paths every one of them is settled.
+    expect(store.corpusReadiness(LANE.corpusId)).toMatchObject({ unreadableItems: 4, failedActionableJobs: 0 });
+  });
+
   test('publishes those verdicts under the count keys the coverage math reads', () => {
     const { store } = newStore();
     settle(store, 'fenced', 'blocked_policy');

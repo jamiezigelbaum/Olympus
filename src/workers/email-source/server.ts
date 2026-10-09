@@ -3470,6 +3470,7 @@ export async function main(): Promise<void> {
       ...(fileExtractionRuntime
         ? {
             readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+              terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
               currentItem(ref) {
                 if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
                   return false;

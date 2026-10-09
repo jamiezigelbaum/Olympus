@@ -66,11 +66,13 @@ import {
   LocalFileExtractionJobStore,
   defaultFileExtractionJobsDbPath,
   type ExtractionLaneKey,
+  type ExtractionTerminalRetryPath,
 } from '../file-extraction/job-store.ts';
 import {
   createDefaultExtractorRegistry,
   defaultTerminalReclassificationRules,
   extractorHealthProbes,
+  terminalRetryPaths,
 } from '../file-extraction/registry.ts';
 import {
   createFileExtractionRunner,
@@ -185,6 +187,8 @@ export interface FileExtractionRuntime {
   runner: FileExtractionRunner;
   jobs: LocalFileExtractionJobStore;
   corpusIds: readonly string[];
+  /** Terminal failures the runner still retries; the readiness counts read them. */
+  terminalRetryPaths: readonly ExtractionTerminalRetryPath[];
   close(): void;
 }
 
@@ -363,12 +367,13 @@ export function createFileExtractionRuntime(
   const registry = createDefaultExtractorRegistry(extractorConfig);
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
 
+  const reclassificationRules = defaultTerminalReclassificationRules(registry);
   const runner = createFileExtractionRunner({
     jobs,
     registry,
     corpora,
     healthProbes: extractorHealthProbes(extractorConfig),
-    reclassificationRules: defaultTerminalReclassificationRules(registry),
+    reclassificationRules,
     ...(workerId ? { workerId } : {}),
   });
 
@@ -376,6 +381,7 @@ export function createFileExtractionRuntime(
     runner,
     jobs,
     corpusIds: corpora.map((corpus) => corpus.corpusId),
+    terminalRetryPaths: terminalRetryPaths(registry, reclassificationRules),
     close() {
       jobs.close();
     },

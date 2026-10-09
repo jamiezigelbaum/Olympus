@@ -87867,7 +87867,7 @@ class LocalFileExtractionJobStore {
     for (const [itemId, itemRows] of byItem) {
       if (itemRows.some((row) => row.status === "indexed"))
         continue;
-      const settledFailed = itemRows.some((row) => row.status === "failed_terminal") && !itemRows.some((row) => row.status === "queued" || row.status === "leased" || row.status === "failed_retryable");
+      const settledFailed = itemRows.some((row) => row.status === "failed_terminal") && !itemRows.some((row) => row.status === "queued" || row.status === "leased" || row.status === "failed_retryable" || terminalHasRetryPath(row, itemRows, options.terminalRetryPaths ?? []));
       if (settledFailed)
         settledFailedItems.add(itemId);
       if (itemRows.some((row) => row.status === "blocked_policy")) {
@@ -87901,8 +87901,10 @@ class LocalFileExtractionJobStore {
       ...newestTerminalProgressAt ? { newestTerminalProgressAt } : {}
     };
   }
-  corpusReadiness(corpusId, now = new Date) {
+  corpusReadiness(corpusId, now = new Date, options = {}) {
     const corpus = requireKeyPart2(corpusId, "corpusId");
+    const itemRetry = terminalRetryPathSql("x", options.terminalRetryPaths ?? []);
+    const pendingRetry = terminalRetryPathSql("pending", options.terminalRetryPaths ?? []);
     const items = this.db.query(`
       WITH item_state AS (
         SELECT
@@ -87911,9 +87913,9 @@ class LocalFileExtractionJobStore {
           MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
               THEN 1 ELSE 0 END) AS metadata_only_jobs,
           MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
-          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable')
+          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
               THEN 1 ELSE 0 END) AS in_flight_jobs
-        FROM extraction_jobs
+        FROM extraction_jobs x
         WHERE corpus_id = ?
         GROUP BY local_item_id
       )
@@ -87925,7 +87927,7 @@ class LocalFileExtractionJobStore {
             AND terminal_failed_jobs = 1 AND in_flight_jobs = 0
             THEN 1 ELSE 0 END) AS unreadable_items
       FROM item_state
-    `).get(corpus);
+    `).get(...itemRetry.params, corpus);
     const jobs = this.db.query(`
       SELECT
         SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
@@ -87961,13 +87963,13 @@ class LocalFileExtractionJobStore {
                 SELECT 1 FROM extraction_jobs pending
                 WHERE pending.corpus_id = j.corpus_id
                   AND pending.local_item_id = j.local_item_id
-                  AND pending.status IN ('queued', 'leased', 'failed_retryable')
+                  AND (pending.status IN ('queued', 'leased', 'failed_retryable') OR ${pendingRetry.sql})
               )
             )
           THEN 1 ELSE 0 END) AS failed_actionable_jobs
       FROM extraction_jobs j
       WHERE corpus_id = ?
-    `).get(now.toISOString(), now.toISOString(), corpus);
+    `).get(now.toISOString(), now.toISOString(), ...pendingRetry.params, corpus);
     const count = (value) => Math.max(0, Math.trunc(value ?? 0));
     const jobCount = (key) => count(typeof jobs?.[key] === "number" ? jobs[key] : undefined);
     return {
@@ -88443,6 +88445,47 @@ function hashString5(value) {
 }
 function nowIso4() {
   return new Date().toISOString();
+}
+function terminalHasRetryPath(row, itemRows, paths) {
+  if (row.status !== "failed_terminal")
+    return false;
+  return paths.some((path) => {
+    if (row.extractor_kind !== path.extractorKind)
+      return false;
+    if (path.escalateToExtractorKind !== undefined) {
+      if (row.last_error_kind !== null && !path.lastErrorKinds.includes(row.last_error_kind))
+        return false;
+      return !itemRows.some((candidate) => candidate.extractor_kind === path.escalateToExtractorKind);
+    }
+    return row.last_error_kind !== null && path.lastErrorKinds.includes(row.last_error_kind) && (row.janitor_terminal_requeue_count ?? 0) < 1;
+  });
+}
+function terminalRetryPathSql(alias, paths) {
+  const clauses = [];
+  const params = [];
+  for (const path of paths) {
+    const kinds = path.lastErrorKinds.map((kind) => requireToken3(kind, "lastErrorKind"));
+    if (kinds.length === 0)
+      continue;
+    const kindList = kinds.map(() => "?").join(", ");
+    if (path.escalateToExtractorKind !== undefined) {
+      clauses.push(`(${alias}.extractor_kind = ? AND (${alias}.last_error_kind IS NULL OR ${alias}.last_error_kind IN (${kindList}))
+        AND NOT EXISTS (
+          SELECT 1 FROM extraction_jobs target
+          WHERE target.corpus_id = ${alias}.corpus_id
+            AND target.local_item_id = ${alias}.local_item_id
+            AND target.extractor_kind = ?
+        ))`);
+      params.push(requireToken3(path.extractorKind, "extractorKind"), ...kinds, requireToken3(path.escalateToExtractorKind, "extractorKind"));
+    } else {
+      clauses.push(`(${alias}.extractor_kind = ? AND ${alias}.last_error_kind IN (${kindList})
+        AND COALESCE(${alias}.janitor_terminal_requeue_count, 0) < 1)`);
+      params.push(requireToken3(path.extractorKind, "extractorKind"), ...kinds);
+    }
+  }
+  if (clauses.length === 0)
+    return { sql: "0", params };
+  return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(" OR ")}))`, params };
 }
 var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3, FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
 var init_job_store = __esm(() => {
@@ -93137,6 +93180,22 @@ function defaultTerminalReclassificationRules(registry2, options = {}) {
     reason: `deterministic ${lastErrorKind} reroute to ${toExtractorKind}`
   }));
 }
+function terminalRetryPaths(registry2, rules) {
+  const paths = [];
+  for (const extractor of registry2.list()) {
+    const kinds = extractor.reread?.unreadTerminalErrorKinds ?? [];
+    if (kinds.length > 0)
+      paths.push({ extractorKind: extractor.kind, lastErrorKinds: [...kinds] });
+  }
+  for (const rule of rules) {
+    paths.push({
+      extractorKind: rule.fromExtractorKind,
+      lastErrorKinds: [rule.lastErrorKind],
+      escalateToExtractorKind: rule.toExtractorKind
+    });
+  }
+  return paths;
+}
 var DEFAULT_EXTRACTOR_SELECTION_ORDER;
 var init_registry = __esm(() => {
   init_ocr();
@@ -94758,18 +94817,20 @@ function createFileExtractionRuntime(options) {
     sweepMediaCache(extractorConfig.media.cacheDir);
   const registry2 = createDefaultExtractorRegistry(extractorConfig);
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
+  const reclassificationRules = defaultTerminalReclassificationRules(registry2);
   const runner = createFileExtractionRunner({
     jobs,
     registry: registry2,
     corpora,
     healthProbes: extractorHealthProbes(extractorConfig),
-    reclassificationRules: defaultTerminalReclassificationRules(registry2),
+    reclassificationRules,
     ...workerId ? { workerId } : {}
   });
   return {
     runner,
     jobs,
     corpusIds: corpora.map((corpus) => corpus.corpusId),
+    terminalRetryPaths: terminalRetryPaths(registry2, reclassificationRules),
     close() {
       jobs.close();
     }
@@ -95016,7 +95077,8 @@ function createExtractionReadinessLedger(jobs, options = {}) {
           return;
         try {
           return readinessSnapshot(jobs.scopedReadiness(lanes, {
-            ...options.currentItem ? { currentItem: options.currentItem } : {}
+            ...options.currentItem ? { currentItem: options.currentItem } : {},
+            ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}
           }));
         } catch {
           return;
@@ -95024,7 +95086,9 @@ function createExtractionReadinessLedger(jobs, options = {}) {
       }
       let readiness;
       try {
-        readiness = jobs.corpusReadiness(corpusId);
+        readiness = jobs.corpusReadiness(corpusId, new Date, {
+          ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}
+        });
       } catch {
         return;
       }
@@ -132248,6 +132312,7 @@ async function main() {
     tierMigration: () => tierMigrationStatusSummary(resolveTierMigrationPaths(process.env, resolveEmbeddingLedgerPath(process.env)).statePath),
     ...fileExtractionRuntime ? {
       readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+        terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
         currentItem(ref) {
           if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
             return false;
