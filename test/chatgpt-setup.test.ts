@@ -167,7 +167,7 @@ describe('setup backend', () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'olympus-chatgpt-backend-')); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-  function backend(options: { veniceKey?: boolean; reload?: () => boolean } = {}) {
+  function backend(options: { veniceKey?: boolean; reload?: () => boolean; connectPages?: boolean } = {}) {
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     const policyPath = join(dir, 'sovereignty.json');
     writeFileSync(policyPath, JSON.stringify(loadSovereigntyPreset('no-sensitive')));
@@ -183,7 +183,7 @@ describe('setup backend', () => {
         return Response.json({ ok: true });
       },
       handoffs: createChatGptHandoffs(),
-      publicUrls: () => ({ origin: RELAY_ORIGIN, host: 'mcp.olympusplugin.ai', issuer: RELAY_ORIGIN, resource: `${RELAY_ORIGIN}/mcp`, protectedResourceMetadataUrl: '', secure: true, installId: INSTALL_ID }),
+      publicUrls: () => ({ origin: RELAY_ORIGIN, host: 'mcp.olympusplugin.ai', issuer: RELAY_ORIGIN, resource: `${RELAY_ORIGIN}/mcp`, protectedResourceMetadataUrl: '', secure: true, installId: INSTALL_ID, ...(options.connectPages ? { connectPages: true } : {}) }),
       sovereignty: { config: loadSovereigntyPreset('no-sensitive'), source: 'file', path: policyPath },
       credentialPresent: () => options.veniceKey === true,
       requestReload: options.reload ?? (() => true),
@@ -197,6 +197,15 @@ describe('setup backend', () => {
     expect(calls[0]).toEqual({ path: '/dashboard/connect/oauth/start', body: { source: 'dropbox', handback: 'relay' } });
     const link = instance.handoffLink({ kind: 'redirect', location: started.authorizationUrl })!;
     expect(link.url).toMatch(new RegExp(`^${RELAY_ORIGIN}/go/oly2g\\.${INSTALL_ID}\\.`));
+  });
+
+  test('key-page links follow the relay capability', () => {
+    const { instance } = backend();
+    expect(instance.keyPagesAvailable?.()).toBe(false);
+    expect(instance.handoffLink({ kind: 'key_page', source: 'readwise' })).toBeUndefined();
+    const { instance: capable } = backend({ connectPages: true });
+    expect(capable.keyPagesAvailable?.()).toBe(true);
+    expect(capable.handoffLink({ kind: 'key_page', source: 'readwise' })!.url).toMatch(new RegExp(`^${RELAY_ORIGIN}/go/oly2g\\.${INSTALL_ID}\\.`));
   });
 
   test('worker refusals surface as their code, never their message', async () => {
@@ -277,6 +286,7 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
       if (state.startError) throw new SetupBackendError(state.startError);
       return { authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=x', expiresAt: '2026-10-01T12:10:00.000Z' };
     },
+    keyPagesAvailable: () => true,
     handoffLink() {
       return { url: `${RELAY_ORIGIN}/go/oly2g.${INSTALL_ID}.${'a'.repeat(43)}`, expiresAt: '2026-10-01T12:10:00.000Z' };
     },

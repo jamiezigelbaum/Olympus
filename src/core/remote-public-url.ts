@@ -29,6 +29,12 @@ export interface RemotePublicUrls {
    * and ChatGPT is the pinned client.
    */
   installId?: string;
+  /**
+   * Relay mode only: the relay renders connect pages for keyed sources
+   * (it advertised CONNECT_PAGE_CAPABILITY). Absent: those sources keep
+   * their help link.
+   */
+  connectPages?: boolean;
 }
 
 /**

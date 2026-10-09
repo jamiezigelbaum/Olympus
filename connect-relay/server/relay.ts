@@ -64,7 +64,16 @@ import {
 } from '../shared/protocol.ts';
 import { INSTALL_URL } from '../shared/dashboard-contract.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey, prefixKey } from '../shared/rate-limit.ts';
-import { CONNECT_PAGE_MAX_REQUEST_BYTES } from '../shared/connect-page.ts';
+import {
+  CONNECT_PAGE_CAPABILITY,
+  CONNECT_PAGE_DESCRIPTOR_MAX_BYTES,
+  CONNECT_PAGE_DESCRIPTOR_TYPE,
+  CONNECT_PAGE_MAX_REQUEST_BYTES,
+  connectPageCsp,
+  isConnectPageSubmission,
+  parseConnectPageDescriptor,
+  renderConnectPage,
+} from '../shared/connect-page.ts';
 import { HANDOFF_PATH_PREFIX, OAUTH_HANDBACK_PATHS, credentialInstallId, oauthHandbackInstallId } from '../shared/tokens.ts';
 import {
   PRIVATE_ANSWER_MAX_REQUEST_BYTES,
@@ -616,7 +625,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
         'Referrer-Policy': 'no-referrer',
-        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         ...headers,
       },
     },
@@ -626,15 +635,19 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
   /**
    * `GET /go/<oly2g.installId.secret>`: a one-time hand-off link, routed by
-   * the install it names. The engine owns single use and expiry.
-   * `POST /go/<id>`: a connect page's one submission, a small form of
-   * ciphertext sealed in the page to the engine (connect-relay/shared/
-   * connect-page.ts), routed the same way and never logged. The relay holds
-   * no key that opens it.
+   * the install it names. The engine owns single use and expiry. A key-page
+   * link is answered with a connect-page descriptor, which the relay renders
+   * from its own template (shared/connect-page.ts); every other answer keeps
+   * the no-script, no-form sandbox.
+   * `POST /go/<id>`: a connect page's one submission, forwarded only when it
+   * is exactly `epk`, `iv` and `ct` (ciphertext sealed in the page to the
+   * engine), routed the same way and never logged. The relay holds no key
+   * that opens it, and no install can collect a plaintext form here.
    */
   const handoff = async (request: Request, path: string, ip: string): Promise<Response> => {
     if (request.method !== 'GET' && request.method !== 'POST') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
-    const installId = credentialInstallId('handoff', path.slice(HANDOFF_PATH_PREFIX.length));
+    const linkId = path.slice(HANDOFF_PATH_PREFIX.length);
+    const installId = credentialInstallId('handoff', linkId);
     if (!installId) return expiredLink();
     let body: Uint8Array = new Uint8Array();
     let releaseBody: (() => void) | undefined;
@@ -643,10 +656,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       if (type !== 'application/x-www-form-urlencoded') return browserPage(415, 'This link opens in a browser.');
       const read = await readBody(request, CONNECT_PAGE_MAX_REQUEST_BYTES, ip);
       if (!read.ok) return read.response;
+      if (!isConnectPageSubmission(new TextDecoder().decode(read.body))) {
+        read.release();
+        return browserPage(400, 'This link takes only what its own Olympus page sends. Go back to ChatGPT and try again.');
+      }
       body = read.body;
       releaseBody = read.release;
     }
-    return toInstall({
+    const response = await toInstall({
       installId,
       request,
       path,
@@ -659,6 +676,28 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       dashboard: false,
       offline: macOffline,
       unknown: expiredLink,
+    });
+    const media = (response.headers.get('content-type') ?? '').split(';', 1)[0]!.trim().toLowerCase();
+    if (media !== CONNECT_PAGE_DESCRIPTOR_TYPE) return response;
+    // A descriptor is rendered, never passed on, and only for a GET.
+    let text: string | undefined;
+    if (request.method === 'GET' && response.status === 200) text = await readCappedText(response, CONNECT_PAGE_DESCRIPTOR_MAX_BYTES);
+    else await response.body?.cancel().catch(() => {});
+    const descriptor = text === undefined ? undefined : parseConnectPageDescriptor(text);
+    if (!descriptor) {
+      log('request_refused', { install: installTag(installId), reason: 'response_connect_page' });
+      return json(502, { error: 'bad_gateway' });
+    }
+    return new Response(renderConnectPage({ descriptor, linkId, relayOrigin: origin.origin }), {
+      status: 200,
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'referrer-policy': 'no-referrer',
+        'x-content-type-options': 'nosniff',
+        'x-frame-options': 'DENY',
+        'content-security-policy': connectPageCsp(origin.origin),
+      },
     });
   };
 
@@ -849,7 +888,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     ws.data.session = session;
     sessions.set(installId, session);
     registry.seen(installId);
-    session.send({ type: 'ready', installId });
+    session.send({ type: 'ready', installId, capabilities: [CONNECT_PAGE_CAPABILITY] });
     // `legacy_auth` sessions are what the legacy window still serves: the
     // operator closes it once none appear (docs/design/chatgpt-plugin.md).
     log('session_ready', { install: installTag(installId), ...(scheme === AUTH_LEGACY ? { legacy_auth: true } : {}) });
@@ -1052,4 +1091,27 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       await registry.flush();
     },
   };
+}
+
+/** A response body as text, or undefined once it passes `max` bytes (the rest is cancelled). */
+async function readCappedText(response: Response, max: number): Promise<string | undefined> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel().catch(() => {});
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return undefined;
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }

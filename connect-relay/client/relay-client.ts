@@ -32,7 +32,7 @@ import type { InstallIdentity } from './identity.ts';
 
 export type RelayClientStatus =
   | { state: 'connecting' }
-  | { state: 'online'; installId: string; connectedAt: number }
+  | { state: 'online'; installId: string; connectedAt: number; capabilities: string[] }
   | { state: 'offline'; reason: string; retryInMs: number }
   | { state: 'replaced'; retryInMs: number }
   | { state: 'stopped' };
@@ -305,7 +305,7 @@ export class RelayClient {
           this.failures = 0;
           this.register = false;
           this.startHeartbeat(() => abandon(4004, 'heartbeat_timeout', 'the relay stopped answering'));
-          this.options.onStatus?.({ state: 'online', installId: identity.installId, connectedAt: Date.now() });
+          this.options.onStatus?.({ state: 'online', installId: identity.installId, connectedAt: Date.now(), capabilities: relayCapabilities(message.capabilities) });
           return;
         case 'pong':
           this.lastPongAt = Date.now();
@@ -537,4 +537,10 @@ export class RelayClient {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
+}
+
+/** The relay's advertised capabilities: short lowercase names, at most 16; anything else is dropped. */
+function relayCapabilities(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === 'string' && /^[a-z0-9_]{1,40}$/.test(entry)).slice(0, 16);
 }

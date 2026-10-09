@@ -149,6 +149,12 @@ export interface ChatGptDashboardOptions {
    * into `installing`; it only joins the embedding download's percent.
    */
   privateModel?: BuiltInPrivateModelView;
+  /**
+   * The relay renders connect pages (it advertised the capability), so
+   * Readwise and X connect through one (docs/design/connect-pages.md).
+   * Absent or false: they keep the help link.
+   */
+  keyPages?: boolean;
 }
 
 export interface BuiltInPrivateModelView {
@@ -252,8 +258,9 @@ export function buildChatGptDashboardViewModel(
   return {
     v: 1,
     connection,
-    needsYou,
-    sources,
+    // Key pages only through a relay that renders them; otherwise the help link.
+    needsYou: options.keyPages ? needsYou : needsYou.map((item) => ({ ...item, fix: withoutKeyPage(item.fix, true) ?? item.fix })),
+    sources: options.keyPages ? sources : sources.map(withoutKeyPageSource),
     ...(progress ? { progress } : {}),
     models: {
       embedding,
@@ -588,13 +595,38 @@ function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFi
   const source = oauthSource(definition);
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
-    : {
-        label: CHATGPT_SETUP_LABELS.connect,
-        tool: DASHBOARD_TOOL_NAME,
-        args: {},
-        disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac,
-        href: onMacHelp('connect'),
-      };
+    : connectOnComputerFix();
+}
+
+function connectOnComputerFix(): DashboardFix {
+  return {
+    label: CHATGPT_SETUP_LABELS.connect,
+    tool: DASHBOARD_TOOL_NAME,
+    args: {},
+    disabledReason: DASHBOARD_CHATGPT_VOCABULARY.connectOnMac,
+    href: onMacHelp('connect'),
+  };
+}
+
+/**
+ * A key-page fix as it reads without a relay that renders key pages: Connect
+ * becomes the help link; Reconnect becomes Check again with the help link
+ * (an attention item) or nothing (a row's primary), as before key pages.
+ */
+function withoutKeyPage(fix: DashboardFix | undefined, attention: boolean): DashboardFix | undefined {
+  if (!fix || fix.tool !== CONNECT_SOURCE_TOOL_NAME || !CHATGPT_KEY_PAGE_SOURCES.has(String(fix.args?.source))) return fix;
+  if (fix.label === DASHBOARD_CHATGPT_VOCABULARY.reconnect) return attention ? checkAgainFix(onMacHelp('reconnect')) : undefined;
+  return connectOnComputerFix();
+}
+
+function withoutKeyPageSource(source: DashboardSource): DashboardSource {
+  if (!source.primary) return source;
+  const primary = withoutKeyPage(source.primary, false);
+  if (primary === source.primary) return source;
+  const next: DashboardSource = { ...source };
+  if (primary) next.primary = primary;
+  else delete next.primary;
+  return next;
 }
 
 function scopePending(card: DashboardSourceCard): boolean {

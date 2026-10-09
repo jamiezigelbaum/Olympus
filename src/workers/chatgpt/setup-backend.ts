@@ -131,9 +131,14 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
       return { authorizationUrl: result.authorization_url, expiresAt: result.expires_at };
     },
 
+    keyPagesAvailable() {
+      return options.publicUrls()?.connectPages === true;
+    },
+
     handoffLink(target) {
       const urls = options.publicUrls();
       if (!urls?.installId) return undefined;
+      if (target.kind === 'key_page' && urls.connectPages !== true) return undefined;
       const link = options.handoffs.mint(urls.installId, target);
       return { url: `${urls.origin}${HANDOFF_PATH_PREFIX}${link.id}`, expiresAt: link.expiresAt };
     },

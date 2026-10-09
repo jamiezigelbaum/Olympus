@@ -130,6 +130,13 @@ describe('public base URL propagation to the worker', () => {
 
     writeRemoteAccessStatus(statusDir, relayStatus());
     expect(source.current()?.installId).toBe(INSTALL_ID);
+    // Key pages are offered only once the relay says it renders them (docs/design/connect-pages.md).
+    expect(source.current()?.connectPages).toBeUndefined();
+    writeRemoteAccessStatus(statusDir, relayStatus({ relay: { state: 'online', reason: null, retry_in_ms: null, capabilities: ['connect_page_v1'] } }));
+    expect(source.current()?.connectPages).toBe(true);
+    writeRemoteAccessStatus(statusDir, relayStatus({ relay: { state: 'online', reason: null, retry_in_ms: null, capabilities: ['something_else'] } }));
+    expect(source.current()?.connectPages).toBeUndefined();
+    writeRemoteAccessStatus(statusDir, relayStatus());
     const live = await metadata('mcp.olympusplugin.ai');
     expect(live.status).toBe(200);
     expect(await live.json()).toMatchObject({

@@ -4,7 +4,8 @@ Status: built 2026-10-09 (unified dashboard, phase C). Owner decision of
 2026-10-09: every unconnected source's button says **Connect**, and every
 Connect opens a browser tab. Gmail, Drive and Dropbox go to the provider's
 sign-in, as they already did. Readwise and X bookmarks open a key-entry page
-that the owner's own engine serves. The key is encrypted inside the page, so
+that the relay renders from its own fixed template, keyed to the owner's
+engine. The key is encrypted inside the page, so
 the relay only ever carries ciphertext. The 2026-10-01 rule still holds: no
 key is ever typed into ChatGPT.
 
@@ -69,40 +70,60 @@ refused a POST and allowed no script.
 
 ## Design
 
+Revised 2026-10-09 after independent review (PR #201): the relay, not the
+engine, renders the page, so no install can put its own words, fields or
+plain form on the relay's domain.
+
 **Hand-off kind `key_page`** (`src/workers/chatgpt/handoff.ts`).
 `olympus_connect_source {source: 'readwise' | 'x'}` mints
 `{kind: 'key_page', source}` on the same one-time link grammar: single use,
-ten minutes, held in memory, never logged.
+ten minutes, held in memory, never logged. The tool mints it only when the
+relay advertised that it renders connect pages (below); otherwise it answers
+`connect_unavailable` and the panel keeps the help link.
 
 1. `GET /go/<id>` spends the link. The engine generates a fresh P-256 key
-   pair for this view; the private key is non-extractable. The engine *arms*
-   one submission for the id (ten minutes from the view) and serves the page
-   (`src/workers/chatgpt/connect-page.ts`). The page carries the public key,
-   the context `olympus-connect-page-v1|<id>|<source>`, the fields to type,
-   and the one pinned script. A reload, or anyone else opening the link,
-   gets "expired".
-2. The script (`connect-relay/shared/connect-page.ts`) makes an ephemeral
-   P-256 key pair, runs ECDH with the engine key, then HKDF-SHA-256
-   (salt = page public ‖ engine public, info = context) to derive an
-   AES-256-GCM key. It encrypts the JSON of the typed fields, with the
-   context as associated data. It clears the inputs and submits a form that
-   contains only `epk`, `iv` and `ct`. The typed inputs have no `name`, so
-   their plain values are never part of any submission, with or without
-   script.
-3. `POST /go/<id>`: the engine checks `Origin` (`null`, which a sandboxed
-   page sends, or the relay origin; anything else gets 403 and the page stays
-   armed), the form content type, and the size (8 KiB). It then **takes** the
-   armed entry, so one attempt is spent whatever it holds. It decrypts, and
-   requires exactly the source's field set (Readwise `token`; X `client_id`,
-   `client_secret`). The fields go to `createKeyPageConnector`
-   (`setup-backend.ts`), which posts in process to the dashboard's own routes
-   on the loopback origin. The answer is one fixed sentence. No worker
-   message, provider text, key or ciphertext is ever echoed or logged.
+   pair for this view; the private key is non-extractable. It *arms* one
+   submission for the id (ten minutes from the view) and answers with a
+   **descriptor** only (`application/vnd.olympus.connect-page+json`):
+   `{v: 1, source, key}`, plus for X the loopback `callback` its app must
+   list. A reload, or anyone else opening the link, gets "expired".
+2. **The relay renders the page** (`connect-relay/shared/connect-page.ts`,
+   `renderConnectPage`). It reads at most 1 KiB of the descriptor and
+   accepts only the closed shape: exactly those keys, `source` from the
+   closed list, `key` a base64url uncompressed P-256 point, `callback` only
+   for X and only `http://127.0.0.1:<port>/oauth/callback/x`. Anything else
+   is a 502 and a `response_connect_page` refusal in the log. Every label,
+   sentence and field on the page is the template's: Readwise `token`;
+   X `client_id` and `client_secret`. A descriptor in answer to a POST is
+   never rendered.
+3. The page's script makes an ephemeral P-256 key pair, runs ECDH with the
+   engine key, then HKDF-SHA-256 (salt = page public ‖ engine public,
+   info = context `olympus-connect-page-v1|<id>|<source>`) to derive an
+   AES-256-GCM key. It seals the JSON of the fixed fields only (it refuses
+   any other field name), with the context as associated data, clears the
+   inputs and submits a form of only `epk`, `iv` and `ct`. The typed inputs
+   have no `name`, so their plain values are never part of any submission.
+   The button is disabled and an error is shown until the script runs, so a
+   browser that blocks it says so instead of doing nothing.
+4. `POST /go/<id>`: the relay forwards only a form body that is exactly
+   `epk` (a P-256 point), `iv` (12 bytes) and `ct` (base64url), once each,
+   nothing else, at most 8 KiB. Any other body is a 400 at the relay and
+   never reaches an install, so no install can collect a plaintext form
+   through `/go/`.
+5. The engine reads nothing for a link with no armed page (404). It checks
+   `Origin` (`null`, which the sandboxed page sends, the relay origin, or
+   absent; anything else is 403), the form content type, then reads at most
+   8 KiB. It then takes the armed entry, decrypts, and requires exactly the
+   source's field set. A body that does not open puts the page back with its
+   original expiry, up to three times, so junk from someone holding the link
+   id cannot spend the owner's page. The fields go to
+   `createKeyPageConnector` (`setup-backend.ts`), which posts in process to
+   the dashboard's own routes on the loopback origin. The answer is one
+   fixed sentence, with `form-action 'none'`. No worker message, provider
+   text, key or ciphertext is ever echoed or logged.
 
-**Relay** (`connect-relay/server/relay.ts`, `response-policy.ts`). `/go/`
-accepts `POST`, but only `application/x-www-form-urlencoded`, capped at 8 KiB
-and read through the usual upload accounting. It is routed on the control
-lane like the GET. `/go/` answers get a new `handoff` policy:
+**Relay** (`connect-relay/server/relay.ts`, `response-policy.ts`). The
+rendered page has:
 
 ```
 sandbox allow-scripts allow-forms; default-src 'none';
@@ -112,47 +133,71 @@ form-action https://<relay>/go/; base-uri 'none'; frame-ancestors 'none'
 
 The page keeps an opaque origin (no `allow-same-origin`), so it cannot touch
 the relay origin's storage. It cannot open connections (`connect-src` falls
-back to `'none'`), and it can run nothing but the pinned script. Any install
-can register, so any install can serve that one script, but nothing else. The
-provider-callback route keeps the no-script `browser` policy. The relay
-client (`connect-relay/client/forward.ts`) now forwards `POST /go/<id>`,
-exact path, no query.
+back to `'none'`) and runs only the pinned script. An install's own answers
+on `/go/` (an expired page, a redirect) keep the no-script, no-form
+`handoff` policy, as before this change. The relay client
+(`connect-relay/client/forward.ts`) forwards `POST /go/<id>`, exact path, no
+query.
 
-**Panel.** `dashboard-view-model.ts`: the Readwise and X rows' Connect,
-Reconnect and connecting fixes call `olympus_connect_source`, as Gmail's do.
-Telegram and WhatsApp keep the help link. The panel client is unchanged: it
-already opens any `/go/` link and polls until the row reads connected.
+**Capability.** The relay's session `ready` message now names
+`capabilities: ['connect_page_v1']`. The relay client passes it to the
+engine's status file (`remote-access/status.json`, `relay.capabilities`),
+and the worker's public-URL source sets `connectPages` only when it is
+present. The panel shows Connect on Readwise and X, and the tool mints a key
+page, only then; against an older relay both keep the help link.
+
+**Script version skew.** The relay serves the page, the script and the CSP
+hash from one build, so they can never disagree, and the engine never sends
+script. Pinning a current and a previous hash is therefore unnecessary. The
+engine–relay contract is the descriptor (`v: 1`) and the capability name; a
+change to either is a new version the relay advertises before engines use
+it.
+
+**Panel.** `dashboard-view-model.ts`: when the capability is present, the
+Readwise and X rows' Connect and Reconnect fixes call
+`olympus_connect_source`, as Gmail's do. Telegram and WhatsApp keep the help
+link. The panel client is unchanged: it already opens any `/go/` link and
+polls until the row reads connected.
 
 ## Threat model
 
-- **Relay (passive or compromised logs):** it sees the page, including the
-  engine public key, and the ciphertext. It never sees a key that opens the
-  ciphertext.
-- **Relay (active):** it serves the page through TLS it terminates, so a
-  malicious relay operator could swap the public key or the script and read
+- **Relay (passive or breached logs):** it sees the descriptor, the page and
+  the ciphertext, never a key that opens it. Bodies are never logged.
+- **Relay (active operator):** it terminates TLS and now renders the page,
+  so a malicious operator could swap the public key or the script and read
   what is typed. This protects against a curious or breached relay, not
-  against the relay's operator. The ChatGPT private-answer panel avoids this
-  because OpenAI serves the panel's code. A key page cannot, because the
-  owner rule keeps keys out of ChatGPT.
+  against its operator (as before; a key page cannot be served by OpenAI
+  because the owner rule keeps keys out of ChatGPT).
 - **Rogue install on the relay domain:** anyone can register an install and
-  mint a `/go/` link that shows a key page on `mcp.olympusplugin.ai`. Before
-  this change, no install could collect input on that domain. Now a phishing
-  link could ask a victim for a Readwise token or X app secret and post it,
-  encrypted to the attacker's engine. The script is fixed, so it cannot do
-  anything else. This is a residual risk for review (see the PR).
-- **Link leak** (OpenAI sees the link in the tool result): the first opener
-  spends it. If someone else opens it first, the owner sees "expired" and
-  nothing was typed. A leaked link after the owner's view is already spent.
+  mint a `/go/` link. It can no longer serve text, fields or a plain form on
+  the relay domain: its own HTML keeps the no-script, no-form sandbox, a
+  descriptor outside the closed shape is a 502, and a POST that is not a
+  sealed body never reaches it. The most it can show is the genuine Readwise
+  or X page keyed to its own engine, which would phish a Readwise token or
+  X app values. That is the same class as the OAuth hand-off links (a rogue
+  can already send a victim through a genuine-looking sign-in) and is
+  accepted for v1.
+- **Unauthenticated submission (L1):** the POST carries no session or owner
+  credential. What authorises it is holding the link id and producing
+  ciphertext that opens with the per-view engine key. Someone who learned
+  the link id after the owner's view (it is in the tool result OpenAI sees)
+  can seal a value of their own to the public key on the page, but only if
+  they also saw the page; then they could connect their own Readwise
+  account or X app to the owner's Olympus. Same class as the OAuth links,
+  whose callback also authenticates only by state; accepted, bounded by one
+  view, ten minutes and single use.
+- **Link leak:** the first opener spends it. If someone else opens it first,
+  the owner sees "expired" and nothing was typed.
 - **CSRF and replay:** a cross-site POST carries a foreign `Origin` and is
   refused. A sandboxed one still needs ciphertext that opens with the
-  per-view engine key, bound to the link id and source. Every submission is
-  single use, and a sealed body for one link does not open another.
+  per-view engine key, bound to the link id and source. A sealed body for
+  one link does not open another; a submission that connects is single use.
 
 ## Rollout
 
-The relay's `/go/` POST support and the pinned script hash ship in the relay
-build. **The relay must be rebuilt and redeployed** before an engine that
-mints key pages is useful. Until then, the old relay refuses the POST (405),
-and its no-script CSP stops the page from encrypting, so nothing is sent.
-Changing `CONNECT_PAGE_SCRIPT` changes the hash, which needs a relay redeploy
-in the same release.
+**Deploy order: relay first.** The relay build carries the template, the
+POST shape check and the `connect_page_v1` capability. Rebuild and redeploy
+the relay before (or with) engines that carry this change. An engine on an
+older relay sees no capability and keeps the help link. An older engine on
+the new relay never mints key pages, so nothing changes for it. Changing
+`CONNECT_PAGE_SCRIPT` needs only a relay redeploy.

@@ -1,34 +1,33 @@
 /**
- * Connect pages, engine side: the key-entry page a `/go/` hand-off link of
- * kind `key_page` serves, and the decryption of what it posts back
- * (docs/design/connect-pages.md; the in-page script is
- * connect-relay/shared/connect-page.ts).
+ * Connect pages, engine side (docs/design/connect-pages.md): the descriptor a
+ * `/go/` hand-off link of kind `key_page` answers with, the decryption of what
+ * the page posts back, and the one-sentence result pages.
  *
- * Each view of a page gets a fresh P-256 key pair. Its public half is written
- * into the page; its private half stays in this process's memory, beside the
- * link id, until one submission takes it or it expires. The page encrypts the
- * typed key to it (ECDH → HKDF-SHA-256 → AES-256-GCM, with the context
+ * The page itself is rendered by the relay from its own fixed template
+ * (connect-relay/shared/connect-page.ts); this engine supplies only the
+ * source and a fresh P-256 public key for that one view. The private half
+ * stays in this process's memory, beside the link id, until a submission
+ * opens with it or it expires. The page encrypts the typed key to it
+ * (ECDH → HKDF-SHA-256 → AES-256-GCM, with the context
  * `olympus-connect-page-v1|<link id>|<source>` as HKDF info and associated
  * data), so the relay that carries the page and the post sees ciphertext only.
  *
  * Nothing here logs, and no key, ciphertext or provider message is ever put
- * in a response: every outcome is one of the fixed sentences below.
+ * in a response: every outcome is one of the fixed sentences in handoff.ts.
  */
 import {
-  CONNECT_PAGE_SCRIPT,
-  CONNECT_PAGE_SCRIPT_HASH,
+  CONNECT_PAGE_DESCRIPTOR_TYPE,
+  CONNECT_PAGE_FIELDS,
+  CONNECT_PAGE_SOURCES,
   connectPageContext,
+  isConnectPageSource,
+  type ConnectPageDescriptor,
+  type ConnectPageSource,
 } from '../../../connect-relay/shared/connect-page.ts';
 
 /** Sources connected by typing a key on a connect page. */
-export const KEY_PAGE_SOURCES = ['readwise', 'x'] as const;
-export type KeyPageSource = (typeof KEY_PAGE_SOURCES)[number];
-
-/** The exact fields each source's page sends; anything else is refused. */
-export const KEY_PAGE_FIELDS: Readonly<Record<KeyPageSource, readonly string[]>> = {
-  readwise: ['token'],
-  x: ['client_id', 'client_secret'],
-};
+export const KEY_PAGE_SOURCES = CONNECT_PAGE_SOURCES;
+export type KeyPageSource = ConnectPageSource;
 
 /** Longest value accepted for any field (Readwise tokens and X client values are far shorter). */
 const MAX_FIELD_LENGTH = 512;
@@ -40,9 +39,7 @@ export interface ConnectPageKey {
   privateKey: CryptoKey;
 }
 
-export function isKeyPageSource(value: unknown): value is KeyPageSource {
-  return typeof value === 'string' && (KEY_PAGE_SOURCES as readonly string[]).includes(value);
-}
+export const isKeyPageSource = isConnectPageSource;
 
 /** A fresh one-view key pair; the private key cannot be exported. */
 export async function createConnectPageKey(): Promise<ConnectPageKey> {
@@ -92,7 +89,7 @@ export async function openConnectPageSubmission(input: {
     plaintext.fill(0);
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-  const expected = KEY_PAGE_FIELDS[input.source];
+  const expected = CONNECT_PAGE_FIELDS[input.source].map((field) => field.name);
   const record = parsed as Record<string, unknown>;
   const keys = Object.keys(record);
   if (keys.length !== expected.length || !expected.every((name) => keys.includes(name))) return undefined;
@@ -107,85 +104,29 @@ export async function openConnectPageSubmission(input: {
   return fields;
 }
 
-const LABELS: Readonly<Record<KeyPageSource, string>> = { readwise: 'Readwise', x: 'X bookmarks' };
-
-/** The key-entry page for one view of a link. */
-export function connectPageResponse(input: {
-  source: KeyPageSource;
-  linkId: string;
-  key: ConnectPageKey;
-  /** The link's own public URL (`https://<relay>/go/<id>`): the form's only target. */
-  actionUrl: string;
-  /** X only: the callback address the owner's X app must list. */
-  xCallbackUri?: string;
-}): Response {
-  const label = LABELS[input.source];
-  const intro = input.source === 'readwise'
-    ? [
-      'Paste your Readwise access token. To find it, open readwise.io/access_token in another tab and copy the token shown there.',
-    ]
-    : [
-      'X bookmarks need your own X developer app, with paid X API access. In the app\'s settings, App permissions must be Read and Type of App must be Web App, Automated App or Bot.',
-      ...(input.xCallbackUri
-        ? [`Its Callback URI / Redirect URL must include exactly: ${input.xCallbackUri}`]
-        : []),
-      'Paste the app\'s OAuth 2.0 Client ID and Client secret from Keys & Tokens. After this page, X asks you to allow Olympus. X returns to Olympus on your computer, so finish that step on the computer Olympus runs on.',
-    ];
-  const fields = input.source === 'readwise'
-    ? [field('token', 'Readwise access token')]
-    : [field('client_id', 'OAuth 2.0 Client ID'), field('client_secret', 'Client secret')];
-  const body = [
-    `<h1>Connect ${label} to Olympus</h1>`,
-    ...intro.map((line) => `<p>${escapeHtml(line)}</p>`),
-    `<form id="olympus-connect" method="post" action="${escapeHtml(input.actionUrl)}" data-key="${toBase64Url(input.key.publicKey)}" data-context="${escapeHtml(connectPageContext(input.linkId, input.source))}" autocomplete="off">`,
-    ...fields,
-    '<input type="hidden" id="olympus-connect-epk" name="epk" value="">',
-    '<input type="hidden" id="olympus-connect-iv" name="iv" value="">',
-    '<input type="hidden" id="olympus-connect-ct" name="ct" value="">',
-    '<button type="submit" id="olympus-connect-submit">Connect</button>',
-    '</form>',
-    '<p id="olympus-connect-error" hidden>This browser could not lock the key for sending. Nothing was sent. Try a current version of Safari, Chrome, Edge or Firefox.</p>',
-    '<p class="note">What you type is locked in this page so that only Olympus on your computer can read it. It never goes through ChatGPT, and this page works once. If you reload it, go back to ChatGPT and press Connect again.</p>',
-    `<script>${CONNECT_PAGE_SCRIPT}</script>`,
-  ].join('');
-  return htmlResponse(200, `Connect ${label}`, body, connectPageCsp(input.actionUrl));
+/** The answer to a key-page link: the source and this view's public key; the relay renders the page. */
+export function connectPageDescriptorResponse(input: { source: KeyPageSource; key: ConnectPageKey; xCallbackUri?: string }): Response {
+  const descriptor: ConnectPageDescriptor = {
+    v: 1,
+    source: input.source,
+    key: toBase64Url(input.key.publicKey),
+    ...(input.source === 'x' && input.xCallbackUri ? { callback: input.xCallbackUri } : {}),
+  };
+  return new Response(JSON.stringify(descriptor), {
+    status: 200,
+    headers: {
+      'Content-Type': CONNECT_PAGE_DESCRIPTOR_TYPE,
+      'Cache-Control': 'no-store',
+      'Referrer-Policy': 'no-referrer',
+    },
+  });
 }
 
 /** A one-sentence result page (no script, no form). */
 export function connectPageMessage(status: number, sentence: string, link?: { href: string; label: string }): Response {
   const action = link ? `<p><a href="${escapeHtml(link.href)}" rel="noreferrer">${escapeHtml(link.label)}</a></p>` : '';
-  return htmlResponse(status, 'Olympus', `<p>${escapeHtml(sentence)}</p>${action}`, MESSAGE_CSP);
-}
-
-const MESSAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-
-function connectPageCsp(actionUrl: string): string {
-  return [
-    'sandbox allow-scripts allow-forms',
-    "default-src 'none'",
-    `script-src ${CONNECT_PAGE_SCRIPT_HASH}`,
-    "style-src 'unsafe-inline'",
-    `form-action ${new URL(actionUrl).origin}`,
-    "base-uri 'none'",
-    "frame-ancestors 'none'",
-  ].join('; ');
-}
-
-function field(name: string, label: string): string {
-  // No `name`: the plain value is never part of the submitted form.
-  return `<label>${escapeHtml(label)}<input type="password" data-field="${name}" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>`;
-}
-
-const STYLE = 'body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;color:#1d1d1f;background:#fff}'
-  + 'h1{font-size:1.4rem}label{display:block;margin:1rem 0;font-weight:600}'
-  + 'input{display:block;width:100%;box-sizing:border-box;margin-top:.35rem;padding:.6rem;font:inherit;border:1px solid #8e8e93;border-radius:8px}'
-  + 'button{font:inherit;font-weight:600;padding:.6rem 1.4rem;border:0;border-radius:8px;background:#1d1d1f;color:#fff}'
-  + '.note{color:#555;font-size:.9rem;margin-top:1.5rem}#olympus-connect-error{color:#b3261e}'
-  + '@media (prefers-color-scheme:dark){body{background:#1c1c1e;color:#f2f2f7}input{background:#2c2c2e;color:#f2f2f7}button{background:#f2f2f7;color:#1c1c1e}.note{color:#aeaeb2}}';
-
-function htmlResponse(status: number, title: string, body: string, csp: string): Response {
   return new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>${escapeHtml(title)}</title><style>${STYLE}</style></head><body>${body}</body></html>`,
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Olympus</title><style>${STYLE}</style></head><body><p>${escapeHtml(sentence)}</p>${action}</body></html>`,
     {
       status,
       headers: {
@@ -193,11 +134,14 @@ function htmlResponse(status: number, title: string, body: string, csp: string):
         'Cache-Control': 'no-store',
         'Referrer-Policy': 'no-referrer',
         'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': csp,
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       },
     },
   );
 }
+
+const STYLE = 'body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;color:#1d1d1f;background:#fff}'
+  + '@media (prefers-color-scheme:dark){body{background:#1c1c1e;color:#f2f2f7}a{color:#8ab4f8}}';
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);

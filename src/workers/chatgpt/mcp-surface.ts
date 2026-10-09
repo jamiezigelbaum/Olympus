@@ -75,6 +75,8 @@ export interface ChatGptSurfaceOptions {
   privacy?: () => ChatGptDashboardOptions['privacy'];
   /** The built-in private model's install state, when it is on for this machine. */
   privateModel?: () => ChatGptDashboardOptions['privateModel'];
+  /** Whether the relay renders connect pages (Readwise and X Connect); absent: they keep the help link. */
+  keyPages?: () => boolean;
   /** Setup from ChatGPT (setup-tools.ts). Absent: the setup tools answer "unavailable". */
   setup?: ChatGptSetupBackend;
   /**
@@ -586,6 +588,7 @@ async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?: Abort
     ...(embedding ? { embedding } : {}),
     ...(privacy ? { privacy } : {}),
     ...(privateModel ? { privateModel } : {}),
+    ...(options.keyPages?.() ? { keyPages: true } : {}),
   });
 }
 

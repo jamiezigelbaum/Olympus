@@ -37,6 +37,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/built-in-transcription.md',
   'docs/design/categorization-precision.md',
   'docs/design/chatgpt-plugin.md',
+  'docs/design/connect-pages.md',
   'docs/design/consult-gate-false-refusals.md',
   'docs/design/consult-m1-measurement.md',
   'docs/design/consult-pii-bakeoff.md',

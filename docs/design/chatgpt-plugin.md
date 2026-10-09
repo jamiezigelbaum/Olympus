@@ -134,9 +134,11 @@ ChatGPT ──HTTPS──> mcp.olympusplugin.ai (Caddy: TLS, Let's Encrypt HTTP-
     and a relay Content-Security-Policy beside the install's own:
     `sandbox; default-src 'none'` (opaque origin, no script) everywhere but
     the operator's demo sign-in, which keeps its origin and may submit its
-    form but runs no script, and `/go/…`, whose pages stay opaque-origin
-    sandboxed but may run the one pinned connect-page script and post a
-    form back to `/go/` (docs/design/connect-pages.md). API routes serve
+    form but runs no script, and the connect pages the relay itself renders
+    on `/go/…` from its own template, which stay opaque-origin sandboxed but
+    run the one pinned connect-page script and post a sealed form back to
+    `/go/` (docs/design/connect-pages.md); an install's own `/go/` answers
+    keep the no-script sandbox. API routes serve
     JSON, event streams or text and never redirect; browser routes (`/go/…`, `/oauth/callback/…`) serve
     HTML, text or JSON and redirect only to Google's and Dropbox's sign-in,
     the engine's loopback port, or the relay. Anything else, and any header

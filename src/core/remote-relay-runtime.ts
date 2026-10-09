@@ -85,10 +85,14 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
     // until it succeeds or fails again, so an unreachable relay reads as one
     // steady "relay unavailable", not a flicker.
     if (next.state === 'connecting' && status.relay?.state === 'offline') return;
+    // What the relay offers is known from its last `ready`, and kept across
+    // a reconnect so the panel does not flip while the session comes back.
+    const capabilities = next.state === 'online' ? next.capabilities : status.relay?.capabilities;
     status.relay = {
       state: next.state,
       reason: next.state === 'offline' ? next.reason : null,
       retry_in_ms: next.state === 'offline' || next.state === 'replaced' ? next.retryInMs : null,
+      ...(capabilities && capabilities.length > 0 ? { capabilities } : {}),
     };
     if (next.state === 'online') status.last_connected_at = new Date(next.connectedAt).toISOString();
     write();

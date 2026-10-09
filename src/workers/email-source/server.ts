@@ -4823,6 +4823,7 @@ export async function main(): Promise<void> {
             answerModelAvailable: chatgptAnswerModelAvailable,
             embedding: chatgptEmbeddingState,
             privateModel: chatgptPrivateModelState,
+            keyPages: () => remotePublicUrls()?.connectPages === true,
             privacy: () => {
               const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
               return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };

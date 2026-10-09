@@ -75,7 +75,13 @@ export type ChallengeMessage = { type: 'challenge'; v: number; nonce: string; po
 /** `auth` is present for scheme 3 and absent for scheme 2 (the legacy wire form, byte for byte). */
 export type HelloMessage = { type: 'hello'; v: number; installId: string; sig: string; auth?: number };
 export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string; pow?: string; auth?: number };
-export type ReadyMessage = { type: 'ready'; installId: string };
+/**
+ * `capabilities`: what this relay offers beyond the base protocol (for
+ * example CONNECT_PAGE_CAPABILITY, shared/connect-page.ts); absent from
+ * relays that predate it. Advisory: an install uses it only to decide what to
+ * offer, never as authorization.
+ */
+export type ReadyMessage = { type: 'ready'; installId: string; capabilities?: string[] };
 export type PingMessage = { type: 'ping' };
 export type PongMessage = { type: 'pong' };
 export type ErrorMessage = { type: 'error'; code: RelayErrorCode; message: string };

@@ -27,7 +27,7 @@ import type { RelayLimits } from '../server/limits.ts';
 import { FileInstallRegistry, MemoryInstallRegistry } from '../server/registry.ts';
 import { startRelay, type RelayHandle } from '../server/relay.ts';
 import { createChatGptHandoffHandler, createChatGptHandoffs } from '../../src/workers/chatgpt/handoff.ts';
-import { CONNECT_PAGE_SCRIPT_HASH } from '../shared/connect-page.ts';
+import { CONNECT_PAGE_CAPABILITY, CONNECT_PAGE_DESCRIPTOR_TYPE, CONNECT_PAGE_SCRIPT_HASH, connectPageCsp } from '../shared/connect-page.ts';
 import { submitThroughScript } from './fixtures/connect-page-browser.ts';
 
 setDefaultTimeout(20_000);
@@ -176,14 +176,16 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     expect(page.headers.get('x-content-type-options')).toBe('nosniff');
     expect(page.headers.get('referrer-policy')).toBe('no-referrer');
     // Both policies are enforced. The relay's sandboxes the page with an
-    // opaque origin and allows exactly one script, the pinned connect-page
-    // script, so the install's own `unsafe-inline` runs nothing.
+    // opaque origin, allows no script and no form, so the install's own
+    // `unsafe-inline` runs nothing and nothing typed there can be posted.
     const csp = page.headers.get('content-security-policy')!;
     expect(csp).toContain("script-src 'unsafe-inline'");
     const relayPolicy = csp.split(', ').find((policy) => policy.startsWith('sandbox'))!;
-    expect(relayPolicy).toMatch(/^sandbox allow-scripts allow-forms; default-src 'none'; script-src 'sha256-[A-Za-z0-9+/]+=*';/);
-    expect(relayPolicy).toContain(`script-src ${CONNECT_PAGE_SCRIPT_HASH};`);
-    expect(relayPolicy).toContain(`form-action https://${PUBLIC_HOST}/go/;`);
+    expect(relayPolicy).toMatch(/^sandbox; default-src 'none';/);
+    expect(relayPolicy).not.toContain('allow-scripts');
+    expect(relayPolicy).not.toContain('allow-forms');
+    expect(relayPolicy).toContain("form-action 'none'");
+    expect(relayPolicy).not.toContain(CONNECT_PAGE_SCRIPT_HASH);
     expect(csp).not.toContain('allow-same-origin');
 
     const state = handbackState(rogue.identity.installId);
@@ -291,7 +293,7 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     expect(used.headers.get('content-security-policy')).toContain("style-src 'unsafe-inline'");
   });
 
-  test('a connect page round trip through the relay: the page, then one sealed POST the relay cannot read', async () => {
+  test('a connect page round trip through the relay: the relay renders the page, then one sealed POST it cannot read', async () => {
     const handoffs = createChatGptHandoffs();
     const received: Array<{ source: string; fields: Record<string, string> }> = [];
     const handler = createChatGptHandoffHandler(handoffs, {
@@ -306,13 +308,18 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     const relay = await makeRelay();
     const install = await connectClient(relay, `http://127.0.0.1:${worker.port}`);
     await until(() => install.statuses.at(-1)?.state === 'online');
+    // The relay says it renders connect pages; the engine offers them only then.
+    const online = install.statuses.at(-1)!;
+    expect(online.state === 'online' ? online.capabilities : []).toContain(CONNECT_PAGE_CAPABILITY);
     const link = handoffs.mint(install.identity.installId, { kind: 'key_page', source: 'readwise' });
     const page = await fetch(`${relay.url}/go/${link.id}`);
     expect(page.status).toBe(200);
-    const csp = page.headers.get('content-security-policy')!;
-    expect(csp).toContain(CONNECT_PAGE_SCRIPT_HASH);
+    expect(page.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(page.headers.get('content-security-policy')).toBe(connectPageCsp(`https://${PUBLIC_HOST}`));
+    const html = await page.text();
+    expect(html).toContain('Readwise access token');
     const token = 'SENTINEL_RELAY_TOKEN_7f3a';
-    const sent = await submitThroughScript(await page.text(), { token });
+    const sent = await submitThroughScript(html, { token });
     expect(sent.body).not.toContain(token);
     const posted = await fetch(`${relay.url}/go/${link.id}`, {
       method: 'POST',
@@ -334,16 +341,65 @@ describe('1: install answers on the relay origin are sandboxed and checked', () 
     expect(logLines.join('\n')).not.toContain(sent.body.slice(0, 40));
   });
 
-  test('the relay forwards a /go/ POST only as a small form', async () => {
+  test('a rogue install cannot put its own words or fields on the connect page', async () => {
+    const key = 'B'.padEnd(87, 'A');
+    const descriptors: Record<string, string> = {
+      label: JSON.stringify({ v: 1, source: 'readwise', key, label: 'Your Google password' }),
+      fields: JSON.stringify({ v: 1, source: 'readwise', key, fields: [{ name: 'password', label: 'Password' }] }),
+      source: JSON.stringify({ v: 1, source: 'google', key }),
+      callback: JSON.stringify({ v: 1, source: 'x', key, callback: 'https://evil.example/login' }),
+      html: '<form method=post><input name=password></form>',
+      large: JSON.stringify({ v: 1, source: 'readwise', key, pad: 'a'.repeat(4000) }),
+      valid: JSON.stringify({ v: 1, source: 'readwise', key }),
+    };
+    const relay = await makeRelay();
+    const answers = new Map<string, string>();
+    const rogue = await rogueInstall(relay, ({ path }) => ({
+      status: 200,
+      headers: [['content-type', CONNECT_PAGE_DESCRIPTOR_TYPE]],
+      body: answers.get(path) ?? '',
+    }));
+    for (const [name, body] of Object.entries(descriptors)) {
+      const id = mintCredential('handoff', rogue.identity.installId);
+      answers.set(`/go/${id}`, body);
+      const page = await fetch(`${relay.url}/go/${id}`);
+      const text = await page.text();
+      if (name === 'valid') {
+        // The most a rogue gets: the relay's own page, keyed to itself.
+        expect(page.status).toBe(200);
+        expect(text).toContain('Readwise access token');
+        expect([...text.matchAll(/data-field="([a-z_]+)"/g)].map((match) => match[1])).toEqual(['token']);
+      } else {
+        expect(page.status).toBe(502);
+        expect(text).not.toContain('password');
+        expect(text).not.toContain('Google');
+        expect(text).not.toContain('evil.example');
+      }
+    }
+    expect(logLines.join('\n')).toContain('"reason":"response_connect_page"');
+  });
+
+  test('a rogue install gets no plaintext form through /go/: only an exact sealed body is forwarded', async () => {
     const relay = await makeRelay();
     const rogue = await rogueInstall(relay, () => ({ status: 200, headers: [['content-type', 'text/plain']], body: 'ok' }));
     const link = `${relay.url}/go/${mintCredential('handoff', rogue.identity.installId)}`;
+    const form = { 'content-type': 'application/x-www-form-urlencoded' };
     expect((await fetch(link, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(415);
-    expect((await fetch(link, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `ct=${'a'.repeat(9000)}` })).status).toBe(413);
+    expect((await fetch(link, { method: 'POST', headers: form, body: `ct=${'a'.repeat(9000)}` })).status).toBe(413);
     expect((await fetch(link, { method: 'PUT', body: 'x' })).status).toBe(405);
+    for (const body of ['ct=a', 'password=hunter2', 'username=me&password=hunter2', 'epk=a&iv=b&ct=c', `token=${'a'.repeat(30)}`]) {
+      const refused = await fetch(link, { method: 'POST', headers: form, body });
+      expect(refused.status).toBe(400);
+      expect(refused.headers.get('content-security-policy')).toContain("form-action 'none'");
+    }
     expect(rogue.seen).toEqual([]);
-    expect((await fetch(link, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'ct=a' })).status).toBe(200);
+    const sealed = `epk=${'B'.padEnd(87, 'A')}&iv=${'a'.repeat(16)}&ct=${'a'.repeat(40)}`;
+    expect((await fetch(link, { method: 'POST', headers: form, body: sealed })).status).toBe(200);
     expect(rogue.seen).toEqual([`POST /go/${link.split('/go/')[1]}`]);
+    // A descriptor in answer to a POST is never rendered.
+    const descriptorRogue = await rogueInstall(relay, () => ({ status: 200, headers: [['content-type', CONNECT_PAGE_DESCRIPTOR_TYPE]], body: JSON.stringify({ v: 1, source: 'readwise', key: 'B'.padEnd(87, 'A') }) }));
+    const posted = await fetch(`${relay.url}/go/${mintCredential('handoff', descriptorRogue.identity.installId)}`, { method: 'POST', headers: form, body: sealed });
+    expect(posted.status).toBe(502);
   });
 
   test('the demo sign-in keeps its origin and may submit its form, but runs no script', async () => {

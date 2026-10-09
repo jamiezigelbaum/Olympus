@@ -84,6 +84,8 @@ export interface ChatGptSetupBackend {
   startOAuth(source: ChatGptOAuthSource): Promise<{ authorizationUrl: string; expiresAt: string }>;
   /** A one-time `https://<relay>/go/<id>` link; undefined when this engine is not linked to the relay. */
   handoffLink(target: HandoffTarget): { url: string; expiresAt: string } | undefined;
+  /** Whether the relay renders connect pages, so a key-page link would work (absent: no). */
+  keyPagesAvailable?(): boolean;
   browseFolders(input: { sourceId: ChatGptFolderSourceId; parentKey?: string; cursor?: string }): Promise<OlympusFolderScopeBrowseResult>;
   approveFolders(input: {
     sourceId: ChatGptFolderSourceId;
@@ -377,6 +379,8 @@ export async function callSetupTool(
       case CONNECT_SOURCE_TOOL_NAME: {
         const source = oneOf(args.source, CONNECT_SOURCES);
         if (isKeyPageSource(source)) {
+          // An older relay cannot render the page: the source stays on its help link.
+          if (!backend.keyPagesAvailable?.()) throw new ChatGptSurfaceError('connect_unavailable');
           const page = backend.handoffLink({ kind: 'key_page', source });
           if (!page) throw new ChatGptSurfaceError('not_linked');
           return connectSourceToolResult({ status: 'open_link', source, openUrl: page.url, expiresAt: page.expiresAt });

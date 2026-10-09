@@ -215,7 +215,13 @@ export interface RemoteAccessStatusFile {
   pid: number | null;
   /** This install's relay id (relay mode). */
   install_id: string | null;
-  relay: { state: RelaySessionState; reason: string | null; retry_in_ms: number | null } | null;
+  relay: {
+    state: RelaySessionState;
+    reason: string | null;
+    retry_in_ms: number | null;
+    /** What the relay advertised in its last `ready` (connect-relay/shared/protocol.ts); absent from older relays. */
+    capabilities?: string[];
+  } | null;
   /** When the relay session last came up. */
   last_connected_at: string | null;
 }
@@ -259,6 +265,13 @@ export function readRemoteAccessStatus(dir: string): RemoteAccessStatusFile | un
 // ---------------------------------------------------------------------------
 // Worker: the public base URL, live
 
+/**
+ * The relay capability that means it renders connect pages. Must equal
+ * CONNECT_PAGE_CAPABILITY in connect-relay/shared/connect-page.ts (a test holds
+ * them equal); kept here so the Gateway bundle does not carry that module.
+ */
+export const RELAY_CONNECT_PAGE_CAPABILITY = 'connect_page_v1';
+
 export interface RemotePublicUrlSource {
   /** The public URLs right now, or undefined while OAuth is off. */
   current(): RemotePublicUrls | undefined;
@@ -300,7 +313,12 @@ export function createRemotePublicUrlSource(
       if (!status || status.error || status.mode === 'off' || !status.public_base_url) return undefined;
       if (status.mode === 'relay' && !(status.install_id && INSTALL_ID.test(status.install_id))) return undefined;
       const parsed = parseRemotePublicBaseUrl(status.public_base_url, status.mode === 'relay' ? status.install_id! : undefined);
-      return parsed.enabled ? parsed.urls : undefined;
+      if (!parsed.enabled) return undefined;
+      // Key pages need a relay that renders them (docs/design/connect-pages.md).
+      const connectPages = status.mode === 'relay'
+        && Array.isArray(status.relay?.capabilities)
+        && status.relay.capabilities.includes(RELAY_CONNECT_PAGE_CAPABILITY);
+      return connectPages ? { ...parsed.urls, connectPages: true } : parsed.urls;
     },
     options.minIntervalMs ?? 1_000,
     options.now ?? Date.now,

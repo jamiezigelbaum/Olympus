@@ -455,7 +455,7 @@ describe('dashboard view-model producer', () => {
       offCard('x.bookmarks'),
       offCard('telegram.messages'),
       card('readwise.library', { connection: { state: 'reauth_required', label: 'reauth required' } }),
-    ]), { now: NOW, embedding: { kind: 'built_in', state: 'failed' } });
+    ]), { now: NOW, embedding: { kind: 'built_in', state: 'failed' }, keyPages: true });
     const fixes = [
       ...vm.needsYou.map((item) => item.fix),
       ...vm.sources.flatMap((source) => [source.primary, ...(source.menu ?? [])]).filter((fix) => fix !== undefined),
@@ -476,6 +476,20 @@ describe('dashboard view-model producer', () => {
     expect(vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix.href).toBeUndefined();
     expect(vm.needsYou.find((item) => item.id === 'source:gmail.email')!.fix.href).toBeUndefined();
     expect(copyDashboardViewModel(vm)).toEqual(vm);
+  });
+
+  test('without a relay that renders key pages, keyed sources keep their help link', () => {
+    const vm = buildChatGptDashboardViewModel(view([
+      offCard('x.bookmarks'),
+      card('readwise.library', { connection: { state: 'reauth_required', label: 'reauth required' } }),
+    ]), { now: NOW });
+    const help = 'https://olympusplugin.ai/help/on-your-mac/';
+    expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary!.href).toBe(`${help}#connect`);
+    expect(vm.sources.find((source) => source.id === 'x.bookmarks')!.primary!.tool).not.toBe('olympus_connect_source');
+    const readwise = vm.needsYou.find((item) => item.id === 'source:readwise.library')!.fix;
+    expect(readwise.href).toBe(`${help}#reconnect`);
+    expect(readwise.tool).not.toBe('olympus_connect_source');
+    expect(JSON.stringify(vm)).not.toContain('"olympus_connect_source","args":{"source":"x"}');
   });
 
   test('a model download keeps the engine installing; embedding state passes through', () => {
