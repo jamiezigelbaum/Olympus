@@ -11,12 +11,13 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
+  daemonEnvironment,
   formatZkapiStageTable,
   inspectLoopbackListener,
   openZkapiConsultSession,
@@ -2455,6 +2456,26 @@ describe('zkAPI consult transport: finding the programs', () => {
       expect(ready.blockers).not.toContain('tor_not_found');
     } else {
       expect(ready.blockers).toContain('daemon_not_found');
+    }
+  });
+});
+
+describe('zkAPI consult transport: the daemon finds its wallet companion', () => {
+  test('the daemon install folder leads PATH, resolved through symlinks', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'zkapi-companion-')));
+    try {
+      const installBin = join(root, 'lib', 'current', 'bin');
+      mkdirSync(installBin, { recursive: true });
+      writeFileSync(join(installBin, 'zkapi-clientd'), '#!/bin/sh\n');
+      const linkDir = join(root, 'bin');
+      mkdirSync(linkDir);
+      symlinkSync(join(installBin, 'zkapi-clientd'), join(linkDir, 'zkapi-clientd'));
+      const env = daemonEnvironment({ HOME: '/home/x', PATH: `/usr/bin:${installBin}:/bin` }, join(linkDir, 'zkapi-clientd'));
+      expect(env.PATH).toBe(`${installBin}:/usr/bin:/bin`);
+      expect(env.HOME).toBe('/home/x');
+      expect(daemonEnvironment({}, join(installBin, 'zkapi-clientd')).PATH).toBe(installBin);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

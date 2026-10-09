@@ -58473,6 +58473,7 @@ __export(exports_consult_transport_zkapi, {
   defaultZkapiStatePath: () => defaultZkapiStatePath,
   defaultZkapiConfinement: () => defaultZkapiConfinement,
   darwinSandboxProfile: () => darwinSandboxProfile,
+  daemonEnvironment: () => daemonEnvironment,
   confinementStatement: () => confinementStatement,
   confinementLevel: () => confinementLevel,
   abandonZkapiFence: () => abandonZkapiFence,
@@ -58957,6 +58958,15 @@ function childEnvironment(env) {
       out[key] = value;
   }
   return out;
+}
+function daemonEnvironment(base, daemonExecutable) {
+  let real = daemonExecutable;
+  try {
+    real = realpathSync4(daemonExecutable);
+  } catch {}
+  const installBin = dirname37(real);
+  const rest = (base.PATH ?? "").split(delimiter4).filter((entry) => entry && entry !== installBin);
+  return { ...base, PATH: [installBin, ...rest].join(delimiter4) };
 }
 function standardExecutableDirectories(env, platform2 = process.platform) {
   const home = env.HOME?.trim();
@@ -59647,7 +59657,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
       const facts = { requests: new Map, settled: new Map };
       const daemonArgv = [daemonExecutable, "serve"];
       stage("daemonReadyMs");
-      daemon = supervise("daemon", watchdog, perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv, childEnv, (line) => parseDaemonLine(facts, line), onChildExit);
+      daemon = supervise("daemon", watchdog, perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv, daemonEnvironment(childEnv, daemonExecutable), (line) => parseDaemonLine(facts, line), onChildExit);
       recordAndStart(daemon);
       const daemonGone = () => daemon.leaderExited || daemon.childExited;
       const owned = async (includeTor = true) => {
