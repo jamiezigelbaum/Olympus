@@ -7269,6 +7269,9 @@ var init_answer_ready_coverage = __esm(() => {
 });
 
 // src/workers/dashboard/vocabulary.ts
+function dashboardManualSyncPendingLine(label) {
+  return `Checking ${label}…`;
+}
 var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_LOCAL_PRIVACY_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
@@ -7405,10 +7408,13 @@ var init_vocabulary = __esm(() => {
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
     howOnMac: "How to fix this on your computer",
-    sourcePaused: "Paused"
+    sourcePaused: "Paused",
+    syncChecking: "Checking…",
+    syncCheckingLine: dashboardManualSyncPendingLine("{source}")
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
+    syncNow: "Sync now",
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",

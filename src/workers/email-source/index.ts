@@ -156,7 +156,7 @@ import {
 } from '../google-connectors/corpora.ts';
 import { dashboardHtmlRoutePage, renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
 import type { DashboardModelInstalls } from '../dashboard/source-rows.ts';
-import { dashboardManualSyncFailedLine, dashboardManualSyncLine } from '../dashboard/vocabulary.ts';
+import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine } from '../dashboard/vocabulary.ts';
 import type { DashboardPrivacyOutcome, DashboardPrivacySummaryOutcome } from './dashboard-privacy.ts';
 import type { DashboardConsultBackend } from './dashboard-consult.ts';
 
@@ -195,6 +195,7 @@ import {
 import type { DashboardBackgroundPageOptions } from '../dashboard/pages/background.ts';
 import {
   DASHBOARD_SAVED_SECRET_FIELD_VALUE,
+  DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS,
   DASHBOARD_SUPPORTED_SOURCES,
   buildSourceDashboardViewModel,
   dashboardManualSyncOutcome,
@@ -822,6 +823,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // the press found after the page refreshes (2026-10-08). In memory beside
   // the Disconnect latch: the line lives ten minutes, a restart may drop it.
   const dashboardManualSyncs = new Map<string, DashboardManualSync>();
+  // Sync now answers before its sync ends (2026-10-09): the runs still going,
+  // and when each source was last started, for `busy` and the once-a-minute
+  // limit. Keyed like `dashboardManualSyncs`, by the dashboard source id.
+  const dashboardManualSyncRuns = new Map<string, Promise<void>>();
+  const dashboardManualSyncStarts = new Map<string, number>();
   // Paired-session sources this worker has unpaired. Separate from the
   // Disconnect latch because it answers a different question: Disconnect's
   // latch gates manual reads for broker sources, while this one is the explicit
@@ -2016,6 +2022,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/sync-now') {
+          // Start, then answer at once (2026-10-09). The sync runs outside the
+          // grant lock and outside this request: the ChatGPT panel gives up on
+          // a tool after 20 s, and a whole library sync held every other
+          // dashboard mutation behind it. What it finds is the card's
+          // `last_manual_sync`, read on the next refresh.
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
@@ -2028,47 +2039,56 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const source = parseDashboardSyncSource(record.source);
           assertDashboardSourceMayRead(source, sourceDashboard, dashboardDisconnectedSources);
           const schedulerSourceId = dashboardSchedulerSourceId(source);
+          const key = schedulerSourceId ?? source;
           const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === schedulerSourceId);
-          const before = sourceScheduler?.status();
-          let result: unknown;
-          try {
-            result = await runDashboardSourceSync({
-              source,
-              reason: 'manual',
-            });
-          } catch (error) {
-            // Our own refusals (scope not approved, worker stopping, no lane)
-            // are sentences written for the owner and pass through. Anything
-            // else came from a provider or a connector and is never relayed.
-            if (error instanceof EmailSourceWorkerError) throw error;
-            if (error instanceof OperationError
-              && (error.code === 'source_index_policy_violation' || error.code === 'invalid_params')) throw error;
-            logSourceWorkerInternalError(request, error);
-            if (schedulerSourceId) dashboardManualSyncs.set(schedulerSourceId, { at: new Date().toISOString(), outcome: 'failed' });
-            throw new EmailSourceWorkerError(502, 'sync_failed', dashboardManualSyncFailedLine(definition?.label ?? 'this source'));
-          }
-          assertNoRawEmailFields(result);
-          const lastManualSync = dashboardManualSyncOutcome({
-            result,
-            ...(before ? { before } : {}),
-            ...(schedulerSourceId ? { schedulerSourceId } : {}),
-            at: new Date(),
-          });
-          if (schedulerSourceId) dashboardManualSyncs.set(schedulerSourceId, lastManualSync);
-          const statusMessage = definition
-            ? dashboardManualSyncLine({ label: definition.label, family: definition.family, last_manual_sync: lastManualSync }, new Date())
-            : undefined;
-          return json({
+          const label = definition?.label ?? 'this source';
+          const answer = (status: 'checking' | 'busy' | 'too_soon', statusMessage: string, lastManualSync?: DashboardManualSync) => json({
             ok: true,
             source,
-            result,
-            last_manual_sync: lastManualSync,
-            ...(statusMessage ? { status_message: statusMessage } : {}),
+            status,
+            ...(lastManualSync ? { last_manual_sync: lastManualSync } : {}),
+            status_message: statusMessage,
             policy: {
               raw_runtime_secrets_exposed: false,
               source_text_returned: false,
             },
           });
+          // Our own refusals (scope not approved, worker stopping, no lane)
+          // are known before anything is read, and answer now, ahead of busy
+          // or too soon: a source that cannot sync says so.
+          const run = await prepareDashboardSourceSync({ source, reason: 'manual' });
+          if (dashboardManualSyncRuns.has(key)) {
+            return answer('busy', dashboardManualSyncBusyLine(label));
+          }
+          const startedAt = Date.now();
+          const previous = dashboardManualSyncStarts.get(key);
+          if (previous !== undefined && startedAt - previous < DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS && startedAt >= previous) {
+            return answer('too_soon', dashboardManualSyncTooSoonLine(label));
+          }
+          const before = sourceScheduler?.status();
+          const checking: DashboardManualSync = { at: new Date(startedAt).toISOString(), outcome: 'checking' };
+          dashboardManualSyncStarts.set(key, startedAt);
+          dashboardManualSyncs.set(key, checking);
+          const work = Promise.resolve().then(run).then((result) => {
+            assertNoRawEmailFields(result);
+            // Stamped when the sync ends, so "Checked just now" is the check's
+            // own time and the run's own last_sync_at never supersedes it.
+            dashboardManualSyncs.set(key, dashboardManualSyncOutcome({
+              result,
+              ...(before ? { before } : {}),
+              ...(schedulerSourceId ? { schedulerSourceId } : {}),
+              at: new Date(),
+            }));
+          }).catch((error: unknown) => {
+            // A provider's or a connector's words are never relayed: the row
+            // says it couldn't check, and the log keeps the rest.
+            if (!(error instanceof EmailSourceWorkerError) && !(error instanceof OperationError)) {
+              logSourceWorkerInternalError(request, error);
+            }
+            dashboardManualSyncs.set(key, { at: new Date().toISOString(), outcome: 'failed' });
+          }).finally(() => { dashboardManualSyncRuns.delete(key); });
+          dashboardManualSyncRuns.set(key, work);
+          return answer('checking', dashboardManualSyncPendingLine(label), checking);
           });
         }
 
@@ -2106,6 +2126,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               const plan = dashboardDisconnectPlan(registry, sourceId);
               if (plan.handles.length === 0) {
                 throw new EmailSourceWorkerError(409, 'source_not_connected', 'This source has no connected local credential/account grant.');
+              }
+              // A Sync now no longer holds the grant lock while it reads
+              // (2026-10-09), so its run is checked here the way a scheduled
+              // read is below: refused, custody untouched, retry when it ends.
+              if ([...plan.sourceIds].some((id) => dashboardManualSyncRuns.has(id))) {
+                throw new EmailSourceWorkerError(
+                  409,
+                  'disconnect_source_busy',
+                  'This source is finishing a read. Retry Disconnect after the current read completes.',
+                );
               }
               if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
                 const removedHandleIds = new Set(plan.handles.map((handle) => handle.handle));
@@ -3320,6 +3350,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   }
 
   async function runDashboardSourceSync(request: DashboardSourceSyncRequest): Promise<unknown> {
+    return (await prepareDashboardSourceSync(request))();
+  }
+
+  /**
+   * Every refusal a sync can meet before it reads anything (scope not
+   * approved, worker stopping, no lane for the source), thrown here; on
+   * success, the run itself, not yet started. Sync now answers between the
+   * two: it refuses at once, or starts the run and answers without waiting
+   * for it (2026-10-09).
+   */
+  async function prepareDashboardSourceSync(request: DashboardSourceSyncRequest): Promise<() => Promise<unknown>> {
     assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
     await refreshDashboardSchedulerSources();
     if (dashboardWorkerClosed) throw new EmailSourceWorkerError(503, 'worker_stopping', 'The worker is restarting.');
@@ -3334,9 +3375,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       // exempt by design — a provider-controlled request must never start a
       // budget-exempt run (R62 finding 1), so it stays scheduled.
       if (hasSchedulerSource) {
+        const scheduler = sourceScheduler!;
         return request.reason === 'manual'
-          ? sourceScheduler!.runSource(schedulerSourceId, undefined, 'operator')
-          : sourceScheduler!.runSource(schedulerSourceId);
+          ? () => scheduler.runSource(schedulerSourceId, undefined, 'operator')
+          : () => scheduler.runSource(schedulerSourceId);
       }
     }
 
@@ -3348,12 +3390,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     // syncable when either path exists, so neither may preempt the other.
     const readwiseSync = request.source === 'readwise' ? currentReadwiseSync() : undefined;
     if (readwiseSync) {
-      return readwiseSync.sync();
+      return () => readwiseSync.sync();
     }
 
     const xSync = request.source === 'x' ? currentXBookmarksRuntime()?.sync : undefined;
     if (request.source === 'x' && xSync) {
-      return xBookmarksLiveAdminResult(
+      return async () => xBookmarksLiveAdminResult(
         'reconcile',
         await xSync.reconcile(
           request.reason === 'manual' ? { provenance: 'operator' } : {},
@@ -3361,8 +3403,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       );
     }
 
-    if (sourceDashboard?.triggerSourceSync) {
-      return sourceDashboard.triggerSourceSync(request);
+    // A hook that names the sources it serves is not asked for any other:
+    // that refusal is known now, before Sync now answers.
+    const hook = sourceDashboard?.triggerSourceSync;
+    if (hook && dashboardSyncHookServes(request.source)) {
+      return () => hook(request);
     }
 
     // A worker with no scheduler at all refuses every source for the same
@@ -3371,7 +3416,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     // for a missing Drive feature.
     throw dashboardSourceSyncNotSupportedError(
       request.source,
-      sourceScheduler === undefined ? 'scheduler_disabled' : 'no_lane',
+      sourceScheduler === undefined && hook === undefined ? 'scheduler_disabled' : 'no_lane',
     );
   }
 

@@ -772,6 +772,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'olympus_model_retry',
         'olympus_privacy_get',
         'olympus_privacy_set',
+        'olympus_sync_source',
       ]);
       const readOnly = new Set([DASHBOARD_TOOL_NAME, 'olympus_search', 'source_index_status', 'source_answer', 'source_answer_result', 'olympus_scope_list', 'olympus_privacy_get']);
       for (const tool of tools) {
@@ -969,7 +970,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'olympus_scope_list',
         'olympus_privacy_get',
       ]);
-      for (const name of ['olympus_connect_source', 'olympus_scope_set', 'olympus_disconnect_source', 'olympus_model_set', 'olympus_privacy_set']) {
+      for (const name of ['olympus_connect_source', 'olympus_scope_set', 'olympus_disconnect_source', 'olympus_model_set', 'olympus_privacy_set', 'olympus_sync_source']) {
         const result = await client.callTool({ name, arguments: {} });
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toEqual({ error: 'unknown_tool' });

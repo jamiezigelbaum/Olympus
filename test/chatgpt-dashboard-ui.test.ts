@@ -1066,3 +1066,140 @@ function luminance(hex: string): number {
   };
   return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
 }
+
+describe('Sync now (olympus_sync_source): start, then the result on a later read', () => {
+  const SYNC = { label: 'Sync now', tool: 'olympus_sync_source', args: { source_id: 'dropbox.files' } };
+  const FOLDERS = { label: 'Choose folders', tool: 'olympus_scope_list', args: { source_id: 'dropbox.files' } };
+  const DISCONNECT = { label: 'Disconnect', tool: 'olympus_disconnect_source', args: { source_id: 'dropbox.files' }, destructive: true };
+  const dropbox = (overrides: Partial<DashboardViewModelV1['sources'][number]> = {}): DashboardViewModelV1['sources'][number] => ({
+    id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Fresh', detail: 'synced 12m ago', lastSyncAt: ago(12 * MIN),
+    menu: [SYNC, FOLDERS, DISCONNECT],
+    ...overrides,
+  });
+  const lineOf = (host: Host, label: string) => rowIn(host, label).querySelector('.source-main .muted')?.textContent ?? '';
+
+  test('pressing it in the ⋯ menu turns the row into Checking…, disabled and busy, at once', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [dropbox()] }) });
+    host.button('Sync now').click();
+    expect(host.toolCalls().at(-1)).toEqual({ name: 'olympus_sync_source', arguments: { source_id: 'dropbox.files' } });
+    const checking = host.button(DASHBOARD_CHATGPT_PAGE_COPY.syncChecking);
+    expect(checking.disabled).toBe(true);
+    expect(checking.getAttribute('aria-busy')).toBe('true');
+    expect(lineOf(host, 'Dropbox')).toBe('Checking Dropbox…');
+    // No second Sync now while one checks, and no stale "Synced …" beside it.
+    expect(host.buttons().some((node) => node.textContent === 'Sync now')).toBe(false);
+    expect(rowIn(host, 'Dropbox').textContent).not.toContain('Synced');
+
+    // The tool answers at once; the page then reads the dashboard, which says checking.
+    host.respond('tools/call', { structuredContent: { status: 'checking', source_id: 'dropbox.files' } });
+    await sleep(0);
+    expect(host.toolCalls().at(-1)).toEqual({ name: 'olympus_dashboard', arguments: {} });
+    host.respond('tools/call', { structuredContent: model({ sources: [dropbox({ detail: 'Checking Dropbox…', lastManualSync: { at: ago(0), outcome: 'checking' } })] }) });
+    await sleep(0);
+    expect(host.button(DASHBOARD_CHATGPT_PAGE_COPY.syncChecking).disabled).toBe(true);
+    expect(lineOf(host, 'Dropbox')).toBe('Checking Dropbox…');
+
+    // A later read carries the result: the engine's own line, in place of the sync time.
+    host.push({ structuredContent: model({ sources: [dropbox({ detail: 'Checked just now — no new files', lastManualSync: { at: ago(0), outcome: 'checked', newItems: 0 } })] }) });
+    expect(lineOf(host, 'Dropbox')).toBe('Checked just now — no new files');
+    expect(host.buttons().some((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.syncChecking)).toBe(false);
+    expect(rowIn(host, 'Dropbox').textContent).not.toContain('Synced');
+  });
+
+  test('the three results read in #191\'s words, beside a running bar, and never as a pause', () => {
+    const host = mount();
+    host.push({
+      structuredContent: model({
+        sources: [
+          dropbox({ detail: 'Checked just now — no new files', lastManualSync: { at: ago(0), outcome: 'checked', newItems: 0 } }),
+          dropbox({
+            id: 'google_drive.docs', label: 'Google Drive', status: 'Working',
+            detail: 'Checked just now — 12 new files, reading them now',
+            lastManualSync: { at: ago(0), outcome: 'checked', newItems: 12 },
+            progress: { stage: 'reading', unit: 'files', done: 1, total: 12, percent: 8.3, stalled: false },
+          }),
+          dropbox({
+            id: 'gmail.email', label: 'Gmail', status: 'Needs you',
+            detail: 'Couldn\'t check Gmail just now — Olympus will try again on its own',
+            lastManualSync: { at: ago(0), outcome: 'failed' },
+            progress: { stage: 'done', unit: 'messages', done: 10, total: 10, percent: 100, stalled: true, stalledReason: 'provider_unavailable' },
+            primary: { ...SYNC, args: { source_id: 'gmail.email' } },
+          }),
+        ],
+      }),
+    });
+    expect(lineOf(host, 'Dropbox')).toBe('Checked just now — no new files');
+    expect(lineOf(host, 'Google Drive')).toBe('Checked just now — 12 new files, reading them now');
+    expect(rowIn(host, 'Google Drive').querySelector('[role=progressbar]')).not.toBeNull();
+    expect(lineOf(host, 'Gmail')).toBe('Couldn\'t check Gmail just now — Olympus will try again on its own');
+    // The pause sentence would contradict the press's own line.
+    expect(rowIn(host, 'Gmail').textContent).not.toContain('isn\'t responding');
+    expect(host.text()).not.toContain('Check again');
+  });
+
+  test('on a late source Sync now is the row\'s button, and the menu keeps no copy of it', async () => {
+    const host = mount();
+    const late = dropbox({ id: 'google_drive.docs', label: 'Google Drive', status: 'Needs you', primary: { ...SYNC, args: { source_id: 'google_drive.docs' } }, menu: [{ ...SYNC, args: { source_id: 'google_drive.docs' } }, FOLDERS, DISCONNECT] });
+    host.push({
+      structuredContent: model({
+        sources: [late],
+        needsYou: [{ id: 'source:google_drive.docs', sentence: 'Google Drive — isn\'t responding', fix: { ...SYNC, args: { source_id: 'google_drive.docs' } } }],
+      }),
+    });
+    const row = rowIn(host, 'Google Drive');
+    expect(Array.from(row.querySelectorAll('.source-actions button')).map((node) => node.textContent)).toEqual(['Sync now']);
+    expect(Array.from(row.querySelectorAll('.menu-panel button')).map((node) => node.textContent)).toEqual(['Choose folders', 'Disconnect']);
+    (row.querySelector('.source-actions button') as unknown as HTMLButtonElement).click();
+    expect(host.toolCalls().at(-1)).toEqual({ name: 'olympus_sync_source', arguments: { source_id: 'google_drive.docs' } });
+    expect(lineOf(host, 'Google Drive')).toBe('Checking Google Drive…');
+    expect(host.button(DASHBOARD_CHATGPT_PAGE_COPY.syncChecking).getAttribute('aria-busy')).toBe('true');
+  });
+
+  test('a refusal shows its fixed sentence beside Sync now and gives the button back', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [dropbox()] }) });
+    host.button('Sync now').click();
+    host.respond('tools/call', {
+      isError: true,
+      structuredContent: { error: 'sync_unavailable' },
+      content: [{ type: 'text', text: 'Olympus can\'t check this source from here right now. It keeps checking on its own.' }],
+    });
+    await sleep(0);
+    expect(host.button('Sync now').disabled).toBe(false);
+    expect(host.text()).toContain('Olympus can\'t check this source from here right now.');
+    expect(lineOf(host, 'Dropbox')).not.toContain('Checking');
+  });
+
+  test('too soon: the page re-reads, and the row keeps the last result line', async () => {
+    const host = mount();
+    host.push({ structuredContent: model({ sources: [dropbox({ detail: 'Checked just now — no new files', lastManualSync: { at: ago(0), outcome: 'checked', newItems: 0 } })] }) });
+    host.button('Sync now').click();
+    host.respond('tools/call', { structuredContent: { status: 'too_soon', source_id: 'dropbox.files' } });
+    await sleep(0);
+    host.respond('tools/call', { structuredContent: model({ sources: [dropbox({ detail: 'Checked just now — no new files', lastManualSync: { at: ago(0), outcome: 'checked', newItems: 0 } })] }) });
+    await sleep(0);
+    expect(lineOf(host, 'Dropbox')).toBe('Checked just now — no new files');
+    expect(host.button('Sync now').disabled).toBe(false);
+  });
+});
+
+describe('Sync now keeps the page reading while it checks', () => {
+  const dashboardCalls = (host: Host) => host.toolCalls().filter((call) => call.name === 'olympus_dashboard').length;
+  test('a source checking counts as moving: re-read every 15 s, not 60 s', async () => {
+    jest.useFakeTimers();
+    try {
+      const host = mount();
+      host.push({
+        structuredContent: model({
+          sources: [{ id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Fresh', detail: 'Checking Dropbox…', lastManualSync: { at: ago(0), outcome: 'checking' } }],
+        }),
+      });
+      jest.advanceTimersByTime(15_000);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(dashboardCalls(host)).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

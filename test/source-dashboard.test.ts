@@ -1573,7 +1573,9 @@ describe('multi-source source dashboard', () => {
     const manualBody = await manual.json();
 
     expect(manual.status).toBe(200);
-    expect(manualBody).toMatchObject({ ok: true, source: 'gmail' });
+    expect(manualBody).toMatchObject({ ok: true, source: 'gmail', status: 'checking' });
+    // The press answers before its sync ends (2026-10-09); wait for the run.
+    for (let i = 0; i < 200 && syncRequests.length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     // A manual sync-now runs the same two store tasks the scheduler runs, so
     // the connect tick and the manual tick each contribute a pull + reconcile.
     expect(syncRequests.map((entry) => (entry as { task: string }).task))
@@ -1693,7 +1695,7 @@ describe('multi-source source dashboard', () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toMatchObject({ ok: true, source: 'readwise' });
+    expect(body).toMatchObject({ ok: true, source: 'readwise', status: 'checking' });
 
     for (const source of ['gmail', 'google-drive']) {
       const googleResponse = await fetch(new Request('http://worker.test/dashboard/sync-now', {
@@ -1709,6 +1711,7 @@ describe('multi-source source dashboard', () => {
       expect(googleResponse.status).toBe(200);
       expect(googleBody).toMatchObject({ ok: true, source });
     }
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(dashboardSyncRequests).toEqual([
       { source: 'readwise', reason: 'manual' },
       { source: 'gmail', reason: 'manual' },
@@ -1739,21 +1742,30 @@ describe('multi-source source dashboard', () => {
     }));
     const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.last_manual_sync).toMatchObject({ outcome: 'checked', new_items: 0 });
-    expect(body.status_message).toBe('Checked just now — no new items');
+    // It answers at once (2026-10-09); the card carries what the check found.
+    expect(body.last_manual_sync).toMatchObject({ outcome: 'checking' });
+    expect(body.status_message).toBe('Checking Readwise…');
 
-    const view = await fetch(new Request('http://worker.test/dashboard.json', {
-      headers: { Authorization: 'Bearer dashboard-secret' },
-    }));
-    expect(view.status).toBe(200);
-    const readwise = (await view.json()).sources.find((source: { source_id: string }) => source.source_id === 'readwise.library');
-    expect(readwise.last_manual_sync).toMatchObject({ outcome: 'checked', new_items: 0 });
+    let readwise: { last_manual_sync?: { outcome: string } } | undefined;
+    for (let i = 0; i < 200; i++) {
+      const view = await fetch(new Request('http://worker.test/dashboard.json', {
+        headers: { Authorization: 'Bearer dashboard-secret' },
+      }));
+      expect(view.status).toBe(200);
+      readwise = (await view.json()).sources.find((source: { source_id: string }) => source.source_id === 'readwise.library');
+      if (readwise?.last_manual_sync?.outcome !== 'checking') break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(readwise?.last_manual_sync).toMatchObject({ outcome: 'checked', new_items: 0 });
   });
 
   test('a Sync now the provider breaks reads one plain line, never the provider text', async () => {
     const worker = createEmailSourceWorker({
+      sourceIndexStatus: { status: async () => fixtureStatus() },
       sourceDashboard: {
         sovereigntyEngine: fixtureSovereigntyEngine(),
+        history: inMemoryHistory(),
+        registryPath: '/tmp/olympus-source-dashboard-test-missing-handles.json',
         fileSourceScopes: approvedFolderScopesFixture(),
         async triggerSourceSync() {
           throw new Error('upstream 503: <html>provider maintenance page for jamie@example.test</html>');
@@ -1767,13 +1779,22 @@ describe('multi-source source dashboard', () => {
       body: JSON.stringify({ source: 'readwise' }),
     }));
     const text = await response.text();
-    expect(response.status).toBe(502);
-    expect(JSON.parse(text).error).toEqual({
-      code: 'sync_failed',
-      message: "Couldn't check Readwise just now — Olympus will try again on its own",
-    });
-    expect(text).not.toContain('upstream');
-    expect(text).not.toContain('example.test');
+    // The press answers before the provider does (2026-10-09); the failure
+    // reaches the card as one plain line.
+    expect(response.status).toBe(200);
+    expect(JSON.parse(text).status).toBe('checking');
+    let card = '';
+    for (let i = 0; i < 200; i++) {
+      const view = await fetch(new Request('http://worker.test/dashboard.json', { headers: { Authorization: 'Bearer dashboard-secret' } }));
+      card = JSON.stringify((await view.json()).sources.find((source: { source_id: string }) => source.source_id === 'readwise.library') ?? {});
+      if (!card.includes('"checking"')) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(card).toContain('"outcome":"failed"');
+    for (const leak of [text, card]) {
+      expect(leak).not.toContain('upstream');
+      expect(leak).not.toContain('example.test');
+    }
   });
 
   // The host's triggerSourceSync is ONE callback for every source, and the
@@ -1792,7 +1813,8 @@ describe('multi-source source dashboard', () => {
         sovereigntyEngine: fixtureSovereigntyEngine(),
         fileSourceScopes: approvedFolderScopesFixture(),
         // The product server's hook, in miniature: it serves Dropbox and
-        // declines everything else with the shared typed error.
+        // declines everything else with the shared typed error, and says so.
+        triggerSourceSyncSources: ['dropbox'],
         async triggerSourceSync(request) {
           hookRequests.push({ source: request.source, reason: request.reason });
           if (request.source !== 'dropbox') {
@@ -1812,15 +1834,18 @@ describe('multi-source source dashboard', () => {
       body: JSON.stringify({ source }),
     }));
 
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
     const readwise = await syncNow('readwise');
     expect(readwise.status).toBe(200);
     expect(await readwise.json()).toMatchObject({ ok: true, source: 'readwise' });
+    await tick();
     expect(readwiseRequests).toEqual([{ mode: 'sync' }]);
     expect(hookRequests).toEqual([]);
 
     const x = await syncNow('x');
     expect(x.status).toBe(200);
     expect(await x.json()).toMatchObject({ ok: true, source: 'x' });
+    await tick();
     expect(xRequests).toEqual([{ task: 'reconcile', provenance: 'operator' }]);
     expect(hookRequests).toEqual([]);
 
@@ -1828,11 +1853,8 @@ describe('multi-source source dashboard', () => {
     // resort rather than the first.
     const dropbox = await syncNow('dropbox');
     expect(dropbox.status).toBe(200);
-    expect(await dropbox.json()).toMatchObject({
-      ok: true,
-      source: 'dropbox',
-      result: { status: 'started', source: 'dropbox' },
-    });
+    expect(await dropbox.json()).toMatchObject({ ok: true, source: 'dropbox', status: 'checking' });
+    await tick();
     expect(hookRequests).toEqual([{ source: 'dropbox', reason: 'manual' }]);
 
     // Gmail here has no scheduler lane and no hook that serves it. That is a

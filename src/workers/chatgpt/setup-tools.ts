@@ -38,6 +38,7 @@ import {
   PRIVACY_SET_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   SCOPE_SET_TOOL_NAME,
+  SYNC_SOURCE_TOOL_NAME,
   type ChatGptDisconnectSourceId,
   type ChatGptFolderSourceId,
   type ChatGptOAuthSource,
@@ -46,6 +47,8 @@ import {
   type PrivacyRuleView,
   type PrivacySettings,
   type ScopeList,
+  type ChatGptSyncSourceId,
+  type SyncSourceResult,
 } from './dashboard-contract.ts';
 import type { HandoffTarget } from './handoff.ts';
 import { ModelChoiceRefusal, type ChatGptModelChoice } from './model-choice.ts';
@@ -59,6 +62,7 @@ import {
   scopeConflictToolResult,
   scopeListToolResult,
   scopeSavedToolResult,
+  syncSourceToolResult,
   type ChatGptErrorCode,
   type ChatGptToolResult,
 } from './response-builder.ts';
@@ -104,6 +108,12 @@ export interface ChatGptSetupBackend {
   approveMail(input: { accountGeneration: string; expectedRevision: string; draft: OlympusMailScopeDraft }): Promise<{ scopeRevision: string; started: boolean }>;
   savedMailDraft(): OlympusMailScopeDraft | undefined;
   disconnect(sourceId: ChatGptDisconnectSourceId): Promise<void>;
+  /**
+   * Sync now: starts one source's sync through the dashboard's own route and
+   * answers without waiting for it (`busy` when one is running, `too_soon`
+   * within a minute of the last press). The result is the dashboard's.
+   */
+  syncSource(sourceId: ChatGptSyncSourceId): Promise<SyncSourceResult['status']>;
   /** Switches between configured models; throws ModelChoiceRefusal for one that is not set up. */
   setModels(choice: ChatGptModelChoice): Promise<{ changed: boolean; embedding: 'built_in' | 'custom'; answers?: 'local' | 'venice'; restarting: boolean }>;
   /**
@@ -134,6 +144,7 @@ const OAUTH_SOURCES = ['gmail', 'google-drive', 'dropbox'] as const;
 const FOLDER_SOURCE_IDS = ['google_drive.docs', 'dropbox.files'] as const;
 const SCOPE_SOURCE_IDS = ['gmail.email', ...FOLDER_SOURCE_IDS] as const;
 const DISCONNECT_SOURCE_IDS = ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library'] as const;
+const SYNC_SOURCE_IDS = DISCONNECT_SOURCE_IDS;
 
 /** The widget may call these; the model may too. */
 const WIDGET_AND_MODEL = { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true } as const;
@@ -279,6 +290,23 @@ export const MODEL_RETRY_TOOL: ToolDefinition = {
   _meta: WIDGET_ONLY,
 };
 
+export const SYNC_SOURCE_TOOL: ToolDefinition = {
+  name: SYNC_SOURCE_TOOL_NAME,
+  title: 'Sync a source now',
+  description: 'For the Olympus panel: check a connected source for anything new now. Answers at once; the panel shows what the check found.',
+  inputSchema: {
+    type: 'object',
+    properties: { source_id: { type: 'string', enum: [...SYNC_SOURCE_IDS] } },
+    required: ['source_id'],
+    additionalProperties: false,
+  },
+  // App-only, like the other panel controls: the owner presses Sync now; the
+  // model never starts a budget-exempt read (owner ruling, 2026-10-09).
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  securitySchemes: OAUTH2_REQUIRED,
+  _meta: WIDGET_ONLY,
+};
+
 /** folder {key, display?}; label {key: id, value: name}; sender {value: address or @domain}. */
 const PRIVACY_RULE_SCHEMA = {
   type: 'object',
@@ -346,6 +374,7 @@ export const SETUP_TOOLS: readonly ToolDefinition[] = [
   MODEL_RETRY_TOOL,
   PRIVACY_GET_TOOL,
   PRIVACY_SET_TOOL,
+  SYNC_SOURCE_TOOL,
 ];
 
 const SETUP_TOOL_NAMES = new Set(SETUP_TOOLS.map((tool) => tool.name));
@@ -400,6 +429,19 @@ export async function callSetupTool(
         const model = oneOf(args.model, ['embedding', 'answers', 'transcription'] as const);
         if (!backend.retryModel(model)) throw new ChatGptSurfaceError('model_not_configured');
         return modelRetryToolResult({ status: 'retrying', model });
+      }
+      case SYNC_SOURCE_TOOL_NAME: {
+        const sourceId = oneOf(args.source_id, SYNC_SOURCE_IDS);
+        let status: SyncSourceResult['status'];
+        try {
+          status = await backend.syncSource(sourceId);
+        } catch (error) {
+          // Not connected, no lane here, the worker restarting: one fixed
+          // sentence, shown beside the button. Never the route's own words.
+          if (error instanceof SetupBackendError && error.code !== 'invalid_request') throw new ChatGptSurfaceError('sync_unavailable');
+          throw error;
+        }
+        return syncSourceToolResult({ status, source_id: sourceId });
       }
       case PRIVACY_GET_TOOL_NAME: {
         const visible = visiblePrivacy(backend.privacySettings(), secretLocations(backend));

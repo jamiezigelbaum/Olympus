@@ -17,7 +17,7 @@ import {
   type DashboardStatus,
   type DashboardStatusColorToken,
 } from '../vocabulary.ts';
-import { DASHBOARD_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
+import { DASHBOARD_TOOL_NAME, SYNC_SOURCE_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
 import { chatgptDashboardClient, type ChatGptDashboardClientConfig } from './client.ts';
 import { privacyLogic } from '../shared-privacy-logic.ts';
 import {
@@ -57,7 +57,7 @@ export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
  * response-builder.ts) is shown beside the control that ran the tool, instead
  * of reading as an unreachable Mac.
  */
-export const CHATGPT_INLINE_ERROR_CODES = ['sign_in_failed', 'source_not_connected', 'source_busy', 'disconnect_incomplete'] as const;
+export const CHATGPT_INLINE_ERROR_CODES = ['sign_in_failed', 'source_not_connected', 'source_busy', 'sync_unavailable', 'disconnect_incomplete'] as const;
 export const CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60_000;
 /** Visible-page refresh: often while something moves, rarely when settled, backing off on failure. */
 export const CHATGPT_DASHBOARD_REFRESH = {
@@ -291,6 +291,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = {}): string {
   const config: ChatGptDashboardClientConfig = {
     toolName: DASHBOARD_TOOL_NAME,
+    syncTool: SYNC_SOURCE_TOOL_NAME,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,

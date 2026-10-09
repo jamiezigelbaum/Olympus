@@ -55,6 +55,7 @@ import type {
   SearchResult,
   SourceProgress,
   SourceStalledReason,
+  SyncSourceResult,
 } from './dashboard-contract.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
@@ -66,8 +67,14 @@ import {
   PRIVACY_META_KEY,
   SCOPE_LIST_TOOL_NAME,
   SCOPE_UI_META_KEY,
+  SYNC_SOURCE_TOOL_NAME,
 } from './dashboard-contract.ts';
-import { DASHBOARD_CHATGPT_VOCABULARY } from '../dashboard/vocabulary.ts';
+import {
+  DASHBOARD_CHATGPT_VOCABULARY,
+  dashboardManualSyncBusyLine,
+  dashboardManualSyncPendingLine,
+  dashboardManualSyncTooSoonLine,
+} from '../dashboard/vocabulary.ts';
 import { credentialInstallId } from '../../../connect-relay/shared/tokens.ts';
 import {
   PRIVATE_ANSWER_META_KEY,
@@ -110,6 +117,7 @@ const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
   [MODEL_SET_TOOL_NAME]: { embedding: new Set(['built_in']), answers: new Set(['local', 'venice']) },
   [MODEL_RETRY_TOOL_NAME]: { model: new Set(['embedding', 'answers', 'transcription']) },
+  [SYNC_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
   [PRIVACY_GET_TOOL_NAME]: {},
 };
 const FIX_HREF_HOST = 'olympusplugin.ai';
@@ -251,7 +259,7 @@ function copySource(source: DashboardSource): DashboardSource {
 
 const TRANSCRIPTION_STATES = new Set<TranscriptionModelView['state']>(['not_needed', 'not_downloaded', 'interrupted', 'downloading', 'verifying', 'ready', 'failed', 'load_failed']);
 
-const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync']>['outcome']>(['checked', 'failed', 'busy']);
+const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync']>['outcome']>(['checking', 'checked', 'failed', 'busy']);
 
 const SOURCE_STAGES = new Set<SourceProgress['stage']>(['listing', 'reading', 'indexing', 'done']);
 const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'provider_unavailable', 'model_downloading']);
@@ -735,6 +743,24 @@ export function disconnectToolResult(result: DisconnectSourceResult): ChatGptToo
   };
 }
 
+/**
+ * `olympus_sync_source`: whether a sync started, and nothing else. What it
+ * finds reaches the panel as the source's `lastManualSync`; never a file name.
+ */
+export function syncSourceToolResult(result: SyncSourceResult): ChatGptToolResult {
+  const sourceId = DISCONNECT_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
+  if (!sourceId) return errorToolResult(new ChatGptSurfaceError('internal'));
+  const status: SyncSourceResult['status'] = result.status === 'busy' || result.status === 'too_soon' ? result.status : 'checking';
+  const label = SOURCE_LABELS[sourceId]!;
+  const text = status === 'busy'
+    ? `${dashboardManualSyncBusyLine(label)}.`
+    : status === 'too_soon'
+      ? `${dashboardManualSyncTooSoonLine(label)}.`
+      : `${dashboardManualSyncPendingLine(label)} The Olympus panel shows what it finds.`;
+  const structured: SyncSourceResult = { status, source_id: sourceId };
+  return { content: [{ type: 'text', text }], structuredContent: structured as unknown as Record<string, unknown> };
+}
+
 export function modelSetToolResult(result: ModelSetResult): ChatGptToolResult {
   const structured: ModelSetResult = {
     status: result.status === 'applied' ? 'applied' : 'unchanged',
@@ -954,6 +980,7 @@ type SurfaceOnlyErrorCode =
   | 'sign_in_failed'
   | 'source_not_connected'
   | 'source_busy'
+  | 'sync_unavailable'
   | 'disconnect_incomplete';
 
 const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
@@ -983,6 +1010,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   sign_in_failed: 'Olympus couldn\'t open the sign-in page for this source. Try again.',
   source_not_connected: 'This source isn\'t connected, so there is nothing to disconnect.',
   source_busy: 'This source is finishing a read. Try again in a moment.',
+  sync_unavailable: 'Olympus can\'t check this source from here right now. It keeps checking on its own.',
   disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',

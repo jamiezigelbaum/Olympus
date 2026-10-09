@@ -52409,6 +52409,12 @@ function dashboardManualSyncFailedLine(label) {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
+function dashboardManualSyncBusyLine(label) {
+  return `Already checking ${label}`;
+}
+function dashboardManualSyncTooSoonLine(label) {
+  return `${label} was checked a moment ago — try again in a minute`;
+}
 function dashboardManualSyncLine(source, now) {
   const sync = source.last_manual_sync;
   if (!sync)
@@ -52419,8 +52425,10 @@ function dashboardManualSyncLine(source, now) {
   const elapsed = now.getTime() - at;
   const when = elapsed < 60000 ? "just now" : dashboardRelativeFromMs(elapsed);
   switch (sync.outcome) {
+    case "checking":
+      return dashboardManualSyncPendingLine(source.label);
     case "busy":
-      return `Already checking ${source.label}`;
+      return dashboardManualSyncBusyLine(source.label);
     case "failed":
       return when === "just now" ? dashboardManualSyncFailedLine(source.label) : `Couldn't check ${source.label} ${when} — Olympus will try again on its own`;
     case "checked": {
@@ -52747,10 +52755,13 @@ var init_vocabulary = __esm(() => {
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
     howOnMac: "How to fix this on your computer",
-    sourcePaused: "Paused"
+    sourcePaused: "Paused",
+    syncChecking: "Checking…",
+    syncCheckingLine: dashboardManualSyncPendingLine("{source}")
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
+    syncNow: "Sync now",
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
@@ -54517,6 +54528,8 @@ function dashboardLiveManualSync(sync, lastSyncAt, now) {
   const at = Date.parse(sync.at);
   if (!Number.isFinite(at))
     return;
+  if (sync.outcome === "checking")
+    return sync;
   const age = now.getTime() - at;
   if (age < -60000 || age > DASHBOARD_MANUAL_SYNC_SHOWN_MS)
     return;
@@ -56432,7 +56445,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_privacy_language();
   init_sqlite_migrations();
@@ -97783,7 +97796,7 @@ function mountDashboardController(options) {
       case "cancel_oauth":
         return "Connection attempt cancelled. Press Connect when you are ready to start a new one.";
       case "sync_now":
-        return "Checked. This card shows what was found.";
+        return "Checking. This card shows what was found.";
       case "set_embedding_priority":
         return "Saved.";
       case "disconnect":
@@ -103110,7 +103123,7 @@ var init_shared_status = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 
 // src/workers/chatgpt/dashboard-view-model.ts
 function buildChatGptDashboardViewModel(view, options = {}) {
@@ -103128,13 +103141,14 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     if (!connecting && !credentials && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress2).fix)) {
       status = "Working";
     }
-    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts };
+    const sync = connecting || status === "Off" || card.sync_now_available !== true ? undefined : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress2);
+    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts, sync };
   });
-  const sources = rows.map(({ definition, card, status, actionKind, connecting, progress: progress2 }, index) => ({
-    entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now),
+  const sources = rows.map(({ definition, card, status, actionKind, connecting, progress: progress2, sync }, index) => ({
+    entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
-  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").map(({ definition, card, actionKind, connecting, progress: progress2 }) => attentionItem(definition, card, actionKind, degraded, connecting, progress2));
+  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").map(({ definition, card, actionKind, connecting, progress: progress2, sync }) => attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync));
   if (embedding.state === "failed") {
     needsYou.push({
       id: "model:embedding",
@@ -103210,15 +103224,20 @@ function sourceRank(source) {
 function sourceGroup(definition) {
   return definition.connect_kind === "local" ? "local" : "cloud";
 }
-function sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now) {
+function sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync) {
   const inFlight = progress && progress.stage !== "done" && status !== "Needs you" && status !== "Failing";
-  const detail = connecting ? CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
+  const ownDetail = connecting ? CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
+  const manualLine = connecting ? undefined : dashboardManualSyncLine(card, now);
+  const detail = manualLine && !(ownDetail ?? "").startsWith(manualLine) ? manualLine : ownDetail;
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition) : undefined;
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect;
+  const late = status === "Needs you" || status === "Failing";
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
   const menu = [];
+  if (sync)
+    menu.push(sync);
   if (status !== "Off" && card.scope_selection && !scopePending(card)) {
     const fix = scopeFix(definition, card);
     if (fix)
@@ -103253,14 +103272,21 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     } : {}
   };
 }
-function attentionItem(definition, card, actionKind, degraded, connecting, progress) {
+function attentionItem(definition, card, actionKind, degraded, connecting, progress, sync) {
   if (connecting) {
     return { id: `source:${definition.source_id}`, sentence: `${definition.label} — ${CONNECTING_REASON}`, fix: connecting.fix };
   }
   const reason = dashboardAttentionLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition) : checkAgainFix();
+  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition) : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
+}
+function syncFix(definition, card, status, actionKind, degraded, progress) {
+  if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card))
+    return;
+  if (scopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress))
+    return;
+  return { label: DASHBOARD_CHATGPT_SETUP_LABELS.syncNow, tool: SYNC_SOURCE_TOOL_NAME, args: { source_id: definition.source_id } };
 }
 function wantsReconnect(card, status, actionKind, degraded, progress) {
   if (dashboardCredentialProblem(card, degraded) || progress?.stalledReason === "waiting_for_credentials")
@@ -103659,7 +103685,7 @@ function isoOrUndefined(value) {
 function isoOrNow(value, now) {
   return isoOrUndefined(value) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, ON_COMPUTER_HELP_URL = "https://olympusplugin.ai/help/on-your-computer/", TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, ON_COMPUTER_HELP_URL = "https://olympusplugin.ai/help/on-your-computer/", TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_shared_status();
   init_phases();
@@ -103676,6 +103702,7 @@ var init_dashboard_view_model = __esm(() => {
   CHATGPT_OAUTH_SOURCES = new Set(["gmail", "google-drive", "dropbox"]);
   SCOPE_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files"]);
   DISCONNECT_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
+  SYNC_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   KNOWN_CONNECTION_LABELS = new Set([
     "not connected",
     "connection state unreadable",
@@ -103712,7 +103739,7 @@ var init_dashboard_view_model = __esm(() => {
   };
   TRANSCRIPTION_DOWNLOADABLE = new Set(["not_needed", "not_downloaded", "interrupted", "failed"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
-  MANUAL_SYNC_OUTCOMES = new Set(["checked", "failed", "busy"]);
+  MANUAL_SYNC_OUTCOMES = new Set(["checking", "checked", "failed", "busy"]);
 });
 
 // src/workers/dashboard/attention.ts
@@ -109525,6 +109552,8 @@ function createEmailSourceWorker(options = {}) {
   const dashboardOAuthCallbackRateLimiter = createDashboardOAuthCallbackRateLimiter();
   const dashboardDisconnectedSources = new Set;
   const dashboardManualSyncs = new Map;
+  const dashboardManualSyncRuns = new Map;
+  const dashboardManualSyncStarts = new Map;
   const dashboardUnpairedSources = new Set;
   let dashboardSchedulerRegistryStamp;
   let dashboardSchedulerAdoptionTick;
@@ -110297,45 +110326,51 @@ function createEmailSourceWorker(options = {}) {
             const source = parseDashboardSyncSource(record3.source);
             assertDashboardSourceMayRead(source, sourceDashboard, dashboardDisconnectedSources);
             const schedulerSourceId = dashboardSchedulerSourceId(source);
+            const key = schedulerSourceId ?? source;
             const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === schedulerSourceId);
-            const before = sourceScheduler?.status();
-            let result;
-            try {
-              result = await runDashboardSourceSync({
-                source,
-                reason: "manual"
-              });
-            } catch (error2) {
-              if (error2 instanceof EmailSourceWorkerError)
-                throw error2;
-              if (error2 instanceof OperationError && (error2.code === "source_index_policy_violation" || error2.code === "invalid_params"))
-                throw error2;
-              logSourceWorkerInternalError(request, error2);
-              if (schedulerSourceId)
-                dashboardManualSyncs.set(schedulerSourceId, { at: new Date().toISOString(), outcome: "failed" });
-              throw new EmailSourceWorkerError(502, "sync_failed", dashboardManualSyncFailedLine(definition?.label ?? "this source"));
-            }
-            assertNoRawEmailFields(result);
-            const lastManualSync = dashboardManualSyncOutcome({
-              result,
-              ...before ? { before } : {},
-              ...schedulerSourceId ? { schedulerSourceId } : {},
-              at: new Date
-            });
-            if (schedulerSourceId)
-              dashboardManualSyncs.set(schedulerSourceId, lastManualSync);
-            const statusMessage = definition ? dashboardManualSyncLine({ label: definition.label, family: definition.family, last_manual_sync: lastManualSync }, new Date) : undefined;
-            return json({
+            const label = definition?.label ?? "this source";
+            const answer = (status, statusMessage, lastManualSync) => json({
               ok: true,
               source,
-              result,
-              last_manual_sync: lastManualSync,
-              ...statusMessage ? { status_message: statusMessage } : {},
+              status,
+              ...lastManualSync ? { last_manual_sync: lastManualSync } : {},
+              status_message: statusMessage,
               policy: {
                 raw_runtime_secrets_exposed: false,
                 source_text_returned: false
               }
             });
+            const run = await prepareDashboardSourceSync({ source, reason: "manual" });
+            if (dashboardManualSyncRuns.has(key)) {
+              return answer("busy", dashboardManualSyncBusyLine(label));
+            }
+            const startedAt = Date.now();
+            const previous = dashboardManualSyncStarts.get(key);
+            if (previous !== undefined && startedAt - previous < DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS && startedAt >= previous) {
+              return answer("too_soon", dashboardManualSyncTooSoonLine(label));
+            }
+            const before = sourceScheduler?.status();
+            const checking = { at: new Date(startedAt).toISOString(), outcome: "checking" };
+            dashboardManualSyncStarts.set(key, startedAt);
+            dashboardManualSyncs.set(key, checking);
+            const work = Promise.resolve().then(run).then((result) => {
+              assertNoRawEmailFields(result);
+              dashboardManualSyncs.set(key, dashboardManualSyncOutcome({
+                result,
+                ...before ? { before } : {},
+                ...schedulerSourceId ? { schedulerSourceId } : {},
+                at: new Date
+              }));
+            }).catch((error2) => {
+              if (!(error2 instanceof EmailSourceWorkerError) && !(error2 instanceof OperationError)) {
+                logSourceWorkerInternalError(request, error2);
+              }
+              dashboardManualSyncs.set(key, { at: new Date().toISOString(), outcome: "failed" });
+            }).finally(() => {
+              dashboardManualSyncRuns.delete(key);
+            });
+            dashboardManualSyncRuns.set(key, work);
+            return answer("checking", dashboardManualSyncPendingLine(label), checking);
           });
         }
         if (request.method === "POST" && url.pathname === "/dashboard/disconnect") {
@@ -110357,6 +110392,9 @@ function createEmailSourceWorker(options = {}) {
               const plan = dashboardDisconnectPlan(registry2, sourceId);
               if (plan.handles.length === 0) {
                 throw new EmailSourceWorkerError(409, "source_not_connected", "This source has no connected local credential/account grant.");
+              }
+              if ([...plan.sourceIds].some((id) => dashboardManualSyncRuns.has(id))) {
+                throw new EmailSourceWorkerError(409, "disconnect_source_busy", "This source is finishing a read. Retry Disconnect after the current read completes.");
               }
               if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
                 const removedHandleIds = new Set(plan.handles.map((handle) => handle.handle));
@@ -111158,6 +111196,9 @@ function createEmailSourceWorker(options = {}) {
     }
   }
   async function runDashboardSourceSync(request) {
+    return (await prepareDashboardSourceSync(request))();
+  }
+  async function prepareDashboardSourceSync(request) {
     assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
     await refreshDashboardSchedulerSources();
     if (dashboardWorkerClosed)
@@ -111167,21 +111208,23 @@ function createEmailSourceWorker(options = {}) {
       const schedulerStatus = sourceScheduler?.status();
       const hasSchedulerSource = schedulerStatus?.sources.some((source) => source.source_id === schedulerSourceId || source.corpus_id === schedulerSourceId) === true;
       if (hasSchedulerSource) {
-        return request.reason === "manual" ? sourceScheduler.runSource(schedulerSourceId, undefined, "operator") : sourceScheduler.runSource(schedulerSourceId);
+        const scheduler = sourceScheduler;
+        return request.reason === "manual" ? () => scheduler.runSource(schedulerSourceId, undefined, "operator") : () => scheduler.runSource(schedulerSourceId);
       }
     }
     const readwiseSync = request.source === "readwise" ? currentReadwiseSync() : undefined;
     if (readwiseSync) {
-      return readwiseSync.sync();
+      return () => readwiseSync.sync();
     }
     const xSync = request.source === "x" ? currentXBookmarksRuntime()?.sync : undefined;
     if (request.source === "x" && xSync) {
-      return xBookmarksLiveAdminResult("reconcile", await xSync.reconcile(request.reason === "manual" ? { provenance: "operator" } : {}));
+      return async () => xBookmarksLiveAdminResult("reconcile", await xSync.reconcile(request.reason === "manual" ? { provenance: "operator" } : {}));
     }
-    if (sourceDashboard?.triggerSourceSync) {
-      return sourceDashboard.triggerSourceSync(request);
+    const hook = sourceDashboard?.triggerSourceSync;
+    if (hook && dashboardSyncHookServes(request.source)) {
+      return () => hook(request);
     }
-    throw dashboardSourceSyncNotSupportedError(request.source, sourceScheduler === undefined ? "scheduler_disabled" : "no_lane");
+    throw dashboardSourceSyncNotSupportedError(request.source, sourceScheduler === undefined && hook === undefined ? "scheduler_disabled" : "no_lane");
   }
   async function refreshDashboardSchedulerSources() {
     if (!sourceScheduler || !sourceDashboard?.refreshSchedulerSources)
@@ -118355,7 +118398,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     open: {},
     notice: "",
     privacyRules: -1,
-    actionError: null
+    actionError: null,
+    syncPressed: {}
   };
   let nextId = 1;
   const pending = {};
@@ -118472,6 +118516,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (isDashboard(content)) {
       state.data = content;
       state.relayDown = false;
+      if (!state.busy)
+        state.syncPressed = {};
       refreshFailures = 0;
       redraw();
       if (!refreshing)
@@ -118510,6 +118556,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       }
       const failed = inlineError(result);
       if (failed) {
+        if (name === config2.syncTool) {
+          state.syncPressed = {};
+          if (key.indexOf("menu:") === 0)
+            state.open[key.slice(0, key.lastIndexOf(":"))] = true;
+        }
         state.actionError = { key, text: failed };
         render(key);
         return;
@@ -118521,6 +118572,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }, () => {
       if (state.busy === key)
         state.busy = "";
+      if (name === config2.syncTool)
+        state.syncPressed = {};
       if (mine === generation)
         state.relayDown = true;
       redraw();
@@ -118732,6 +118785,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         state.confirming = "";
         picker.start(fix, source ? source.id : "", source ? source.label : "", key);
       };
+    } else if (fix.tool === config2.syncTool && source) {
+      action = () => {
+        state.syncPressed[source.id] = true;
+        state.open["menu:" + source.id] = false;
+        callTool(fix.tool, fix.args || {}, key);
+      };
     } else if (typeof fix.tool === "string" && fix.tool)
       action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
@@ -118891,32 +118950,42 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const progress = sourceProgress(source);
     const stalledWords = progress ? stalledSentence(progress, source) : "";
     const detail = typeof source.detail === "string" && source.detail ? source.detail : "";
+    const checking = syncChecking(source);
+    const manual = !checking && !source.connecting && syncResult(source) && !!detail;
     if (source.connecting) {
       meta2.push(capitalise2(detail || (item ? itemReason(item, source) : "")));
       const expires = linkExpiry(source.connecting.expiresAt);
       if (expires)
         meta2.push(expires);
+    } else if (checking) {
+      meta2.push(fill2(P.syncCheckingLine, { source: String(source.label || "") }));
+    } else if (manual) {
+      meta2.push(capitalise2(detail));
     } else if (progress) {} else if (item)
       meta2.push(capitalise2(itemReason(item, source)));
     else if (off)
       meta2.push(capitalise2(detail || P.notConnected));
     else if (detail)
       meta2.push(capitalise2(detail));
-    if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt) && !source.connecting && !progress && !saysSynced(detail)) {
+    if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt) && !source.connecting && !progress && !checking && !manual && !saysSynced(detail)) {
       meta2.push(fill2(P.synced, { when: ago(source.lastSyncAt) }));
     }
     const shown = meta2.filter((part) => !!part);
     if (shown.length)
       add(main, el("p", "muted", shown.join(" · ")));
-    if (progress)
+    if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
+    }
     add(row, main);
     const controls = el("div", "source-actions");
     const context = { id, label: String(source.label || id) };
     const fix = item && item.fix ? item.fix : source.primary;
-    if (fix)
+    const isSync = (entry) => !!entry && entry.tool === config2.syncTool;
+    if (fix && !(checking && isSync(fix)))
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => !fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool);
+    if (checking)
+      add(controls, checkingControl("primary:" + id));
+    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -118936,6 +119005,23 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(row, menuBox);
     }
     return row;
+  }
+  function syncChecking(source) {
+    if (!source || source.connecting)
+      return false;
+    if (state.syncPressed[String(source.id)])
+      return true;
+    const manual = source.lastManualSync;
+    return !!manual && typeof manual === "object" && manual.outcome === "checking";
+  }
+  function syncResult(source) {
+    const manual = source && source.lastManualSync;
+    return !!manual && typeof manual === "object" && ["checked", "failed", "busy"].indexOf(manual.outcome) >= 0;
+  }
+  function checkingControl(key) {
+    const busy = button(P.syncChecking, key, null, "plain");
+    busy.setAttribute("aria-busy", "true");
+    return add(el("span", "fix"), busy);
   }
   function saysSynced(detail) {
     const word = P.synced.split("{")[0].trim().toLowerCase();
@@ -119421,7 +119507,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (sources.some((source) => {
       if (!source || typeof source !== "object")
         return false;
-      if (source.connecting || source.status === "Working")
+      if (source.connecting || source.status === "Working" || syncChecking(source))
         return true;
       const progress = sourceProgress(source);
       return !!progress && !progress.stalled;
@@ -121599,6 +121685,7 @@ function vars(palette) {
 function chatgptDashboardPageHtml(options = {}) {
   const config2 = {
     toolName: DASHBOARD_TOOL_NAME,
+    syncTool: SYNC_SOURCE_TOOL_NAME,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -121656,7 +121743,7 @@ var init_page = __esm(() => {
   init_shared_privacy_logic();
   init_picker();
   init_privacy2();
-  CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "disconnect_incomplete"];
+  CHATGPT_INLINE_ERROR_CODES = ["sign_in_failed", "source_not_connected", "source_busy", "sync_unavailable", "disconnect_incomplete"];
   CHATGPT_DASHBOARD_STALE_AFTER_MS = 10 * 60000;
   CHATGPT_DASHBOARD_REFRESH = {
     activeMs: 15000,
@@ -123717,6 +123804,16 @@ function disconnectToolResult(result) {
     structuredContent: { status: "disconnected", source_id: sourceId }
   };
 }
+function syncSourceToolResult(result) {
+  const sourceId = DISCONNECT_SOURCE_IDS2.has(result.source_id) ? result.source_id : undefined;
+  if (!sourceId)
+    return errorToolResult(new ChatGptSurfaceError("internal"));
+  const status = result.status === "busy" || result.status === "too_soon" ? result.status : "checking";
+  const label = SOURCE_LABELS[sourceId];
+  const text = status === "busy" ? `${dashboardManualSyncBusyLine(label)}.` : status === "too_soon" ? `${dashboardManualSyncTooSoonLine(label)}.` : `${dashboardManualSyncPendingLine(label)} The Olympus panel shows what it finds.`;
+  const structured = { status, source_id: sourceId };
+  return { content: [{ type: "text", text }], structuredContent: structured };
+}
 function modelSetToolResult(result) {
   const structured = {
     status: result.status === "applied" ? "applied" : "unchanged",
@@ -123995,6 +124092,7 @@ var init_response_builder = __esm(() => {
     [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS2 },
     [MODEL_SET_TOOL_NAME]: { embedding: new Set(["built_in"]), answers: new Set(["local", "venice"]) },
     [MODEL_RETRY_TOOL_NAME]: { model: new Set(["embedding", "answers", "transcription"]) },
+    [SYNC_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS2 },
     [PRIVACY_GET_TOOL_NAME]: {}
   };
   HANDOFF_URL = /^https:\/\/mcp\.olympusplugin\.ai\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
@@ -124008,7 +124106,7 @@ var init_response_builder = __esm(() => {
   ANSWER_KINDS = new Set(["built_in", "venice", "local"]);
   CITABLE_TRUST_DOMAINS = new Set(["public_safe", "internal"]);
   TRANSCRIPTION_STATES = new Set(["not_needed", "not_downloaded", "interrupted", "downloading", "verifying", "ready", "failed", "load_failed"]);
-  MANUAL_SYNC_OUTCOMES2 = new Set(["checked", "failed", "busy"]);
+  MANUAL_SYNC_OUTCOMES2 = new Set(["checking", "checked", "failed", "busy"]);
   SOURCE_STAGES = new Set(["listing", "reading", "indexing", "done"]);
   STALLED_REASONS = new Set(["waiting_for_credentials", "scope_pending", "provider_unavailable", "model_downloading"]);
   PENDING_TEXT = "Olympus is still preparing this answer on the computer. Call source_answer_result with this job_id " + "(repeat while it says working). Do not ask the question again.";
@@ -124058,6 +124156,7 @@ var init_response_builder = __esm(() => {
     sign_in_failed: "Olympus couldn't open the sign-in page for this source. Try again.",
     source_not_connected: "This source isn't connected, so there is nothing to disconnect.",
     source_busy: "This source is finishing a read. Try again in a moment.",
+    sync_unavailable: "Olympus can't check this source from here right now. It keeps checking on its own.",
     disconnect_incomplete: "Olympus couldn't finish disconnecting this source. Try again.",
     picker_unavailable: "Olympus could not list this source right now. Try again shortly.",
     confirm_whole_account: "Choosing the whole account needs the owner's confirmation in the Olympus panel.",
@@ -124224,6 +124323,18 @@ async function callSetupTool(name, args, backend) {
         if (!backend.retryModel(model))
           throw new ChatGptSurfaceError("model_not_configured");
         return modelRetryToolResult({ status: "retrying", model });
+      }
+      case SYNC_SOURCE_TOOL_NAME: {
+        const sourceId = oneOf(args.source_id, SYNC_SOURCE_IDS2);
+        let status;
+        try {
+          status = await backend.syncSource(sourceId);
+        } catch (error2) {
+          if (error2 instanceof SetupBackendError && error2.code !== "invalid_request")
+            throw new ChatGptSurfaceError("sync_unavailable");
+          throw error2;
+        }
+        return syncSourceToolResult({ status, source_id: sourceId });
       }
       case PRIVACY_GET_TOOL_NAME: {
         const visible = visiblePrivacy(backend.privacySettings(), secretLocations(backend));
@@ -124523,7 +124634,7 @@ function surfaceError(error2) {
     return new ChatGptSurfaceError("internal");
   return new ChatGptSurfaceError("internal");
 }
-var SetupBackendError, OAUTH2_REQUIRED, OAUTH_SOURCES2, FOLDER_SOURCE_IDS, SCOPE_SOURCE_IDS3, DISCONNECT_SOURCE_IDS3, WIDGET_AND_MODEL, WIDGET_ONLY, SELECTION_SCHEMA, MAIL_DRAFT_SCHEMA, CONNECT_SOURCE_TOOL, SCOPE_LIST_TOOL, SCOPE_SET_TOOL, DISCONNECT_SOURCE_TOOL, MODEL_SET_TOOL, MODEL_RETRY_TOOL, PRIVACY_RULE_SCHEMA, PRIVACY_GET_TOOL, PRIVACY_SET_TOOL, SETUP_TOOLS, SETUP_TOOL_NAMES, PRIVACY_CONFIRMATION_TTL_MS, PRIVACY_CONFIRMATIONS_MAX = 32, privacyConfirmations, SCOPE_LIST_PAGE_SIZE = 100, MAX_PROVIDER_PAGES = 50, FOLDER_COLLATOR, SORTED_CURSOR_PREFIX = "olysort1.", BACKEND_CODES;
+var SetupBackendError, OAUTH2_REQUIRED, OAUTH_SOURCES2, FOLDER_SOURCE_IDS, SCOPE_SOURCE_IDS3, DISCONNECT_SOURCE_IDS3, SYNC_SOURCE_IDS2, WIDGET_AND_MODEL, WIDGET_ONLY, SELECTION_SCHEMA, MAIL_DRAFT_SCHEMA, CONNECT_SOURCE_TOOL, SCOPE_LIST_TOOL, SCOPE_SET_TOOL, DISCONNECT_SOURCE_TOOL, MODEL_SET_TOOL, MODEL_RETRY_TOOL, SYNC_SOURCE_TOOL, PRIVACY_RULE_SCHEMA, PRIVACY_GET_TOOL, PRIVACY_SET_TOOL, SETUP_TOOLS, SETUP_TOOL_NAMES, PRIVACY_CONFIRMATION_TTL_MS, PRIVACY_CONFIRMATIONS_MAX = 32, privacyConfirmations, SCOPE_LIST_PAGE_SIZE = 100, MAX_PROVIDER_PAGES = 50, FOLDER_COLLATOR, SORTED_CURSOR_PREFIX = "olysort1.", BACKEND_CODES;
 var init_setup_tools = __esm(() => {
   init_mail_source_scope();
   init_privacy_profile();
@@ -124545,6 +124656,7 @@ var init_setup_tools = __esm(() => {
   FOLDER_SOURCE_IDS = ["google_drive.docs", "dropbox.files"];
   SCOPE_SOURCE_IDS3 = ["gmail.email", ...FOLDER_SOURCE_IDS];
   DISCONNECT_SOURCE_IDS3 = ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"];
+  SYNC_SOURCE_IDS2 = DISCONNECT_SOURCE_IDS3;
   WIDGET_AND_MODEL = { ui: { visibility: ["model", "app"] }, "openai/widgetAccessible": true };
   WIDGET_ONLY = { ui: { visibility: ["app"] }, "openai/widgetAccessible": true, "openai/visibility": "private" };
   SELECTION_SCHEMA = {
@@ -124677,6 +124789,20 @@ var init_setup_tools = __esm(() => {
     securitySchemes: OAUTH2_REQUIRED,
     _meta: WIDGET_ONLY
   };
+  SYNC_SOURCE_TOOL = {
+    name: SYNC_SOURCE_TOOL_NAME,
+    title: "Sync a source now",
+    description: "For the Olympus panel: check a connected source for anything new now. Answers at once; the panel shows what the check found.",
+    inputSchema: {
+      type: "object",
+      properties: { source_id: { type: "string", enum: [...SYNC_SOURCE_IDS2] } },
+      required: ["source_id"],
+      additionalProperties: false
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    securitySchemes: OAUTH2_REQUIRED,
+    _meta: WIDGET_ONLY
+  };
   PRIVACY_RULE_SCHEMA = {
     type: "object",
     properties: {
@@ -124736,7 +124862,8 @@ var init_setup_tools = __esm(() => {
     MODEL_SET_TOOL,
     MODEL_RETRY_TOOL,
     PRIVACY_GET_TOOL,
-    PRIVACY_SET_TOOL
+    PRIVACY_SET_TOOL,
+    SYNC_SOURCE_TOOL
   ];
   SETUP_TOOL_NAMES = new Set(SETUP_TOOLS.map((tool) => tool.name));
   PRIVACY_CONFIRMATION_TTL_MS = 30 * 60000;
@@ -129688,6 +129815,10 @@ function createChatGptSetupBackend(options) {
         throw error2;
       }
     },
+    async syncSource(sourceId) {
+      const result = await post2("/dashboard/sync-now", { source: SYNC_ROUTE_SOURCES[sourceId] });
+      return result.status === "busy" || result.status === "too_soon" ? result.status : "checking";
+    },
     async setModels(choice) {
       const configured = {
         venice: options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile("venice")),
@@ -129738,7 +129869,7 @@ function safeCount(count2) {
     return 0;
   }
 }
-var WORKER_ORIGIN = "http://olympus-worker.internal", DISCONNECT_OAUTH_SOURCES;
+var WORKER_ORIGIN = "http://olympus-worker.internal", DISCONNECT_OAUTH_SOURCES, SYNC_ROUTE_SOURCES;
 var init_setup_backend = __esm(() => {
   init_mail_source_scope();
   init_sovereignty();
@@ -129751,6 +129882,13 @@ var init_setup_backend = __esm(() => {
     "gmail.email": "gmail",
     "google_drive.docs": "google-drive",
     "dropbox.files": "dropbox"
+  };
+  SYNC_ROUTE_SOURCES = {
+    "gmail.email": "gmail",
+    "google_drive.docs": "google-drive",
+    "dropbox.files": "dropbox",
+    "x.bookmarks": "x",
+    "readwise.library": "readwise"
   };
 });
 

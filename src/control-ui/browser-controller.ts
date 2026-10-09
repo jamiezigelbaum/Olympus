@@ -197,9 +197,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'connect_api_key': return 'Key accepted. This card updates when Olympus confirms the connection.';
       case 'start_oauth': return 'Waiting for authorization. This card updates when the connection completes.';
       case 'cancel_oauth': return 'Connection attempt cancelled. Press Connect when you are ready to start a new one.';
-      // The route answers once the check has run, with its result as
-      // status_message; this is only the fallback for a reply without one.
-      case 'sync_now': return 'Checked. This card shows what was found.';
+      // The route starts the check and answers at once ("Checking Dropbox…"
+      // as status_message); the card shows what it found on a later refresh.
+      // This is only the fallback for a reply without a message.
+      case 'sync_now': return 'Checking. This card shows what was found.';
       case 'set_embedding_priority': return 'Saved.';
       case 'disconnect': return 'Disconnected. This card updates when Olympus confirms it.';
       case 'unpair': return 'Unpaired on this computer.';

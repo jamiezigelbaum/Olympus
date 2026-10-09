@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=9d66c60d9d87"
+          "resourceUri": "ui://olympus/dashboard?v=97c9b0f7ca4a"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=9d66c60d9d87",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=97c9b0f7ca4a",
         "openai/ui": {
           "entrypoints": [
             {
@@ -766,11 +766,55 @@
         "openai/widgetAccessible": true,
         "openai/visibility": "private"
       }
+    },
+    {
+      "name": "olympus_sync_source",
+      "title": "Sync a source now",
+      "description": "For the Olympus panel: check a connected source for anything new now. Answers at once; the panel shows what the check found.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "enum": [
+              "gmail.email",
+              "google_drive.docs",
+              "dropbox.files",
+              "x.bookmarks",
+              "readwise.library"
+            ]
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
     }
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=9d66c60d9d87",
+      "uri": "ui://olympus/dashboard?v=97c9b0f7ca4a",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
