@@ -430,6 +430,7 @@ flowchart LR
 | `olympus dashboard --no-open` | generates an unused opening link for an agent to hand to you |
 | `olympus dashboard token` | advanced compatibility access to the worker bearer; never share it in chat |
 | `olympus source answer "…"` | ask across your sources from the terminal |
+| `olympus ask "…" [--level strict\|standard]` | one question to a frontier model anonymously through zkAPI (paid from your zkAPI balance; the question only) |
 | `olympus tier explain\|set\|rules\|classifier …` | why an item has its tier, owner overrides and rules, and the private classifier's approval |
 | `olympus tier migrate plan\|approve\|run\|rollback\|purge\|status` | moves an existing install's items into per-item tiers, each step owner-approved after a dry-run plan |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |

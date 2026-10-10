@@ -179,6 +179,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'tier classifier',
   'tier migrate',
   'doctor',
+  'ask',
   'argus ping',
   'argus list',
   'argus complete',
