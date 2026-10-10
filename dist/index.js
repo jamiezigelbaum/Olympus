@@ -7160,6 +7160,9 @@ var init_connected_handles = __esm(() => {
   init_credential_broker();
 });
 
+// src/core/google-handle-compatibility.ts
+var init_google_handle_compatibility = () => {};
+
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
 var init_privacy_language = __esm(() => {
@@ -11448,6 +11451,7 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
 }
 var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_google_handle_compatibility();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -17701,6 +17705,7 @@ function unique(values) {
 init_connected_handles();
 
 // src/core/connect.ts
+init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
 import { mkdirSync as mkdirSync9, readFileSync as readFileSync15, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";

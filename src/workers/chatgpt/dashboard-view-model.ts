@@ -557,7 +557,7 @@ function connectingFor(
 function reconnectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
   const source = oauthSource(definition);
   return source
-    ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
+    ? { label: source === 'gmail' || source === 'google-drive' ? 'Reconnect Google' : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
     : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, 'reconnect'));
 }
 
