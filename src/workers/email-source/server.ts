@@ -3498,10 +3498,11 @@ export async function main(): Promise<void> {
         items: (corpusId) => extractionReadinessLedger.unreadableItems(corpusId),
         verdict: unreadableVerdict,
         locate: (ref) => fileExtractionRuntime.locateItem(ref),
-        // The provider's own resolver, else the item's locator when it is a web page (a Drive link).
+        // The provider's own resolver, else a Drive file's own Google page.
+        // Nothing else opens: a locator is provider data, not a link to trust.
         openTarget: (provider, locator) => (Object.hasOwn(unreadableOpenTargets, provider)
           ? unreadableOpenTargets[provider]!(locator)
-          : /^https:\/\//.test(locator) ? { url: locator } : undefined),
+          : provider === 'google_drive' && googleFilePage(locator) ? { url: locator } : undefined),
         ...(process.platform === 'darwin'
           ? {
               openFile: (path: string) => new Promise<void>((resolve, reject) => {
@@ -5994,4 +5995,15 @@ function mergeConnectorStores(stores: readonly LocalConnectorStore[]): LocalConn
     }
   }
   return [...byCorpusId.values()];
+}
+
+/** A Google Drive file's own page: https on drive.google.com or docs.google.com, nothing else. */
+function googleFilePage(locator: string): boolean {
+  try {
+    const url = new URL(locator);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && (url.hostname === 'drive.google.com' || url.hostname === 'docs.google.com');
+  } catch {
+    return false;
+  }
 }

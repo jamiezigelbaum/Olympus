@@ -128741,7 +128741,7 @@ async function main() {
     items: (corpusId) => extractionReadinessLedger.unreadableItems(corpusId),
     verdict: unreadableVerdict,
     locate: (ref) => fileExtractionRuntime.locateItem(ref),
-    openTarget: (provider, locator) => Object.hasOwn(unreadableOpenTargets, provider) ? unreadableOpenTargets[provider](locator) : /^https:\/\//.test(locator) ? { url: locator } : undefined,
+    openTarget: (provider, locator) => Object.hasOwn(unreadableOpenTargets, provider) ? unreadableOpenTargets[provider](locator) : provider === "google_drive" && googleFilePage(locator) ? { url: locator } : undefined,
     ...process.platform === "darwin" ? {
       openFile: (path) => new Promise((resolve11, reject) => {
         const args = unreadableOpenArguments(path, unreadableDropboxRoots());
@@ -130365,6 +130365,14 @@ function mergeConnectorStores(stores) {
     }
   }
   return [...byCorpusId.values()];
+}
+function googleFilePage(locator) {
+  try {
+    const url = new URL(locator);
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && (url.hostname === "drive.google.com" || url.hostname === "docs.google.com");
+  } catch {
+    return false;
+  }
 }
 var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
 var init_server5 = __esm(async () => {
