@@ -51888,6 +51888,7 @@ __export(exports_consult_transport_zkapi, {
   ZKAPI_STAGE_LABELS: () => ZKAPI_STAGE_LABELS,
   ZKAPI_SESSION_READY_TIMEOUT_MS: () => ZKAPI_SESSION_READY_TIMEOUT_MS,
   ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD,
+  ZKAPI_CONSULT_ERROR_MESSAGES: () => ZKAPI_CONSULT_ERROR_MESSAGES,
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn4, execFileSync as execFileSync2 } from "node:child_process";
@@ -53649,7 +53650,7 @@ async function readBounded(response, maxBytes) {
   }
   return { ok: true, text: new TextDecoder().decode(joined) };
 }
-var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
+var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, ZKAPI_CONSULT_ERROR_MESSAGES, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
 const loopback = () => new Promise((resolve) => {
@@ -53739,7 +53740,7 @@ var init_consult_transport_zkapi = __esm(() => {
     ["teardownMs", "teardown"],
     ["totalMs", "total"]
   ];
-  MESSAGES = {
+  ZKAPI_CONSULT_ERROR_MESSAGES = {
     invalid_question: "The consult question is empty, too long, or contains control characters.",
     busy: "Another zkAPI consult is in flight; consults are sent one at a time.",
     acknowledgements_incomplete: "The zkAPI risk acknowledgements are not all accepted for the current version.",
@@ -53783,6 +53784,7 @@ var init_consult_transport_zkapi = __esm(() => {
     session_spent: "This zkAPI session has already sent, was cancelled, or has ended; each session sends at most once.",
     internal_error: "The zkAPI session failed inside Olympus."
   };
+  MESSAGES = ZKAPI_CONSULT_ERROR_MESSAGES;
   DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "any" };
   WATCHDOG_SCRIPT = `
 const { spawn, execFileSync } = require('node:child_process');
@@ -56459,7 +56461,7 @@ var init_vocabulary = __esm(() => {
     title: "Private question",
     notSeen: "ChatGPT does not see this question or its answer. It goes out anonymously through zkAPI from your computer.",
     notSent: "Nothing was sent.",
-    mayHaveLeft: "The question left your computer but no answer came back. It may have been charged; check before asking again.",
+    mayHaveLeft: "The question left your computer but no answer came back. It may have used some of your zkAPI balance; check before asking again.",
     questionLabel: "Your question",
     strict: "Strict",
     strictHint: "Your own model rewrites it into general questions first, so nothing identifying can leave.",
@@ -56470,7 +56472,7 @@ var init_vocabulary = __esm(() => {
     lightCleanup: "lightly cleaned up",
     custom: "by your saved instruction",
     send: "Ask anonymously",
-    cost: "Paid from your zkAPI balance.",
+    cost: "Uses your zkAPI balance.",
     sending: "Sealing your question for your computer…",
     waiting: "Asking from your computer… this can take a few minutes.",
     empty: "Type a question first.",
@@ -56489,7 +56491,7 @@ var init_vocabulary = __esm(() => {
     howAsWritten: "sent as written",
     howLightCleanup: "lightly cleaned up before it left",
     howCustom: "prepared by your saved instruction before it left",
-    networkVisible: "Tor was off or bypassed, so the network address was visible: payment was private, the question was not anonymous.",
+    networkVisible: "Tor was off or bypassed, so the network address was visible and the question was not anonymous.",
     networkUnverified: "The network route could not be verified on this computer.",
     showSent: "Show what was sent",
     hideSent: "Hide what was sent",
@@ -120331,8 +120333,16 @@ async function askAnonymously(input, deps) {
     return { ok: false, code: "settings_stale", message: CONSULT_ASK_MESSAGES.stale };
   if (input.signal?.aborted && !result.ok && result.error.outcome === "not_sent")
     return { ok: false, code: "cancelled", message: CONSULT_ASK_MESSAGES.cancelled };
-  if (!result.ok)
-    return { ok: false, code: result.error.code, message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message, sent, outcome: result.error.outcome };
+  if (!result.ok) {
+    return {
+      ok: false,
+      code: result.error.code,
+      message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message,
+      sent,
+      outcome: result.error.outcome,
+      ...result.error.daemonCode !== undefined ? { daemonCode: result.error.daemonCode } : {}
+    };
+  }
   return {
     ok: true,
     sent,
@@ -121384,6 +121394,53 @@ var init_private_question_resource = __esm(() => {
   };
 });
 
+// src/workers/chatgpt/zkapi-copy.ts
+function chatgptZkapiRefusal(code, message, daemonCode) {
+  if (code === "daemon_error" && daemonCode === "funding_required") {
+    return { code: "balance_run_out", message: reworded(message, ZKAPI_CONSULT_ERROR_MESSAGES.daemon_error, CHATGPT_ZKAPI_BALANCE_RUN_OUT) };
+  }
+  const ask = ASK_REFUSALS[code];
+  if (ask)
+    return { code: ask.code, message: reworded(message, ask.original, ask.message) };
+  const transport = TRANSPORT_REFUSALS[code];
+  if (transport)
+    return { code: transport.code, message: reworded(message, ZKAPI_CONSULT_ERROR_MESSAGES[code], transport.message) };
+  return { code, message };
+}
+function reworded(message, original, replacement) {
+  return message.startsWith(original) ? `${replacement}${message.slice(original.length)}` : replacement;
+}
+function chatgptZkapiRouteLabel(route, networkIdentity) {
+  const label = route.replace("anonymous route (payment, key and network identity hidden)", "anonymous route (key and network identity hidden)").replace(/payment privacy only \(network address visible\)/, "network address visible").replace(/payment privacy only: /, "network address visible: ").replace(/payment privacy; /, "").replace(/; lease settlement (?:not confirmed|pending)$/, "");
+  if (!CHATGPT_ZKAPI_FORBIDDEN_TERMS.test(label))
+    return label;
+  return networkIdentity === "hidden" ? "anonymous route" : networkIdentity === "visible" ? "network address visible" : "network route not verified";
+}
+var CHATGPT_ZKAPI_FORBIDDEN_TERMS, CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE = "Uses the user's own zkAPI account, set up outside ChatGPT in Olympus on their computer; each question uses a little of its balance.", DETAILS = "Olympus on your computer has the details.", CHATGPT_ZKAPI_BALANCE_RUN_OUT, TRANSPORT_REFUSALS, ASK_REFUSALS;
+var init_zkapi_copy = __esm(() => {
+  init_consult_ask();
+  init_consult_transport_zkapi();
+  CHATGPT_ZKAPI_FORBIDDEN_TERMS = /\b(?:paid|pay|pays|paying|payment|payments|price|prices|priced|cost|costs|charge|charged|charges|fee|fees|eth|ether|crypto\w*|on-?chain|chain|wallet|wallets|deposit\w*|fund|funds|funded|funding|top(?:ping)?[ -]?up|add money|money|dollars?|usd|spend\w*|spent|lease\w*|ledgers?|reserved?|holds?|withdraw\w*|credits?)\b|\$/i;
+  CHATGPT_ZKAPI_BALANCE_RUN_OUT = `Your zkAPI balance has run out. ${DETAILS}`;
+  TRANSPORT_REFUSALS = {
+    funding_date_missing: { code: "zkapi_needs_attention", message: `Your zkAPI account needs attention, so nothing was sent. ${DETAILS}` },
+    funding_date_invalid: { code: "zkapi_needs_attention", message: `Your zkAPI account needs attention, so nothing was sent. ${DETAILS}` },
+    note_expired: { code: "zkapi_needs_attention", message: `Your zkAPI account needs attention, so nothing was sent. ${DETAILS}` },
+    unresolved_session: { code: "unresolved_session", message: `An earlier zkAPI question was not finished, so nothing was sent. ${DETAILS}` },
+    unresolved_session_other_wallet: { code: "unresolved_session", message: `An earlier zkAPI question from another zkAPI setup was not finished, so nothing was sent. ${DETAILS}` },
+    daemon_keyless: { code: "daemon_keyless", message: `The zkAPI daemon accepts requests without a local API key, so Olympus refuses to send. ${DETAILS}` },
+    spend_cap_reached: { code: "daily_limit_reached", message: "The daily zkAPI limit you set is reached." },
+    state_unavailable: { code: "state_unavailable", message: `Olympus could not read or write its zkAPI session record. ${DETAILS}` },
+    timeout: { code: "timeout", message: "The zkAPI question timed out; it may still have used some of your zkAPI balance." },
+    aborted: { code: "aborted", message: "The zkAPI question was cancelled; it may still have used some of your zkAPI balance." },
+    authorization_refused: { code: "authorization_refused", message: "The final check just before sending refused the question; nothing was sent." }
+  };
+  ASK_REFUSALS = {
+    route_not_configured: { original: CONSULT_ASK_MESSAGES.noRoute, code: "route_not_configured", message: `Anonymous answers are not set up yet. ${DETAILS}` },
+    cancelled: { original: CONSULT_ASK_MESSAGES.cancelled, code: "cancelled", message: "The request was cancelled before the question was sent." }
+  };
+});
+
 // src/workers/chatgpt/response-builder.ts
 function dashboardToolResult(view) {
   const structured = copyDashboardViewModel(view);
@@ -121661,8 +121718,9 @@ function askAnonymouslyToolResult(raw) {
     const sent = clean(record3.sent, MAX_ANSWER);
     const hidden = record3.networkIdentity === "hidden";
     const visible = record3.networkIdentity === "visible";
-    const route = clean(record3.route, 200);
-    const how = hidden ? "anonymously" : visible ? "through zkAPI with the network address visible (payment privacy only; Tor is off on this route or was bypassed)" : `through zkAPI with the network route not verified (payment privacy; the route reads: ${route ?? "not verified"})`;
+    const rawRoute = clean(record3.route, 200);
+    const route = rawRoute !== undefined ? chatgptZkapiRouteLabel(rawRoute, record3.networkIdentity) : undefined;
+    const how = hidden ? "anonymously" : visible ? "through zkAPI with the network address visible (Tor is off on this route or was bypassed, so it was not anonymous)" : `through zkAPI with the network route not verified (the route reads: ${route ?? "not verified"})`;
     const note = rewritten ? `Asked ${how} at ${level === "strict" ? "Strict" : "Standard"}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.` : `Asked ${how} at Standard, as written.`;
     const saveNote = clean(record3.note, 1000);
     const model = clean(record3.model, 200);
@@ -121703,13 +121761,14 @@ function askAnonymouslyToolResult(raw) {
       }
     };
   }
+  const refusal2 = chatgptZkapiRefusal(typeof record3.code === "string" ? record3.code.replace(UNSAFE_CHARS, "").slice(0, 64) : "refused", message, record3.daemonCode);
   return {
-    content: [{ type: "text", text: `Not answered: ${message}` }],
+    content: [{ type: "text", text: `Not answered: ${refusal2.message}` }],
     structuredContent: {
       status: "refused",
-      code: typeof record3.code === "string" ? record3.code.replace(UNSAFE_CHARS, "").slice(0, 64) : "refused",
-      ...record3.outcome === "sent_failed" || record3.outcome === "unknown" ? { outcome: record3.outcome, note: "The question had already left the user's computer when this failed, so it may have been charged; say so, and do not ask it again without asking the user." } : {},
-      message
+      code: refusal2.code,
+      ...(record3.outcome === "sent_failed" || record3.outcome === "unknown") && refusal2.code !== "balance_run_out" ? { outcome: record3.outcome, note: "The question had already left the user's computer when this failed, so it may have used some of their zkAPI balance; say so, and do not ask it again without asking the user." } : {},
+      message: refusal2.message
     }
   };
 }
@@ -122291,6 +122350,7 @@ var init_response_builder = __esm(() => {
   init_private_answer_resource();
   init_private_question_contract();
   init_private_question_resource();
+  init_zkapi_copy();
   MAX_ANSWER = 64 * 1024;
   UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
   OAUTH_SOURCES = new Set(["gmail", "google-drive", "dropbox"]);
@@ -123464,6 +123524,7 @@ var init_mcp_surface = __esm(() => {
   init_private_question_contract();
   init_private_question_resource();
   init_response_builder();
+  init_zkapi_copy();
   READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   OAUTH2_REQUIRED2 = [{ type: "oauth2", scopes: [] }];
   OAUTH2_OPTIONAL = [{ type: "noauth" }, { type: "oauth2", scopes: [] }];
@@ -123588,8 +123649,8 @@ var init_mcp_surface = __esm(() => {
     name: "ask_anonymously",
     title: "Ask anonymously",
     description: [
-      "Ask a frontier model one question anonymously through zkAPI, paid per question from the user's own zkAPI balance;",
-      "nothing identifies them and the provider cannot tie it to an account. Use it only when the user has already written the question",
+      "Ask a frontier model one question anonymously through zkAPI; nothing identifies the user and the model provider cannot tie the",
+      `question to them. ${CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE} Use it only when the user has already written the question`,
       "in this conversation and asks for it to go anonymously, privately or through Olympus zkAPI, or to a named model without being tracked.",
       "When they ask for a private or anonymous question without writing it, call open_private_question instead and never ask them to",
       "type the question here (you would see it). Only the question goes out: no documents, no history.",
@@ -123608,7 +123669,7 @@ var init_mcp_surface = __esm(() => {
         level: { type: "string", enum: ["strict", "standard"], description: "Strict or Standard. Omit to use the level the user chose before." },
         cleanup: { type: "string", enum: ["as_written", "light_cleanup", "custom"], description: "Standard only: how the words are prepared. Omit to use the saved one." },
         remember: { type: "boolean", description: "Save this level (and cleanup) as the default so the user is not asked again." },
-        model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI holds this conversation." }
+        model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI hosts this conversation." }
       },
       required: ["question"],
       additionalProperties: false
@@ -123620,8 +123681,8 @@ var init_mcp_surface = __esm(() => {
     name: "open_private_question",
     title: "Open a private question",
     description: [
-      "Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer,",
-      "paid from their zkAPI balance, and answered inside the panel. Call it at once, with no question in hand, whenever the user asks",
+      "Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer",
+      `and answered inside the panel. ${CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE} Call it at once, with no question in hand, whenever the user asks`,
       'for a private, anonymous or zkAPI question and has not written the question itself: "use Olympus zkAPI to ask a private question",',
       '"ask something privately", "zkapi private q" and the like. Never reply by asking what the question is: anything typed into this',
       "conversation is no longer private. Only when the user has already written the question here and wants it sent anonymously, use",
@@ -126197,16 +126258,17 @@ function resultOf(outcome) {
       ...outcome.cleanup !== undefined ? { cleanup: outcome.cleanup } : {},
       rewritten: outcome.rewritten,
       ...outcome.rewritten ? { sent: outcome.sent } : {},
-      route: outcome.route,
+      route: chatgptZkapiRouteLabel(outcome.route, outcome.networkIdentity),
       networkIdentity: outcome.networkIdentity
     };
   }
+  const refusal2 = chatgptZkapiRefusal(outcome.code, outcome.message, "daemonCode" in outcome ? outcome.daemonCode : undefined);
   return {
     v: 1,
     state: "refused",
-    code: outcome.code,
-    message: outcome.message,
-    ..."outcome" in outcome && outcome.outcome !== undefined ? { outcome: outcome.outcome } : {},
+    code: refusal2.code,
+    message: refusal2.message,
+    ..."outcome" in outcome && outcome.outcome !== undefined && refusal2.code !== "balance_run_out" ? { outcome: outcome.outcome } : {},
     ..."sent" in outcome && outcome.sent !== undefined ? { sent: outcome.sent } : {}
   };
 }
@@ -126214,6 +126276,7 @@ var LEVELS, CLEANUPS, PENDING_RETRY_SECONDS2 = 5, WAITING_RETRY_SECONDS = 2, POL
 var init_private_question_jobs = __esm(() => {
   init_private_answer();
   init_private_answer_crypto();
+  init_zkapi_copy();
   init_private_question_contract();
   LEVELS = ["strict", "standard"];
   CLEANUPS = ["as_written", "light_cleanup", "custom"];

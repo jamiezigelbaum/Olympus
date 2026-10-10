@@ -97,6 +97,7 @@ import { DASHBOARD_RESOURCE_VERSIONED_URI } from './dashboard-resource.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI } from './private-answer-resource.ts';
 import { PRIVATE_QUESTION_META_KEY, type PrivateQuestionMetaV1 } from './private-question-contract.ts';
 import { PRIVATE_QUESTION_RESOURCE_VERSIONED_URI } from './private-question-resource.ts';
+import { chatgptZkapiRefusal, chatgptZkapiRouteLabel } from './zkapi-copy.ts';
 
 export interface ChatGptTextContent {
   type: 'text';
@@ -547,17 +548,19 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     const rewritten = record.rewritten === true;
     const sent = clean(record.sent, MAX_ANSWER);
     // Anonymous only when the network address was hidden (Tor, verified).
-    // Visible (Tor off, or a bypass observed) gives payment privacy only;
-    // not verified (Tor ran but the route could not be confirmed, e.g. no
-    // confinement on Linux) is told as what it is: the route says why.
+    // Visible (Tor off, or a bypass observed): the question was not
+    // anonymous; not verified (Tor ran but the route could not be confirmed,
+    // e.g. no confinement on Linux) is told as what it is: the route says why.
+    // The route reads without its money clauses inside ChatGPT (zkapi-copy.ts).
     const hidden = record.networkIdentity === 'hidden';
     const visible = record.networkIdentity === 'visible';
-    const route = clean(record.route, 200);
+    const rawRoute = clean(record.route, 200);
+    const route = rawRoute !== undefined ? chatgptZkapiRouteLabel(rawRoute, record.networkIdentity) : undefined;
     const how = hidden
       ? 'anonymously'
       : visible
-        ? 'through zkAPI with the network address visible (payment privacy only; Tor is off on this route or was bypassed)'
-        : `through zkAPI with the network route not verified (payment privacy; the route reads: ${route ?? 'not verified'})`;
+        ? 'through zkAPI with the network address visible (Tor is off on this route or was bypassed, so it was not anonymous)'
+        : `through zkAPI with the network route not verified (the route reads: ${route ?? 'not verified'})`;
     const note = rewritten
       ? `Asked ${how} at ${level === 'strict' ? 'Strict' : 'Standard'}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.`
       : `Asked ${how} at Standard, as written.`;
@@ -601,13 +604,17 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
       },
     };
   }
+  // Reworded for ChatGPT where the engine's words carry money terms; an
+  // insufficient balance is told as such, with no call to add money.
+  const refusal = chatgptZkapiRefusal(typeof record.code === 'string' ? record.code.replace(UNSAFE_CHARS, '').slice(0, 64) : 'refused', message, record.daemonCode);
   return {
-    content: [{ type: 'text', text: `Not answered: ${message}` }],
+    content: [{ type: 'text', text: `Not answered: ${refusal.message}` }],
     structuredContent: {
       status: 'refused',
-      code: typeof record.code === 'string' ? record.code.replace(UNSAFE_CHARS, '').slice(0, 64) : 'refused',
-      ...(record.outcome === 'sent_failed' || record.outcome === 'unknown' ? { outcome: record.outcome, note: 'The question had already left the user\'s computer when this failed, so it may have been charged; say so, and do not ask it again without asking the user.' } : {}),
-      message,
+      code: refusal.code,
+      // A 402 from zkAPI refuses before any spend, so it never carries the may-have-used note.
+      ...((record.outcome === 'sent_failed' || record.outcome === 'unknown') && refusal.code !== 'balance_run_out' ? { outcome: record.outcome, note: 'The question had already left the user\'s computer when this failed, so it may have used some of their zkAPI balance; say so, and do not ask it again without asking the user.' } : {}),
+      message: refusal.message,
     },
   };
 }

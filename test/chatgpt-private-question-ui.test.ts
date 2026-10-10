@@ -306,7 +306,7 @@ describe('asking', () => {
     expect(host.text()).not.toContain(W.mayHaveLeft);
     expectNothingLeaked(host);
 
-    // A send that failed after the question left is never called "not sent": the panel says it may have been charged and shows what left.
+    // A send that failed after the question left is never called "not sent": the panel says it may have used some of the balance and shows what left.
     const left: PrivateQuestionResultV1 = { v: 1, state: 'refused', code: 'session_spent', message: 'The session ended before a reply.', outcome: 'unknown', sent: 'What options does a tenant usually have?' };
     const leftHost = mount({ engine, result: left });
     leftHost.push({ content: [], _meta: metaFor(engine) });

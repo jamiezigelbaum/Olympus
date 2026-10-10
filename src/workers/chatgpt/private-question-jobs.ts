@@ -25,6 +25,7 @@ import {
   type SealedPrivateAnswer,
 } from './private-answer-crypto.ts';
 import type { ClaimResponse } from './private-answer-jobs.ts';
+import { chatgptZkapiRefusal, chatgptZkapiRouteLabel } from './zkapi-copy.ts';
 import {
   PRIVATE_QUESTION_JOB_TTL_MS,
   PRIVATE_QUESTION_MAX_CHARS,
@@ -301,16 +302,18 @@ export function resultOf(outcome: ConsultAskResult): PrivateQuestionResultV1 {
       ...(outcome.cleanup !== undefined ? { cleanup: outcome.cleanup } : {}),
       rewritten: outcome.rewritten,
       ...(outcome.rewritten ? { sent: outcome.sent } : {}),
-      route: outcome.route,
+      route: chatgptZkapiRouteLabel(outcome.route, outcome.networkIdentity),
       networkIdentity: outcome.networkIdentity,
     };
   }
+  // The panel is hosted by ChatGPT: refusals read the way zkapi-copy.ts words them there.
+  const refusal = chatgptZkapiRefusal(outcome.code, outcome.message, 'daemonCode' in outcome ? outcome.daemonCode : undefined);
   return {
     v: 1,
     state: 'refused',
-    code: outcome.code,
-    message: outcome.message,
-    ...('outcome' in outcome && outcome.outcome !== undefined ? { outcome: outcome.outcome } : {}),
+    code: refusal.code,
+    message: refusal.message,
+    ...('outcome' in outcome && outcome.outcome !== undefined && refusal.code !== 'balance_run_out' ? { outcome: outcome.outcome } : {}),
     ...('sent' in outcome && outcome.sent !== undefined ? { sent: outcome.sent } : {}),
   };
 }

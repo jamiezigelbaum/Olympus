@@ -184,7 +184,8 @@ describe('the jobs: begin → ask → collect', () => {
     expect(h.asked).toEqual([{ question: 'q', level: 'standard', cleanup: 'light_cleanup' }]);
     h.answer({ ok: false, code: 'spend_cap_reached', message: 'Today\'s spending limit is reached.' });
     await settle();
-    expect(await opened(h.jobs, meta.jobId, panel)).toEqual({ v: 1, state: 'refused', code: 'spend_cap_reached', message: 'Today\'s spending limit is reached.' });
+    // The panel is hosted by ChatGPT: a refusal with money words reads the way zkapi-copy.ts words it there.
+    expect(await opened(h.jobs, meta.jobId, panel)).toEqual({ v: 1, state: 'refused', code: 'daily_limit_reached', message: 'The daily zkAPI limit you set is reached.' });
 
     const h2 = harness();
     const meta2 = (await h2.jobs.begin())!;

@@ -31,7 +31,7 @@ import {
   type ConsultStandardMode,
   type ConsultWriterChoice,
 } from './consult-settings.ts';
-import type { ZkapiConsultOutcome, ZkapiConsultResult } from './consult-transport-zkapi.ts';
+import type { ZkapiConsultOutcome, ZkapiConsultResult, ZkapiDaemonErrorCode } from './consult-transport-zkapi.ts';
 import type { ConsultWriterInput, ConsultWriterOutcome } from './consult-writer.ts';
 
 /** The typed question's bound, in characters (the transport also caps it at 8 KiB). */
@@ -141,6 +141,8 @@ export type ConsultAskResult =
      * provider). Absent when nothing was ever sent to the transport.
      */
     readonly outcome?: ZkapiConsultOutcome;
+    /** The zkAPI daemon's own error code, when it answered with one (`funding_required`: the balance has run out). */
+    readonly daemonCode?: ZkapiDaemonErrorCode;
   };
 
 export const CONSULT_ASK_MESSAGES = Object.freeze({
@@ -404,7 +406,16 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   if (!result) return { ok: false, code: 'route_not_configured', message: CONSULT_ASK_MESSAGES.noRoute };
   if (stale) return { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale };
   if (input.signal?.aborted && !result.ok && result.error.outcome === 'not_sent') return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };
-  if (!result.ok) return { ok: false, code: result.error.code, message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message, sent, outcome: result.error.outcome };
+  if (!result.ok) {
+    return {
+      ok: false,
+      code: result.error.code,
+      message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message,
+      sent,
+      outcome: result.error.outcome,
+      ...(result.error.daemonCode !== undefined ? { daemonCode: result.error.daemonCode } : {}),
+    };
+  }
   return {
     ok: true,
     sent,

@@ -191,10 +191,10 @@ describe('ask_anonymously: the ChatGPT result', () => {
     const refused = askAnonymouslyToolResult({ ok: false, code: 'secret_detected', message: 'Not sent: a key.', sent: 'secret text' });
     expect(refused.structuredContent).toEqual({ status: 'refused', code: 'secret_detected', message: 'Not sent: a key.' });
     expect(JSON.stringify(refused)).not.toContain('secret text');
-    // A send that failed after the question left: the model is told it may have been charged (Codex P1 on #227), still without the text.
+    // A send that failed after the question left: the model is told it may have used some of the balance (Codex P1 on #227), still without the text.
     const failed = askAnonymouslyToolResult({ ok: false, code: 'session_spent', message: 'The session ended before a reply.', sent: 'what left', outcome: 'sent_failed' });
     expect(failed.structuredContent).toMatchObject({ status: 'refused', code: 'session_spent', outcome: 'sent_failed' });
-    expect(String((failed.structuredContent as Record<string, unknown>).note)).toContain('may have been charged');
+    expect(String((failed.structuredContent as Record<string, unknown>).note)).toContain('may have used some of their zkAPI balance');
     expect(JSON.stringify(failed)).not.toContain('what left');
     expect(askAnonymouslyToolResult({ ok: false, code: 'busy', message: 'm', sent: 's', outcome: 'not_sent' }).structuredContent).toEqual({ status: 'refused', code: 'busy', message: 'm' });
     const working = askAnonymouslyToolResult({ status: 'working', job_id: 'saj_abc' });
