@@ -692,7 +692,7 @@ describe('the worker serves the card only inside a local control session', () =>
     const { cookie } = await localSession(fetcher);
     const session = await (await fetcher(new Request(`${ORIGIN}/dashboard?outside-help`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }))).text();
     expect(session).toContain('data-outside-help ');
-    expect(session).toContain('data-statement="automatic"');
+    expect(session).toContain('data-statement="only_when_asked"');
     expect(session).toContain('data-outside-enabled="true"');
     expect(session).not.toContain('data-outside-unlock');
     expect(calls).toEqual(['status']);

@@ -147,6 +147,8 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   empty: 'Type a question first.',
   tooLong: `Keep the question under ${CONSULT_ASK_MAX_CHARS.toLocaleString('en-US')} characters.`,
   settingsInvalid: 'The anonymous answers settings file could not be read, so nothing was sent.',
+  /** The dashboard switch is off (or anonymous answers were never set up): the agent tools send nothing. */
+  off: 'Not sent: anonymous answers are off on your dashboard. Turn them on under Private answers, then ask again.',
   declined: 'Your model chose not to send anything.',
   writerFailed: 'Your model could not prepare the question, so nothing was sent.',
   secret: 'Not sent: the question looks like it contains a password, key or token.',
@@ -239,6 +241,9 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     return { ok: false, code: 'settings_invalid', message: CONSULT_ASK_MESSAGES.settingsInvalid };
   }
   if (read.state === 'invalid') return { ok: false, code: 'settings_invalid', message: CONSULT_ASK_MESSAGES.settingsInvalid };
+  // The dashboard's Turn on/off is the owner's brake on the agent tools (owner
+  // decision 2026-10-10): off, or never set up, sends nothing and asks nothing.
+  if (read.state !== 'valid' || !read.settings.enabled) return { ok: false, code: 'anonymous_answers_off', message: CONSULT_ASK_MESSAGES.off };
   let settings = read.state === 'valid' ? read.settings : undefined;
   let stored = consultStandardBinding(settings ?? DEFAULT_CONSULT_SETTINGS);
   const storedLevel: ConsultAskLevel = settings ? consultAskLevelFromSettings(settings.level) : 'standard';
