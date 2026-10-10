@@ -3,6 +3,7 @@ import { isLoopbackAddress, requestPeerAddress } from '../core/request-peer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
 import {
   DASHBOARD_LAUNCH_MINT_PATH,
+  DASHBOARD_LAUNCH_REMOTE_PURPOSE,
   DASHBOARD_LAUNCH_PAGE_HTML,
   DASHBOARD_LAUNCH_PAGE_PATH,
   DASHBOARD_LAUNCH_REDEEM_PATH,
@@ -150,7 +151,8 @@ export function withWorkerBearerAuth(
       if (!hasValidWorkerBearerToken(presentedAuthorization, authToken)) return unauthorizedWorkerResponse();
       const origin = sameRequestOrigin(request);
       if (!origin) return dashboardControlForbiddenResponse('origin_mismatch');
-      return dashboardLaunchMintedResponse(launchTickets.mint(origin));
+      const remote = new URL(request.url).searchParams.get('purpose') === DASHBOARD_LAUNCH_REMOTE_PURPOSE;
+      return dashboardLaunchMintedResponse(launchTickets.mint(origin, { remote }));
     }
     if (isDashboardLaunchRedeemRequest(request)) {
       // No bearer and no cookie: the proof is the ticket itself, bound to the

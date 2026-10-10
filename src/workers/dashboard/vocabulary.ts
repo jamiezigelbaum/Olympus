@@ -1480,6 +1480,25 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    */
   howOnComputer: 'Do this on your computer',
   howOnComputerFix: 'Fix this on your computer',
+  /**
+   * Remote mode (2026-10-10; core/remote-open.ts): the engine runs on a
+   * server, so a "do this on your computer" control opens this box instead of
+   * the olympus:// page. The two command lines are built from the engine's
+   * port and the owner's own SSH name (remoteOpenInstructions).
+   */
+  remote: {
+    title: 'Olympus runs on a server, so this opens on your computer through a secure tunnel.',
+    askLine: 'Ask your assistant:',
+    askPhrase: 'Open Olympus on my computer',
+    askPhraseFor: 'Open Olympus on my computer to connect {source}',
+    byHandAfterAsk: 'Or do it yourself:',
+    onComputer: 'On your computer, run:',
+    onServer: 'Then on the server, run this and open the link it prints in your computer\'s browser:',
+    portNote: 'Keep {port} on both sides of the tunnel: the link only works on that port.',
+    copy: 'Copy',
+    copied: 'Copied',
+    copySelected: 'Selected: press Ctrl+C or ⌘C to copy',
+  },
   /** A source that is not moving and whose reason the engine did not send (never a blank row). */
   sourcePaused: 'Paused',
   /**

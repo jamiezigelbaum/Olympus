@@ -13,6 +13,7 @@ import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } f
 import { createModelKeyReload, workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
+import { resolveServerMode } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -4867,6 +4868,19 @@ export async function main(): Promise<void> {
     embedding: chatgptEmbeddingState,
     privateModel: chatgptPrivateModelState,
     transcription: dashboardTranscriptionState,
+    // Remote mode (core/remote-open.ts): read per dashboard read, so
+    // `olympus server-mode on` needs no restart. `agent`: the OpenClaw
+    // Gateway supervises this worker (its native service, not the standalone
+    // engine host), so the owner's assistant can open Olympus on their
+    // computer for them; anywhere else (a hand-run worker, or a Hermes
+    // install that turned the route off) the panel shows the by-hand lines only.
+    remote: () => {
+      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv() });
+      const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw';
+      return mode.remote
+        ? { port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }
+        : undefined;
+    },
     privacy: () => {
       const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
       return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
