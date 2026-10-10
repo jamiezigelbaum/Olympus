@@ -119435,6 +119435,7 @@ function chatgptPrivateQuestionProgram(config2) {
   let cleanup = "";
   let sentOpen = false;
   let pair = null;
+  const followed = {};
   let run = 0;
   let theme = "";
   let focusAfter = "";
@@ -119518,10 +119519,12 @@ function chatgptPrivateQuestionProgram(config2) {
     if (value === undefined && info)
       return;
     const next = readMeta(value);
-    if (info && next && info.jobId === next.jobId)
+    if (info && next && (info.jobId === next.jobId || followed[next.jobId]))
       return;
     if (!info && !next)
       return;
+    for (const id of Object.keys(followed))
+      delete followed[id];
     start(next, !quiet || !!next);
     if (next)
       resume(next.jobId, 0);
@@ -119551,6 +119554,7 @@ function chatgptPrivateQuestionProgram(config2) {
       if (mine !== run)
         return;
       if (following || depth === 0) {
+        followed[jobId] = true;
         start(kept.next, true);
         resume(kept.next.jobId, depth + 1);
         return;
@@ -119596,6 +119600,7 @@ function chatgptPrivateQuestionProgram(config2) {
       await keepKey(jobId, keys.privateKey, keys.publicKey, true, next);
       if (mine !== run)
         return;
+      followed[jobId] = true;
       start(next, true);
       focusAfter = "question";
       render();
