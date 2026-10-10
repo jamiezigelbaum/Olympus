@@ -541,7 +541,7 @@ loopback address there forwards to the cloud.
     "torSocksPort": 19050,
     "fundingDate": "2026-10-01",
     "depositUsd": 20,
-    "acknowledgements": { "version": 5, "accepted": ["automatic", "provider_reads", "cost", "fees", "expiry", "new_service"] }
+    "acknowledgements": { "version": 7, "accepted": ["only_when_asked", "provider_reads", "cost", "fees", "expiry", "new_service"] }
   }
 }
 ```
@@ -569,12 +569,14 @@ sequence follows the reference wrapper scripts in `ethereum/zkapi` pull
 request #16.
 
 **The money, plainly.** Turning this on requires accepting six statements
-(acknowledgement version 6: the owner's calmer rewrite of 2026-10-08, with
-the provider statement corrected on 2026-10-10; any
+(acknowledgement version 7: the owner's calmer rewrite of 2026-10-08, with
+the provider statement corrected on 2026-10-10 and the first statement
+rewritten the same day once questions stopped going out on their own; any
 earlier acknowledgement must be given again, and nothing is sent until it is):
 
-- Questions go out automatically when the answer from your Mac is missing
-  something. You can turn this off at any time.
+- A question goes out only when you ask your agent to use Olympus zkAPI.
+  Nothing is sent on its own, and you can turn anonymous answers off at any
+  time.
 - The AI provider reads each question but cannot tell who sent it. At
   Standard, a question goes out the way you choose; at Strict, your model
   removes identifying details first. An unusual situation could still hint at

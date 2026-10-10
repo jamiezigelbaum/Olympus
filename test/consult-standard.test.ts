@@ -89,7 +89,7 @@ describe('the writer under Standard', () => {
 });
 
 describe('Ask anonymously', () => {
-  const settings = (extra: Partial<typeof DEFAULT_CONSULT_SETTINGS> = {}): ConsultSettingsRead => ({ state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 2, ...extra } });
+  const settings = (extra: Partial<typeof DEFAULT_CONSULT_SETTINGS> = {}): ConsultSettingsRead => ({ state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 2, enabled: true, ...extra } });
   const reply = (text: string): ZkapiConsultResult => ({ ok: true, text, routeLabel: 'zkAPI via Tor', networkIdentity: 'hidden', receipt: {} as never, elapsedMs: 5 });
 
   /** A question at Standard, as an agent sends it once the level is chosen. */
@@ -136,6 +136,13 @@ describe('Ask anonymously', () => {
     expect(await askAnonymously(q('  '), none.value)).toMatchObject({ ok: false, code: 'question_empty' });
     expect(await askAnonymously(q('x'.repeat(CONSULT_ASK_MAX_CHARS + 1)), none.value)).toMatchObject({ ok: false, code: 'question_too_long' });
     expect(await askAnonymously(q('x'), deps({ state: 'invalid', reason: 'malformed_json' } as unknown as ConsultSettingsRead).value)).toMatchObject({ ok: false, code: 'settings_invalid' });
+    // The dashboard switch off, or no settings file yet: refused before anything is prepared, and no Strict/Standard choice is asked.
+    const off = deps(settings({ enabled: false }));
+    expect(await askAnonymously(q('x'), off.value)).toEqual({ ok: false, code: 'anonymous_answers_off', message: CONSULT_ASK_MESSAGES.off });
+    expect(off.calls.prepare).toHaveLength(0);
+    expect(off.calls.send).toHaveLength(0);
+    const absent = deps({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
+    expect(await askAnonymously(q('x'), absent.value)).toMatchObject({ ok: false, code: 'anonymous_answers_off' });
     expect(await askAnonymously(q('x'), deps(settings(), { kind: 'declined', promptTokens: 1, ms: 1 }).value)).toEqual({ ok: false, code: 'writer_declined', message: CONSULT_ASK_MESSAGES.declined });
     expect(await askAnonymously(q('x'), deps(settings(), { kind: 'failed', reason: 'form' }).value)).toMatchObject({ ok: false, code: 'writer_failed' });
     const keyed = deps(settings({ standardMode: 'as_written' }));

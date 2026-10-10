@@ -214,7 +214,11 @@ Decisions:
    missed; it helps when a stronger model's reasoning or outside knowledge is
    wanted. The evidence excerpts in item 3 return with the documents lane
    (`use_documents`, design step 4); until then the writer reads only the
-   question.
+   question. The card's first cost-and-risk statement says so (acknowledgement
+   version 7, 2026-10-10), and the card's Turn on/off is a real brake: while
+   anonymous answers are off, or were never set up, `ask_anonymously` and the
+   private question panel refuse with `anonymous_answers_off` before anything
+   is prepared or any Strict/Standard choice is asked.
 5. **The answering model is never the provider that holds the conversation.**
    OpenAI also holds a ChatGPT conversation and could link it to the
    anonymous question; Anthropic holds a Claude one. So the model follows who
