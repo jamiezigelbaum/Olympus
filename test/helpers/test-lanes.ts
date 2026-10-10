@@ -53,7 +53,7 @@ export function testLaneFor(source: string): TestLane {
   if (source.includes('OLYMPUS_TEST_LANE:') && declaration === undefined) {
     throw new Error('Malformed OLYMPUS_TEST_LANE declaration.');
   }
-  if (declaration !== undefined && declaration !== 'go') {
+  if (declaration !== undefined && declaration !== 'go' && declaration !== 'deploy') {
     throw new Error(`Unsupported OLYMPUS_TEST_LANE declaration: ${declaration}`);
   }
   const usesGo = GO_TOOLCHAIN_USE.test(source);
@@ -64,6 +64,9 @@ export function testLaneFor(source: string): TestLane {
     if (!usesGo) throw new Error('The Go lane declaration has no detected Go invocation.');
     return 'go';
   }
+  // A file whose processes start in a shared helper or the code under test
+  // declares the deploy lane; the source scan cannot see those spawns.
+  if (declaration === 'deploy') return 'deploy';
   return SPAWNS.test(source) ? 'deploy' : 'fast';
 }
 
