@@ -258,7 +258,16 @@ describe('asking', () => {
     await host.until(() => host.text().includes(W.empty), 'the empty notice');
     expect(host.asks).toHaveLength(0);
 
+    // Too long: never clipped by the box; the count and the notice say how far over, nothing sent.
+    expect(host.field().hasAttribute('maxlength')).toBe(false);
+    type(host, 'x'.repeat(4_321));
+    expect(host.text()).toContain('4,321 / 4,000 characters');
+    host.button(W.send).click();
+    await host.until(() => host.text().includes('The question is 4,321 characters; keep it under 4,000.'), 'the too-long notice');
+    expect(host.asks).toHaveLength(0);
+
     type(host, SECRET_QUESTION);
+    expect(host.text()).toContain(`${SECRET_QUESTION.length} / 4,000 characters`);
     host.button(W.send).click();
     await host.until(() => host.text().includes(SECRET_ANSWER), 'the answer');
     expect(host.asks).toHaveLength(1);
