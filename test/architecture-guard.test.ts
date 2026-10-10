@@ -272,6 +272,8 @@ const FORBIDDEN_SHARED_DOMAIN_TOKENS: ReadonlyArray<{ label: string; pattern: Re
 const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
   ['src/core/analyst.ts', new Set([
     'isUnsupportedNoContentAnswer',
+    // Ends a cut answer at a sentence or word boundary: punctuation only, no question semantics.
+    'clampAnswer',
     'compactSourceText',
     'stripCodeFences',
   ])],

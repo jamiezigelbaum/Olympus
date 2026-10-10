@@ -174,7 +174,11 @@ export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
   relevanceMargin: 0.04,
   maxPassageChars: 2_400,
   maxPromptBytes: 11_000,
-  maxAnswerChars: 1_000,
+  // About 1.1k characters of answer (the answer field is 55% of the
+  // budget). At 1k a two-clause answer about a contract stopped mid-word at
+  // 550 (2026-10-10 live); the model stops sooner when it is done, so only
+  // an answer that needs the room pays its generation time.
+  maxAnswerChars: 2_000,
   audit: false,
   maxLeadingItems: 2,
   // On EmbeddingGemma 2's narrow cosine scale 0.01 let a near-tie lead, so

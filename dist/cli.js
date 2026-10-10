@@ -30943,13 +30943,13 @@ function currentAnalystAbortSignal() {
   return analystAbortSignalStorage.getStore();
 }
 function analystResponseSchema(maxOutputChars) {
-  const budget = Math.max(400, Math.floor(maxOutputChars));
+  const budget = analystSchemaBudget(maxOutputChars);
   const citations = 6;
   const gaps = ANALYST_SCHEMA_MAX_GAPS;
   return {
     type: "object",
     properties: {
-      answer: { type: "string", maxLength: Math.floor(budget * 0.55) },
+      answer: { type: "string", maxLength: analystSchemaAnswerChars(maxOutputChars) },
       citations: {
         type: "array",
         maxItems: citations,
@@ -30967,6 +30967,12 @@ function analystResponseSchema(maxOutputChars) {
     },
     required: ["answer", "citations", "unanswered", "sufficient"]
   };
+}
+function analystSchemaBudget(maxOutputChars) {
+  return Math.max(400, Math.floor(maxOutputChars));
+}
+function analystSchemaAnswerChars(maxOutputChars) {
+  return Math.floor(analystSchemaBudget(maxOutputChars) * 0.55);
 }
 function analystSchemaGapChars(maxOutputChars) {
   const budget = Math.max(400, Math.floor(maxOutputChars));
@@ -30995,7 +31001,7 @@ function createAnalyst(model, createOptions = {}) {
       const compact = createOptions.evidenceFormat === "compact";
       const request = {
         system: compact ? ANALYST_COMPACT_SYSTEM : ANALYST_SYSTEM,
-        prompt: compact ? buildCompactAnalystPrompt(pack) : buildAnalystPrompt(pack, localOnly),
+        prompt: `${compact ? buildCompactAnalystPrompt(pack) : buildAnalystPrompt(pack, localOnly)}${createOptions.boundedResponseSchema ? answerLengthLine(analystSchemaAnswerChars(maxOutputChars)) : ""}`,
         localOnly,
         maxOutputChars,
         ...createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(maxOutputChars) } : {},
@@ -31027,21 +31033,23 @@ function createAnalyst(model, createOptions = {}) {
           escalation: { reason, redactedPack: redactPackForEscalation(pack) }
         };
       }
-      const answer = clampAnswer(parsed?.answer ?? completion.text.trim(), options.maxAnswerChars);
+      const answerLimit = createOptions.boundedResponseSchema ? Math.min(options.maxAnswerChars ?? Number.POSITIVE_INFINITY, analystSchemaAnswerChars(maxOutputChars)) : options.maxAnswerChars;
+      const answer = clampAnswer(parsed?.answer ?? completion.text.trim(), answerLimit);
       return { answer, citations, unanswered };
     }
   };
 }
-function analystPromptBytes(pack, options, evidenceFormat = "full") {
+function analystPromptBytes(pack, options, evidenceFormat = "full", boundedOutputChars) {
+  const bound = boundedOutputChars !== undefined ? answerLengthLine(analystSchemaAnswerChars(boundedOutputChars)) : "";
   if (evidenceFormat === "compact") {
     return promptEncoder.encode(`${ANALYST_COMPACT_SYSTEM}
 
-${buildCompactAnalystPrompt(pack)}`).length;
+${buildCompactAnalystPrompt(pack)}${bound}`).length;
   }
   const localOnly = options.localOnly || evidencePackRequiresLocalOnly(pack);
   return promptEncoder.encode(`${ANALYST_SYSTEM}
 
-${buildAnalystPrompt(pack, localOnly)}`).length;
+${buildAnalystPrompt(pack, localOnly)}${bound}`).length;
 }
 function evidencePackRequiresLocalOnly(pack) {
   return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
@@ -31608,11 +31616,23 @@ function stripSecureMatchCounts(pack) {
   const { matchCounts: _matchCounts, ...coverage } = pack.coverage;
   return coverage;
 }
+function answerLengthLine(chars) {
+  return `
+
+Write "answer" in at most ${chars} characters, ending with a complete sentence.`;
+}
 function clampAnswer(answer, maxAnswerChars) {
-  if (maxAnswerChars !== undefined && answer.length > maxAnswerChars) {
-    return answer.slice(0, maxAnswerChars);
-  }
-  return answer;
+  if (maxAnswerChars === undefined || !Number.isFinite(maxAnswerChars))
+    return answer;
+  const limit = Math.max(1, Math.floor(maxAnswerChars));
+  const cut = answer.length > limit ? answer.slice(0, limit) : answer;
+  if (cut.length < limit || /[.!?…]["'”’)\]]*\s*$/u.test(cut))
+    return cut;
+  const sentenceEnd = Math.max(...[...cut.matchAll(/[.!?…]["'”’)\]]*\s/gu)].map((match) => match.index + match[0].trimEnd().length));
+  if (sentenceEnd >= limit / 2)
+    return cut.slice(0, sentenceEnd);
+  const space = cut.lastIndexOf(" ");
+  return space > 0 ? `${cut.slice(0, space).replace(/[\s,;:]+$/u, "")}…` : cut;
 }
 function parseAnalystModelOutput(text) {
   const stripped = stripCodeFences(text);
@@ -111515,7 +111535,7 @@ function isLocalServiceDown(error2) {
 }
 async function answerPrivately(question, evidence, options = {}) {
   const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
-  const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES, options.evidenceFormat ?? "full");
+  const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
   const verdict = { sufficient: undefined };
   const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
     auditSuspiciousDrafts: options.audit ?? true,
@@ -111640,9 +111660,9 @@ function echoesEvidenceScaffolding(text2) {
   const normalized = text2.toLowerCase().split(/\s+/).join(" ").split(" /").join("/").split("/ ").join("/").split(" :").join(":");
   return ANALYST_EVIDENCE_SCAFFOLDING_LABELS.some((label) => normalized.includes(label));
 }
-function fitPrivatePack(pack, maxPromptBytes, format) {
+function fitPrivatePack(pack, maxPromptBytes, format, outputChars) {
   const options = { localOnly: true };
-  const promptBytes = (candidatePack) => analystPromptBytes(candidatePack, options, format);
+  const promptBytes = (candidatePack) => analystPromptBytes(candidatePack, options, format, outputChars);
   if (promptBytes(pack) <= maxPromptBytes)
     return pack;
   for (let keep = pack.candidates.length;keep >= 1; keep -= 1) {
@@ -123349,7 +123369,7 @@ var init_private_answer_model = __esm(() => {
     relevanceMargin: 0.04,
     maxPassageChars: 2400,
     maxPromptBytes: 11000,
-    maxAnswerChars: 1000,
+    maxAnswerChars: 2000,
     audit: false,
     maxLeadingItems: 2,
     leadGap: 0.03,

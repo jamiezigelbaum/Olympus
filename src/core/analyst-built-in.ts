@@ -15,6 +15,7 @@ import { totalmem } from 'node:os';
 import {
   ANALYST_EVIDENCE_SCAFFOLDING_LABELS,
   analystPromptBytes,
+  DEFAULT_ANALYST_MAX_OUTPUT_CHARS,
   analystSchemaGapChars,
   createAnalyst,
   runWithAnalystAbortSignal,
@@ -545,6 +546,7 @@ export async function answerPrivately(
     privateEvidencePack(question, evidence),
     options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES,
     options.evidenceFormat ?? 'full',
+    options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS,
   );
   // Whether the model called its own answer complete ("sufficient"): the
   // AnalystResult does not carry it, and the panel shows no gaps then.
@@ -742,9 +744,9 @@ export function echoesEvidenceScaffolding(text: string): boolean {
  * trailing candidates left out. Measured on the real prompt, so labels and
  * escaping count.
  */
-function fitPrivatePack(pack: EvidencePack, maxPromptBytes: number, format: AnalystEvidenceFormat): EvidencePack {
+function fitPrivatePack(pack: EvidencePack, maxPromptBytes: number, format: AnalystEvidenceFormat, outputChars: number): EvidencePack {
   const options = { localOnly: true };
-  const promptBytes = (candidatePack: EvidencePack) => analystPromptBytes(candidatePack, options, format);
+  const promptBytes = (candidatePack: EvidencePack) => analystPromptBytes(candidatePack, options, format, outputChars);
   if (promptBytes(pack) <= maxPromptBytes) return pack;
   for (let keep = pack.candidates.length; keep >= 1; keep -= 1) {
     const base = pack.candidates.slice(0, keep);
