@@ -1289,6 +1289,15 @@ var init_secret_store = __esm(() => {
   init_file_lease();
 });
 
+// src/core/build-flavor.ts
+var PUBLIC_RUNTIME_BUILD = false;
+
+// src/core/google-handle-compatibility.ts
+function isRetiredGoogleHandle(handle, publicBuild = PUBLIC_RUNTIME_BUILD) {
+  return publicBuild && (handle.provider === "gmail" && handle.handle === "gmail.personal.delegated" || handle.provider === "google_drive" && handle.handle === "google_drive.personal.delegated") && handle.oauth2Refresh === undefined && (handle.tokenSecretRefs?.length ?? 0) === 0;
+}
+var init_google_handle_compatibility = () => {};
+
 // src/core/operation-error.ts
 function sourceAnswerJobNotFound() {
   return new OperationError("source_answer_job_not_found", "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted.", "Ask the question again with source_answer.");
@@ -3013,9 +3022,6 @@ var init_publisher_oauth_client = __esm(() => {
     DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
   ];
 });
-
-// src/core/build-flavor.ts
-var PUBLIC_RUNTIME_BUILD = false;
 
 // src/core/google-service-account.ts
 import { createSign } from "node:crypto";
@@ -5817,6 +5823,10 @@ async function completeOAuthSourceConnection(prepared, code) {
         ...xUserId ? { providerAccountId: xUserId } : {}
       }, prepared.registryPath);
     }
+    const replacedProviders = new Set(proposedHandles.map((handle) => handle.provider));
+    const retired = readConnectedHandleRegistry(prepared.registryPath).handles.filter((handle) => replacedProviders.has(handle.provider) && isRetiredGoogleHandle(handle));
+    if (retired.length > 0)
+      removeConnectedHandles(retired.map((handle) => handle.handle), prepared.registryPath);
     return {
       ok: true,
       source: prepared.options.source,
@@ -5842,7 +5852,7 @@ async function resolveOAuthClientSecret(prepared) {
 }
 function assertOneConnectedAccountForProposedProviders(registryPath, proposed) {
   const providers = new Set(proposed.map((handle) => handle.provider));
-  const handles = readConnectedHandleRegistry(registryPath).handles.filter((handle) => providers.has(handle.provider));
+  const handles = readConnectedHandleRegistry(registryPath).handles.filter((handle) => providers.has(handle.provider) && !isRetiredGoogleHandle(handle));
   assertOneConnectedAccountPerProvider({ version: 1, handles }, proposed);
 }
 function normalizeOAuthTimeoutMs(value, defaultValue, label) {
@@ -6583,6 +6593,7 @@ function retryableErrorDisposition(error, now) {
 }
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
+  init_google_handle_compatibility();
   init_model_transport();
   init_zkapi_consult_settings();
   init_secret_store();
@@ -58406,8 +58417,15 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === "embedding_lane_disabled");
   const schedule = scheduleFromSchedulers(schedulers);
   const operatorPaused = schedule?.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason);
+  const googleReconnectRequired = (definition.provider === "gmail" || definition.provider === "google_drive") && (handlesForDefinition(definition, registry).some((handle) => isRetiredGoogleHandle(handle)) || !operatorPaused && schedule?.last_error_kind === "credential_missing");
   const providerRefusing = !operatorPaused && (schedule?.degraded_reason === "api_request_guard" || schedule !== undefined && schedule.consecutive_failures > 0 && schedule.last_error_kind === "api_request_guard");
-  const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired);
+  const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing || googleReconnectRequired, now, registryUnreadable, unpaired);
+  if (googleReconnectRequired) {
+    baseConnection.state = "reauth_required";
+    baseConnection.label = "Reconnect Google to continue syncing";
+    if (baseConnection.action.kind === "oauth")
+      baseConnection.action.label = "Reconnect Google";
+  }
   const pairedSession = definition.connect_action.kind === "guided_session";
   const unpairable = pairedSession && unpaired === undefined && (baseConnection.handles.length > 0 || baseConnection.state !== "not_connected");
   const connectedFolderSource = fileSourceScopeStatus !== undefined && baseConnection.handles.length > 0 && baseConnection.state !== "reauth_required";
@@ -59890,6 +59908,7 @@ function round12(value) {
 }
 var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
+  init_google_handle_compatibility();
   init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
@@ -112144,7 +112163,7 @@ function dashboardProvidersForSource(source) {
 }
 function assertDashboardAccountCardinality(registry2, source) {
   const providers = new Set(dashboardProvidersForSource(source));
-  const handles = registry2.handles.filter((handle) => providers.has(handle.provider));
+  const handles = registry2.handles.filter((handle) => providers.has(handle.provider) && !isRetiredGoogleHandle(handle));
   try {
     assertOneConnectedAccountPerProvider({ version: 1, handles });
   } catch {
@@ -112908,6 +112927,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000;
 var init_email_source = __esm(() => {
+  init_google_handle_compatibility();
   init_consent_page();
   init_analyst();
   init_types();
@@ -118271,7 +118291,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition) : undefined;
+  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === "Needs you" || status === "Failing";
   const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
   const menu = [];
@@ -118333,7 +118353,7 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   }
   const reason = dashboardAttentionLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition) : sync ?? checkAgainFix();
+  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function syncFix(definition, card, status, actionKind, degraded, progress) {
@@ -118361,9 +118381,9 @@ function connectingFor(definition, card, now) {
     fix: { label: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
   };
 }
-function reconnectFix(definition) {
+function reconnectFix(definition, card) {
   const source = oauthSource(definition);
-  return source ? { label: DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, "reconnect"));
+  return source ? { label: (source === "gmail" || source === "google-drive") && card.connection.label === "Reconnect Google to continue syncing" ? "Reconnect Google" : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, "reconnect"));
 }
 function helpLinkFix(label, href) {
   return { label, tool: DASHBOARD_TOOL_NAME, args: {}, href, openHref: true };
@@ -118808,6 +118828,7 @@ var init_dashboard_view_model = __esm(() => {
   DISCONNECT_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   SYNC_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   KNOWN_CONNECTION_LABELS = new Set([
+    "Reconnect Google to continue syncing",
     "not connected",
     "connection state unreadable",
     "awaiting browser consent",

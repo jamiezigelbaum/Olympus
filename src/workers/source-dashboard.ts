@@ -1,3 +1,4 @@
+import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
 import { mkdirSync } from 'node:fs';
@@ -1071,7 +1072,7 @@ export type DashboardSourceAction =
   | {
     kind: 'oauth';
     source: DashboardOAuthSource;
-    label: 'Connect' | 'Reauthenticate';
+    label: 'Connect' | 'Reauthenticate' | 'Reconnect Google';
     /**
      * True when this source connects through Olympus's own registered OAuth
      * app: the card offers one Connect button and no fields, and the
@@ -2374,6 +2375,9 @@ function sourceCardFromDefinition(
   // describe two different lanes.
   const operatorPaused = schedule?.degraded_reason !== undefined
     && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason);
+  const googleReconnectRequired = (definition.provider === 'gmail' || definition.provider === 'google_drive')
+    && (handlesForDefinition(definition, registry).some((handle) => isRetiredGoogleHandle(handle))
+      || (!operatorPaused && schedule?.last_error_kind === 'credential_missing'));
   const providerRefusing = !operatorPaused
     && (schedule?.degraded_reason === 'api_request_guard'
       || (schedule !== undefined && schedule.consecutive_failures > 0 && schedule.last_error_kind === 'api_request_guard'));
@@ -2393,11 +2397,16 @@ function sourceCardFromDefinition(
     oauthRedirectBaseUrl,
     apiKeyAvailability,
     pendingConnects,
-    providerRefusing,
+    providerRefusing || googleReconnectRequired,
     now,
     registryUnreadable,
     unpaired,
   );
+  if (googleReconnectRequired) {
+    baseConnection.state = 'reauth_required';
+    baseConnection.label = 'Reconnect Google to continue syncing';
+    if (baseConnection.action.kind === 'oauth') baseConnection.action.label = 'Reconnect Google';
+  }
   // Two custody controls, never both on one row. A paired session gets Unpair,
   // which removes the session this computer holds and is the only act that
   // actually ends the pairing; Disconnect is the broker-grant act and has

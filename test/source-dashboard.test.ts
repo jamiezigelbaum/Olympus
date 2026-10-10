@@ -1,3 +1,4 @@
+import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -903,6 +904,21 @@ describe('multi-source source dashboard', () => {
     if (gmail?.connection.action.kind !== 'oauth') throw new Error('expected Gmail OAuth action');
     expect(gmail.connection.action.source).toBe('gmail');
     expect(gmail.connection.action.label).toBe('Reauthenticate');
+  });
+
+  test('Google credential_missing exposes a reconnect action after the first failure', () => {
+    const scheduler = fixtureScheduler();
+    scheduler.sources = [{ source_id: 'gmail.email', corpus_id: 'internal.email', sync_cadence: 'continuous', sync_interval_seconds: 300,
+      freshness_threshold_hours: 26, stale_sync_anomaly: false,
+      tasks: [{ id: 'email.sync', kind: 'sync', running: false, consecutive_failures: 1, last_error_kind: 'credential_missing' }] }];
+    const view = buildSourceDashboardViewModel({ sourceIndexStatus: fixtureStatus(), schedulerStatus: scheduler,
+      sovereigntyEngine: fixtureSovereigntyEngine(), connectedHandleRegistry: { version: 1, handles: [gmailHandle('gmail.personal.delegated')] },
+      publisherOAuthSources: ['gmail', 'google-drive'], now: new Date('2026-07-02T12:00:00.000Z') });
+    const gmail = view.sources.find((source) => source.source_id === 'gmail.email')!;
+    expect(gmail.connection.state).toBe('reauth_required');
+    expect(gmail.connection.action).toMatchObject({ kind: 'oauth', source: 'gmail', label: 'Reconnect Google' });
+    const panel = buildChatGptDashboardViewModel(view, { now: new Date('2026-07-02T12:00:00.000Z') });
+    expect(panel.needsYou.some((item) => item.fix?.label === 'Reconnect Google' && item.fix.args?.source === 'gmail')).toBe(true);
   });
 
   test('pending OAuth attempts render awaiting-consent and expire back to disconnected', () => {
