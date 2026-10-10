@@ -1,3 +1,5 @@
+// OLYMPUS_TEST_LANE: deploy
+// Processes start in the transport under test (fake Tor and daemon), not in this file.
 // Tranche Z1 of the frontier-consult design: the experimental zkAPI consult
 // transport, proven against stand-in executables. A fake `tor` binds the SOCKS
 // port and reports bootstrap; a fake `zkapi-clientd` answers `--version` and

@@ -1,3 +1,5 @@
+// OLYMPUS_TEST_LANE: deploy
+// Processes start in the transport under test (fake Tor and daemon), not in this file.
 // zkAPI consult transport tests; shared fixture in ./helpers/zkapi-transport-harness.ts.
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';

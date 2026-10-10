@@ -56,6 +56,7 @@ describe('test lane partition', () => {
     expect(() => testLaneFor(invocation)).toThrow(/must declare/);
     expect(() => testLaneFor('// OLYMPUS_TEST_LANE: go\nconst x = 1;')).toThrow(/no detected/);
     expect(() => testLaneFor('// OLYMPUS_TEST_LANE: rust\nconst x = 1;')).toThrow(/Unsupported/);
+    expect(testLaneFor('// OLYMPUS_TEST_LANE: deploy\nconst x = 1;')).toBe('deploy');
   });
 
   test('this guard runs in the fast lane, since it is the gate it protects', () => {
