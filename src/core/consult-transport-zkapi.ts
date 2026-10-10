@@ -224,6 +224,22 @@ export interface ZkapiSessionReceipt {
   reservedUsd?: number;
   /** How long each stage took; content-free numbers only. */
   stageMs?: ZkapiStageTimings;
+  /** Set when an owned process ended on its own and ended the session (`session_process_exited`). */
+  exited?: ZkapiProcessExit;
+}
+
+/**
+ * Which owned process of a session stopped on its own, how, and in which
+ * stage. Content-free: no line of its output is kept, only the exit code or
+ * signal the operating system reported. A signal names an outside stop (the
+ * recovery of 2026-10-10 18:36Z died to a SIGTERM that readiness, running in
+ * the same process, sent to its own session's Tor client).
+ */
+export interface ZkapiProcessExit {
+  role: 'tor' | 'daemon';
+  code?: number;
+  signal?: string;
+  stage?: keyof ZkapiStageTimings;
 }
 
 /**
@@ -1004,9 +1020,11 @@ process.stderr.on('error', () => {});
 process.on('uncaughtException', () => cleanup());
 const start = () => {
   child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] });
-  const report = () => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED}\\n'); } catch {} };
-  child.on('exit', (code) => { exitCode = code === null ? 1 : code; report(); cleanup(); });
-  child.on('error', () => { exitCode = 127; report(); cleanup(); });
+  // The child's exit code or signal rides on the marker line: the only facts
+  // kept about how it ended.
+  const report = (code, signal) => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED} ' + (typeof code === 'number' ? code : '-') + ' ' + (signal || '-') + '\\n'); } catch {} };
+  child.on('exit', (code, signal) => { exitCode = code === null ? 1 : code; report(code, signal); cleanup(); });
+  child.on('error', () => { exitCode = 127; report(127, null); cleanup(); });
 };
 let received = '';
 process.stdin.setEncoding('utf8');
@@ -1022,6 +1040,8 @@ interface Supervised {
   leaderExited: boolean;
   /** The watchdog's child (Tor or the daemon) exited; reported before group cleanup ends. */
   childExited: boolean;
+  /** How the watchdog's child ended, from the marker line; absent when only the watchdog's exit was seen. */
+  exit?: { code?: number; signal?: string };
   /** Set before Olympus stops the group on purpose, so the exit is not a failure. */
   deliberate: boolean;
   /** The group leader's process instance, taken at spawn. */
@@ -1079,7 +1099,12 @@ function supervise(
         // Each line is parsed for fixed facts and dropped; nothing is retained,
         // including the daemon's cost and balance lines.
         const line = pending.slice(0, index);
-        if (line === WATCHDOG_CHILD_EXITED) {
+        if (line === WATCHDOG_CHILD_EXITED || line.startsWith(`${WATCHDOG_CHILD_EXITED} `)) {
+          const [, code, signal] = line.split(' ');
+          handle.exit = {
+            ...(code && /^\d+$/.test(code) ? { code: Number(code) } : {}),
+            ...(signal && signal !== '-' ? { signal } : {}),
+          };
           handle.childExited = true;
           report();
         } else {
@@ -1202,9 +1227,18 @@ export function zkapiConsultInFlightOnDisk(statePath: string): { since: string }
     return undefined;
   }
   const running = state?.running;
-  if (!running || !supervisorAlive(running.supervisor)) return undefined;
+  if (!running || !supervisorAlive(running)) return undefined;
   return { since: zkapiRunningSince(statePath) };
 }
+
+/**
+ * The session this process is running right now, from the moment its
+ * `running` record is written until that record is replaced. A record that
+ * names this very process is alive exactly when it is this session; any other
+ * record with this pid was left by an earlier process whose pid came round
+ * again, or by a session of this process that never finished.
+ */
+let activeSessionId: string | undefined;
 
 function zkapiRunningSince(statePath: string): string {
   try {
@@ -1214,8 +1248,13 @@ function zkapiRunningSince(statePath: string): string {
   }
 }
 
-function supervisorAlive(supervisor: { pid: number; instance?: ProcessInstanceIdentity }): boolean {
-  if (supervisor.pid === process.pid) return false;
+function supervisorAlive(running: { sessionId: string; supervisor: { pid: number; instance?: ProcessInstanceIdentity } }): boolean {
+  const { supervisor } = running;
+  // Incident 2026-10-10 18:36Z: readiness ran in the worker that was itself
+  // supervising the recovery session, called its own pid dead, and stopped
+  // that session's Tor client as "stranded". The session is live while it is
+  // the one this process is running.
+  if (supervisor.pid === process.pid) return running.sessionId === activeSessionId;
   const boot = currentBootId();
   if (supervisor.instance?.bootId && boot && supervisor.instance.bootId !== boot) return false;
   try {
@@ -1237,7 +1276,7 @@ function supervisorAlive(supervisor: { pid: number; instance?: ProcessInstanceId
 async function recoverStrandedGroups(statePath: string, now: Date): Promise<'clear' | 'busy' | 'stranded'> {
   const running = readState(statePath)?.running;
   if (!running) return 'clear';
-  if (supervisorAlive(running.supervisor)) return 'busy';
+  if (supervisorAlive(running)) return 'busy';
   const recordedBoot = running.supervisor.instance?.bootId;
   let allGone = true;
   for (const group of running.groups) {
@@ -1759,7 +1798,7 @@ export async function zkapiConsultReadiness(
       // when they are ours), exactly as the next ask would: the record is
       // cleared when every group is gone, and only groups still alive or
       // unidentifiable are reported, by name.
-      const supervisorRunning = supervisorAlive(state.running.supervisor);
+      const supervisorRunning = supervisorAlive(state.running);
       const outcome = supervisorRunning ? 'busy' : await recoverStrandedGroups(statePath, now);
       if (outcome !== 'clear') {
         const recordedBoot = state.running.supervisor.instance?.bootId;
@@ -2076,6 +2115,7 @@ async function openSession(
       return failure('internal_error', sent.dispatched ? 'unknown' : 'not_sent', initialIdentity, timed);
     } finally {
       zkapiConsultInFlight = false;
+      activeSessionId = undefined;
     }
   })().then((result) => {
     // The lease is released by now. A send still waiting (the session ended
@@ -2261,7 +2301,20 @@ async function runSession(
   let result: ZkapiConsultResult = failure('internal_error', 'not_sent', 'not_verified');
   const unexpectedExit = (): boolean => groups.some((group) => (group.leaderExited || group.childExited) && !group.deliberate);
   const onChildExit = (handle: Supervised): void => {
-    if (!handle.deliberate) sessionAbort.abort();
+    if (handle.deliberate) return;
+    // The first unexpected exit is the one that ended the session; the stage
+    // it happened in is the one open now.
+    receipt.exited ??= { role: handle.role, ...(openStage ? { stage: openStage.key } : {}) };
+    sessionAbort.abort();
+  };
+  // The marker line with the exit code can arrive after the watchdog's own
+  // exit was reported; the receipt takes whatever is known by the end.
+  const settleExitFacts = (): void => {
+    const exited = receipt.exited;
+    if (!exited) return;
+    const handle = groups.find((group) => group.role === exited.role);
+    if (handle?.exit?.code !== undefined && exited.code === undefined) exited.code = handle.exit.code;
+    if (handle?.exit?.signal && !exited.signal) exited.signal = handle.exit.signal;
   };
   const interrupted = (): ZkapiConsultErrorCode => (unexpectedExit() ? 'session_process_exited' : abortCause);
   let sendDeadline: ReturnType<typeof setTimeout> | undefined;
@@ -2269,6 +2322,7 @@ async function runSession(
   try {
     writeFileSync(watchdog, WATCHDOG_SCRIPT, { mode: 0o600 });
     const supervisorInstance = processInstanceIdentity(process.pid);
+    activeSessionId = sessionId;
     updateState(statePath, now(), (state) => ({
       ...state,
       running: { sessionId, supervisor: { pid: process.pid, ...(supervisorInstance ? { instance: supervisorInstance } : {}) }, workDir, groups: [] },
@@ -2661,12 +2715,16 @@ async function runSession(
     result = fail('teardown_incomplete');
   }
   stage(undefined);
+  settleExitFacts();
   timings = withTiming(timings, 'totalMs', elapsedMs(clock, startedAt));
   const final = result;
   // The returned receipt and the ledger's last session carry every stage,
-  // teardown and total included.
+  // teardown and total included, and the exit that ended the session when
+  // one did, with the message naming it.
   const finalReceipt = final.ok ? final.receipt : final.error.receipt;
   if (finalReceipt && Object.keys(timings).length > 0) finalReceipt.stageMs = { ...timings };
+  if (finalReceipt && receipt.exited) finalReceipt.exited = { ...receipt.exited };
+  if (!final.ok && final.error.code === 'session_process_exited' && receipt.exited) final.error.message = zkapiProcessExitMessage(receipt.exited);
   try {
     updateState(statePath, now(), (state) => {
       const { running, ...rest } = state;
@@ -2678,8 +2736,43 @@ async function runSession(
     });
   } catch {
     // The ledger stays as last written; the next session refuses if it is unreadable.
+  } finally {
+    // A record kept for a teardown that did not finish is no longer this
+    // process's live session: the next ask may stop what it can prove ours.
+    activeSessionId = undefined;
   }
   return final;
+}
+
+const EXIT_STAGE_NAMES: Partial<Record<keyof ZkapiStageTimings, string>> = {
+  leaseAcquireMs: 'before the session lease was held',
+  confinementSelfTestMs: 'during the confinement self-test',
+  torBootstrapMs: 'while Tor was starting',
+  daemonReadyMs: 'while the daemon was starting',
+  daemonVerifyMs: 'while the daemon was being checked',
+  policyWarmMs: 'while the daemon loaded its model policy',
+  reservationMs: 'while the request was being reserved',
+  dispatchToFirstByteMs: 'while the request was out',
+  firstByteToCompletionMs: 'while the reply was being read',
+  correlationWaitMs: 'while waiting for the daemon to correlate the request',
+  settlementWaitMs: 'while waiting for the payment to settle',
+  torStopMs: 'while Tor was being stopped',
+  postStopProbeMs: 'during the post-stop probe',
+  teardownMs: 'during teardown',
+};
+
+/**
+ * One sentence for `session_process_exited` that says which process ended,
+ * how (exit code or signal) and when (the stage), so the problem is findable
+ * without any of the process's output. A signal is a stop from outside the
+ * process, and the sentence says so.
+ */
+export function zkapiProcessExitMessage(exit: ZkapiProcessExit): string {
+  const who = exit.role === 'tor' ? 'The Tor client' : 'The zkAPI daemon';
+  const how = exit.signal ? ` (signal ${exit.signal})` : exit.code !== undefined ? ` (exit code ${exit.code})` : '';
+  const when = exit.stage && EXIT_STAGE_NAMES[exit.stage] ? ` ${EXIT_STAGE_NAMES[exit.stage]}` : '';
+  const outside = exit.signal ? ' Something else on this computer stopped it.' : '';
+  return `${who} of this session stopped unexpectedly${how}${when}.${outside}`;
 }
 
 /**
