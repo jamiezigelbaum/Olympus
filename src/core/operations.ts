@@ -57,6 +57,8 @@ export interface Operation {
   params: Record<string, ParamDef>;
   handler: (ctx: OperationContext, params: Record<string, unknown>) => Promise<unknown>;
   mutating: boolean;
+  /** The operation reaches outside the owner's own index and models (a paid question to a provider); generic MCP publishes openWorldHint from it. */
+  openWorld?: true;
   availability?: (config: OlympusConfig) => boolean;
   nativeExposure?: 'always' | 'sourceIndexEnabledOnly';
   /**
@@ -578,7 +580,11 @@ export const operations: Operation[] = [
       'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.',
     ].join(' '),
     params: ASK_ANONYMOUSLY_PARAMS,
-    mutating: false,
+    // Not read-only: it spends from the user's zkAPI balance, sends text to a
+    // provider and may store a preference; a client that auto-approves
+    // read-only tools must not auto-approve this one.
+    mutating: true,
+    openWorld: true,
     nativeExposure: 'always',
     cliHints: { name: 'ask', positional: ['question'], stdin: 'question' },
     handler: async (ctx, params) => {

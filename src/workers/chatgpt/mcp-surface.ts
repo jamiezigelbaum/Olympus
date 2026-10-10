@@ -319,6 +319,9 @@ export const CHATGPT_TOOLS: readonly ChatGptToolDefinition[] = [
 export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable' | 'readOnly'> = {}): ChatGptToolDefinition[] {
   const tools: ChatGptToolDefinition[] = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
   if (answerToolsListed(ctx, options)) tools.push(...ANSWER_TOOLS);
+  // A handed-off anonymous answer is collected with source_answer_result
+  // too, so the collector is listed with the ask even with no answer model.
+  else if (askToolListed(ctx)) tools.push(SOURCE_ANSWER_RESULT_TOOL);
   if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL);
   tools.push(...SETUP_TOOLS);
   return options.readOnly ? tools.filter((tool) => tool.annotations.readOnlyHint) : tools;
@@ -425,7 +428,7 @@ export async function callChatGptTool(
         return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
-        if (!answerToolsListed(ctx, options)) throw new ChatGptSurfaceError('unknown_tool');
+        if (!answerToolsListed(ctx, options) && !askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
         const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : '';
         if (!jobId) throw new ChatGptSurfaceError('invalid_params');
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });

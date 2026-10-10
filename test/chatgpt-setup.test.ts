@@ -881,13 +881,14 @@ describe('setup tools over the remote handler', () => {
 });
 
 describe('olympus_search (retrieval only)', () => {
-  test('without an answer model on the Mac, search is listed and source_answer is not', async () => {
+  test('without an answer model on the Mac, search is listed and source_answer is not; the collector stays for a handed-off anonymous answer', async () => {
     const client = await connectClient();
     try {
       const names = (await client.listTools()).tools.map((tool) => tool.name);
       expect(names).toContain('olympus_search');
       expect(names).not.toContain('source_answer');
-      expect(names).not.toContain('source_answer_result');
+      expect(names).toContain('ask_anonymously');
+      expect(names).toContain('source_answer_result');
       expect((await call(client, 'source_answer', { question: 'q' })).isError).toBe(true);
       answerModel = true;
       expect((await client.listTools()).tools.map((tool) => tool.name)).toContain('source_answer');

@@ -66096,7 +66096,8 @@ var init_operations = __esm(() => {
         'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.'
       ].join(" "),
       params: ASK_ANONYMOUSLY_PARAMS,
-      mutating: false,
+      mutating: true,
+      openWorld: true,
       nativeExposure: "always",
       cliHints: { name: "ask", positional: ["question"], stdin: "question" },
       handler: async (ctx, params) => {
@@ -87014,7 +87015,7 @@ function listMcpTools(config2, surface = "mcp") {
     annotations: {
       readOnlyHint: !operation.mutating,
       destructiveHint: false,
-      openWorldHint: false
+      openWorldHint: operation.openWorld === true
     }
   }));
 }
@@ -119945,6 +119946,8 @@ function listChatGptTools(ctx, options = {}) {
   const tools = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
   if (answerToolsListed(ctx, options))
     tools.push(...ANSWER_TOOLS);
+  else if (askToolListed(ctx))
+    tools.push(SOURCE_ANSWER_RESULT_TOOL);
   if (askToolListed(ctx))
     tools.push(ASK_ANONYMOUSLY_TOOL);
   tools.push(...SETUP_TOOLS);
@@ -120028,7 +120031,7 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
         return answerToolResult(raw, privateMatch ? { privateMatch } : {});
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
-        if (!answerToolsListed(ctx, options))
+        if (!answerToolsListed(ctx, options) && !askToolListed(ctx))
           throw new ChatGptSurfaceError("unknown_tool");
         const jobId = typeof args.job_id === "string" ? args.job_id.trim() : "";
         if (!jobId)
@@ -124187,8 +124190,8 @@ async function askAnonymously(input, deps) {
   }
   if (read.state === "invalid")
     return { ok: false, code: "settings_invalid", message: CONSULT_ASK_MESSAGES.settingsInvalid };
-  const settings = read.state === "valid" ? read.settings : undefined;
-  const stored = consultStandardBinding(settings ?? DEFAULT_CONSULT_SETTINGS);
+  let settings = read.state === "valid" ? read.settings : undefined;
+  let stored = consultStandardBinding(settings ?? DEFAULT_CONSULT_SETTINGS);
   const storedLevel = settings ? consultAskLevelFromSettings(settings.level) : "standard";
   let level;
   if (input.level !== undefined) {
@@ -124230,6 +124233,16 @@ async function askAnonymously(input, deps) {
         }
         if (read.state === "invalid")
           return { ok: false, code: "settings_invalid", message: CONSULT_ASK_MESSAGES.settingsInvalid };
+        settings = read.state === "valid" ? read.settings : undefined;
+        stored = consultStandardBinding(settings ?? DEFAULT_CONSULT_SETTINGS);
+        const rememberedCleanup = input.cleanup !== undefined && input.cleanup !== "custom" ? input.cleanup : undefined;
+        if (!settings?.levelChosen || consultAskLevelFromSettings(settings.level) !== level || rememberedCleanup !== undefined && stored.mode !== rememberedCleanup) {
+          return { ok: false, code: "settings_stale", message: CONSULT_ASK_MESSAGES.stale };
+        }
+        if (input.cleanup === undefined)
+          cleanup = stored.mode;
+        else if (input.cleanup === "custom" && stored.mode !== "custom")
+          return { ok: false, code: "settings_stale", message: CONSULT_ASK_MESSAGES.stale };
       } else {
         rememberNote = outcome.message;
       }

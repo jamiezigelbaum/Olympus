@@ -43,7 +43,7 @@ describe('ask_anonymously: operation → worker route → core', () => {
     await expect(ask.handler(ctx, { question: 'x', level: 'loose' })).rejects.toMatchObject({ code: 'invalid_params' });
     await expect(ask.handler(ctx, { question: 'x', cleanup: 'tidy' })).rejects.toMatchObject({ code: 'invalid_params' });
     await expect(ask.handler(ctx, { question: 'x', remember: 'maybe' })).rejects.toMatchObject({ code: 'invalid_params' });
-    await expect(ask.handler(ctx, { question: 'x', documents: true })).rejects.toMatchObject({ code: 'invalid_params' });
+    await expect(ask.handler(ctx, { question: 'x', documents: true })).rejects.toThrow('undeclared property: "documents"');
     await expect(ask.handler(ctx, {})).rejects.toMatchObject({ code: 'invalid_params' });
   });
 
@@ -67,8 +67,9 @@ describe('ask_anonymously: operation → worker route → core', () => {
     await expect(ask.handler(ctx, { question: 'x' })).rejects.toMatchObject({ code: 'email_not_configured' });
   });
 
-  test('the operation is on every agent surface and the CLI: not mutating, always exposed natively, `olympus ask`', () => {
-    expect(ask.mutating).toBe(false);
+  test('the operation is on every agent surface and the CLI: not read-only (it spends and sends out), open-world, always exposed natively, `olympus ask`', () => {
+    expect(ask.mutating).toBe(true);
+    expect(ask.openWorld).toBe(true);
     expect(ask.nativeExposure).toBe('always');
     expect(ask.cliHints).toEqual({ name: 'ask', positional: ['question'], stdin: 'question' });
     expect(Object.keys(ask.params)).toEqual(['question', 'level', 'cleanup', 'remember', 'model']);

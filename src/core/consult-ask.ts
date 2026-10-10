@@ -162,8 +162,8 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     return { ok: false, code: 'settings_invalid', message: CONSULT_ASK_MESSAGES.settingsInvalid };
   }
   if (read.state === 'invalid') return { ok: false, code: 'settings_invalid', message: CONSULT_ASK_MESSAGES.settingsInvalid };
-  const settings = read.state === 'valid' ? read.settings : undefined;
-  const stored = consultStandardBinding(settings ?? DEFAULT_CONSULT_SETTINGS);
+  let settings = read.state === 'valid' ? read.settings : undefined;
+  let stored = consultStandardBinding(settings ?? DEFAULT_CONSULT_SETTINGS);
   const storedLevel: ConsultAskLevel = settings ? consultAskLevelFromSettings(settings.level) : 'standard';
 
   // The level: this call's, else the remembered one; with neither, ask once.
@@ -203,13 +203,26 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
       }
       if (outcome.ok) {
         remembered = true;
-        // The file moved: the binding below must see the new revision.
+        // The file moved: the binding below must see the new revision, and
+        // every setting this question is prepared with is re-read from it.
+        // A write that landed in between (another conversation's remember,
+        // the card) shows as a level or mode other than the one just stored:
+        // refused as stale rather than sent under the newer revision with
+        // the older preparation (Codex review of PR #215).
         try {
           read = deps.settings();
         } catch {
           return { ok: false, code: 'settings_invalid', message: CONSULT_ASK_MESSAGES.settingsInvalid };
         }
         if (read.state === 'invalid') return { ok: false, code: 'settings_invalid', message: CONSULT_ASK_MESSAGES.settingsInvalid };
+        settings = read.state === 'valid' ? read.settings : undefined;
+        stored = consultStandardBinding(settings ?? DEFAULT_CONSULT_SETTINGS);
+        const rememberedCleanup = input.cleanup !== undefined && input.cleanup !== 'custom' ? input.cleanup : undefined;
+        if (!settings?.levelChosen || consultAskLevelFromSettings(settings.level) !== level || (rememberedCleanup !== undefined && stored.mode !== rememberedCleanup)) {
+          return { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale };
+        }
+        if (input.cleanup === undefined) cleanup = stored.mode;
+        else if (input.cleanup === 'custom' && stored.mode !== 'custom') return { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale };
       } else {
         rememberNote = outcome.message;
       }

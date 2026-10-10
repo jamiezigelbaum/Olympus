@@ -218,4 +218,34 @@ describe('Ask anonymously', () => {
     expect(await askAnonymously({ question: 'x', origin: 'agent', level: 'standard', model: 'not a model' }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.modelInvalid });
     expect(d.calls.send).toHaveLength(1);
   });
+
+  test('a write that lands between remember and the send (another conversation, the card) is refused as stale, never sent under the newer revision (Codex review of PR #215)', async () => {
+    const races: Array<{ after: Partial<typeof DEFAULT_CONSULT_SETTINGS>; note: string }> = [
+      { after: { standardMode: 'light_cleanup', levelChosen: true, revision: 4 }, note: 'another conversation remembered light cleanup' },
+      { after: { level: 'general', standardMode: 'as_written', levelChosen: true, revision: 4 }, note: 'the card switched to Strict' },
+      { after: { standardMode: 'as_written', revision: 4 }, note: 'the card cleared the choice' },
+    ];
+    for (const race of races) {
+      let current = settings({ standardMode: 'custom', standardInstruction: 'In Dutch.' });
+      const d = deps(current);
+      const value: ConsultAskDependencies = {
+        ...d.value,
+        settings: () => current,
+        remember: async () => { current = settings({ standardMode: 'custom', standardInstruction: 'In Dutch.', ...race.after }); return { ok: true }; },
+      };
+      const result = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'as_written', remember: true }, value);
+      expect({ note: race.note, result }).toEqual({ note: race.note, result: { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale } });
+      expect(d.calls.send).toEqual([]);
+    }
+    // The remembered write itself, unchanged after: the question goes, prepared by the re-read file.
+    let current = settings({ standardMode: 'custom', standardInstruction: 'In Dutch.' });
+    const d = deps(current);
+    const value: ConsultAskDependencies = {
+      ...d.value,
+      settings: () => current,
+      remember: async () => { current = settings({ standardMode: 'light_cleanup', levelChosen: true, revision: 4 }); return { ok: true }; },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'light_cleanup', remember: true }, value)).toMatchObject({ ok: true, cleanup: 'light_cleanup', remembered: true });
+    expect(d.calls.prepare[0]!.instruction).toBe(CONSULT_LIGHT_CLEANUP_INSTRUCTION);
+  });
 });

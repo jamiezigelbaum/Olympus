@@ -20763,7 +20763,8 @@ var operations = [
       'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.'
     ].join(" "),
     params: ASK_ANONYMOUSLY_PARAMS,
-    mutating: false,
+    mutating: true,
+    openWorld: true,
     nativeExposure: "always",
     cliHints: { name: "ask", positional: ["question"], stdin: "question" },
     handler: async (ctx, params) => {
