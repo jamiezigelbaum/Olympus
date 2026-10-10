@@ -172,7 +172,13 @@ export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
   maxAnswerChars: 1_000,
   audit: false,
   maxLeadingItems: 2,
-  leadGap: 0.01,
+  // On EmbeddingGemma 2's narrow cosine scale 0.01 let a near-tie lead, so
+  // the panel read one item and dropped the answer ranked just behind it.
+  // On the owner's blind sets (2026-10-10, 63 answerable questions) the item
+  // that answers was read for 37 at 0.01, 41 at 0.02, 42 at 0.03 and 43 at
+  // 0.05, the reads per question rising from 2.0 to 3.0: 0.03 keeps most of
+  // the gain while a clear leader is still read alone, in depth.
+  leadGap: 0.03,
   leadingEvidenceChars: 5_000,
   // Full detail on a small local model is bounded by prefill and generation
   // speed: on a loaded Mac 10k characters of evidence and a 3.7k answer budget

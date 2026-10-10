@@ -196,9 +196,26 @@ describe('the private match floor', () => {
       expect(found.matched).toBe(1);
       expect(found.candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId)).toEqual(['mandate', 'letter']);
       expect(found.candidates[1]!.chunks.join(' ')).toContain('escritura pública');
+      expect(found.candidates.map((candidate) => candidate.neighbour)).toEqual([undefined, true]);
       // Nothing matched: no neighbours either, so no panel.
       const offTopic = await searchPrivateEvidence({ lanes, question: 'zzq below' });
       expect(offTopic).toEqual({ matched: 0, candidates: [] });
+    }, 'secure_local');
+  });
+
+  test('neighbours are at most as many as the panel reads', async () => {
+    const mandate: FixtureItem = { id: 'mandate', name: 'sale-mandate.pdf', text: 'The notary is chosen by the buyer. Fees below the agreed rate.' };
+    const others: FixtureItem[] = Array.from({ length: 7 }, (_, index) => ({
+      id: `other-${index}`,
+      name: `carta-${index}.pdf`,
+      text: `Carta número ${index}.`,
+    }));
+    await withStore([mandate, ...others], async (store) => {
+      const provider = builtInLikeProvider();
+      await store.embedChunks({ provider });
+      const found = await searchPrivateEvidence({ lanes: privateLanes(store, provider), question: 'notary below' });
+      expect(found.matched).toBe(1);
+      expect(found.candidates.filter((candidate) => candidate.neighbour)).toHaveLength(4);
     }, 'secure_local');
   });
 });

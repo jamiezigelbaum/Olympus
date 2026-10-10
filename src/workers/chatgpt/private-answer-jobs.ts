@@ -261,7 +261,10 @@ interface AnalysisTiming {
   recheckMs?: number | undefined;
   /** Cached evidence items the dispatch-time eligibility check dropped. */
   dropped?: number | undefined;
+  /** Evidence items the search matched. */
   matched?: number;
+  /** Nearest neighbours offered beside the matches (not matches; searchPrivateEvidence). */
+  neighbours?: number;
   items?: number | undefined;
   unreadable?: number | undefined;
   evidenceBytes?: number | undefined;
@@ -292,6 +295,7 @@ export function formatAnalysisTiming(timing: AnalysisTiming): string {
   if (timing.recheckMs !== undefined) fields.push(`recheck_ms=${timing.recheckMs}`);
   if (timing.dropped) fields.push(`dropped=${timing.dropped}`);
   if (timing.matched !== undefined) fields.push(`matched=${timing.matched}`);
+  if (timing.neighbours) fields.push(`neighbours=${timing.neighbours}`);
   if (timing.items !== undefined) fields.push(`items=${timing.items}`);
   if (timing.unreadable !== undefined) fields.push(`unreadable=${timing.unreadable}`);
   if (timing.evidenceBytes !== undefined) fields.push(`evidence_bytes=${timing.evidenceBytes}`);
@@ -1428,7 +1432,8 @@ export class PrivateAnswerJobs {
       // dropped) must not start inference.
       if (settled || abort.signal.aborted) return;
       const evidence = found.filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
-      timing.matched = evidence.length;
+      timing.neighbours = evidence.filter((item) => item.neighbour === true).length;
+      timing.matched = evidence.length - timing.neighbours;
       if (evidence.length === 0) {
         settle({ kind: 'failed' }, 'no_evidence');
         return;

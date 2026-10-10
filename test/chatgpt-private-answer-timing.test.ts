@@ -171,6 +171,21 @@ describe('1. every claimed job settles within its deadline', () => {
     expect(line).not.toMatch(CONTENT);
     expect(line).not.toContain(jobId);
   });
+
+  test('neighbours offered beside the matches are logged apart from them', async () => {
+    const { jobs, lines } = harness(async (_question, _evidence, _signal, observe) => {
+      observe?.evidence?.({ items: 2, unreadable: 0, bytes: 42 });
+      return { answer: 'x', citations: [] };
+    });
+    const evidence = [...EVIDENCE, { ...EVIDENCE[0]!, title: 'SENTINEL_NEIGHBOUR_91c2', neighbour: true }];
+    const jobId = jobs.begin({ question: QUESTION, count: 1, evidence, refresh: async () => evidence }).jobId!;
+    const panel = await generatePanelKeyPair();
+    await jobs.claim(jobId, panel.publicKey);
+    await Bun.sleep(30);
+    expect((await jobs.claim(jobId, panel.publicKey)).body.status).toBe('ready');
+    expect(lines[0]).toContain(' matched=1 neighbours=1 items=2 ');
+    expect(lines[0]).not.toMatch(CONTENT);
+  });
 });
 
 describe('1b. a shared analysis logs no negative wait', () => {

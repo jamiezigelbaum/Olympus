@@ -35776,7 +35776,7 @@ async function privateNeighbours(adapters, build, matches) {
         return false;
       seen.add(key(candidate));
       return true;
-    });
+    }).slice(0, PRIVATE_NEIGHBOURS_MAX).map((candidate) => ({ ...candidate, neighbour: true }));
   } catch {
     return [];
   }
@@ -35850,7 +35850,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_analyst();
   init_analyst_openclaw_infer();
@@ -120482,6 +120482,8 @@ function formatAnalysisTiming(timing) {
     fields.push(`dropped=${timing.dropped}`);
   if (timing.matched !== undefined)
     fields.push(`matched=${timing.matched}`);
+  if (timing.neighbours)
+    fields.push(`neighbours=${timing.neighbours}`);
   if (timing.items !== undefined)
     fields.push(`items=${timing.items}`);
   if (timing.unreadable !== undefined)
@@ -121309,7 +121311,8 @@ class PrivateAnswerJobs {
       if (settled || abort.signal.aborted)
         return;
       const evidence = found.filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
-      timing.matched = evidence.length;
+      timing.neighbours = evidence.filter((item) => item.neighbour === true).length;
+      timing.matched = evidence.length - timing.neighbours;
       if (evidence.length === 0) {
         settle({ kind: "failed" }, "no_evidence");
         return;
@@ -122198,7 +122201,7 @@ var init_private_answer_model = __esm(() => {
     maxAnswerChars: 1000,
     audit: false,
     maxLeadingItems: 2,
-    leadGap: 0.01,
+    leadGap: 0.03,
     leadingEvidenceChars: 5000,
     deepEvidenceChars: 7000,
     deepPromptBytes: 11500,
