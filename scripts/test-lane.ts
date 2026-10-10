@@ -61,19 +61,17 @@ export function parseTestLaneArgs(args: string[]): TestLaneOptions {
   return { lane, shard: { index, total } };
 }
 
-export function buildTestLaneCommand(selected: string[], junitPath?: string): string[] {
-  // --parallel runs files across one worker per core (each file isolated);
-  // the lane was CPU-bound on a single process before this. Workers compete
-  // for the same cores, so a CPU-heavy test runs ~2-3x slower than alone (a
-  // 2.2 s corpus test hit Bun's 5 s default on main): the default per-test
-  // timeout scales to match and still catches hangs. Explicit timeouts win.
-  const command = [
-    'bun',
-    'test',
-    '--parallel',
-    '--timeout=15000',
-    ...selected.map((name) => join('test', name)),
-  ];
+export function buildTestLaneCommand(selected: string[], junitPath?: string, lane: TestLane = 'fast'): string[] {
+  // The fast lane runs files across one worker per core (each file isolated);
+  // it was CPU-bound on a single process before this. Workers compete for the
+  // same cores, so a CPU-heavy test runs ~2-3x slower than alone (a 2.2 s
+  // corpus test hit Bun's 5 s default): the default per-test timeout scales to
+  // match and still catches hangs. Explicit timeouts win. The deploy and Go
+  // lanes stay serial: they are the process-spawning tests, contention pushed
+  // an installer lock test past its timeout, and its abandoned child then held
+  // the worker open until the job was cancelled. They are sharded instead.
+  const parallel = lane === 'fast' ? ['--parallel', '--timeout=15000'] : [];
+  const command = ['bun', 'test', ...parallel, ...selected.map((name) => join('test', name))];
   if (junitPath) command.push('--reporter=junit', `--reporter-outfile=${junitPath}`);
   return command;
 }
@@ -146,7 +144,7 @@ export function runTestLane(args: string[]): number {
 
   const junitPath = process.env.OLYMPUS_JUNIT_PATH;
   if (junitPath) mkdirSync(join(ROOT, junitPath, '..'), { recursive: true });
-  const child = Bun.spawnSync(buildTestLaneCommand(selected, junitPath), {
+  const child = Bun.spawnSync(buildTestLaneCommand(selected, junitPath, options.lane), {
     cwd: ROOT,
     stdout: 'inherit',
     stderr: 'inherit',
