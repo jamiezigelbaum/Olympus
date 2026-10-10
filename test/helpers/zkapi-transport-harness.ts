@@ -67,7 +67,13 @@ const dir = process.env.ZKAPI_CLIENTD_CONFIG_DIR;
 const planPath = dir + '/plan.json';
 const plan = fs.existsSync(planPath) ? JSON.parse(fs.readFileSync(planPath, 'utf8')) : { version: '0.1.6' };
 if (process.argv[2] === '--version') { console.log('zkapi-clientd ' + plan.version); process.exit(0); }
+if (process.argv[2] === 'serve' && process.argv[3] === '--help') { console.log(plan.noSupervisor ? 'Usage: serve' : '--relay-url --companion-proxy-listen --wallet-api-listen --require-managed-companion --require-companion-custody'); process.exit(0); }
 if (process.argv[2] !== 'serve') process.exit(2);
+const flagValue = (flag) => { const i = process.argv.indexOf(flag); return i < 0 ? undefined : process.argv[i + 1]; };
+const proxyListen = flagValue('--companion-proxy-listen');
+const walletListen = flagValue('--wallet-api-listen');
+const supervised = Boolean(proxyListen && walletListen);
+const transportStatus = supervised ? { kind: 'socks5', relay_endpoint: '127.0.0.1:' + plan.relayPort, companion: 'managed', wallet_custody: 'connection_owner_verified', connect_proxy: proxyListen, wallet_api: walletListen, ...plan.transportStatus } : undefined;
 const log = (line) => console.log('zkapi-clientd 2026/10/05 12:00:00 ' + line);
 const event = (line) => fs.appendFileSync(dir + '/events.log', line + '\\n');
 const relayUp = () => new Promise((resolve) => {
@@ -83,13 +89,20 @@ const tryTcp = (host, port) => new Promise((resolve) => {
   s.once('connect', () => { s.destroy(); resolve('connected'); });
   s.once('error', () => resolve(Date.now() - started < 1000 ? 'refused_fast' : 'error_slow'));
 });
-const tryUdp = () => new Promise((resolve) => { const s = dgram.createSocket('udp4'); s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'denied' : 'sent'); }); });
+const tryUdp = () => new Promise((resolve) => { const s = dgram.createSocket('udp4'); const done = (value) => { try { s.close(); } catch {} resolve(value); }; s.once('error', () => done('denied')); s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => done(e ? 'denied' : 'sent')); });
 const tryResolver = () => new Promise((resolve) => { const s = net.createConnection({ path: '/private/var/run/mDNSResponder' }); s.once('connect', () => { s.destroy(); resolve('connected'); }); s.once('error', () => resolve('denied')); });
 const json = (status, body, headers = {}) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers } });
 const err = (status, code, message = 'fixed daemon text') => json(status, { error: { message, type: code, code, param: null } }, status === 401 ? { 'WWW-Authenticate': 'Bearer' } : {});
 let key = 0;
 let request = 0;
 (async () => {
+  if (supervised) {
+    const bind = (address) => Bun.listen({ hostname: '127.0.0.1', port: Number(address.split(':')[1]), socket: { open(s) { s.end(); }, data() {} } });
+    bind(proxyListen);
+    if (plan.walletBindDelayMs) setTimeout(() => bind(walletListen), plan.walletBindDelayMs);
+    else bind(walletListen);
+    event('supervisor ' + JSON.stringify(process.argv.slice(3)));
+  }
   if (!(await relayUp())) { log('ERROR configuration check failed'); process.exit(1); }
   if (plan.egressProbe) {
     const result = { direct: await tryTcp('192.0.2.1', 9), udp: await tryUdp(), resolver: await tryResolver(), loopbackOther: await tryTcp('127.0.0.1', plan.egressProbe) };
@@ -107,7 +120,7 @@ let request = 0;
     if (url.pathname === '/healthz') return json(200, '{"status":"ok"}');
     const keyless = !plan.requireKey && (url.pathname === '/v1/models' || url.pathname === '/v1/chat/completions');
     if (!keyless && httpRequest.headers.get('authorization') !== 'Bearer ' + plan.apiKey) return err(401, 'invalid_api_key', 'A valid local zkAPI client API key is required.');
-    if (url.pathname === '/admin/status') return json(200, { backend: 'zkapi', network: 'mainnet', request_budget_policy: 'model' });
+    if (url.pathname === '/admin/status') return json(200, { backend: 'zkapi', network: 'mainnet', request_budget_policy: 'model', transport: transportStatus });
     if (url.pathname === '/v1/models' && httpRequest.method !== 'GET') return err(405, 'method_not_allowed');
     if (url.pathname === '/v1/models') {
       if (plan.policyNeverLoads) return err(502, 'models_unavailable');
@@ -197,9 +210,12 @@ export interface Plan {
   crashAfterCompletion?: boolean;
   crashAfterSettlement?: boolean;
   egressProbe?: number;
+  transportStatus?: Record<string, string>;
+  noSupervisor?: boolean;
+  walletBindDelayMs?: number;
 }
 
-/** A confinement that filters loopback ports: no shipped platform provides one. */
+/** Injected stand-in; the macOS test uses the real platform confinement. */
 export const filteredConfinement: ZkapiConfinement = {
   level: 'loopback_filtered',
   limit: 'test confinement',

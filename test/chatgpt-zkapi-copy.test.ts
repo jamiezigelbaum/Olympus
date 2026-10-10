@@ -143,6 +143,12 @@ describe('route labels', () => {
     ['not anonymous: key isolation or local authentication not confirmed', 'not_verified', /^not anonymous: key isolation/],
   ];
 
+  test('does not promote unknown labels or inconsistent receipts into an anonymous route', () => {
+    expect(chatgptZkapiRouteLabel('unknown payment route', 'hidden')).toBe('network route not verified');
+    expect(chatgptZkapiRouteLabel('anonymous route (payment, key and network identity hidden)', 'not_verified')).toBe('network route not verified');
+    expect(chatgptZkapiRouteLabel('anonymous route (unrecognized)', 'hidden')).toBe('network route not verified');
+  });
+
   test('read without payment or settlement clauses, keeping the network facts', () => {
     for (const [label, identity, kept] of labels) {
       const shown = chatgptZkapiRouteLabel(label, identity);

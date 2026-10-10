@@ -16415,7 +16415,7 @@ init_file_lease();
 import { spawn, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash2, randomUUID as randomUUID7 } from "node:crypto";
 import { accessSync as accessSync5, chmodSync as chmodSync3, constants as constants3, existsSync as existsSync6, mkdirSync as mkdirSync7, mkdtempSync, readdirSync as readdirSync2, readFileSync as readFileSync12, readlinkSync, realpathSync as realpathSync2, rmSync as rmSync3, statSync as statSync11, writeFileSync as writeFileSync4 } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { homedir as homedir9, tmpdir as tmpdir2 } from "node:os";
 import { delimiter as delimiter4, dirname as dirname11, isAbsolute as isAbsolute11, join as join16, resolve as resolvePath } from "node:path";
 
@@ -16624,7 +16624,7 @@ var MAX_QUESTION_BYTES = 8 * 1024;
 var POLL_MS = 100;
 var STOP_GRACE_MS = 1e4;
 var KILL_GRACE_MS = 3000;
-var ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6"];
+var ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6", "0.1.6-olympus2"];
 var CHILD_ENV_KEYS = [
   "HOME",
   "PATH",
@@ -16719,6 +16719,20 @@ function versionSupported(version) {
   const normalized = version?.replace(/^v/, "");
   return ZKAPI_SUPPORTED_DAEMON_VERSIONS.includes(normalized ?? "");
 }
+function supportsManagedConfinement(executable, env) {
+  try {
+    const help = execFileSync2(executable, ["serve", "--help"], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+      env,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    return ["--relay-url", "--companion-proxy-listen", "--wallet-api-listen", "--require-managed-companion", "--require-companion-custody"].every((flag) => help.includes(flag));
+  } catch {
+    return false;
+  }
+}
 function confinementLevel(policy) {
   if (policy.nonLoopback !== "denied" || policy.unixSockets !== "denied")
     return "none";
@@ -16726,72 +16740,94 @@ function confinementLevel(policy) {
 }
 function confinementStatement(level) {
   if (level === "loopback_filtered") {
-    return "network confinement allowed only this session's Tor and daemon ports";
+    return "network confinement allowed only this session's Tor and managed daemon/companion TCP ports";
   }
   if (level === "non_loopback_blocked") {
     return "in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered";
   }
   return "no network confinement";
 }
+function sessionPorts(ports) {
+  const values = [ports.tor, ports.daemon, ports.companionProxy, ports.walletApi];
+  if (values.some((port) => !Number.isInteger(port) || port < 1 || port > 65535) || new Set(values).size !== values.length)
+    throw new Error("Invalid confinement ports");
+  return values;
+}
 function darwinSandboxProfile(policy, ports) {
   const rules = ["(version 1)", "(allow default)"];
   if (policy.nonLoopback === "denied" || policy.unixSockets === "denied") {
     rules.push("(deny network*)");
-    rules.push('(allow network-bind (local ip "localhost:*"))');
-    rules.push('(allow network-inbound (local ip "localhost:*"))');
     if (policy.loopbackOutbound === "any") {
+      rules.push('(allow network-bind (local ip "localhost:*"))');
+      rules.push('(allow network-inbound (local ip "localhost:*"))');
       rules.push('(allow network-outbound (remote ip "localhost:*"))');
     } else {
-      rules.push(`(allow network-outbound (remote ip "localhost:${ports.tor}"))`);
-      rules.push(`(allow network-outbound (remote ip "localhost:${ports.daemon}"))`);
+      for (const port of sessionPorts(ports)) {
+        rules.push(`(allow network-outbound (remote tcp4 "localhost:${port}"))`);
+        if (port !== ports.tor) {
+          rules.push(`(allow network-bind (local tcp4 "localhost:${port}"))`);
+          rules.push(`(allow network-inbound (local tcp4 "localhost:${port}"))`);
+        }
+      }
     }
   }
   return rules.join("");
 }
-var DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "any" };
+var DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "session_ports_only" };
 var SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
-const loopback = () => new Promise((resolve) => {
-  const server = net.createServer((c) => c.end());
-  server.listen(0, '127.0.0.1', () => {
-    const s = net.createConnection({ host: '127.0.0.1', port: server.address().port });
-    s.once('connect', () => { s.destroy(); server.close(); resolve('connected'); });
-    s.once('error', () => { server.close(); resolve('failed'); });
-  });
-});
-const tcp = () => new Promise((resolve) => {
+const { execFileSync } = require('node:child_process');
+const targets = JSON.parse(process.argv[2]);
+const tcp = (host, port, path) => new Promise((resolve) => {
   const started = Date.now();
-  const s = net.createConnection({ host: '192.0.2.1', port: 9 });
+  const s = net.createConnection(path ? { path } : { host, port });
   s.setTimeout(3000, () => { s.destroy(); resolve('timeout'); });
   s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'));
+  s.once('error', () => { s.destroy(); resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'); });
 });
-const udp = () => new Promise((resolve) => {
+const udp = (host, port) => new Promise((resolve) => {
   const s = dgram.createSocket('udp4');
-  s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'failed' : 'sent'); });
-});
-const resolver = () => new Promise((resolve) => {
-  const s = net.createConnection({ path: '/private/var/run/mDNSResponder' });
-  s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve('failed'));
+  const done = (result) => { try { s.close(); } catch {} resolve(result); };
+  s.once('error', () => done('failed'));
+  s.send(Buffer.from([0]), port, host, (e) => done(e ? 'failed' : 'sent'));
 });
 (async () => {
-  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
+  const result = {};
+  for (const port of targets.allowed) result['allowed' + port] = await tcp('127.0.0.1', port);
+  result.other = await tcp('127.0.0.1', targets.other);
+  result.ipv6 = await tcp('::1', targets.allowed[0]);
+  result.mapped = await tcp('::ffff:127.0.0.1', targets.other);
+  result.udp = await udp('192.0.2.1', 53);
+  result.loopbackUdp = await udp('127.0.0.1', targets.allowed[0]);
+  result.resolver = await tcp(null, null, '/private/var/run/mDNSResponder');
+  result.tcp = await tcp('192.0.2.1', 9);
+  if (process.argv[3] !== 'child') result.child = JSON.parse(execFileSync(process.execPath, [__filename, process.argv[2], 'child'], { timeout: 10000 }));
   process.stdout.write(JSON.stringify(result));
-})();
+})().catch(() => process.exit(1));
 `;
 function runSelfTestProbe(argv, env) {
   try {
     return JSON.parse(execFileSync2(argv[0], argv.slice(1), {
       encoding: "utf8",
-      timeout: 1e4,
+      timeout: 25000,
       env,
       stdio: ["ignore", "pipe", "ignore"]
     }));
   } catch {
     return;
   }
+}
+async function listenProbe(port = 0, host = "127.0.0.1") {
+  const server = createServer((socket) => socket.end());
+  await new Promise((resolve3, reject) => {
+    server.once("error", reject);
+    server.listen({ port, host, exclusive: true }, () => {
+      server.removeListener("error", reject);
+      resolve3();
+    });
+  });
+  return server;
 }
 function defaultZkapiConfinement() {
   if (process.platform === "darwin" && existsSync6("/usr/bin/sandbox-exec")) {
@@ -16800,12 +16836,28 @@ function defaultZkapiConfinement() {
       level,
       limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
       wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
-      selfTest: async (workDir, env) => {
-        const script = join16(workDir, "confinement-self-test.cjs");
-        writeFileSync4(script, SELF_TEST_SCRIPT, { mode: 384 });
-        const outside = runSelfTestProbe([process.execPath, script], env);
-        const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
-        return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
+      selfTest: async (workDir, env, ports) => {
+        const servers = [];
+        try {
+          const allowed = sessionPorts(ports);
+          for (const port of allowed)
+            servers.push(await listenProbe(port));
+          servers.push(await listenProbe(ports.tor, "::1"));
+          const other = await listenProbe();
+          servers.push(other);
+          const targets = JSON.stringify({ allowed, other: other.address().port });
+          const script = join16(workDir, "confinement-self-test.cjs");
+          writeFileSync4(script, SELF_TEST_SCRIPT, { mode: 384 });
+          const outside = runSelfTestProbe([process.execPath, script, targets], env);
+          const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env);
+          const matches = (out, confined) => Boolean(out && confined) && allowed.every((port) => out["allowed" + port] === "connected" && confined["allowed" + port] === "connected") && ["other", "ipv6", "mapped", "resolver"].every((key) => out[key] === "connected" && confined[key] === "failed_fast") && ["udp", "loopbackUdp"].every((key) => out[key] === "sent" && confined[key] === "failed") && (out.tcp === "timeout" || out.tcp === "failed_slow") && confined.tcp === "failed_fast";
+          return matches(outside, inside) && matches(outside?.child, inside?.child);
+        } catch {
+          return false;
+        } finally {
+          for (const server of servers)
+            server.close();
+        }
       }
     };
   }
@@ -17187,6 +17239,8 @@ async function zkapiConsultReadiness(options) {
     }
     if (!versionSupported(daemonVersion))
       blockers.push("daemon_version_unsupported");
+    if (settings.tor === "per_consult" && confinement.level === "loopback_filtered" && !supportsManagedConfinement(daemonExecutable, childEnvironment(env)))
+      blockers.push("daemon_supervisor_unsupported");
   }
   const torExecutable = settings.tor === "per_consult" ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
   if (settings.tor === "per_consult" && !torExecutable)

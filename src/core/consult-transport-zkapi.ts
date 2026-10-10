@@ -33,14 +33,14 @@
 //   - The wrapper retries once after warming a cold model policy. Olympus warms
 //     first and never resends a consult.
 //
-// What this does NOT prove, and so what no label claims: zkapi-clientd takes
-// its relay and companion mode only from config.json, which Olympus does not
-// read, and the managed companion reaches the network through a proxy on a
-// random loopback port. So the route of the daemon and its companion is
-// established only by network confinement that filters loopback ports, which
-// no platform implementation here provides (see ZkapiConfinement). The strong
-// label "anonymous route" exists in the type and is never produced by the
-// shipped confinement; every receipt names what was and was not verified.
+// macOS pins the daemon's managed companion API and CONNECT proxy using the
+// supervisor flags in the Olympus zkAPI fork. Seatbelt allows TCP/IPv4 only to
+// this session's Tor, daemon, companion API and proxy ports; the proxy itself
+// is confined and can leave the host only through Tor. Before starting either
+// program, the exact profile is tested against live positive/negative controls
+// and an exec descendant. Listener ownership and authenticated transport status
+// are checked before dispatch. Only a completed receipt satisfying every
+// zkapiRouteLabel condition can say "anonymous route".
 //
 // The input is a plain string and a model id: there is no parameter that can
 // carry an EvidencePack, history, tools or a system prompt. Errors are
@@ -50,7 +50,7 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createConnection } from 'node:net';
+import { createConnection, createServer, type Server } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
@@ -89,7 +89,8 @@ const STOP_GRACE_MS = 10_000;
 const KILL_GRACE_MS = 3_000;
 /**
  * Reviewed daemon versions. 0.1.5 shipped SOCKS5/Tor client mode; 0.1.6 is the
- * newest release reviewed. Their highest per-request allowance is $6
+ * newest upstream release reviewed. The Olympus fork 0.1.6-olympus2 adds
+ * supervisor flags and local companion custody without changing allowances. Their highest per-request allowance is $6
  * (`internal/zkapi/model_budget.go`; $1 to $6 by the model's price tier). A
  * request is counted against the owner's daily spend limit at the allowance
  * the live model list states for its model, since that is what the daemon
@@ -98,7 +99,7 @@ const KILL_GRACE_MS = 3_000;
  * change between the listing and the send can move the actual hold, bounded
  * by $6. A newer version is refused until its allowance table is reviewed.
  */
-export const ZKAPI_SUPPORTED_DAEMON_VERSIONS = ['0.1.5', '0.1.6'] as const;
+export const ZKAPI_SUPPORTED_DAEMON_VERSIONS = ['0.1.5', '0.1.6', '0.1.6-olympus2'] as const;
 export const ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6_000_000;
 /** The fixed, content-free question a recovery-only session sends. */
 const RECOVERY_QUESTION = 'Reply with the single word OK.';
@@ -131,6 +132,7 @@ export type ZkapiConsultErrorCode =
   | 'tor_bootstrap_failed'
   | 'daemon_start_failed'
   | 'daemon_version_unsupported'
+  | 'daemon_supervisor_unsupported'
   | 'relay_mismatch'
   | 'key_reuse_on'
   | 'key_reuse_unverified'
@@ -189,19 +191,26 @@ export type ZkapiDaemonErrorCode = (typeof KNOWN_DAEMON_ERROR_CODES)[number] | '
  * `none`: not confined. `non_loopback_blocked`: the OS denied every connection
  * except loopback, and DNS, to the daemon and its descendants, self-tested in
  * that session. `loopback_filtered`: additionally only the session's own Tor
- * and daemon ports were reachable on loopback. Only the last can support the
- * strong label; no shipped platform implementation provides it.
+ * and managed daemon/companion ports were reachable on loopback. Only the last
+ * can support the strong label, after its session self-test passes.
  */
 export type ZkapiConfinementLevel = 'none' | 'non_loopback_blocked' | 'loopback_filtered';
+
+export interface ZkapiConfinementPorts {
+  tor: number;
+  daemon: number;
+  companionProxy?: number;
+  walletApi?: number;
+}
 
 export interface ZkapiConfinement {
   readonly level: ZkapiConfinementLevel;
   /** A fixed sentence naming what this confinement does not cover. */
   readonly limit: string;
   /** The argv that runs `argv` under the confinement. */
-  wrap(argv: readonly string[], ports: { tor: number; daemon: number }): string[];
+  wrap(argv: readonly string[], ports: ZkapiConfinementPorts): string[];
   /** Proves, in this session, that the confinement denies what it claims. */
-  selfTest(workDir: string, env: NodeJS.ProcessEnv): Promise<boolean>;
+  selfTest(workDir: string, env: NodeJS.ProcessEnv, ports: ZkapiConfinementPorts): Promise<boolean>;
 }
 
 /** What one session proved, with no request or response content. */
@@ -481,7 +490,8 @@ export const ZKAPI_CONSULT_ERROR_MESSAGES: Readonly<Record<ZkapiConsultErrorCode
   tor_port_busy: 'Something already listens on the zkAPI Tor port; Olympus needs it free to start a fresh Tor client.',
   tor_bootstrap_failed: 'The per-consult Tor client did not finish bootstrapping.',
   daemon_start_failed: 'zkapi-clientd serve did not become ready.',
-  daemon_version_unsupported: 'This zkapi-clientd version is not a reviewed version (0.1.5 or 0.1.6).',
+  daemon_version_unsupported: 'This zkapi-clientd version is not a reviewed version (0.1.5, 0.1.6 or 0.1.6-olympus2).',
+  daemon_supervisor_unsupported: 'This zkAPI app cannot enforce the managed anonymous route. Use the Olympus zkapi-clientd fork with companion custody support (0.1.6-olympus2); nothing was sent.',
   relay_mismatch: 'The daemon is not configured for the expected route (SOCKS5 when Tor is on, direct when Tor is off).',
   key_reuse_on: 'The daemon key-reuse window is on, so requests would be linkable; Olympus refuses to send.',
   key_reuse_unverified: 'The daemon did not confirm a fresh key for every request.',
@@ -602,6 +612,19 @@ function versionSupported(version: string | undefined): boolean {
   return (ZKAPI_SUPPORTED_DAEMON_VERSIONS as readonly string[]).includes(normalized ?? '');
 }
 
+/** Help reads no wallet state; an old binary must refuse before Tor starts. */
+function supportsManagedConfinement(executable: string, env: NodeJS.ProcessEnv): boolean {
+  try {
+    const help = execFileSync(executable, ['serve', '--help'], {
+      encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024, env, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return ['--relay-url', '--companion-proxy-listen', '--wallet-api-listen', '--require-managed-companion', '--require-companion-custody']
+      .every((flag) => help.includes(flag));
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Confinement
 
@@ -626,7 +649,7 @@ export function confinementLevel(policy: ZkapiConfinementPolicy): ZkapiConfineme
 /** The one sentence every label and doctor line uses for a confinement level. */
 export function confinementStatement(level: ZkapiConfinementLevel): string {
   if (level === 'loopback_filtered') {
-    return 'network confinement allowed only this session\'s Tor and daemon ports';
+    return 'network confinement allowed only this session\'s Tor and managed daemon/companion TCP ports';
   }
   if (level === 'non_loopback_blocked') {
     return 'in this session\'s sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered';
@@ -639,77 +662,107 @@ export function confinementStatement(level: ZkapiConfinementLevel): string {
  * kernel enforces the profile for the daemon, its wallet companion and every
  * other descendant, whatever language they are written in.
  */
-export function darwinSandboxProfile(policy: ZkapiConfinementPolicy, ports: { tor: number; daemon: number }): string {
+function sessionPorts(ports: ZkapiConfinementPorts): number[] {
+  const values = [ports.tor, ports.daemon, ports.companionProxy, ports.walletApi];
+  if (values.some((port) => !Number.isInteger(port) || port! < 1 || port! > 65535)
+    || new Set(values).size !== values.length) throw new Error('Invalid confinement ports');
+  return values as number[];
+}
+
+export function darwinSandboxProfile(policy: ZkapiConfinementPolicy, ports: ZkapiConfinementPorts): string {
   const rules = ['(version 1)', '(allow default)'];
   if (policy.nonLoopback === 'denied' || policy.unixSockets === 'denied') {
     rules.push('(deny network*)');
-    rules.push('(allow network-bind (local ip "localhost:*"))');
-    rules.push('(allow network-inbound (local ip "localhost:*"))');
     if (policy.loopbackOutbound === 'any') {
+      rules.push('(allow network-bind (local ip "localhost:*"))');
+      rules.push('(allow network-inbound (local ip "localhost:*"))');
       rules.push('(allow network-outbound (remote ip "localhost:*"))');
     } else {
-      rules.push(`(allow network-outbound (remote ip "localhost:${ports.tor}"))`);
-      rules.push(`(allow network-outbound (remote ip "localhost:${ports.daemon}"))`);
+      // tcp4 matters: "localhost" otherwise also permits an unowned IPv6
+      // listener on the same port. UDP and Unix sockets remain denied.
+      for (const port of sessionPorts(ports)) {
+        rules.push(`(allow network-outbound (remote tcp4 "localhost:${port}"))`);
+        if (port !== ports.tor) {
+          rules.push(`(allow network-bind (local tcp4 "localhost:${port}"))`);
+          rules.push(`(allow network-inbound (local tcp4 "localhost:${port}"))`);
+        }
+      }
     }
   }
   return rules.join('');
 }
 
-/**
- * The policy this platform can enforce for zkapi-clientd. Loopback stays
- * open on macOS: the managed companion reaches the network through a proxy the
- * daemon opens on a random loopback port (upstream `internal/relay/connect.go`),
- * which a profile written before start cannot name.
- */
-const DARWIN_POLICY: ZkapiConfinementPolicy = { nonLoopback: 'denied', unixSockets: 'denied', loopbackOutbound: 'any' };
+const DARWIN_POLICY: ZkapiConfinementPolicy = { nonLoopback: 'denied', unixSockets: 'denied', loopbackOutbound: 'session_ports_only' };
 
-// Plain CommonJS so it runs under Bun or Node. 192.0.2.1 is TEST-NET-1: it
-// routes nowhere, so an unconfined probe sends nothing anyone can receive.
-// The same script runs inside and outside the sandbox; only the difference
-// counts. A loopback listener inside the probe is the positive control.
+// Content-free probes, run unchanged outside, inside and in an exec descendant.
+// Positive listeners live in the parent, so a denial cannot be a closed port.
+// TEST-NET-1 carries no question, credential or real destination.
 const SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
-const loopback = () => new Promise((resolve) => {
-  const server = net.createServer((c) => c.end());
-  server.listen(0, '127.0.0.1', () => {
-    const s = net.createConnection({ host: '127.0.0.1', port: server.address().port });
-    s.once('connect', () => { s.destroy(); server.close(); resolve('connected'); });
-    s.once('error', () => { server.close(); resolve('failed'); });
-  });
-});
-const tcp = () => new Promise((resolve) => {
+const { execFileSync } = require('node:child_process');
+const targets = JSON.parse(process.argv[2]);
+const tcp = (host, port, path) => new Promise((resolve) => {
   const started = Date.now();
-  const s = net.createConnection({ host: '192.0.2.1', port: 9 });
+  const s = net.createConnection(path ? { path } : { host, port });
   s.setTimeout(3000, () => { s.destroy(); resolve('timeout'); });
   s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'));
+  s.once('error', () => { s.destroy(); resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'); });
 });
-const udp = () => new Promise((resolve) => {
+const udp = (host, port) => new Promise((resolve) => {
   const s = dgram.createSocket('udp4');
-  s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'failed' : 'sent'); });
-});
-const resolver = () => new Promise((resolve) => {
-  const s = net.createConnection({ path: '/private/var/run/mDNSResponder' });
-  s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve('failed'));
+  const done = (result) => { try { s.close(); } catch {} resolve(result); };
+  s.once('error', () => done('failed'));
+  s.send(Buffer.from([0]), port, host, (e) => done(e ? 'failed' : 'sent'));
 });
 (async () => {
-  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
+  const result = {};
+  for (const port of targets.allowed) result['allowed' + port] = await tcp('127.0.0.1', port);
+  result.other = await tcp('127.0.0.1', targets.other);
+  result.ipv6 = await tcp('::1', targets.allowed[0]);
+  result.mapped = await tcp('::ffff:127.0.0.1', targets.other);
+  result.udp = await udp('192.0.2.1', 53);
+  result.loopbackUdp = await udp('127.0.0.1', targets.allowed[0]);
+  result.resolver = await tcp(null, null, '/private/var/run/mDNSResponder');
+  result.tcp = await tcp('192.0.2.1', 9);
+  if (process.argv[3] !== 'child') result.child = JSON.parse(execFileSync(process.execPath, [__filename, process.argv[2], 'child'], { timeout: 10000 }));
   process.stdout.write(JSON.stringify(result));
-})();
+})().catch(() => process.exit(1));
 `;
 
-function runSelfTestProbe(argv: string[], env: NodeJS.ProcessEnv): Record<string, string> | undefined {
+type ConfinementProbe = Record<string, unknown>;
+function runSelfTestProbe(argv: string[], env: NodeJS.ProcessEnv): ConfinementProbe | undefined {
   try {
     return JSON.parse(execFileSync(argv[0]!, argv.slice(1), {
-      encoding: 'utf8',
-      timeout: 10_000,
-      env,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })) as Record<string, string>;
+      encoding: 'utf8', timeout: 25_000, env, stdio: ['ignore', 'pipe', 'ignore'],
+    })) as ConfinementProbe;
   } catch {
     return undefined;
+  }
+}
+
+async function listenProbe(port = 0, host = '127.0.0.1'): Promise<Server> {
+  const server = createServer((socket) => socket.end());
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen({ port, host, exclusive: true }, () => { server.removeListener('error', reject); resolve(); });
+  });
+  return server;
+}
+
+async function companionPorts(excluded: number[]): Promise<{ companionProxy: number; walletApi: number }> {
+  const servers: Server[] = [];
+  try {
+    const ports: number[] = [];
+    while (ports.length < 2) {
+      const server = await listenProbe();
+      servers.push(server);
+      const port = (server.address() as { port: number }).port;
+      if (!excluded.includes(port)) ports.push(port);
+    }
+    return { companionProxy: ports[0]!, walletApi: ports[1]! };
+  } finally {
+    for (const server of servers) server.close();
   }
 }
 
@@ -720,24 +773,33 @@ export function defaultZkapiConfinement(): ZkapiConfinement {
       level,
       limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
       wrap: (argv, ports) => ['/usr/bin/sandbox-exec', '-p', darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
-      selfTest: async (workDir, env) => {
-        const script = join(workDir, 'confinement-self-test.cjs');
-        writeFileSync(script, SELF_TEST_SCRIPT, { mode: 0o600 });
-        // The same probes outside are the controls: there the TCP attempt to a
-        // non-routable address must not fail at once, the resolver socket must
-        // connect and the UDP send must be accepted, so a failure inside is the
-        // sandbox's doing and not an offline machine. Bun reports a sandbox
-        // denial under other error names, so denial is inferred from that
-        // difference, not from an error code.
-        const outside = runSelfTestProbe([process.execPath, script], env);
-        const inside = runSelfTestProbe(
-          ['/usr/bin/sandbox-exec', '-p', darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script],
-          env,
-        );
-        return outside?.loopback === 'connected' && outside.udp === 'sent' && outside.resolver === 'connected'
-          && (outside.tcp === 'timeout' || outside.tcp === 'failed_slow')
-          && inside?.loopback === 'connected' && inside.udp === 'failed' && inside.resolver === 'failed'
-          && inside.tcp === 'failed_fast';
+      selfTest: async (workDir, env, ports) => {
+        const servers: Server[] = [];
+        try {
+          const allowed = sessionPorts(ports);
+          for (const port of allowed) servers.push(await listenProbe(port));
+          // A live IPv6 listener at an allowed numeric port must stay denied.
+          servers.push(await listenProbe(ports.tor, '::1'));
+          const other = await listenProbe();
+          servers.push(other);
+          const targets = JSON.stringify({ allowed, other: (other.address() as { port: number }).port });
+          const script = join(workDir, 'confinement-self-test.cjs');
+          writeFileSync(script, SELF_TEST_SCRIPT, { mode: 0o600 });
+          const outside = runSelfTestProbe([process.execPath, script, targets], env);
+          const inside = runSelfTestProbe(
+            ['/usr/bin/sandbox-exec', '-p', darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env,
+          );
+          const matches = (out: ConfinementProbe | undefined, confined: ConfinementProbe | undefined): boolean => Boolean(out && confined)
+            && allowed.every((port) => out!['allowed' + port] === 'connected' && confined!['allowed' + port] === 'connected')
+            && ['other', 'ipv6', 'mapped', 'resolver'].every((key) => out![key] === 'connected' && confined![key] === 'failed_fast')
+            && ['udp', 'loopbackUdp'].every((key) => out![key] === 'sent' && confined![key] === 'failed')
+            && (out!.tcp === 'timeout' || out!.tcp === 'failed_slow') && confined!.tcp === 'failed_fast';
+          return matches(outside, inside) && matches(outside?.child as ConfinementProbe, inside?.child as ConfinementProbe);
+        } catch {
+          return false;
+        } finally {
+          for (const server of servers) server.close();
+        }
       },
     };
   }
@@ -1795,6 +1857,8 @@ export async function zkapiConsultReadiness(
       daemonVersion = undefined;
     }
     if (!versionSupported(daemonVersion)) blockers.push('daemon_version_unsupported');
+    if (settings.tor === 'per_consult' && confinement.level === 'loopback_filtered'
+      && !supportsManagedConfinement(daemonExecutable, childEnvironment(env))) blockers.push('daemon_supervisor_unsupported');
   }
   const torExecutable = settings.tor === 'per_consult' ? resolveZkapiExecutable('tor', settings.torExecutable, env) : undefined;
   if (settings.tor === 'per_consult' && !torExecutable) blockers.push('tor_not_found');
@@ -2217,6 +2281,8 @@ async function runSession(
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === 'per_consult';
+  const filtered = perConsultTor && confinement.level === 'loopback_filtered';
+  const ports: ZkapiConfinementPorts = { tor: settings.torSocksPort, daemon: daemonPort };
   const receipt: ZkapiSessionReceipt = {
     recovery,
     keyReuse: 'not_verified',
@@ -2297,6 +2363,7 @@ async function runSession(
   if (!options.apiKey) return refuse('daemon_api_key_missing');
   const daemonExecutable = resolveZkapiExecutable('zkapi-clientd', settings.daemonExecutable, env);
   if (!daemonExecutable) return refuse('daemon_not_found');
+  if (filtered && !supportsManagedConfinement(daemonExecutable, childEnvironment(env))) return refuse('daemon_supervisor_unsupported');
   const torExecutable = perConsultTor ? resolveZkapiExecutable('tor', settings.torExecutable, env) : undefined;
   if (perConsultTor && !torExecutable) return refuse('tor_not_found');
   try {
@@ -2377,7 +2444,8 @@ async function runSession(
 
     if (perConsultTor) {
       stage('confinementSelfTestMs');
-      if (await confinement.selfTest(workDir, childEnv)) {
+      if (filtered) Object.assign(ports, await companionPorts([ports.tor, ports.daemon]));
+      if (await confinement.selfTest(workDir, childEnv, ports)) {
         receipt.confinementSelfTest = 'passed';
       } else if (confinement.level !== 'none') {
         // Confinement that was requested but could not prove itself refuses.
@@ -2411,11 +2479,17 @@ async function runSession(
 
     const facts: DaemonFacts = { requests: new Map(), settled: new Map() };
     const daemonArgv = [daemonExecutable, 'serve'];
+    if (filtered) daemonArgv.push(
+      '--relay-url', `socks5://127.0.0.1:${ports.tor}`,
+      '--companion-proxy-listen', `127.0.0.1:${ports.companionProxy}`,
+      '--wallet-api-listen', `127.0.0.1:${ports.walletApi}`,
+      '--require-managed-companion', '--require-companion-custody',
+    );
     stage('daemonReadyMs');
     daemon = supervise(
       'daemon',
       watchdog,
-      perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv,
+      perConsultTor ? confinement.wrap(daemonArgv, ports) : daemonArgv,
       daemonEnvironment(childEnv, daemonExecutable),
       (line) => parseDaemonLine(facts, line),
       onChildExit,
@@ -2429,6 +2503,12 @@ async function runSession(
       if (includeTor ? anyExited() : daemonGone()) return false;
       const listener = await inspect(daemonPort);
       if (listener.kind !== 'found' || listener.pgid !== daemon!.pgid) return false;
+      if (filtered) {
+        for (const port of [ports.companionProxy!, ports.walletApi!]) {
+          const companion = await inspect(port);
+          if (companion.kind !== 'found' || companion.pgid !== daemon!.pgid) return false;
+        }
+      }
       if (tor && includeTor) {
         const socks = await inspect(settings.torSocksPort);
         if (socks.kind !== 'found' || socks.pgid !== tor.pgid) return false;
@@ -2446,11 +2526,15 @@ async function runSession(
 
     const ready = await waitFor(
       async (remainingMs) => Boolean(facts.listen)
-        && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: 'GET' }, sessionSignal, Math.min(2_000, remainingMs))),
+        && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: 'GET' }, sessionSignal, Math.min(2_000, remainingMs)))
+        // The API can bind before the Rust companion finishes starting. Do
+        // not send a key until every required listener has proven ownership.
+        && (!filtered || await owned()),
       settings.daemonReadyTimeoutMs,
       { signal: sessionSignal, giveUp: anyExited, pollMs: 250 },
     );
-    if (!ready) return (result = fail(sessionSignal.aborted ? interrupted() : 'daemon_start_failed'));
+    if (!ready) return (result = fail(sessionSignal.aborted ? interrupted()
+      : filtered && facts.listen ? 'daemon_identity_failed' : 'daemon_start_failed'));
     stage('daemonVerifyMs');
     receipt.daemonVersion = facts.version!;
     if (!versionSupported(facts.version)) return (result = fail('daemon_version_unsupported'));
@@ -2482,6 +2566,7 @@ async function runSession(
     if (!status || status.status === 401) return (result = fail('daemon_api_key_rejected'));
     const network = adminStatusNetwork(status);
     if (!network) return (result = fail('daemon_identity_failed'));
+    if (filtered && !managedTransportMatches(status, ports)) return (result = fail('relay_mismatch'));
     receipt.inferenceAuth = 'verified';
     receipt.network = network;
 
@@ -2852,6 +2937,21 @@ function elapsedMs(clock: () => number, since: number | undefined): number | und
 /** Timings with `key` set to `ms`, or unchanged when the measurement is missing. */
 function withTiming(timings: ZkapiStageTimings, key: keyof ZkapiStageTimings, ms: number | undefined): ZkapiStageTimings {
   return ms === undefined ? timings : { ...timings, [key]: ms };
+}
+
+/** The authenticated fork status must name this exact supervised topology. */
+function managedTransportMatches(response: ProbeResponse, ports: ZkapiConfinementPorts): boolean {
+  try {
+    const transport = JSON.parse(response.body).transport;
+    return response.status === 200 && transport?.kind === 'socks5'
+      && transport.relay_endpoint === `127.0.0.1:${ports.tor}`
+      && transport.companion === 'managed'
+      && transport.wallet_custody === 'connection_owner_verified'
+      && transport.connect_proxy === `127.0.0.1:${ports.companionProxy}`
+      && transport.wallet_api === `127.0.0.1:${ports.walletApi}`;
+  } catch {
+    return false;
+  }
 }
 
 function adminStatusNetwork(response: ProbeResponse): 'mainnet' | 'sepolia' | undefined {

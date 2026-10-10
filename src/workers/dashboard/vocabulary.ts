@@ -2288,8 +2288,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     needs_acceptance: 'Anonymous answers: paused · accept the updated statements',
     blocked: 'Anonymous answers: paused · needs a fix',
   },
-  /** The honesty label: the network route is not verified on macOS, said plainly. */
-  experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
+  /** The route claim belongs to a verified, completed session, never the platform alone. */
+  experimental: 'Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.',
   /** What outside help is, before anything technical (owner, 2026-10-07). */
   intro: 'For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.',
   /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'). */
@@ -2407,7 +2407,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
    * shorter statements leave out: when a question is sent, the hold counted against
    * limits, no default limit, deposit fees and no top-up, the estimated
    * expiry date, the fee buffer, the API key and key reuse, the operator
-   * and the proof setup, and that the route is not verified on macOS.
+   * and the proof setup, and when the network route can be confirmed.
    */
   disclosure: [
     'Olympus sends a question only when you ask your agent to use Olympus zkAPI. Nothing is sent on its own.',
@@ -2418,7 +2418,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     'When you add money, send one transfer with the deposit plus the fee buffer zkapi-clientd shows. Network fees move, so the buffer can fall short and need a second transfer.',
     'Set zkapi-clientd to require an API key, so only Olympus on this computer can spend the balance. Olympus refuses to send while key reuse is on, so separate questions are not linked by a shared payment key.',
     'One operator account can pause deposits and withdrawals while the 30-day clock keeps running, and one party ran zkAPI\'s proof setup. Your balance lives in files on this computer; losing them loses the money.',
-    'The provider reads the question; zkAPI hides who paid. On macOS, Olympus cannot yet confirm the network route is anonymous.',
+    'The provider reads the question; zkAPI hides who paid. On macOS, a compatible zkAPI app lets Olympus confirm the Tor route for each completed session. “Anonymous route” appears only when every check passes; it does not hide identifying details in your question.',
   ],
   routeMissing: 'zkAPI is not set up. Add it, then follow Set up zkAPI below.',
   policyNotFile: 'Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.',
@@ -2447,7 +2447,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** The To fix list: plain words, each with where its fix is. Technical names stay in Set up zkAPI and Details. */
   blockers: {
     daemon_not_found: 'The zkAPI app is not installed on this computer.',
-    daemon_version_unsupported: 'This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6.',
+    daemon_version_unsupported: 'This version of the zkAPI app has not been checked by Olympus. Use a reviewed version: 0.1.5, 0.1.6 or the Olympus fork 0.1.6-olympus2.',
+    daemon_supervisor_unsupported: 'This zkAPI app needs the Olympus fork (0.1.6-olympus2) to confirm the anonymous route on macOS. Nothing was sent.',
     tor_not_found: 'The program that hides your network address is not installed.',
     daemon_api_key_missing: 'Olympus does not have your zkAPI access key yet.',
     acknowledgements_incomplete: 'The statements on this page are not accepted yet. Nothing is sent until they are.',
@@ -2468,7 +2469,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   stepsTitle: 'Set up zkAPI',
   stepsIntro: 'Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.',
   steps: [
-    'Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). If you installed them yourself, zkapi-clientd must be version 0.1.5 or 0.1.6.',
+    'Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). On macOS, the confined route requires the Olympus zkapi-clientd fork 0.1.6-olympus2; the upstream 0.1.5/0.1.6 build cannot confirm it.',
     'Run: zkapi-clientd config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.',
     'Wait until the tool prints "Private inference balance activated".',
     'Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050',
