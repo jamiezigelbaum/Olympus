@@ -93,6 +93,7 @@ describe('test lane partition', () => {
     expect(buildTestLaneCommand(['one.test.ts', 'two.test.ts'])).toEqual([
       'bun',
       'test',
+      '--parallel',
       join('test', 'one.test.ts'),
       join('test', 'two.test.ts'),
     ]);
