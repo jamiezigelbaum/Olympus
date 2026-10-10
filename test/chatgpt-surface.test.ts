@@ -1033,26 +1033,33 @@ describe('ChatGPT MCP surface over the remote handler', () => {
     }
   });
 
-  test('a read-only grant (demo sign-in) lists and runs only the read-only tools', async () => {
+  test('a read-only grant (demo sign-in) lists and runs only the read-only tools, and the private question panel', async () => {
     readOnlySurface = true;
     const client = await connectClient();
     try {
       const { tools } = await client.listTools();
+      // open_private_question is the one named exception (review case P5).
       expect(tools.map((tool) => tool.name)).toEqual([
         DASHBOARD_TOOL_NAME,
         'olympus_search',
         'source_index_status',
         'source_answer',
         'source_answer_result',
+        'open_private_question',
         'olympus_scope_list',
         'olympus_privacy_get',
       ]);
-      for (const name of ['olympus_connect_source', 'olympus_scope_set', 'olympus_disconnect_source', 'olympus_model_set', 'olympus_privacy_set', 'olympus_sync_source']) {
+      expect(tools.map((tool) => tool.name)).not.toContain('ask_anonymously');
+      expect(tools.map((tool) => tool.name)).not.toContain('olympus_privacy_set');
+      for (const name of ['ask_anonymously', 'olympus_connect_source', 'olympus_scope_set', 'olympus_disconnect_source', 'olympus_model_set', 'olympus_privacy_set', 'olympus_sync_source']) {
         const result = await client.callTool({ name, arguments: {} });
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toEqual({ error: 'unknown_tool' });
       }
       expect((await client.callTool({ name: DASHBOARD_TOOL_NAME, arguments: {} })).isError).toBeFalsy();
+      const opened = await client.callTool({ name: 'open_private_question', arguments: {} }) as Record<string, any>;
+      expect(opened.isError).toBeFalsy();
+      expect(opened.structuredContent).toEqual({ status: 'opened' });
     } finally {
       await client.close();
     }

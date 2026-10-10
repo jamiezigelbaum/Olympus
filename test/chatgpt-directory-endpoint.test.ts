@@ -299,14 +299,25 @@ describe('/openai/mcp serves the same surface, narrowed', () => {
     }
   });
 
-  test('a demo sign-in grant gets the same read-only tools on both endpoints', async () => {
+  test('a demo sign-in grant gets the same read-only tools (and the private question panel) on both endpoints', async () => {
     const def = await grant(undefined, 'demo');
     const directory = await grant(DIRECTORY_RESOURCE, 'demo');
     const onMcp = (await result(await rpc('/mcp', def.access_token, 'tools/list'))).tools as Array<{ name: string; annotations: { readOnlyHint?: boolean } }>;
     const onDirectory = (await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/list'))).tools;
     expect(onDirectory).toEqual(onMcp);
     expect(onMcp.length).toBeGreaterThan(0);
-    expect(onMcp.every((tool) => tool.annotations.readOnlyHint === true)).toBe(true);
+    // open_private_question is the one named exception (review case P5).
+    expect(onMcp.filter((tool) => tool.annotations.readOnlyHint !== true).map((tool) => tool.name)).toEqual(['open_private_question']);
+    expect(names(onMcp)).not.toContain('ask_anonymously');
+    expect(names(onMcp)).not.toContain('olympus_privacy_set');
+    for (const [path, token] of [['/mcp', def.access_token], [DIRECTORY_MCP_PATH, directory.access_token]] as const) {
+      for (const name of ['ask_anonymously', 'olympus_privacy_set']) {
+        const refused = await result(await rpc(path, token, 'tools/call', { name, arguments: name === 'ask_anonymously' ? { question: 'q' } : {} }));
+        expect(refused.structuredContent).toEqual({ error: 'unknown_tool' });
+      }
+      const opened = await result(await rpc(path, token, 'tools/call', { name: 'open_private_question', arguments: {} }));
+      expect(opened.structuredContent).not.toEqual({ error: 'unknown_tool' });
+    }
   });
 
   test('a tool off the allowlist is not listed there, and calling it is an unknown tool', async () => {

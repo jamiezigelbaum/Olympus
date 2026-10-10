@@ -123175,6 +123175,9 @@ var init_setup_tools = __esm(() => {
 });
 
 // src/workers/chatgpt/mcp-surface.ts
+function readOnlyGrantMayUse(tool) {
+  return tool.annotations.readOnlyHint || READ_ONLY_GRANT_EXCEPTIONS.includes(tool.name);
+}
 function listChatGptTools(ctx, options = {}) {
   const tools = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
   if (answerToolsListed(ctx, options))
@@ -123184,7 +123187,7 @@ function listChatGptTools(ctx, options = {}) {
   if (askToolListed(ctx))
     tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
   tools.push(...SETUP_TOOLS);
-  return options.readOnly ? tools.filter((tool) => tool.annotations.readOnlyHint) : tools;
+  return options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools;
 }
 function answerToolsListed(ctx, options) {
   if (options.answerModelAvailable && !options.answerModelAvailable())
@@ -123201,7 +123204,7 @@ function askToolListed(ctx) {
 async function callChatGptTool(name, args, ctx, options, signal, detachedContext) {
   const later = detachedContext ?? (() => ctx);
   try {
-    if (options.readOnly && !CHATGPT_TOOLS.some((tool) => tool.name === name && tool.annotations.readOnlyHint)) {
+    if (options.readOnly && !CHATGPT_TOOLS.some((tool) => tool.name === name && readOnlyGrantMayUse(tool))) {
       throw new ChatGptSurfaceError("unknown_tool");
     }
     switch (name) {
@@ -123505,7 +123508,7 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, CHATGPT_TOOLS, defaultProbeLog = (line) => {
+var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, CHATGPT_TOOLS, defaultProbeLog = (line) => {
   console.warn(line);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
@@ -123695,6 +123698,7 @@ var init_mcp_surface = __esm(() => {
     securitySchemes: OAUTH2_REQUIRED2
   };
   ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL];
+  READ_ONLY_GRANT_EXCEPTIONS = [OPEN_PRIVATE_QUESTION_TOOL.name];
   CHATGPT_TOOLS = [
     DASHBOARD_TOOL,
     SEARCH_TOOL,

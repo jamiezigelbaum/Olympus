@@ -104,7 +104,8 @@ export interface ChatGptSurfaceOptions {
   answerModelAvailable?: () => boolean;
   /**
    * Read-only tools only (a demo sign-in grant): every tool whose
-   * annotations are not read-only is neither listed nor callable.
+   * annotations are not read-only is neither listed nor callable, except
+   * the named READ_ONLY_GRANT_EXCEPTIONS.
    */
   readOnly?: boolean;
 }
@@ -339,6 +340,19 @@ export const OPEN_PRIVATE_QUESTION_TOOL: ChatGptToolDefinition = {
 const ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL] as const;
 
 /**
+ * Tools a read-only (demo) grant may list and call although they are not
+ * read-only. Demo grants run directory review case P5 ("ask a private
+ * question anonymously"): the question is typed in the sealed panel and its
+ * cost comes from the demo install's own zkAPI balance. ask_anonymously,
+ * privacy and every other write tool stay hidden and refused.
+ */
+const READ_ONLY_GRANT_EXCEPTIONS: readonly string[] = [OPEN_PRIVATE_QUESTION_TOOL.name];
+
+function readOnlyGrantMayUse(tool: ChatGptToolDefinition): boolean {
+  return tool.annotations.readOnlyHint || READ_ONLY_GRANT_EXCEPTIONS.includes(tool.name);
+}
+
+/**
  * Every tool this surface can list, in list order. The relay lists all of them
  * to a caller with no token (it cannot see the engine's config), from the
  * manifest scripts/build-chatgpt-relay-assets.ts generates from this array.
@@ -361,7 +375,7 @@ export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSur
   else if (askToolListed(ctx)) tools.push(SOURCE_ANSWER_RESULT_TOOL);
   if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
   tools.push(...SETUP_TOOLS);
-  return options.readOnly ? tools.filter((tool) => tool.annotations.readOnlyHint) : tools;
+  return options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools;
 }
 
 /** source_answer works only with an answer model on the Mac and the operation exposed remotely. */
@@ -393,7 +407,7 @@ export async function callChatGptTool(
 ): Promise<ChatGptToolResult> {
   const later = detachedContext ?? (() => ctx);
   try {
-    if (options.readOnly && !CHATGPT_TOOLS.some((tool) => tool.name === name && tool.annotations.readOnlyHint)) {
+    if (options.readOnly && !CHATGPT_TOOLS.some((tool) => tool.name === name && readOnlyGrantMayUse(tool))) {
       throw new ChatGptSurfaceError('unknown_tool');
     }
     switch (name) {
