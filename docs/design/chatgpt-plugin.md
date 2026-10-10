@@ -1170,10 +1170,16 @@ sealed to the panel key like a private answer; the panel collects it with
 kept key collects instead of asking again. Jobs live 30 minutes; expiry
 aborts a running ask.
 
-What the host learns: that a panel opened, and how long it polled. Never the
-question, the answer, the level or the model: nothing goes back through
-tools/call, widget state or a follow-up message (test/chatgpt-private-question-ui.test.ts
-asserts it). Proof of both directions of the crypto:
+What the host learns: that a panel opened, how long it polled, and the
+panel's rendered height (every MCP Apps widget reports its size, so the
+length class of the outcome is observable; an accepted residual under the
+owner's 2026-10-07 ruling that sealed content is the bar, not invisibility,
+like the private answer panel's). Never the question, the answer, the level
+or the model: nothing goes back through tools/call, widget state or a
+follow-up message (test/chatgpt-private-question-ui.test.ts asserts it). A
+send that fails after the question left is told as such (it may have been
+charged), never as "nothing was sent": the transport's outcome travels
+inside the sealed result. Proof of both directions of the crypto:
 test/chatgpt-private-question.test.ts.
 
 ## Live smoke (added 2026-10-02)

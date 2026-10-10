@@ -550,6 +550,7 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     structuredContent: {
       status: 'refused',
       code: typeof record.code === 'string' ? record.code.replace(UNSAFE_CHARS, '').slice(0, 64) : 'refused',
+      ...(record.outcome === 'sent_failed' || record.outcome === 'unknown' ? { outcome: record.outcome, note: 'The question had already left the user\'s computer when this failed, so it may have been charged; say so, and do not ask it again without asking the user.' } : {}),
       message,
     },
   };

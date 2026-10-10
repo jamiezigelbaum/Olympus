@@ -65,7 +65,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   type Meta = { jobId: string; askKey: string; level: string; cleanup: string; customInstruction: boolean; maxChars: number };
   type Result =
     | { state: 'answered'; answer: string; model: string; level: string; cleanup: string; rewritten: boolean; sent: string; route: string; network: string }
-    | { state: 'refused'; message: string };
+    | { state: 'refused'; message: string; left: boolean; sent: string };
   let info: Meta | null = null;
   // compose | sending | waiting | done | error | gone
   let phase = 'compose';
@@ -360,7 +360,12 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   }
   function readResult(value: Any): Result | null {
     if (!value || typeof value !== 'object' || value.v !== 1) return null;
-    if (value.state === 'refused') return typeof value.message === 'string' ? { state: 'refused', message: value.message } : null;
+    if (value.state === 'refused') {
+      if (typeof value.message !== 'string') return null;
+      // After a send was attempted, only `not_sent` means nothing left; `sent_failed` and `unknown` may have been charged.
+      const left = value.outcome === 'sent_failed' || value.outcome === 'unknown';
+      return { state: 'refused', message: value.message, left, sent: left && typeof value.sent === 'string' ? value.sent : '' };
+    }
     if (value.state !== 'answered' || typeof value.answer !== 'string') return null;
     return {
       state: 'answered',
@@ -601,11 +606,20 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   function doneView(shown: Result): HTMLElement {
     const card = el('div', 'card');
     if (shown.state === 'refused') {
-      card.appendChild(head(T.notSent, true));
+      card.appendChild(head(shown.left ? T.mayHaveLeft : T.notSent, true));
       const text = el('div', 'answer', shown.message);
       text.setAttribute('data-key', 'answer');
       text.setAttribute('tabindex', '-1');
       card.appendChild(text);
+      if (shown.sent) {
+        const toggle = el('button', 'src-toggle', sentOpen ? T.hideSent : T.showSent) as HTMLButtonElement;
+        toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', sentOpen ? 'true' : 'false');
+        toggle.setAttribute('data-key', 'sent-toggle');
+        toggle.addEventListener('click', () => { sentOpen = !sentOpen; focusAfter = 'sent-toggle'; render(); });
+        card.appendChild(toggle);
+        if (sentOpen) card.appendChild(el('pre', 'asked-text', shown.sent));
+      }
       card.appendChild(againButton());
       return card;
     }

@@ -18,9 +18,12 @@
  * pending → ready) and renders it as text only.
  *
  * What the host learns: that a private question was opened at that moment,
- * and how long the panel polled. Never the question, the answer, the level
- * or the model: nothing of those goes back to the host (no tools/call, no
- * widget state, no follow-up message).
+ * how long the panel polled, and the panel's rendered height (it reports its
+ * size to the host like every MCP Apps widget, so the length class of the
+ * outcome is observable: an accepted residual under the owner's 2026-10-07
+ * ruling that sealed content is the bar, not invisibility). Never the
+ * question, the answer, the level or the model: nothing of those goes back
+ * to the host (no tools/call, no widget state, no follow-up message).
  */
 import { CONSULT_ASK_MAX_CHARS } from '../../core/consult-ask.ts';
 
@@ -73,4 +76,13 @@ export type PrivateQuestionResultV1 =
     route: string;
     networkIdentity: 'hidden' | 'visible' | 'not_verified';
   }
-  | { v: 1; state: 'refused'; code: string; message: string };
+  | {
+    v: 1;
+    state: 'refused';
+    code: string;
+    message: string;
+    /** After a send was attempted: 'not_sent', 'sent_failed' (spending may have happened) or 'unknown' (it may have reached the provider). */
+    outcome?: 'not_sent' | 'sent_failed' | 'unknown';
+    /** The prepared question, when one was prepared. */
+    sent?: string;
+  };

@@ -1933,8 +1933,10 @@ export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   title: 'Private question',
   /** The muted line under the title while composing and once answered. */
   notSeen: 'ChatGPT does not see this question or its answer. It goes out anonymously through zkAPI from your computer.',
-  /** The muted line when the ask was refused on the computer. */
+  /** The muted line when the ask was refused before anything left the computer. */
   notSent: 'Nothing was sent.',
+  /** The send was attempted and failed afterwards: it may have reached the provider and been charged. */
+  mayHaveLeft: 'The question left your computer but no answer came back. It may have been charged; check before asking again.',
   questionLabel: 'Your question',
   strict: 'Strict',
   strictHint: 'Your own model rewrites it into general questions first, so nothing identifying can leave.',

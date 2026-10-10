@@ -277,5 +277,12 @@ export function resultOf(outcome: ConsultAskResult): PrivateQuestionResultV1 {
       networkIdentity: outcome.networkIdentity,
     };
   }
-  return { v: 1, state: 'refused', code: outcome.code, message: outcome.message };
+  return {
+    v: 1,
+    state: 'refused',
+    code: outcome.code,
+    message: outcome.message,
+    ...(outcome.outcome !== undefined ? { outcome: outcome.outcome } : {}),
+    ...(outcome.sent !== undefined ? { sent: outcome.sent } : {}),
+  };
 }

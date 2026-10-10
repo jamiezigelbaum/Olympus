@@ -282,7 +282,21 @@ describe('asking', () => {
     await host.until(() => host.text().includes('spending limit'), 'the refusal');
     expect(host.asks[0]!.opened).toEqual({ v: 1, question: 'q', level: 'standard', cleanup: 'custom' });
     expect(host.text()).toContain(W.notSent);
+    expect(host.text()).not.toContain(W.mayHaveLeft);
     expectNothingLeaked(host);
+
+    // A send that failed after the question left is never called "not sent": the panel says it may have been charged and shows what left.
+    const left: PrivateQuestionResultV1 = { v: 1, state: 'refused', code: 'session_spent', message: 'The session ended before a reply.', outcome: 'unknown', sent: 'What options does a tenant usually have?' };
+    const leftHost = mount({ engine, result: left });
+    leftHost.push({ content: [], _meta: metaFor(engine) });
+    type(leftHost, 'q');
+    leftHost.button(W.send).click();
+    await leftHost.until(() => leftHost.text().includes('before a reply'), 'the failed send');
+    expect(leftHost.text()).toContain(W.mayHaveLeft);
+    expect(leftHost.text()).not.toContain(W.notSent);
+    leftHost.button(W.showSent).click();
+    expect(leftHost.text()).toContain('tenant usually have');
+    expectNothingLeaked(leftHost);
   });
 
   test('a re-mount while the answer is on its way collects it with the kept key instead of asking again', async () => {

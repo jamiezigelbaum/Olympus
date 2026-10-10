@@ -249,6 +249,8 @@ describe('the jobs: begin → ask → collect', () => {
       v: 1, state: 'answered', answer: 'Negotiate, or move.', level: 'standard', cleanup: 'as_written', rewritten: false, route: 'zkapi', networkIdentity: 'hidden',
     });
     expect(resultOf({ ok: false, code: 'needs_choice', message: 'm', options: {} as never })).toEqual({ v: 1, state: 'refused', code: 'needs_choice', message: 'm' });
+    // A send that failed after the question left carries the transport's outcome and what left.
+    expect(resultOf({ ok: false, code: 'session_spent', message: 'm', sent: 'What left?', outcome: 'sent_failed' })).toEqual({ v: 1, state: 'refused', code: 'session_spent', message: 'm', outcome: 'sent_failed', sent: 'What left?' });
   });
 });
 
