@@ -605,6 +605,12 @@ describe('private answer collection', () => {
     expect(workerA.requests[1]!.path.endsWith(`/private/${jobId}/ask`)).toBe(true);
     expect((await ask('x'.repeat(16_385))).status).toBe(413);
     expect(workerA.requests).toHaveLength(2);
+    // Ask another (`/another`) is forwarded like a collection, with the key-sized cap.
+    const another = (body: string) => fetch(`${relay.url}/private/${jobId}/another`, { method: 'POST', headers: { 'content-type': 'application/json', origin: PANEL }, body });
+    expect((await another('x'.repeat(600))).status).toBe(413);
+    expect((await another('{"v":1}')).status).not.toBe(413);
+    expect(workerA.requests).toHaveLength(3);
+    expect(workerA.requests[2]!.path.endsWith(`/private/${jobId}/another`)).toBe(true);
     expect(workerB.requests).toHaveLength(0);
 
     const logs = logLines.join('\n');

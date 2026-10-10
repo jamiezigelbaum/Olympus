@@ -21,6 +21,7 @@
 import { PRIVATE_QUESTION_META_KEY } from '../../chatgpt/private-question-contract.ts';
 import { DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY } from '../vocabulary.ts';
 import { CHATGPT_PRIVATE_ANSWER_CSS, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_KEY_STORE } from './private-answer.ts';
+import { chatgptMarkdownRender } from './markdown.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -67,7 +68,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     | { state: 'answered'; answer: string; model: string; level: string; cleanup: string; rewritten: boolean; sent: string; route: string; network: string }
     | { state: 'refused'; message: string; left: boolean; sent: string };
   let info: Meta | null = null;
-  // compose | sending | waiting | done | error | gone
+  // compose | sending | waiting | done | error | opening | gone
   let phase = 'compose';
   let result: Result | null = null;
   let errorText = '';
@@ -134,23 +135,30 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   });
 
   // ---- the tool result ---------------------------------------------------
+  function readMeta(value: Any): Meta | null {
+    if (!(value && typeof value === 'object' && value.v === 1 && typeof value.jobId === 'string' && JOB_ID.test(value.jobId)
+      && typeof value.askKey === 'string' && /^[A-Za-z0-9_-]{87}$/.test(value.askKey))) return null;
+    return {
+      jobId: value.jobId,
+      askKey: value.askKey,
+      level: value.level === 'strict' ? 'strict' : 'standard',
+      cleanup: value.cleanup === 'light_cleanup' || value.cleanup === 'custom' ? value.cleanup : 'as_written',
+      customInstruction: value.customInstruction === true,
+      maxChars: typeof value.maxChars === 'number' && isFinite(value.maxChars) && value.maxChars > 0 ? Math.floor(value.maxChars) : 4000,
+    };
+  }
   function accept(meta: Any, quiet?: boolean): void {
     const value = meta && typeof meta === 'object' ? meta[config.metaKey] : undefined;
     if (value === undefined && info) return;
-    let next: Meta | null = null;
-    if (value && typeof value === 'object' && value.v === 1 && typeof value.jobId === 'string' && JOB_ID.test(value.jobId)
-      && typeof value.askKey === 'string' && /^[A-Za-z0-9_-]{87}$/.test(value.askKey)) {
-      next = {
-        jobId: value.jobId,
-        askKey: value.askKey,
-        level: value.level === 'strict' ? 'strict' : 'standard',
-        cleanup: value.cleanup === 'light_cleanup' || value.cleanup === 'custom' ? value.cleanup : 'as_written',
-        customInstruction: value.customInstruction === true,
-        maxChars: typeof value.maxChars === 'number' && isFinite(value.maxChars) && value.maxChars > 0 ? Math.floor(value.maxChars) : 4000,
-      };
-    }
+    const next = readMeta(value);
     if (info && next && info.jobId === next.jobId) return;
     if (!info && !next) return;
+    start(next, !quiet || !!next);
+    // A re-mount after the question went: collect instead of asking again. After Ask another, follow to the newest job.
+    if (next) void resume(next.jobId, 0);
+  }
+  /** Fresh state for a job (or none): the compose view. */
+  function start(next: Meta | null, draw: boolean): void {
     run++;
     info = next;
     phase = 'compose';
@@ -162,19 +170,65 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     cleanup = next ? next.cleanup : '';
     sentOpen = false;
     pair = null;
-    if (!quiet || next) render();
-    // A re-mount after the question went: collect instead of asking again.
-    if (next) void resume(next.jobId);
+    if (draw) render();
   }
 
-  async function resume(jobId: string): Promise<void> {
+  async function resume(jobId: string, depth: number): Promise<void> {
     const mine = run;
     const kept = await keptKey(jobId);
-    if (mine !== run || !kept || !kept.asked) return;
+    if (mine !== run || !kept) return;
+    if (kept.next && depth < 20) {
+      // This job was followed by Ask another: show the newest one.
+      const following = await keptKey(kept.next.jobId);
+      if (mine !== run) return;
+      if (following || depth === 0) {
+        start(kept.next, true);
+        void resume(kept.next.jobId, depth + 1);
+        return;
+      }
+    }
+    if (!kept.asked) return;
     pair = { jobId, privateKey: kept.privateKey, publicKey: kept.publicKey };
     phase = 'waiting';
     render();
     void collect(false);
+  }
+
+  /** Ask another: a new job from this computer for the same panel, in place; otherwise the host's way (a new panel). */
+  async function another(): Promise<void> {
+    if (!info || !pair || phase !== 'done') return;
+    const mine = ++run;
+    const jobId = info.jobId;
+    const keys = pair;
+    phase = 'opening';
+    render();
+    try {
+      const controller = typeof (window as Any).AbortController === 'function' ? new (window as Any).AbortController() as AbortController : null;
+      const response = await bounded<Response>((window as Any).fetch(config.relayOrigin + '/private/' + jobId + '/another', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
+        ...(controller ? { signal: controller.signal } : {}),
+      }), config.requestTimeoutMs, controller);
+      let body: Any = null;
+      try { body = await response.json(); } catch { body = null; }
+      if (mine !== run) return;
+      const next = response.status === 200 && body && body.status === 'opened' ? readMeta(body.meta) : null;
+      if (!next) {
+        phase = 'gone';
+        render();
+        return;
+      }
+      await keepKey(jobId, keys.privateKey, keys.publicKey, true, next);
+      if (mine !== run) return;
+      start(next, true);
+      focusAfter = 'question';
+      render();
+    } catch {
+      if (mine !== run) return;
+      phase = 'gone';
+      render();
+    }
   }
 
   // ---- crypto ------------------------------------------------------------
@@ -294,7 +348,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       }
     });
   }
-  async function keptKey(jobId: string): Promise<{ privateKey: CryptoKey; publicKey: string; asked: boolean } | null> {
+  async function keptKey(jobId: string): Promise<{ privateKey: CryptoKey; publicKey: string; asked: boolean; next: Meta | null } | null> {
     try {
       const value = await inStore('readwrite', (store) => {
         const read = store.get(jobId);
@@ -309,15 +363,15 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       const fresh = typeof value.createdAt === 'number' && Date.now() - value.createdAt < KS.maxAgeMs;
       if (!fresh || !privateKey || typeof privateKey !== 'object' || privateKey.type !== 'private') return null;
       if (typeof value.publicKey !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(value.publicKey)) return null;
-      return { privateKey, publicKey: value.publicKey, asked: value.asked === true };
+      return { privateKey, publicKey: value.publicKey, asked: value.asked === true, next: readMeta(value.next) };
     } catch {
       return null;
     }
   }
-  async function keepKey(jobId: string, privateKey: CryptoKey, publicKey: string, asked: boolean): Promise<void> {
+  async function keepKey(jobId: string, privateKey: CryptoKey, publicKey: string, asked: boolean, next?: Meta): Promise<void> {
     try {
       await inStore('readwrite', (store) => {
-        store.put({ privateKey, publicKey, asked, createdAt: Date.now() }, jobId);
+        store.put({ privateKey, publicKey, asked, createdAt: Date.now(), ...(next ? { next: { v: 1, ...next } } : {}) }, jobId);
       });
     } catch { /* memory only */ }
     void dropOldKeys();
@@ -624,9 +678,17 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       return card;
     }
     card.appendChild(head(T.notSeen));
-    const text = el('div', 'answer', shown.answer);
+    const text = el('div', 'answer');
     text.setAttribute('data-key', 'answer');
     text.setAttribute('tabindex', '-1');
+    // Rendered Markdown (text-built nodes, never HTML); plain text when the renderer is missing.
+    const markdown = (window as Any).olympusMarkdown;
+    if (typeof markdown === 'function') {
+      text.className = 'answer md';
+      markdown(doc, text, shown.answer);
+    } else {
+      text.textContent = shown.answer;
+    }
     card.appendChild(text);
     const how = shown.level === 'strict'
       ? T.howStrict
@@ -652,11 +714,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     const button = el('button', 'btn', T.askAnother) as HTMLButtonElement;
     button.type = 'button';
     button.setAttribute('data-key', 'again');
-    button.addEventListener('click', () => {
-      // A new question needs a new job (one sealed question per job): the user asks ChatGPT to open one.
-      phase = 'gone';
-      render();
-    });
+    button.addEventListener('click', () => { void another(); });
     actions.appendChild(button);
     return actions;
   }
@@ -672,6 +730,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     if (info) {
       if (phase === 'compose' || (phase === 'error' && canRetry)) root.appendChild(composeView(info));
       else if (phase === 'sending') root.appendChild(workingView(T.sending));
+      else if (phase === 'opening') root.appendChild(workingView(T.opening));
       else if (phase === 'waiting') root.appendChild(workingView(T.waiting));
       else if (phase === 'done' && result) root.appendChild(doneView(result));
       else if (phase === 'gone') {
@@ -804,7 +863,7 @@ export function chatgptPrivateQuestionPageHtml(options: ChatGptPrivateQuestionPa
     '</head>',
     '<body>',
     '<div id="panel"></div>',
-    `<script>(${chatgptPrivateQuestionProgram.toString()})(${scriptJson(config)});</script>`,
+    `<script>window.olympusMarkdown=(${chatgptMarkdownRender.toString()});(${chatgptPrivateQuestionProgram.toString()})(${scriptJson(config)});</script>`,
     '</body>',
     '</html>',
     '',
