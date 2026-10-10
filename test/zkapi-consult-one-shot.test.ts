@@ -207,7 +207,7 @@ describe('zkAPI consult transport: one-shot session', () => {
   test('a process that dies while the session is ready ends it with nothing reserved', async () => {
     const session = await openReady();
     writeFileSync(join(configDir, 'kill-tor'), '');
-    expect(await session.finished).toMatchObject({ ok: false, error: { code: 'session_process_exited', outcome: 'not_sent' } });
+    expect(await session.finished).toMatchObject({ ok: false, error: { code: 'session_process_exited', outcome: 'not_sent', receipt: { exited: { role: 'tor', code: 1 } } } });
     expectNothingReserved();
     await expectProcessesGone();
     expect(await session.send(QUESTION)).toMatchObject({ kind: 'failed', error: { code: 'session_spent' } });

@@ -103,6 +103,8 @@ import {
   doctorDeps,
   zkapiCheck,
   useZkapiHarness,
+  openReady,
+  expectProcessesGone,
 } from './helpers/zkapi-transport-harness.ts';
 
 useZkapiHarness();
@@ -439,9 +441,15 @@ describe('zkAPI consult transport: verification refusals', () => {
     expect(completions()).toEqual([]);
   }, SLOW);
 
-  test('a Tor client that dies after bootstrap ends the session', async () => {
+  test('a Tor client that dies after bootstrap ends the session, and the receipt says which process, how and when', async () => {
     writePlan({ torDiesAfterMs: 150, startDelayMs: 600 });
-    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: false, error: { code: 'session_process_exited', outcome: 'not_sent' } });
+    const result = await sendZkapiConsult(QUESTION, transport());
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'session_process_exited', outcome: 'not_sent', receipt: { exited: { role: 'tor', code: 1, stage: expect.any(String) } } },
+    });
+    expect(result.ok ? '' : result.error.message).toMatch(/^The Tor client of this session stopped unexpectedly \(exit code 1\) (while|during) /);
+    expect(ledger().lastSession).toMatchObject({ result: 'session_process_exited', exited: { role: 'tor', code: 1 } });
     expect(completions()).toEqual([]);
   }, SLOW);
 
@@ -1154,4 +1162,46 @@ describe('a session record left behind: readiness and the engine\'s in-flight ch
     expect(ready.stranded).toMatchObject({ supervisorRunning: true, groups: [{ role: 'tor', state: 'gone' }, { role: 'daemon', state: 'gone' }] });
     expect(ledger().running).toBeDefined();
   });
+
+  test('a record naming this very process, with no session running here, is a dead one: cleared, never in flight', async () => {
+    writeFileSync(statePath, JSON.stringify({ ...base, running: { ...dead, supervisor: { pid: process.pid } } }));
+    expect(zkapiConsultInFlightOnDisk(statePath)).toBeUndefined();
+    const ready = await zkapiConsultReadiness(transport());
+    expect(ready.stranded).toBeUndefined();
+    expect(ready.blockers).not.toContain('stranded_processes');
+    expect(ledger().running).toBeUndefined();
+  });
+
+  test('readiness in the process that is running the session sees it in flight and never stops it (recovery incident 2026-10-10 18:36Z)', async () => {
+    // The dashboard's status poll runs readiness in the worker that supervises
+    // the session. Before this fix the worker called its own pid dead, proved
+    // the live groups "ours" and SIGTERMed them: the recovery died 12 s into
+    // Tor's bootstrap as session_process_exited.
+    const session = await openReady();
+    expect(ledger().running).toMatchObject({ supervisor: { pid: process.pid } });
+    expect(zkapiConsultInFlightOnDisk(statePath)).toMatchObject({ since: expect.any(String) });
+    const ready = await zkapiConsultReadiness(transport());
+    expect(ready.blockers).not.toContain('stranded_processes');
+    expect(ready.stranded).toMatchObject({ supervisorRunning: true, groups: [{ role: 'tor', state: 'ours' }, { role: 'daemon', state: 'ours' }] });
+    expect(ledger().running).toBeDefined();
+    expect(await session.send(QUESTION)).toMatchObject({ kind: 'reply' });
+    expect(await session.finished).toMatchObject({ ok: true, receipt: { fence: 'clear' } });
+    expect(zkapiConsultInFlightOnDisk(statePath)).toBeUndefined();
+    expect(ledger().running).toBeUndefined();
+  }, SLOW);
+
+  test('a session stopped from outside names the process, the signal and the stage, with nothing of its output kept', async () => {
+    const session = await openReady();
+    const tor = (ledger().running.groups as Array<{ role: string; pgid: number }>).find((group) => group.role === 'tor')!;
+    process.kill(-tor.pgid, 'SIGTERM');
+    const result = await session.finished;
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'session_process_exited', outcome: 'not_sent', receipt: { exited: { role: 'tor', signal: 'SIGTERM' } } },
+    });
+    expect(result.ok ? '' : result.error.message).toBe('The Tor client of this session stopped unexpectedly (signal SIGTERM). Something else on this computer stopped it.');
+    expect(ledger().lastSession).toMatchObject({ result: 'session_process_exited', exited: { role: 'tor', signal: 'SIGTERM' } });
+    expect(JSON.stringify(ledger().lastSession.exited)).not.toMatch(/Bootstrapped|listening|balance/);
+    await expectProcessesGone();
+  }, SLOW);
 });

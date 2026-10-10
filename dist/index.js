@@ -16895,9 +16895,11 @@ process.stderr.on('error', () => {});
 process.on('uncaughtException', () => cleanup());
 const start = () => {
   child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] });
-  const report = () => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED}\\n'); } catch {} };
-  child.on('exit', (code) => { exitCode = code === null ? 1 : code; report(); cleanup(); });
-  child.on('error', () => { exitCode = 127; report(); cleanup(); });
+  // The child's exit code or signal rides on the marker line: the only facts
+  // kept about how it ended.
+  const report = (code, signal) => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED} ' + (typeof code === 'number' ? code : '-') + ' ' + (signal || '-') + '\\n'); } catch {} };
+  child.on('exit', (code, signal) => { exitCode = code === null ? 1 : code; report(code, signal); cleanup(); });
+  child.on('error', () => { exitCode = 127; report(127, null); cleanup(); });
 };
 let received = '';
 process.stdin.setEncoding('utf8');
@@ -16963,9 +16965,11 @@ function recordedGroupState(group, recordedBootId) {
     return "unknown";
   return group.leader.startTime === current.startTime ? "ours" : "gone";
 }
-function supervisorAlive(supervisor) {
+var activeSessionId;
+function supervisorAlive(running) {
+  const { supervisor } = running;
   if (supervisor.pid === process.pid)
-    return false;
+    return running.sessionId === activeSessionId;
   const boot = currentBootId();
   if (supervisor.instance?.bootId && boot && supervisor.instance.bootId !== boot)
     return false;
@@ -16984,7 +16988,7 @@ async function recoverStrandedGroups(statePath, now) {
   const running = readState(statePath)?.running;
   if (!running)
     return "clear";
-  if (supervisorAlive(running.supervisor))
+  if (supervisorAlive(running))
     return "busy";
   const recordedBoot = running.supervisor.instance?.bootId;
   let allGone = true;
@@ -17169,7 +17173,7 @@ async function zkapiConsultReadiness(options) {
     fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));
     unresolvedSession = fences.length > 0;
     if (state?.running) {
-      const supervisorRunning = supervisorAlive(state.running.supervisor);
+      const supervisorRunning = supervisorAlive(state.running);
       const outcome = supervisorRunning ? "busy" : await recoverStrandedGroups(statePath, now);
       if (outcome !== "clear") {
         const recordedBoot = state.running.supervisor.instance?.bootId;
@@ -17219,6 +17223,29 @@ async function zkapiConsultReadiness(options) {
   };
 }
 var SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomplete"]);
+var EXIT_STAGE_NAMES = {
+  leaseAcquireMs: "before the session lease was held",
+  confinementSelfTestMs: "during the confinement self-test",
+  torBootstrapMs: "while Tor was starting",
+  daemonReadyMs: "while the daemon was starting",
+  daemonVerifyMs: "while the daemon was being checked",
+  policyWarmMs: "while the daemon loaded its model policy",
+  reservationMs: "while the request was being reserved",
+  dispatchToFirstByteMs: "while the request was out",
+  firstByteToCompletionMs: "while the reply was being read",
+  correlationWaitMs: "while waiting for the daemon to correlate the request",
+  settlementWaitMs: "while waiting for the payment to settle",
+  torStopMs: "while Tor was being stopped",
+  postStopProbeMs: "during the post-stop probe",
+  teardownMs: "during teardown"
+};
+function zkapiProcessExitMessage(exit) {
+  const who = exit.role === "tor" ? "The Tor client" : "The zkAPI daemon";
+  const how = exit.signal ? ` (signal ${exit.signal})` : exit.code !== undefined ? ` (exit code ${exit.code})` : "";
+  const when = exit.stage && EXIT_STAGE_NAMES[exit.stage] ? ` ${EXIT_STAGE_NAMES[exit.stage]}` : "";
+  const outside = exit.signal ? " Something else on this computer stopped it." : "";
+  return `${who} of this session stopped unexpectedly${how}${when}.${outside}`;
+}
 
 // src/core/engine-service.ts
 var ENGINE_LABEL = "ai.olympusplugin.engine";
@@ -19775,7 +19802,7 @@ function describeZkapiReadiness(readiness) {
   const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts its model's hold, up to $6.00)`;
   const fence = readiness.fences.length > 0 ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ""})` : ""}${entry.thisWallet ? ", this wallet" : ", another wallet"}`).join("; ")}; run a recovery-only session before another consult` : "no unresolved session";
   const stranded = readiness.stranded ? readiness.stranded.supervisorRunning ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})` : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(", ") || "no group recorded"}` : "";
-  const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}${stageTimings(readiness.lastSession.stageMs)}` : "no consult run yet";
+  const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}${stageTimings(readiness.lastSession.stageMs)}${readiness.lastSession.exited ? `; ${zkapiProcessExitMessage(readiness.lastSession.exited)}` : ""}` : "no consult run yet";
   const blockers = readiness.blockers.length > 0 ? `; not ready: ${readiness.blockers.join(", ")}` : "; ready";
   return `${daemon}; ${tor}; ${confinement}; ${ports}; ${key}; ${acks}; ${expiryText}${deposit}; ${usage}; ${fence}${stranded}; balance, fee quotes and on-chain expiry not available from the daemon; ${last}; route: ${readiness.routeLabel}${blockers}`;
 }
