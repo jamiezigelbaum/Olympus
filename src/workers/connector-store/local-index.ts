@@ -2445,7 +2445,7 @@ export class LocalConnectorStore {
         throw new Error('Connector store read-only mode requires a regular non-symlink database file.');
       }
     } else if (this.dbPath !== ':memory:') {
-      mkdirSync(dirname(this.dbPath), { recursive: true });
+      mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }

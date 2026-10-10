@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -182,6 +182,43 @@ describe('native Olympus worker service', () => {
       OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: 'false',
       OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/opt/olympus/sovereignty.json',
     });
+  });
+
+  test('hands the plugin remote section to the worker and drops an inherited one', async () => {
+    const fixture = fakeWorkerFixture();
+    const pluginConfig = fixture.pluginConfig(true);
+    pluginConfig.remote = {
+      enabled: true,
+      demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$fixture' },
+    };
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: pluginConfig,
+      moduleUrl: import.meta.url,
+      startupTimeoutMs: 20_000,
+      readinessPollMs: 20,
+      stopGraceMs: 100,
+      workerEnvPath: fixture.envFilePath,
+    }));
+    await service.start({});
+    expect(JSON.parse(JSON.parse(readFileSync(fixture.configEnvPath, 'utf8')).OLYMPUS_NATIVE_REMOTE_CONFIG_JSON)).toEqual({
+      enabled: true,
+      demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$fixture' },
+    });
+    await service.stop();
+
+    // No remote in the plugin config: a value from worker.env never reaches the child.
+    const bare = fakeWorkerFixture();
+    appendFileSync(bare.envFilePath, 'OLYMPUS_NATIVE_REMOTE_CONFIG_JSON={"demoConsent":{"enabled":true}}\n');
+    const bareService = track(createNativeWorkerService({
+      initialPluginConfig: bare.pluginConfig(true),
+      moduleUrl: import.meta.url,
+      startupTimeoutMs: 20_000,
+      readinessPollMs: 20,
+      stopGraceMs: 100,
+      workerEnvPath: bare.envFilePath,
+    }));
+    await bareService.start({});
+    expect(JSON.parse(readFileSync(bare.configEnvPath, 'utf8')).OLYMPUS_NATIVE_REMOTE_CONFIG_JSON).toBeUndefined();
   });
 
   test('refuses an inline sovereignty policy instead of starting with different trust rules', async () => {
@@ -493,6 +530,7 @@ writeFileSync(process.env.FAKE_WORKER_CONFIG_ENV_PATH, JSON.stringify(Object.fro
     'OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER',
     'OLYMPUS_SOVEREIGNTY_CONFIG_PATH',
     'OLYMPUS_CREDENTIAL_SYNTHETIC',
+    'OLYMPUS_NATIVE_REMOTE_CONFIG_JSON',
   ].map((key) => [key, process.env[key]]),
 )));
 if (process.env.FAKE_WORKER_EXIT_BEFORE_SERVE === 'true') process.exit(23);

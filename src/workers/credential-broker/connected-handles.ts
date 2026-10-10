@@ -224,7 +224,7 @@ function writeConnectedHandleRegistryWithPreservedUnknowns(
   path: string,
   preservedUnknownHandles: unknown[],
 ): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // This file is the only mapping from handle to its token URL, secret refs and
   // provider account. A torn write does not corrupt one entry -- readers reject
   // the whole file, so every registry-derived handle disappears from the broker

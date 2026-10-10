@@ -193,7 +193,7 @@ export class EncryptedFileSecretStore implements SecretStore {
         tag: cipher.getAuthTag().toString('base64'),
         ciphertext: ciphertext.toString('base64'),
       };
-      mkdirSync(dirname(this.encryptedFilePath), { recursive: true });
+      mkdirSync(dirname(this.encryptedFilePath), { recursive: true, mode: 0o700 });
       // One authenticated blob holds every secret, and it fails to decrypt whole
       // if a single byte is missing -- so a write torn by a restart does not lose
       // one key, it loses the store, and nothing backs this file up.
@@ -221,7 +221,7 @@ export class EncryptedFileSecretStore implements SecretStore {
   }
 
   private localRandomKey(): Buffer {
-    mkdirSync(dirname(this.keyFilePath), { recursive: true });
+    mkdirSync(dirname(this.keyFilePath), { recursive: true, mode: 0o700 });
     if (!existsSync(this.keyFilePath)) {
       // Lose this and the ciphertext written under it is undecryptable, so it is
       // flushed before anything can encrypt against it.

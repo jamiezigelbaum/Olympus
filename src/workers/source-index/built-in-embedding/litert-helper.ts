@@ -268,7 +268,7 @@ function main(): void {
     process.exit(1);
   }
   lib.litert_lm_set_min_log_level(LOG_ERRORS_ONLY);
-  mkdirSync(settings.cacheDir, { recursive: true });
+  mkdirSync(settings.cacheDir, { recursive: true, mode: 0o700 });
   let device: 'gpu' | 'cpu' = 'cpu';
   let engine: Pointer | null = null;
   const wantsVision = settings.visionTokensPerImage !== undefined;
