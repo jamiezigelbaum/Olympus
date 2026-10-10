@@ -501,8 +501,14 @@ async function defaultClearQuarantine(dir: string): Promise<void> {
   });
 }
 
-/** Creates `path` 0700 if missing; otherwise it must be ours, a real folder, and writable by no one else. */
-function ensureOwnedDirectory(path: string, uid: number | undefined, label: string): void {
+/**
+ * Creates `path` 0700 if missing; otherwise it must be ours, a real folder, and
+ * writable by no one else. `repairWriteBits` drops group/other write from a
+ * folder that is already ours instead of refusing it: only for the Olympus
+ * folder itself, which a service under umask 002 used to create 0775
+ * (olympus-test, 2026-10-10). Everything inside it is still checked as-is.
+ */
+function ensureOwnedDirectory(path: string, uid: number | undefined, label: string, options: { repairWriteBits?: boolean } = {}): void {
   try {
     mkdirSync(path, { mode: 0o700 });
   } catch (error) {
@@ -516,6 +522,17 @@ function ensureOwnedDirectory(path: string, uid: number | undefined, label: stri
   }
   if (stats.isSymbolicLink() || !stats.isDirectory()) throw new ManagedToolsError('folder_unsafe', `${label} is not a plain folder.`);
   if (uid !== undefined && stats.uid !== uid) throw new ManagedToolsError('folder_unsafe', `${label} belongs to another user.`);
+  if ((stats.mode & 0o022) !== 0 && options.repairWriteBits === true) {
+    try {
+      chmodSync(path, stats.mode & 0o755);
+      stats = lstatSync(path);
+    } catch {
+      throw new ManagedToolsError('folder_unsafe', `${label} can be changed by other users, and Olympus could not fix that.`);
+    }
+    if (stats.isSymbolicLink() || !stats.isDirectory() || (uid !== undefined && stats.uid !== uid)) {
+      throw new ManagedToolsError('folder_unsafe', `${label} is not a plain folder.`);
+    }
+  }
   if ((stats.mode & 0o022) !== 0) throw new ManagedToolsError('folder_unsafe', `${label} can be changed by other users.`);
 }
 
@@ -540,7 +557,7 @@ export async function installManagedTools(options: ManagedToolsInstallOptions = 
   try {
     // The folder above Olympus's own (Application Support, ~/.local/share) is the system's: created if missing, never re-permissioned.
     mkdirSync(dirname(base), { recursive: true, mode: 0o700 });
-    ensureOwnedDirectory(base, uid, 'The Olympus folder');
+    ensureOwnedDirectory(base, uid, 'The Olympus folder', { repairWriteBits: true });
     ensureOwnedDirectory(root, uid, 'The Olympus tools folder');
   } catch (error) {
     const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError('folder_unsafe', 'Olympus could not prepare its tools folder.');

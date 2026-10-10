@@ -51351,7 +51351,7 @@ async function defaultClearQuarantine(dir) {
     execFile("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve9());
   });
 }
-function ensureOwnedDirectory(path, uid, label) {
+function ensureOwnedDirectory(path, uid, label, options = {}) {
   try {
     mkdirSync23(path, { mode: 448 });
   } catch (error) {
@@ -51368,6 +51368,17 @@ function ensureOwnedDirectory(path, uid, label) {
     throw new ManagedToolsError("folder_unsafe", `${label} is not a plain folder.`);
   if (uid !== undefined && stats.uid !== uid)
     throw new ManagedToolsError("folder_unsafe", `${label} belongs to another user.`);
+  if ((stats.mode & 18) !== 0 && options.repairWriteBits === true) {
+    try {
+      chmodSync13(path, stats.mode & 493);
+      stats = lstatSync14(path);
+    } catch {
+      throw new ManagedToolsError("folder_unsafe", `${label} can be changed by other users, and Olympus could not fix that.`);
+    }
+    if (stats.isSymbolicLink() || !stats.isDirectory() || uid !== undefined && stats.uid !== uid) {
+      throw new ManagedToolsError("folder_unsafe", `${label} is not a plain folder.`);
+    }
+  }
   if ((stats.mode & 18) !== 0)
     throw new ManagedToolsError("folder_unsafe", `${label} can be changed by other users.`);
 }
@@ -51386,7 +51397,7 @@ async function installManagedTools(options = {}) {
   const root = join47(base, "tools");
   try {
     mkdirSync23(dirname32(base), { recursive: true, mode: 448 });
-    ensureOwnedDirectory(base, uid, "The Olympus folder");
+    ensureOwnedDirectory(base, uid, "The Olympus folder", { repairWriteBits: true });
     ensureOwnedDirectory(root, uid, "The Olympus tools folder");
   } catch (error) {
     const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("folder_unsafe", "Olympus could not prepare its tools folder.");
