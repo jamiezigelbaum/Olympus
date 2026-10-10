@@ -6,7 +6,7 @@ description: Help the user install Olympus on their Mac and connect it to ChatGP
 # Set up Olympus on a Mac
 
 Olympus answers from the user's own sources with an engine that runs on their
-Mac. ChatGPT reaches it through `https://mcp.olympusplugin.ai/mcp`, and the
+Mac. ChatGPT reaches it through `https://mcp.olympusplugin.ai/openai/mcp`, and the
 user approves ChatGPT on the Mac with one click.
 
 ## The one install command
