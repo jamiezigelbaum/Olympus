@@ -159,6 +159,18 @@ describe('zkAPI consult transport: fence and recovery', () => {
       .toMatchObject({ ok: false, error: { code: 'acknowledgements_incomplete', receipt: { fence: 'held' } } });
   }, SLOW);
 
+  test('recovery runs without the cost-and-risk statements: it sends nothing of the owner\'s and settles money already held (owner decision 2026-10-10)', async () => {
+    writePlan({ noSettlement: true });
+    await sendZkapiConsult(QUESTION, transport());
+    expect(zkapiUnresolvedSession(statePath)).toBe(true);
+    writePlan({ noSettlement: false, settleDelayMs: 30 });
+    const unaccepted = transport({ settings: settings({ acknowledgements: { version: 0, accepted: [] } }) });
+    // A question is still refused until the statements are accepted again.
+    expect(await sendZkapiConsult(QUESTION, unaccepted)).toMatchObject({ ok: false, error: { code: 'acknowledgements_incomplete', outcome: 'not_sent' } });
+    expect(await recoverZkapiSession(unaccepted)).toMatchObject({ ok: true, receipt: { recovery: true, settlement: 'confirmed', fence: 'clear' } });
+    expect(zkapiUnresolvedSession(statePath)).toBe(false);
+  }, SLOW);
+
   test('a receipt reflects a held fence even when the session is refused before starting', async () => {
     writePlan({ noSettlement: true });
     await sendZkapiConsult(QUESTION, transport());
