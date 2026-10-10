@@ -192,7 +192,9 @@ const UNNAMED = 'Unnamed file';
 const VERDICT_REUSE_MS = 1_000;
 
 interface TokenEntry {
-  /** The opener and the item: one live token per pair. */
+  /**
+   * The opener and the item: one live token per pair.
+   */
   slot: string;
   opener: string;
   item: ExtractionUnreadableItem;
@@ -210,7 +212,9 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
 
   const keyOf = (ref: ExtractionItemRef) => `${ref.corpusId}\u0000${ref.localItemId}`;
 
-  /** The verdict now (a throw counts as Secrets), reused for VERDICT_REUSE_MS. */
+  /**
+   * The verdict now (a throw counts as Secrets), reused for VERDICT_REUSE_MS.
+   */
   function verdictOf(item: ExtractionUnreadableItem, at: number): ExtractionUnreadableVerdict {
     const key = keyOf(item.ref);
     const known = verdicts.get(key);
@@ -234,7 +238,9 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     }
   }
 
-  /** The counted items across these corpora still unreadable now, newest failure first. */
+  /**
+   * The counted items across these corpora still unreadable now, newest failure first.
+   */
   function current(corpusIds: readonly string[], at: number): ExtractionUnreadableItem[] {
     return merged(corpusIds).filter((item) => verdictOf(item, at) === 'unreadable');
   }
