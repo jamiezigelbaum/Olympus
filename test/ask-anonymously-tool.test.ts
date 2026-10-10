@@ -61,6 +61,16 @@ describe('ask_anonymously: operation → worker route → core', () => {
     expect(await ok.json()).toMatchObject({ ok: true, reply: 'y' });
   });
 
+  test('a native host\'s cancellation (no job hand-off) reaches the worker request', async () => {
+    let seen: AbortSignal | undefined;
+    const { ctx } = lane(async (_input, signal) => { seen = signal; return { ok: false, code: 'cancelled', message: 'cancelled' }; });
+    const controller = new AbortController();
+    await ask.handler({ ...ctx, signal: controller.signal }, { question: 'x', level: 'standard' });
+    expect(seen!.aborted).toBe(false);
+    controller.abort();
+    expect(seen!.aborted).toBe(true);
+  });
+
   test('the caller\'s cancellation reaches the core through the client and the route', async () => {
     let seen: AbortSignal | undefined;
     const { ctx } = lane(async (_input, signal) => { seen = signal; return { ok: false, code: 'cancelled', message: 'cancelled' }; });

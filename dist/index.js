@@ -20786,7 +20786,7 @@ var operations = [
         ...signal ? { signal } : {}
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? jobs.registry.run(jobs, ask) : ask();
+      return jobs ? jobs.registry.run(jobs, ask) : ask(ctx.signal);
     }
   }
 ];
@@ -21814,7 +21814,7 @@ function nativeToolFromOperation(operation, ctx) {
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted?.();
       try {
-        const result = await operation.handler(ctx, asParams(params));
+        const result = await operation.handler(signal ? { ...ctx, signal } : ctx, asParams(params));
         return operationResult(operation, result);
       } catch (error) {
         if (error instanceof OperationError)

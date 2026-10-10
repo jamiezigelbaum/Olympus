@@ -47,6 +47,12 @@ export interface OperationContext {
    * hands off to a background job; without it, it waits as it always has.
    */
   sourceAnswerJobs?: SourceAnswerJobScope;
+  /**
+   * The calling surface's cancellation for this one call (OpenClaw's tool
+   * signal). An ask without a job hand-off runs under it, so a cancel before
+   * dispatch sends nothing and reserves nothing.
+   */
+  signal?: AbortSignal;
   /** Test seam for olympus_doctor's host check; production probes this machine. */
   doctorHostProbe?: () => DoctorHostFacts;
 }
@@ -608,7 +614,7 @@ export const operations: Operation[] = [
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? jobs.registry.run(jobs, ask) : ask();
+      return jobs ? jobs.registry.run(jobs, ask) : ask(ctx.signal);
     },
   },
 ];

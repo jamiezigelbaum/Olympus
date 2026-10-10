@@ -66120,7 +66120,7 @@ var init_operations = __esm(() => {
           ...signal ? { signal } : {}
         });
         const jobs = ctx.sourceAnswerJobs;
-        return jobs ? jobs.registry.run(jobs, ask) : ask();
+        return jobs ? jobs.registry.run(jobs, ask) : ask(ctx.signal);
       }
     }
   ];

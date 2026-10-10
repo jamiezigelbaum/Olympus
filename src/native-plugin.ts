@@ -225,7 +225,9 @@ function nativeToolFromOperation(operation: Operation, ctx: OperationContext): N
     async execute(_toolCallId, params, signal) {
       signal?.throwIfAborted?.();
       try {
-        const result = await operation.handler(ctx, asParams(params));
+        // The host's cancellation reaches the operation (ask_anonymously
+        // stops before dispatch under it; nothing paid after a cancel).
+        const result = await operation.handler(signal ? { ...ctx, signal } : ctx, asParams(params));
         return operationResult(operation, result);
       } catch (error) {
         if (error instanceof OperationError) return errorResult(error);
