@@ -45,6 +45,15 @@ export const DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900;
  * not the CLI, so the oldest tickets are pruned first.
  */
 export const DASHBOARD_LAUNCH_MAX_TICKETS = 32;
+/**
+ * A remote opening ticket (`olympus_open_remote`): the owner's assistant runs
+ * the tunnel and the open within a minute, so it lives two minutes, and it
+ * passes through an agent transcript, so minting one revokes any earlier
+ * remote ticket not yet redeemed (review of 2026-10-10).
+ */
+export const DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120;
+/** `POST /dashboard/control/launch?purpose=remote` mints a remote ticket. */
+export const DASHBOARD_LAUNCH_REMOTE_PURPOSE = 'remote';
 
 export interface DashboardLaunchTicketStoreOptions {
   now?: () => number;
@@ -69,6 +78,7 @@ export type DashboardLaunchTicketConsumeResult =
 interface DashboardLaunchTicketRecord {
   expiresAtMs: number;
   originTag: string;
+  remote?: true;
 }
 
 /**
@@ -90,11 +100,26 @@ export class DashboardLaunchTickets {
     }
   }
 
-  mint(origin: string): string {
-    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
-    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
+  /**
+   * `remote`: a two-minute ticket, and any earlier remote ticket still
+   * outstanding is revoked first, so at most one is ever live.
+   */
+  mint(origin: string, options: { remote?: boolean } = {}): string {
+    const nowMs = this.now();
+    this.prune(nowMs);
+    if (options.remote === true) {
+      for (const [ticket, record] of this.tickets) {
+        if (record.remote) this.tickets.delete(ticket);
+      }
+    }
+    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
+    const expiresAtMs = nowMs + ttlSeconds * 1000;
     const ticket = randomBytes(32).toString('base64url');
-    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
+    this.tickets.set(ticket, {
+      expiresAtMs,
+      originTag: dashboardLaunchOriginTag(origin),
+      ...(options.remote === true ? { remote: true as const } : {}),
+    });
     // Boundary is inclusive enough to be simple: an evicted ticket is no worse
     // than a spent one, and both are refusals the caller already handles.
     while (this.tickets.size > this.maxTickets) {

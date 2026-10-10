@@ -104,22 +104,33 @@ sides.
 
 `src/core/remote-open-tool.ts`. Native OpenClaw surface only.
 
-- **Owner only.** The native tool factory sets `ownerAgentSession` from
-  OpenClaw's own `senderIsOwner` for each call; nothing else sets it and it
-  is never read from params. A non-owner sender (a group member, a forwarded
-  message) is refused.
+- **Owner, in a direct chat.** The native tool factory sets
+  `ownerAgentSession` for each call from OpenClaw's own tool context
+  (`isOwnerDirectTurn`): `senderIsOwner` must be true AND the session key
+  must be a direct session, not a cron, sub-agent, ACP, hook, group or
+  channel run; no session key is refused. Nothing else sets it and it is
+  never read from params. OpenClaw does not tell a plugin tool what
+  triggered the turn (its tool context has no trigger or run kind), so a
+  heartbeat in the owner's main session cannot be told apart; see the
+  residual below.
 - **Closed target list.** `target` must be one of `core/open-targets.ts`
   (`dashboard`, `connect/<x|readwise|telegram|whatsapp>`,
   `fix/<connect|reconnect|answers|search|models>`); any other param is
-  refused. A prompt-injected call can at most open one of these screens, and
-  the node still asks the owner before the tunnel starts.
+  refused, and so is a `computer` other than `macos`, `linux` or `windows`.
+  A prompt-injected call can at most open one of these screens, and the
+  node still asks the owner before the tunnel starts.
 - **Minted last.** Every refusal (owner, target, params, not a server, engine
   not on loopback) happens before the ticket is minted; nothing logs the link
   or puts it in an error.
-- **Returns** the link (single use, 15 minutes), the engine port, where it
-  lands (`/dashboard?keys` for Keys targets, else `/dashboard`), the SSH name
-  (or null, with the placeholder to replace), the by-hand lines, and per
-  platform:
+- **A remote ticket.** It is minted with `?purpose=remote`: it lives two
+  minutes (enough to run the tunnel, then open) instead of the CLI's
+  fifteen, and minting one revokes any earlier remote ticket not yet
+  redeemed, so at most one is ever live.
+- **Returns**, for the one `computer` named, the tunnel and open commands
+  (the link appears exactly once, inside `open`; the native result's
+  `details` leave it out), the engine port, where it lands
+  (`/dashboard?keys` for Keys targets, else `/dashboard`), the SSH name (or
+  null, with the placeholder to replace) and the by-hand lines:
   - tunnel: `ssh -f -o ExitOnForwardFailure=yes -L 127.0.0.1:PORT:127.0.0.1:PORT TARGET sleep 1800`
     (bound to 127.0.0.1 only; closes itself once the server-side `sleep`
     ends and the browser's connections close, so there is no kill step to
@@ -146,7 +157,8 @@ The user-facing page is docs/openclaw-node-setup.md.
 
 - **The link is a bearer ticket.** It sits in the exec arguments on the node,
   in the node's approval prompt and logs, and in the agent's transcript on
-  the gateway. It is single use, expires in 15 minutes, and grants only the
+  the gateway. It is single use, expires in 2 minutes, is revoked by the
+  next remote ticket, and grants only the
   control session `olympus dashboard` grants (not the worker token, and never
   the local grade Outside help needs). Its origin binding means it only
   redeems at `http://127.0.0.1:PORT`.
@@ -168,12 +180,17 @@ The user-facing page is docs/openclaw-node-setup.md.
   local mint refusing in remote mode or requiring a secret; that is a
   separate decision (it changes Outside help on servers).
 
-- **Who can trigger it.** Only the owner's own session (OpenClaw's
-  `senderIsOwner`); the tunnel still needs the owner's approval on the node
-  each time.
+- **Who can trigger it.** Only the owner in a direct session (OpenClaw's
+  `senderIsOwner` and a direct session key); the tunnel still needs the
+  owner's approval on the node each time.
 - **Nothing passes through the relay or ChatGPT.** Keys are typed into the
   dashboard in the owner's own browser. ChatGPT sees the port and, if the
   owner set one, their own SSH name.
-- **Residual:** a document the owner's assistant reads during an owner turn
-  could ask it to run this flow. It can open one of the listed screens and
-  must get past the ssh approval; it cannot pass anything through the link.
+- **Residual (independent review, 2026-10-10):** a document the owner asks
+  the assistant to read during their own direct turn, or a heartbeat run in
+  the owner's main session, could get a ticket minted without the owner
+  asking to open anything; OpenClaw exposes no trigger to tell these apart.
+  What that buys: one ticket, live two minutes, revoked by the next, which
+  redeems only on the engine's loopback port (so only through a tunnel the
+  owner approved on their computer, or on the server itself), and opens one
+  of the listed screens. It cannot pass anything through the link.

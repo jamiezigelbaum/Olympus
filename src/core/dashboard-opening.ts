@@ -23,6 +23,8 @@ export interface DashboardOpeningMintOptions {
   target?: OpenTarget;
   /** How the error hints name the CLI (the CLI passes its own; see olympusCommandHint). */
   commandHint?: string;
+  /** A remote ticket (olympus_open_remote): two minutes, and it revokes any earlier one. */
+  remote?: boolean;
 }
 
 /**
@@ -119,7 +121,7 @@ export async function mintDashboardOpeningUrl(
   const fetchImpl = dependencies.fetchImpl ?? fetch;
   let response: Response;
   try {
-    response = await fetchImpl(`${base}/dashboard/control/launch`, {
+    response = await fetchImpl(`${base}/dashboard/control/launch${dependencies.remote === true ? '?purpose=remote' : ''}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, Origin: base },
       redirect: 'error',

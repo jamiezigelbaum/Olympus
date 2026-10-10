@@ -29773,11 +29773,23 @@ class DashboardLaunchTickets {
       throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
     }
   }
-  mint(origin) {
-    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
-    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
+  mint(origin, options = {}) {
+    const nowMs = this.now();
+    this.prune(nowMs);
+    if (options.remote === true) {
+      for (const [ticket2, record] of this.tickets) {
+        if (record.remote)
+          this.tickets.delete(ticket2);
+      }
+    }
+    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
+    const expiresAtMs = nowMs + ttlSeconds * 1000;
     const ticket = randomBytes2(32).toString("base64url");
-    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
+    this.tickets.set(ticket, {
+      expiresAtMs,
+      originTag: dashboardLaunchOriginTag(origin),
+      ...options.remote === true ? { remote: true } : {}
+    });
     while (this.tickets.size > this.maxTickets) {
       const oldest = this.tickets.keys().next();
       if (oldest.done)
@@ -29816,7 +29828,7 @@ function dashboardLaunchOriginTag(origin) {
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
-var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_LAUNCH_PAGE_HTML;
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_PAGE_HTML;
 var init_dashboard_launch = __esm(() => {
   init_open_targets();
   DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>

@@ -1432,11 +1432,13 @@ Design: `docs/design/remote-access.md`; owner-facing page:
      asks the owner once; tell them to choose Allow once.
    - ask `off` with `allowlist`: ssh would be refused. Tell the owner;
      do not change the node's policy without their explicit yes.
-4. **Test it** with `olympus_open_remote {"target": "dashboard"}`: run the
-   returned `node_commands.<platform>.tunnel` with `exec host=node` (the owner
-   approves it), then `.open`. The dashboard opens unlocked in the owner's
-   browser. Never paste, repeat or store the returned link; it is a one-time
-   ticket.
+4. **Test it**, when the owner asks you to, with
+   `olympus_open_remote {"target": "dashboard", "computer": "macos"}` (or
+   `linux`, `windows`: the node's platform): run the returned `tunnel` with
+   `exec host=node` (the owner approves it), then `open` right away. The
+   dashboard opens unlocked in the owner's browser. Never paste, repeat or
+   store the link inside `open`; it is a one-time ticket that lasts two
+   minutes.
 
 Hermes installs have no node: in step 1 add `--agent-route off`, and skip
 steps 2 to 4; the dashboard then shows the owner only the two lines to copy.

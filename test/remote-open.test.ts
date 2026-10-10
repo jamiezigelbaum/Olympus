@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Window } from 'happy-dom';
 import { mintDashboardOpeningUrl } from '../src/core/dashboard-opening.ts';
-import { DASHBOARD_LAUNCH_PAGE_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from '../src/core/dashboard-launch.ts';
+import { DASHBOARD_LAUNCH_PAGE_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { allOpenTargets, openTargetFromPath, openTargetPath } from '../src/core/open-targets.ts';
 import { exposedOperations } from '../src/core/operation-exposure.ts';
@@ -24,7 +24,7 @@ import {
   remoteOpenNodeCommands,
   resolveServerMode,
 } from '../src/core/remote-open.ts';
-import { OPEN_REMOTE_TOOL_NAME, openRemote } from '../src/core/remote-open-tool.ts';
+import { OPEN_REMOTE_TOOL_NAME, isOwnerDirectTurn, openRemote, openRemoteDetails } from '../src/core/remote-open-tool.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { OLYMPUS_HOST_CONTEXT_KEY, type DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
@@ -148,6 +148,44 @@ describe('the commands the agent runs on the computer', () => {
   });
 });
 
+describe('the owner\'s direct turn (review 2026-10-10, P1)', () => {
+  test('owner and a direct session only; unknown is refused', () => {
+    expect(isOwnerDirectTurn({ senderIsOwner: true, sessionKey: 'agent:main:main' })).toBe(true);
+    expect(isOwnerDirectTurn({ senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:12345' })).toBe(true);
+    expect(isOwnerDirectTurn({ senderIsOwner: false, sessionKey: 'agent:main:main' })).toBe(false);
+    expect(isOwnerDirectTurn({ senderIsOwner: true })).toBe(false);
+    expect(isOwnerDirectTurn(undefined)).toBe(false);
+    for (const key of ['agent:main:cron:job:run:1', 'cron:job', 'agent:main:subagent:x', 'agent:main:subagent:x:subagent:y', 'acp:abc', 'hook:x', 'agent:main:whatsapp:group:1', 'agent:main:discord:channel:2', 'global', 'unknown']) {
+      expect(isOwnerDirectTurn({ senderIsOwner: true, sessionKey: key })).toBe(false);
+    }
+  });
+});
+
+describe('remote opening tickets (review 2026-10-10, P2)', () => {
+  test('two minutes, and a new remote ticket revokes the earlier unredeemed one; ordinary tickets are untouched', () => {
+    let now = 1_000_000;
+    const tickets = new DashboardLaunchTickets({ now: () => now });
+    const origin = 'http://127.0.0.1:8010';
+    const cli = tickets.mint(origin);
+    const first = tickets.mint(origin, { remote: true });
+    const second = tickets.mint(origin, { remote: true });
+    expect(tickets.consume(first, origin)).toEqual({ status: 'unknown' });
+    expect(tickets.consume(second, origin)).toEqual({ status: 'ok', ticket: second });
+    const late = tickets.mint(origin, { remote: true });
+    now += 121_000;
+    expect(tickets.consume(late, origin)).toEqual({ status: 'expired' });
+    // The CLI's own ticket keeps its fifteen minutes.
+    expect(tickets.consume(cli, origin)).toEqual({ status: 'ok', ticket: cli });
+  });
+
+  test('the native result carries the link once: in the text, never in details', async () => {
+    const payload = { ok: true, open: `open 'http://127.0.0.1:8010/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${TICKET}'`, tunnel: 'ssh …' };
+    const details = openRemoteDetails(payload) as Record<string, unknown>;
+    expect(details).toEqual({ ok: true, tunnel: 'ssh …' });
+    expect(JSON.stringify(details)).not.toContain(TICKET);
+  });
+});
+
 describe('olympus_open_remote', () => {
   function mintFetch(calls: string[]) {
     return (async (input: RequestInfo | URL) => {
@@ -170,41 +208,54 @@ describe('olympus_open_remote', () => {
 
   test('gives the owner\'s session the link, the port, where it lands and the exact commands', async () => {
     const calls: string[] = [];
-    const result = await openRemote({ config: config(), ownerAgentSession: true }, { target: 'connect/x' }, serverDeps(calls));
-    expect(calls).toEqual(['http://127.0.0.1:8123/dashboard/control/launch']);
+    const result = await openRemote({ config: config(), ownerAgentSession: true }, { target: 'connect/x', computer: 'macos' }, serverDeps(calls));
+    // A remote ticket: two minutes, and it revokes any earlier one (the worker's mint route).
+    expect(calls).toEqual(['http://127.0.0.1:8123/dashboard/control/launch?purpose=remote']);
+    const link = `http://127.0.0.1:8123/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${TICKET}&olympus_open=connect.x`;
     expect(result).toMatchObject({
       ok: true,
       target: 'connect/x',
       lands_on: '/dashboard?keys',
-      link: `http://127.0.0.1:8123/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${TICKET}&olympus_open=connect.x`,
+      computer: 'macos',
+      tunnel: 'ssh -f -o ExitOnForwardFailure=yes -L 127.0.0.1:8123:127.0.0.1:8123 jamie@sparta sleep 1800',
+      tunnel_in_background: false,
+      open: `open '${link}'`,
       link_single_use: true,
-      link_expires_in_seconds: 900,
+      link_expires_in_seconds: 120,
       engine_port: 8123,
       ssh_target: 'jamie@sparta',
       by_hand: { onComputer: 'ssh -N -L 8123:127.0.0.1:8123 jamie@sparta', onServer: 'olympus dashboard --no-open --target connect/x' },
     });
-    const commands = result.node_commands as Record<string, { tunnel: string }>;
-    expect(commands.macos!.tunnel).toBe('ssh -f -o ExitOnForwardFailure=yes -L 127.0.0.1:8123:127.0.0.1:8123 jamie@sparta sleep 1800');
+    // The link appears exactly once in the result: inside open, nowhere else.
+    expect(JSON.stringify(result).split(TICKET).length - 1).toBe(1);
+    expect(result).not.toHaveProperty('link');
+    expect(result).not.toHaveProperty('node_commands');
     expect(JSON.stringify(result)).not.toContain(TOKEN);
+    const windows = await openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard', computer: 'windows' }, serverDeps([]));
+    expect(windows.tunnel_in_background).toBe(true);
+    expect(String(windows.open).startsWith('cmd /c start "" "')).toBe(true);
   });
 
   test('without a known SSH name, says so and leaves the placeholder to replace', async () => {
-    const result = await openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard' }, serverDeps([], { OLYMPUS_SERVER_MODE: 'on' }));
+    const result = await openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard', computer: 'linux' }, serverDeps([], { OLYMPUS_SERVER_MODE: 'on' }));
     expect(result.ssh_target).toBeNull();
-    expect((result.node_commands as Record<string, { tunnel: string }>).linux!.tunnel).toContain(' you@your-server ');
+    expect(String(result.tunnel)).toContain(' you@your-server ');
     expect(result.lands_on).toBe('/dashboard');
   });
 
   test('refuses before minting anything: not the owner, an unknown place, extra params, not a server, not loopback', async () => {
     const calls: string[] = [];
-    await expect(openRemote({ config: config() }, { target: 'dashboard' }, serverDeps(calls))).rejects.toThrow(/owner's own assistant/);
-    await expect(openRemote({ config: config(), ownerAgentSession: false }, { target: 'dashboard' }, serverDeps(calls))).rejects.toThrow(/owner/);
-    await expect(openRemote({ config: config(), ownerAgentSession: true }, { target: 'connect/evil' }, serverDeps(calls))).rejects.toThrow(/target must be one of/);
-    await expect(openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard', url: 'http://x' }, serverDeps(calls))).rejects.toThrow(/only "target"/);
-    await expect(openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard' }, serverDeps(calls, { OLYMPUS_SERVER_MODE: 'off' }))).rejects.toThrow(/not on a server/);
+    const ask = { target: 'dashboard', computer: 'macos' };
+    await expect(openRemote({ config: config() }, ask, serverDeps(calls))).rejects.toThrow(/direct chat/);
+    await expect(openRemote({ config: config(), ownerAgentSession: false }, ask, serverDeps(calls))).rejects.toThrow(/owner/);
+    await expect(openRemote({ config: config(), ownerAgentSession: true }, { ...ask, target: 'connect/evil' }, serverDeps(calls))).rejects.toThrow(/target must be one of/);
+    await expect(openRemote({ config: config(), ownerAgentSession: true }, { ...ask, computer: 'amiga' }, serverDeps(calls))).rejects.toThrow(/computer must be one of/);
+    await expect(openRemote({ config: config(), ownerAgentSession: true }, { target: 'dashboard' }, serverDeps(calls))).rejects.toThrow(/computer must be one of/);
+    await expect(openRemote({ config: config(), ownerAgentSession: true }, { ...ask, url: 'http://x' }, serverDeps(calls))).rejects.toThrow(/only "target" and "computer"/);
+    await expect(openRemote({ config: config(), ownerAgentSession: true }, ask, serverDeps(calls, { OLYMPUS_SERVER_MODE: 'off' }))).rejects.toThrow(/not on a server/);
     const exposed = config();
     exposed.email.baseUrl = 'http://10.0.0.5:8123/v1';
-    await expect(openRemote({ config: exposed, ownerAgentSession: true }, { target: 'dashboard' }, serverDeps(calls))).rejects.toThrow(/loopback/);
+    await expect(openRemote({ config: exposed, ownerAgentSession: true }, ask, serverDeps(calls))).rejects.toThrow(/loopback/);
     expect(calls).toEqual([]);
   });
 
@@ -229,11 +280,19 @@ describe('olympus_open_remote', () => {
     } as never);
     expect(factory).toBeDefined();
     // A sender who is not the owner (a group member, a forwarded message) gets a refusal.
-    const refused = await factory!({ senderIsOwner: false }).execute('t1', { target: 'dashboard' });
+    const main = 'agent:main:main';
+    const refused = await factory!({ senderIsOwner: false, sessionKey: main }).execute('t1', { target: 'dashboard', computer: 'macos' });
     expect(refused.isError).toBe(true);
     expect(refused.content[0]!.text).toContain('owner');
-    // The owner passes the owner check (and stops at the next one in this test host).
-    const owner = await factory!({ senderIsOwner: true }).execute('t2', { target: 'connect/evil' });
+    // Review 2026-10-10 (P1): the owner bit alone is not enough. A scheduled,
+    // sub-agent, hook or group run, or a turn with no session key, is refused.
+    for (const sessionKey of [undefined, 'agent:main:cron:nightly:run:1', 'agent:main:subagent:abc', 'hook:gmail:1', 'agent:main:telegram:group:42', 'acp:x', 'global']) {
+      const background = await factory!({ senderIsOwner: true, ...(sessionKey ? { sessionKey } : {}) }).execute('t3', { target: 'dashboard', computer: 'macos' });
+      expect(background.isError).toBe(true);
+      expect(background.content[0]!.text).toContain('direct chat');
+    }
+    // The owner in their direct chat passes the owner check (and stops at the next one in this test host).
+    const owner = await factory!({ senderIsOwner: true, sessionKey: main }).execute('t2', { target: 'connect/evil', computer: 'macos' });
     expect(owner.content[0]!.text).toContain('target must be one of');
   });
 });

@@ -1,3 +1,4 @@
+import { OPEN_REMOTE_TOOL_NAME, isOwnerDirectTurn, openRemoteDetails } from './core/remote-open-tool.ts';
 import { createNativeTranscriptionCleanupService } from './core/native-transcription-cleanup-service.ts';
 import { createNativeCreditMonitorService } from './core/native-credit-monitor-service.ts';
 import { backgroundNativeProcessService } from './core/native-process-service.ts';
@@ -85,6 +86,8 @@ interface OpenClawPluginToolContext {
   agentAccountId?: string;
   requesterSenderId?: string;
   senderIsOwner?: boolean;
+  /** The session's key (`agent:<id>:main`, `agent:<id>:cron:…`, `…:subagent:…`); runtime-provided. */
+  sessionKey?: string;
   deliveryContext?: {
     channel?: string;
     to?: string;
@@ -114,7 +117,8 @@ function operationResult(operation: Operation, payload: unknown): NativeToolResu
         text: contentTextForOperation(operation, payload),
       },
     ],
-    details: payload,
+    // The remote opening link appears once, in the text, never again in details.
+    details: operation.name === OPEN_REMOTE_TOOL_NAME ? openRemoteDetails(payload) : payload,
   };
 }
 
@@ -339,10 +343,11 @@ const plugin = {
           });
         }) as unknown as NativeTool);
       } else if (operation.requiresOwnerAgentSession) {
-        // Vouched for by the host only: OpenClaw's senderIsOwner, per call.
+        // Vouched for by the host only, per call: OpenClaw's senderIsOwner, in
+        // a direct session (core/remote-open-tool.ts isOwnerDirectTurn).
         api.registerTool(((toolContext: OpenClawPluginToolContext) => nativeToolFromOperation(operation, {
           ...ctx,
-          ownerAgentSession: toolContext?.senderIsOwner === true,
+          ownerAgentSession: isOwnerDirectTurn(toolContext),
         })) as unknown as NativeTool);
       } else {
         api.registerTool(nativeToolFromOperation(operation, ctx));
