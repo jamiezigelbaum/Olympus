@@ -23,6 +23,7 @@
  * ChatGPT account is v2.
  */
 import type { DashboardStatus, DashboardUnreadableReasonCode } from '../dashboard/vocabulary.ts';
+import type { SourceFailureKind } from '../dashboard/source-failure.ts';
 
 export type ConnectionState = 'not_connected' | 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
 
@@ -84,6 +85,31 @@ export type SourceStalledReason =
  * only (metadata-only folders) are finished once listed: they are never
  * counted as unread.
  */
+/** Why a sync failed or a source is paused: dashboard/source-failure.ts. */
+export type { SourceFailureKind };
+
+/**
+ * What stopped a stalled source (contract v1 addition, 2026-10-10), behind
+ * its row's See why:
+ * - `failing`: its syncs keep failing (`failure`, `failures` in a row, when it
+ *   last worked, when it tries next);
+ * - `paused`: Olympus paused it itself (a daily limit or the provider's rate
+ *   limit), until `nextTryAt`;
+ * - `switched_off`: the `stage` it is stuck at is switched off on the computer;
+ * - `no_movement`: nothing moved for `stillSeconds` and nothing says why.
+ */
+export interface SourceStallDetail {
+  cause: 'failing' | 'paused' | 'switched_off' | 'no_movement';
+  failure?: SourceFailureKind;
+  failures?: number;
+  lastWorkedAt?: string;
+  nextTryAt?: string;
+  stillSeconds?: number;
+  stage?: 'listing' | 'reading' | 'indexing';
+  /** `failure: 'unknown'` only: the reference Olympus's log carries the message under. */
+  ref?: string;
+}
+
 export interface SourceProgress {
   stage: 'listing' | 'reading' | 'indexing' | 'done';
   unit: 'files' | 'messages' | 'items';
@@ -93,6 +119,8 @@ export interface SourceProgress {
   stalled: boolean;
   /** Only when `stalled`, and only when the reason is known. */
   stalledReason?: SourceStalledReason;
+  /** Only when `stalled` on something other than a fix the owner makes (sign-in, folders). */
+  stall?: SourceStallDetail;
 }
 
 export interface DashboardSource {
@@ -145,7 +173,14 @@ export interface DashboardSource {
    * that has not finished yet; `at` is when it started. Sync now answers at
    * once (`olympus_sync_source`), and the result arrives here on a later read.
    */
-  lastManualSync?: { at: string; outcome: ManualSyncOutcome; newItems?: number };
+  lastManualSync?: {
+    at: string;
+    outcome: ManualSyncOutcome;
+    newItems?: number;
+    /** `failed` only: why, and for `unknown` the log reference. */
+    failure?: SourceFailureKind;
+    ref?: string;
+  };
 }
 
 export interface DashboardUnreadable {
@@ -304,8 +339,17 @@ export interface TranscriptionModelView {
   bytesTotal?: number;
   /** `failed` only. */
   failedReason?: ModelInstallFailedReason;
+  /** `load_failed` only (contract v1 addition, 2026-10-10): why it would not start. */
+  loadFailedReason?: ModelLoadFailedReason;
   download?: DashboardFix;
 }
+
+/**
+ * Why a downloaded built-in model would not start, from Olympus's own start-up
+ * errors: its server is missing or incomplete, it stopped while starting, it
+ * took too long to load, another program had its port, or none of those.
+ */
+export type ModelLoadFailedReason = 'not_installed' | 'stopped_while_starting' | 'too_slow' | 'port_taken' | 'unknown';
 
 /** A built-in model's install (contract v1 addition, 2026-10-01). */
 export type ModelInstallState = 'downloading' | 'verifying' | 'ready' | 'failed';

@@ -31,6 +31,7 @@ import {
   dashboardRefusedFirstConnect as refusedFirstConnect,
 } from '../dashboard/shared-status.ts';
 import { dashboardSourceProgress, type DashboardPhase } from '../dashboard/phases.ts';
+import { isSourceFailureKind, sourceFailureKind, sourceFailureRef } from '../dashboard/source-failure.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { BuiltInTranscriptionDashboardState } from '../source-index/built-in-reasoning/transcription-model.ts';
 import {
@@ -45,6 +46,7 @@ import {
   dashboardAttentionLine,
   dashboardIsConnectedSource,
   dashboardManualSyncLine,
+  dashboardOperatorPaused,
   dashboardStatus,
   dashboardSubLine,
   dashboardSyncKeepsFailing,
@@ -79,6 +81,7 @@ import {
   type ModelInstall,
   type ModelInstallFailedReason,
   type SourceProgress,
+  type SourceStallDetail,
   type SourceStalledReason,
   type TranscriptionModelView,
   UNREADABLE_NAMES_IN_RESULT,
@@ -420,6 +423,10 @@ function sourceEntry(
             at: manual.at,
             outcome: manual.outcome,
             ...(manual.new_items !== undefined ? { newItems: manual.new_items } : {}),
+            ...(manual.outcome === 'failed' && isSourceFailureKind(manual.failure_kind) ? { failure: manual.failure_kind } : {}),
+            ...(manual.outcome === 'failed' && manual.failure_kind === 'unknown' && sourceFailureRef(manual.failure_ref)
+              ? { ref: manual.failure_ref! }
+              : {}),
           },
         }
       : {}),
@@ -671,7 +678,58 @@ function measuredSourceProgress(
   }
   const reason = stalledReason({ stage, open, scrubbed, embedding, credentialsMissing });
   const stalled = reason !== undefined || open.state === 'stalled';
-  return { progress: { stage, unit, done, total, percent, stalled, ...(reason ? { stalledReason: reason } : {}) }, counts };
+  const stall = stalled ? stallDetail(card, open, stage, reason, now) : undefined;
+  return {
+    progress: { stage, unit, done, total, percent, stalled, ...(reason ? { stalledReason: reason } : {}), ...(stall ? { stall } : {}) },
+    counts,
+  };
+}
+
+/**
+ * What stopped a stalled source, for its See why (owner rule, 2026-10-10:
+ * never say something is wrong without a way to find out exactly what it is).
+ * Only closed words, counts and times leave: the failure's kind, never its
+ * message; for a failure Olympus could not classify, the reference its log
+ * line carries. None for a stall the row's own fix explains (sign-in,
+ * folders) or the model download.
+ */
+function stallDetail(
+  card: DashboardSourceCard,
+  open: DashboardPhase,
+  stage: Exclude<SourceProgress['stage'], 'done'>,
+  reason: SourceStalledReason | undefined,
+  now: Date,
+): SourceStallDetail | undefined {
+  if (reason !== undefined && reason !== 'provider_unavailable') return undefined;
+  const schedule = card.schedule;
+  const lastWorkedAt = isoOrUndefined(schedule?.last_success_at);
+  const nextRun = isoOrUndefined(schedule?.next_run_at);
+  const nextTryAt = nextRun && Date.parse(nextRun) > now.getTime() ? nextRun : undefined;
+  const timing = { ...(lastWorkedAt ? { lastWorkedAt } : {}), ...(nextTryAt ? { nextTryAt } : {}) };
+  if (dashboardOperatorPaused(card)) {
+    return { cause: 'paused', failure: sourceFailureKind(undefined, schedule?.degraded_reason), ...timing };
+  }
+  const failures = count(schedule?.consecutive_failures ?? 0);
+  if (reason === 'provider_unavailable' || failures > 0) {
+    const failure = sourceFailureKind(schedule?.last_error_kind, schedule?.degraded_reason);
+    const ref = failure === 'unknown' ? sourceFailureRef(schedule?.last_error_hash) : undefined;
+    return { cause: 'failing', failure, ...(failures > 0 ? { failures } : {}), ...timing, ...(ref ? { ref } : {}) };
+  }
+  const drain = card.ingestion_health?.drain_state;
+  if ((open.id === 'embedding' && card.embedding_lane_state === 'embedding_lane_disabled')
+    || (open.id === 'extraction' && (drain === 'held' || drain === 'disabled'))) {
+    return { cause: 'switched_off', stage };
+  }
+  const movedAt = isoOrUndefined(open.id === 'metadata_sync'
+    ? card.movement?.metadata_sync_at
+    : open.id === 'extraction' ? card.movement?.extraction_at : card.movement?.embedding_at);
+  const stillSeconds = movedAt ? Math.max(0, Math.floor((now.getTime() - Date.parse(movedAt)) / 1000)) : undefined;
+  return {
+    cause: 'no_movement',
+    stage,
+    ...(stillSeconds !== undefined ? { stillSeconds } : {}),
+    ...(movedAt ? { lastWorkedAt: movedAt } : lastWorkedAt ? { lastWorkedAt } : {}),
+  };
 }
 
 function stalledReason(input: {
@@ -758,6 +816,7 @@ function transcriptionModel(state: BuiltInTranscriptionDashboardState | undefine
     }
   }
   if (state.state === 'failed') out.failedReason = state.failedReason ?? 'unknown';
+  if (state.state === 'load_failed') out.loadFailedReason = state.loadFailedReason ?? 'unknown';
   const label = state.state === 'load_failed'
     ? DASHBOARD_CHATGPT_PICKER_COPY.tryAgain
     : TRANSCRIPTION_DOWNLOADABLE.has(state.state) ? DASHBOARD_CHATGPT_PAGE_COPY.modelDownloadNow : undefined;
@@ -1082,6 +1141,8 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
             at: isoOrUndefined(card.last_manual_sync.at)!,
             outcome: card.last_manual_sync.outcome,
             ...(finite(card.last_manual_sync.new_items) ? { new_items: count(card.last_manual_sync.new_items) } : {}),
+            ...(isSourceFailureKind(card.last_manual_sync.failure_kind) ? { failure_kind: card.last_manual_sync.failure_kind } : {}),
+            ...(sourceFailureRef(card.last_manual_sync.failure_ref) ? { failure_ref: card.last_manual_sync.failure_ref! } : {}),
           },
         }
       : {}),

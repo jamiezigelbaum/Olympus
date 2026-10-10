@@ -8,6 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
+import type { ModelLoadFailedReason } from '../../chatgpt/dashboard-contract.ts';
 import {
   currentPlatform,
   installPinnedModel,
@@ -182,6 +183,22 @@ export interface BuiltInTranscriptionDashboardState {
   bytesDone?: number;
   bytesTotal?: number;
   failedReason?: ModelInstallFailedReason;
+  loadFailedReason?: ModelLoadFailedReason;
+}
+
+/**
+ * Why the server would not start, read off Olympus's own start-up messages
+ * (install.ts, server.ts), never a provider's.
+ */
+export function modelLoadFailedReason(message: string | undefined): ModelLoadFailedReason {
+  const text = message ?? '';
+  if (text.includes('is not installed') || text.includes('did not install completely') || text.includes('could not be unpacked') || text.includes('did not contain')) {
+    return 'not_installed';
+  }
+  if (text.includes('exited while starting')) return 'stopped_while_starting';
+  if (text.includes('did not load within')) return 'too_slow';
+  if (text.includes('port was taken') || text.includes('No free loopback port')) return 'port_taken';
+  return 'unknown';
 }
 
 export function builtInTranscriptionDashboardState(
@@ -195,7 +212,7 @@ export function builtInTranscriptionDashboardState(
   if (status.state === 'ready' || status.state === 'loading') return { state: 'ready' };
   if (status.state === 'failed') {
     return status.failure?.reason === 'runtime_load_failed'
-      ? { state: 'load_failed' }
+      ? { state: 'load_failed', loadFailedReason: modelLoadFailedReason(status.failure.message) }
       : { state: 'failed', failedReason: modelInstallFailedReason(status.failure) };
   }
   if (!live.installing) return { state: 'interrupted' };

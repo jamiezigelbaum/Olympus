@@ -17,6 +17,7 @@ import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL } from '../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
+import type { ModelLoadFailedReason, SourceFailureKind } from '../chatgpt/dashboard-contract.ts';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
 
@@ -1062,9 +1063,57 @@ export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
   },
 };
 
-/** A Sync now that could not run, in plain words; the provider's own text stays in the log. */
-export function dashboardManualSyncFailedLine(label: string): string {
-  return `Couldn't check ${label} just now — Olympus will try again on its own`;
+/**
+ * Why a source's sync failed or paused, one sentence per closed failure kind
+ * (dashboard/source-failure.ts); {source} is the source's name. Never the
+ * provider's words: an `unknown` failure adds the reference Olympus's log
+ * keeps the message under (owner rule, 2026-10-10: never say something is
+ * wrong without a way to find out exactly what it is).
+ */
+export const DASHBOARD_SOURCE_FAILURE_WORDS: Readonly<Record<SourceFailureKind, string>> = {
+  sign_in: '{source} needs you to sign in again.',
+  network: 'Olympus couldn\'t reach {source} over the network.',
+  timeout: '{source} took too long to answer.',
+  rate_limited: '{source} asked Olympus to slow down for a while.',
+  provider_busy: '{source} was busy and asked Olympus to try later.',
+  provider_refused: '{source} refused Olympus\'s request.',
+  daily_limit: 'Olympus reached its daily limit for {source}.',
+  search_model_unavailable: 'The search model wasn\'t running.',
+  reader_unavailable: 'The file reader wasn\'t running.',
+  busy_here: 'Olympus was busy with other work.',
+  setup: '{source}\'s setup isn\'t finished.',
+  not_started: 'The check didn\'t start.',
+  unknown: 'Olympus hit an error it doesn\'t recognise.',
+};
+
+/** After an `unknown` failure or an opaque tool error: where its exact words are. */
+export const DASHBOARD_FAILURE_REF = 'Olympus\'s log on the computer has the details under reference {ref}.';
+
+/** The same, for an unrecognised error that came without a reference (an older run). */
+export const DASHBOARD_FAILURE_LOG = 'Olympus\'s log on the computer has the details.';
+
+/**
+ * "Dropbox took too long to answer." — and for a failure Olympus could not
+ * classify, where its log keeps the exact words.
+ */
+export function dashboardSourceFailureSentence(kind: SourceFailureKind, label: string, ref?: string): string {
+  const sentence = DASHBOARD_SOURCE_FAILURE_WORDS[kind].replace('{source}', label);
+  if (kind !== 'unknown') return sentence;
+  return `${sentence} ${ref ? DASHBOARD_FAILURE_REF.replace('{ref}', ref) : DASHBOARD_FAILURE_LOG}`;
+}
+
+/**
+ * A Sync now that could not run, in plain words, with why when the engine
+ * knows it; the provider's own text stays in the log.
+ */
+export function dashboardManualSyncFailedLine(
+  label: string,
+  failure?: SourceFailureKind,
+  ref?: string,
+  when = 'just now',
+): string {
+  if (!failure) return `Couldn't check ${label} ${when} — Olympus will try again on its own`;
+  return `Couldn't check ${label} ${when}: ${dashboardSourceFailureSentence(failure, label, ref)} Olympus will try again on its own.`;
 }
 
 /** While a Sync now press is outstanding: "Checking Dropbox…". */
@@ -1107,9 +1156,7 @@ export function dashboardManualSyncLine(
     case 'busy':
       return dashboardManualSyncBusyLine(source.label);
     case 'failed':
-      return when === 'just now'
-        ? dashboardManualSyncFailedLine(source.label)
-        : `Couldn't check ${source.label} ${when} — Olympus will try again on its own`;
+      return dashboardManualSyncFailedLine(source.label, sync.failure_kind, sync.failure_kind === 'unknown' ? sync.failure_ref : undefined, when);
     case 'checked': {
       const found = sync.new_items;
       if (found === undefined) return `Checked ${when}`;
@@ -1375,6 +1422,18 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
   relay_unavailable: {
     title: 'Olympus can\'t reach your computer right now.',
     disabledReason: 'Can\'t reach your computer',
+    /**
+     * Behind the banner's See why: what the last failed read got back
+     * (owner rule, 2026-10-10). `error` quotes Olympus's own fixed sentence,
+     * `host` the chat app's own error message, capped.
+     */
+    why: {
+      no_answer: 'Olympus didn\'t answer within {seconds} seconds.',
+      error: 'Olympus answered with an error: {text}',
+      unreadable: 'Olympus answered with something this page can\'t read.',
+      host: 'The connection to Olympus failed: {text}',
+      at: 'Last tried {when}.',
+    },
   },
   /** Labels for `connection.action.id`; `help` is shown as text when the action has no link. */
   actions: {
@@ -1436,6 +1495,17 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   modelDownloadInterrupted: 'Download stopped before it finished',
   /** Downloaded, but it would not start. */
   modelCouldNotStart: 'Couldn\'t start {model}',
+  /** The same, with why (modelLoadFailedReasons). */
+  modelCouldNotStartBecause: 'Couldn\'t start {model}: {reason}',
+  modelLoadFailedReasons: {
+    not_installed: 'its files are missing or incomplete; Download now fetches them again',
+    stopped_while_starting: 'it stopped while starting',
+    too_slow: 'it took too long to start',
+    port_taken: 'another program was using the port it needs',
+    unknown: 'Olympus\'s log on the computer has the details',
+  } satisfies Record<ModelLoadFailedReason, string>,
+  /** A model whose download failed, on its own line in Models: "Not working: the disk is full". */
+  modelNotWorkingBecause: 'Not working: {reason}',
   modelInstallDownloading: 'Downloading {model}',
   modelInstallVerifying: 'Checking {model}…',
   modelInstallFailed: 'Couldn\'t download {model}: {reason}',
@@ -1475,6 +1545,31 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   sourceStages: { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing' },
   findingItems: 'Finding items',
   sourceProgress: '{stage} — {percent}%, {done} of {total} {unit}',
+  /**
+   * The page-wide progress line names what stopped instead of a bare
+   * "stalled" (2026-10-10): "Dropbox paused", "Dropbox and Gmail paused",
+   * "Dropbox, Gmail and 2 more paused".
+   */
+  stalledSources: '{sources} paused',
+  stalledAnd: '{first} and {last}',
+  stalledMore: '{count} more',
+  /**
+   * Behind a stalled row's See why (owner rule, 2026-10-10): why, from the
+   * engine's closed words, then when it last worked and when it tries again.
+   */
+  sourceFailures: DASHBOARD_SOURCE_FAILURE_WORDS,
+  failureRef: DASHBOARD_FAILURE_REF,
+  failureLog: DASHBOARD_FAILURE_LOG,
+  stallWhy: {
+    failedOnce: 'The last try failed.',
+    failedMany: 'The last {count} tries failed.',
+    switchedOff: '{stage} is turned off in Olympus\'s settings.',
+    stillFor: '{stage} hasn\'t moved for {duration}.',
+    still: '{stage} hasn\'t moved for a while.',
+    lastWorked: 'Last worked {when}.',
+    nextTry: 'Olympus tries again in {duration}.',
+    watchLog: 'Olympus\'s log on the computer shows what it is doing.',
+  },
   /** One plain sentence per stalled reason; {source} is the source's name. */
   stalledReasons: {
     waiting_for_credentials: 'Paused: Olympus needs you to sign in to {source} again',

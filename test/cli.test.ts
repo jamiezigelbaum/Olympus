@@ -274,6 +274,19 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('every command group answers a bare --help with its usage', async () => {
+    const groups = new Set(V0_4_PUBLIC_CLI_COMMANDS.filter((command) => command.includes(' ')).map((command) => command.split(' ')[0]!));
+    expect(groups.has('server-mode')).toBe(true);
+    for (const group of groups) {
+      const result = await runBinExit([group, '--help']);
+      expect(result.stderr).toBe('');
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`Usage: olympus ${group}`);
+    }
+    const serverMode = await runBinExit(['server-mode', '--help']);
+    for (const command of ['status', 'on', 'off', 'auto']) expect(serverMode.stdout).toContain(`olympus server-mode ${command}`);
+  }, 30_000);
+
   test('worker lifecycle refuses command-line secret and managed-path overrides', async () => {
     for (const option of ['--auth-token', '--env-path', '--olympus-bin', '--working-directory']) {
       const result = await runBinExit(['worker', 'install', '--dry-run', option, '/tmp/placeholder']);
