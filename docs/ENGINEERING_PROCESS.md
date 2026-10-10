@@ -46,11 +46,11 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    User-installed hooks remain user-owned and must not be rewritten by repo
    automation.
 5. **Let CI decide merge readiness.** GitHub requires every substantive lane
-   directly: `static checks`, `fast tests`, all three `deploy tests` shards,
-   and `Go bridge tests`. A local result is useful evidence,
-   never a substitute for those exact-head checks.
-   The fast lane also runs `test:exchange` for the publisher Google exchange
-   service; `typecheck` checks both the plugin and the exchange service's
+   directly: `static checks`, `fast tests`, `exchange tests`, all three
+   `deploy tests` shards, and `Go bridge tests`. A local result is useful
+   evidence, never a substitute for those exact-head checks.
+   The `exchange tests` lane runs `test:exchange` for the publisher Google
+   exchange service; `typecheck` checks both the plugin and the exchange service's
    separate WebWorker configuration. The `exchange/` subtree is critical,
    including its deployment configuration and tests. The same holds for the
    `connect-relay/` service (`test:connect-relay`, `typecheck:connect-relay`;
