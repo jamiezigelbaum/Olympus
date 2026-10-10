@@ -108,6 +108,18 @@ describe('ask_anonymously: operation → worker route → core', () => {
     expect(seen!.aborted).toBe(true);
   });
 
+  test('off the Gateway the ask waits for the whole session (20 min ceiling); inside OpenClaw the lane keeps its 10-minute ceiling', async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const email = { askAnonymously: async (options: Record<string, unknown>) => { calls.push(options); return { ok: true }; } } as unknown as OperationContext['email'];
+    const base: OperationContext = { config: defaultConfig(), delphi: {} as OperationContext['delphi'], email };
+    await ask.handler({ ...base, caller: { surface: 'mcp' } }, { question: 'x' });
+    await ask.handler({ ...base, caller: { surface: 'remote', connectionId: 'c', displayName: 'Muse' } }, { question: 'x' });
+    await ask.handler(base, { question: 'x' });
+    await ask.handler({ ...base, caller: { surface: 'native', displayName: 'OpenClaw' } }, { question: 'x', timeoutMs: 1_200_000 });
+    expect(calls.map((call) => call.maxTimeoutMs)).toEqual([1_200_000, 1_200_000, 1_200_000, undefined]);
+    expect(calls[3]!.timeoutMs).toBe(1_200_000);
+  });
+
   test('a disabled worker refuses with email_not_configured before any request', async () => {
     const { ctx } = lane(async () => { throw new Error('must not be called'); });
     ctx.config.email.enabled = false;

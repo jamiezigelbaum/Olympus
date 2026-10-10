@@ -1,6 +1,6 @@
 import { DelphiClient } from './delphi.ts';
 import { defaultDoctorHostProbe, runDoctor, type DoctorHostFacts } from './doctor.ts';
-import { EmailClient, type SourceAnswerSelectedItemOption } from './email.ts';
+import { EmailClient, type SourceAnswerSelectedItemOption, CONSULT_ASK_CLIENT_TIMEOUT_MS } from './email.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
 import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
@@ -167,7 +167,7 @@ const ASK_ANONYMOUSLY_PARAMS = {
   cleanup: { type: 'string', description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
   remember: { type: 'boolean', description: 'Save this level (and cleanup) as the default for later questions, so the user is not asked again.' },
   model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model.' },
-  timeoutMs: { type: 'number', description: 'How long to wait for the answer, in milliseconds (default 720000; a zkAPI route can take minutes).' },
+  timeoutMs: { type: 'number', description: 'How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000).' },
 } satisfies Record<string, ParamDef>;
 
 export const operations: Operation[] = [
@@ -604,6 +604,9 @@ export const operations: Operation[] = [
       const remember = optionalBoolean(params.remember, 'remember');
       const model = optionalString(params.model);
       const timeoutMs = optionalNumber(params.timeoutMs, 'timeoutMs');
+      // Inside the OpenClaw Gateway the lane timer must stay at its ceiling
+      // (email.ts); everywhere else the ask may wait for the whole session.
+      const insideGateway = ctx.caller?.surface === 'native';
       const ask = (signal?: AbortSignal) => ctx.email.askAnonymously({
         question,
         ...(level !== undefined ? { level } : {}),
@@ -611,6 +614,7 @@ export const operations: Operation[] = [
         ...(remember !== undefined ? { remember } : {}),
         ...(model !== undefined ? { model } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(insideGateway ? {} : { maxTimeoutMs: CONSULT_ASK_CLIENT_TIMEOUT_MS }),
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;

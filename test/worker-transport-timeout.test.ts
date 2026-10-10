@@ -14,6 +14,11 @@ describe('direct worker HTTP transport timeouts', () => {
     expect(effectiveEmailRequestTimeoutMs(180_000, Number.NaN)).toBe(180_000);
     expect(effectiveEmailRequestTimeoutMs(180_000, 900_000)).toBe(MAX_EMAIL_REQUEST_TIMEOUT_MS);
     expect(effectiveEmailRequestTimeoutMs(600_000, 1_800_000)).toBe(600_000);
+    // A caller off the Gateway may raise the ceiling for one request (the anonymous ask); a lower "ceiling" changes nothing.
+    expect(effectiveEmailRequestTimeoutMs(600_000, 1_200_000, 1_200_000)).toBe(1_200_000);
+    expect(effectiveEmailRequestTimeoutMs(600_000, 1_800_000, 1_200_000)).toBe(1_200_000);
+    expect(effectiveEmailRequestTimeoutMs(600_000, 900_000, 300_000)).toBe(600_000);
+    expect(effectiveEmailRequestTimeoutMs(0, 900_000, 1_200_000)).toBe(0);
 
     const transport = new DirectHttpEmailTransport(hangingFetch('email'), 'worker-secret', 10);
     await expect(transport.requestJson('http://email.test/v1/source/answer', {

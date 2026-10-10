@@ -13634,7 +13634,7 @@ var PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
   ["invalid_request", "invalid_request"],
   ["source_index_policy_violation", "source_index_policy_violation"]
 ]);
-var CONSULT_ASK_CLIENT_TIMEOUT_MS = 12 * 60000;
+var CONSULT_ASK_CLIENT_TIMEOUT_MS = 20 * 60000;
 
 class EmailClient {
   config;
@@ -13658,7 +13658,10 @@ class EmailClient {
         ...options.remember !== undefined ? { remember: options.remember } : {},
         ...options.model ? { model: options.model } : {}
       })
-    }, { timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS });
+    }, {
+      timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS,
+      ...options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}
+    });
   }
   async sourceAnswer(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
@@ -13881,12 +13884,13 @@ function createEmailTransport(config) {
   return new DirectHttpEmailTransport(fetch, workerAuthTokenProvider(config), config.email.requestTimeoutSeconds * 1000);
 }
 var MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000;
-function effectiveEmailRequestTimeoutMs(configuredMs, requestedMs) {
+function effectiveEmailRequestTimeoutMs(configuredMs, requestedMs, maxMs = MAX_EMAIL_REQUEST_TIMEOUT_MS) {
   if (!(configuredMs > 0))
     return configuredMs;
   if (requestedMs === undefined || !Number.isFinite(requestedMs) || requestedMs <= configuredMs)
     return configuredMs;
-  return Math.min(Math.floor(requestedMs), Math.max(configuredMs, MAX_EMAIL_REQUEST_TIMEOUT_MS));
+  const ceiling = Number.isFinite(maxMs) && maxMs > MAX_EMAIL_REQUEST_TIMEOUT_MS ? maxMs : MAX_EMAIL_REQUEST_TIMEOUT_MS;
+  return Math.min(Math.floor(requestedMs), Math.max(configuredMs, ceiling));
 }
 
 class DirectHttpEmailTransport {
@@ -13899,7 +13903,7 @@ class DirectHttpEmailTransport {
     this.timeoutMs = timeoutMs;
   }
   async requestJson(url, init, options) {
-    const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs);
+    const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs, options?.maxTimeoutMs);
     let response;
     try {
       const authToken = typeof this.authToken === "function" ? this.authToken() : this.authToken;
@@ -20363,7 +20367,7 @@ var ASK_ANONYMOUSLY_PARAMS = {
   cleanup: { type: "string", description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
   remember: { type: "boolean", description: "Save this level (and cleanup) as the default for later questions, so the user is not asked again." },
   model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model." },
-  timeoutMs: { type: "number", description: "How long to wait for the answer, in milliseconds (default 720000; a zkAPI route can take minutes)." }
+  timeoutMs: { type: "number", description: "How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000)." }
 };
 var operations = [
   {
@@ -20776,6 +20780,7 @@ var operations = [
       const remember = optionalBoolean(params.remember, "remember");
       const model = optionalString4(params.model);
       const timeoutMs = optionalNumber2(params.timeoutMs, "timeoutMs");
+      const insideGateway = ctx.caller?.surface === "native";
       const ask = (signal) => ctx.email.askAnonymously({
         question,
         ...level !== undefined ? { level } : {},
@@ -20783,6 +20788,7 @@ var operations = [
         ...remember !== undefined ? { remember } : {},
         ...model !== undefined ? { model } : {},
         ...timeoutMs !== undefined ? { timeoutMs } : {},
+        ...insideGateway ? {} : { maxTimeoutMs: CONSULT_ASK_CLIENT_TIMEOUT_MS },
         ...signal ? { signal } : {}
       });
       const jobs = ctx.sourceAnswerJobs;
