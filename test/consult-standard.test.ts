@@ -248,4 +248,55 @@ describe('Ask anonymously', () => {
     expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'light_cleanup', remember: true }, value)).toMatchObject({ ok: true, cleanup: 'light_cleanup', remembered: true });
     expect(d.calls.prepare[0]!.instruction).toBe(CONSULT_LIGHT_CLEANUP_INSTRUCTION);
   });
+
+  test('a save that fails while the answer succeeds is reported with the answer (Codex review of PR #215)', async () => {
+    const d = deps(settings({ standardMode: 'as_written' }));
+    const value: ConsultAskDependencies = { ...d.value, remember: async () => ({ ok: false, message: 'The settings changed under you; not saved.' }) };
+    const result = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', remember: true }, value);
+    expect(result).toMatchObject({ ok: true, remembered: false, note: 'The settings changed under you; not saved.' });
+    // The save that lands: no note.
+    let current = settings({ standardMode: 'as_written' });
+    const saved = deps(current);
+    const kept = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', remember: true }, {
+      ...saved.value,
+      settings: () => current,
+      remember: async () => { current = settings({ standardMode: 'as_written', levelChosen: true, revision: 3 }); return { ok: true }; },
+    });
+    expect(kept).toMatchObject({ ok: true, remembered: true });
+    expect('note' in kept).toBe(false);
+  });
+
+  test('the caller\'s cancellation stops the ask before dispatch with nothing sent: before the writer, after it, and at authorization (Codex review of PR #215)', async () => {
+    const gone = AbortSignal.abort();
+    const before = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: gone }, before.value)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
+    expect(before.calls.prepare).toEqual([]);
+    expect(before.calls.send).toEqual([]);
+    // Cancelled while the writer runs: the writer sees the signal, nothing is sent.
+    const controller = new AbortController();
+    const during = deps(settings({ standardMode: 'light_cleanup', levelChosen: true }));
+    const seen: Array<AbortSignal | undefined> = [];
+    const value: ConsultAskDependencies = {
+      ...during.value,
+      prepare: async (_input, _writer, _level, signal) => { seen.push(signal); controller.abort(); return { kind: 'questions', questions: ['How long do deposits take?'], promptTokens: 1, ms: 1 }; },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: controller.signal }, value)).toMatchObject({ ok: false, code: 'cancelled' });
+    expect(seen).toEqual([controller.signal]);
+    expect(during.calls.send).toEqual([]);
+    // Cancelled between the gate and dispatch: authorization refuses, nothing reserved; the signal reaches the transport.
+    const late = new AbortController();
+    const atSend = deps(settings({ standardMode: 'as_written', levelChosen: true }));
+    const sendValue: ConsultAskDependencies = {
+      ...atSend.value,
+      send: async (question, authorize, options) => {
+        late.abort();
+        expect(options.signal).toBe(late.signal);
+        if (!authorize()) return { ok: false, error: { code: 'authorization_refused', message: 'refused', outcome: 'not_sent', networkIdentity: 'not_verified' } };
+        atSend.calls.send.push(question);
+        return reply('never');
+      },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: late.signal }, sendValue)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
+    expect(atSend.calls.send).toEqual([]);
+  });
 });

@@ -107610,7 +107610,7 @@ function createEmailSourceWorker(options = {}) {
           if (!consultAsk) {
             throw new EmailSourceWorkerError(501, "consult_ask_not_supported", "Private source worker does not support anonymous questions.");
           }
-          return json(await consultAsk(await parseConsultAskRequest(request)));
+          return json(await consultAsk(await parseConsultAskRequest(request), request.signal));
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/answer`) {
           if (!sourceAnswer) {
@@ -118548,8 +118548,9 @@ function askAnonymouslyToolResult(raw) {
     const rewritten = record3.rewritten === true;
     const sent = clean(record3.sent, MAX_ANSWER);
     const note = rewritten ? `Asked anonymously through zkAPI at ${level === "strict" ? "Strict" : "Standard"}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.` : "Asked anonymously through zkAPI at Standard, as written.";
+    const saveNote = clean(record3.note, 1000);
     return {
-      content: [{ type: "text", text: [reply, "", note].join(`
+      content: [{ type: "text", text: [reply, "", note, ...saveNote ? [`Tell the user: ${saveNote}`] : []].join(`
 `) }],
       structuredContent: {
         status: "answered",
@@ -118559,7 +118560,8 @@ function askAnonymouslyToolResult(raw) {
         rewritten,
         ...sent !== undefined ? { sent } : {},
         ...typeof record3.cleanup === "string" ? { cleanup: record3.cleanup } : {},
-        ...record3.remembered === true ? { remembered: true } : {}
+        ...record3.remembered === true ? { remembered: true } : {},
+        ...saveNote ? { note: saveNote } : {}
       }
     };
   }
@@ -124248,6 +124250,8 @@ async function askAnonymously(input, deps) {
       }
     }
   }
+  if (input.signal?.aborted)
+    return { ok: false, code: "cancelled", message: CONSULT_ASK_MESSAGES.cancelled };
   const writer = read.state === "valid" ? read.settings.writer ?? null : null;
   const strict = level === "strict";
   let questions;
@@ -124259,10 +124263,12 @@ async function askAnonymously(input, deps) {
     const instruction = strict ? undefined : cleanup === "custom" ? stored.instruction : CONSULT_LIGHT_CLEANUP_INSTRUCTION;
     let written;
     try {
-      written = await deps.prepare({ question: typed, answer: "", gaps: [], ...instruction !== undefined ? { instruction } : {} }, writer, strict ? "general" : "unnamed");
+      written = await deps.prepare({ question: typed, answer: "", gaps: [], ...instruction !== undefined ? { instruction } : {} }, writer, strict ? "general" : "unnamed", input.signal);
     } catch {
       written = { kind: "failed", reason: "request_failed" };
     }
+    if (input.signal?.aborted)
+      return { ok: false, code: "cancelled", message: CONSULT_ASK_MESSAGES.cancelled };
     if (written.kind === "declined")
       return { ok: false, code: "writer_declined", message: CONSULT_ASK_MESSAGES.declined };
     if (written.kind !== "questions")
@@ -124281,6 +124287,8 @@ async function askAnonymously(input, deps) {
   const bound = askBinding(read);
   let stale = false;
   const authorize = () => {
+    if (input.signal?.aborted)
+      return false;
     let current;
     try {
       current = deps.settings();
@@ -124293,7 +124301,7 @@ async function askAnonymously(input, deps) {
   };
   let result;
   try {
-    result = await deps.send(sent, authorize, { origin: input.origin, ...input.model !== undefined ? { model: input.model } : {} });
+    result = await deps.send(sent, authorize, { origin: input.origin, ...input.model !== undefined ? { model: input.model } : {}, ...input.signal ? { signal: input.signal } : {} });
   } catch {
     result = { ok: false, error: { code: "internal_error", message: "The zkAPI session failed inside Olympus.", outcome: "unknown", networkIdentity: "not_verified" } };
   }
@@ -124301,6 +124309,8 @@ async function askAnonymously(input, deps) {
     return { ok: false, code: "route_not_configured", message: CONSULT_ASK_MESSAGES.noRoute };
   if (stale)
     return { ok: false, code: "settings_stale", message: CONSULT_ASK_MESSAGES.stale };
+  if (input.signal?.aborted && !result.ok && result.error.outcome === "not_sent")
+    return { ok: false, code: "cancelled", message: CONSULT_ASK_MESSAGES.cancelled };
   if (!result.ok)
     return { ok: false, code: result.error.code, message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message, sent };
   return {
@@ -124311,7 +124321,8 @@ async function askAnonymously(input, deps) {
     level,
     ...strict ? {} : { cleanup },
     rewritten,
-    remembered
+    remembered,
+    ...rememberNote ? { note: rememberNote } : {}
   };
 }
 function validModelId(value) {
@@ -124338,7 +124349,8 @@ var init_consult_ask = __esm(() => {
     cleanupInvalid: 'cleanup must be "as_written", "light_cleanup" or "custom".',
     cleanupCustomMissing: 'No custom instruction is saved on the Olympus dashboard, so "custom" cannot be used; choose as_written or light_cleanup.',
     rememberUnavailable: "The choice could not be saved here; it was used for this question only.",
-    modelInvalid: "model must be a zkAPI model id such as anthropic/claude-sonnet-5.5."
+    modelInvalid: "model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.",
+    cancelled: "The request was cancelled before the question was sent; nothing was charged."
   });
 });
 
@@ -128328,7 +128340,7 @@ async function main() {
     },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
-    consultAsk: (input) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, origin: "agent" }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
+    consultAsk: (input, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, origin: "agent", signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
     currentReadwiseSync,
@@ -128599,20 +128611,20 @@ async function main() {
       askAnonymouslyNow = async (input) => {
         const result = await askAnonymously2(input, {
           settings: () => readConsultSettings2(),
-          prepare: (writerInput, writer, level) => runChosenWriter(writerInput, {
-            kill: new AbortController().signal,
+          prepare: (writerInput, writer, level, signal) => runChosenWriter(writerInput, {
+            kill: signal ?? new AbortController().signal,
             deadlineMs: writer ? writer.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 : CONSULT_WRITER_LIMITS2.deadlineMs,
             level,
             writer
           }),
-          send: async (text4, authorize, { origin, model }) => {
+          send: async (text4, authorize, { origin, model, signal }) => {
             const route = transport(origin === "agent" ? "chatgpt" : "dashboard", model);
             if (!route)
               return;
-            const opened = await openZkapiConsultSession2(route);
+            const opened = await openZkapiConsultSession2(route, signal ? { signal } : {});
             if (!opened.ok)
               return { ok: false, error: opened.error };
-            await opened.session.send(text4, { authorize: () => authorize() });
+            await opened.session.send(text4, { authorize: () => authorize(), ...signal ? { signal } : {} });
             return opened.session.finished;
           },
           remember: (choice) => dashboardConsult.rememberLevel(choice)

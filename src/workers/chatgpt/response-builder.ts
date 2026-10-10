@@ -491,8 +491,11 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
     const note = rewritten
       ? `Asked anonymously through zkAPI at ${level === 'strict' ? 'Strict' : 'Standard'}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.`
       : 'Asked anonymously through zkAPI at Standard, as written.';
+    // A requested save that failed: told with the answer, so the user is not
+    // surprised by the Strict/Standard question next time.
+    const saveNote = clean(record.note, 1_000);
     return {
-      content: [{ type: 'text', text: [reply, '', note].join('\n') }],
+      content: [{ type: 'text', text: [reply, '', note, ...(saveNote ? [`Tell the user: ${saveNote}`] : [])].join('\n') }],
       structuredContent: {
         status: 'answered',
         answer: reply,
@@ -502,6 +505,7 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
         ...(sent !== undefined ? { sent } : {}),
         ...(typeof record.cleanup === 'string' ? { cleanup: record.cleanup } : {}),
         ...(record.remembered === true ? { remembered: true } : {}),
+        ...(saveNote ? { note: saveNote } : {}),
       },
     };
   }

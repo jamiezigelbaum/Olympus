@@ -399,7 +399,7 @@ export interface EmailSourceWorkerOptions {
    * one typed question prepared at the chosen level and sent through zkAPI.
    * Absent: `/consult/ask` answers 501.
    */
-  consultAsk?: (input: ConsultAskWireRequest) => Promise<unknown>;
+  consultAsk?: (input: ConsultAskWireRequest, signal: AbortSignal) => Promise<unknown>;
   // Optional content-free latency ledger. When present, one JSON line per
   // answered source_answer request is appended (phase timings, corpus ids, skip
   // reasons, analyst backend/fallback, release decision — never query/content).
@@ -924,7 +924,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // The outcome is a result, never an HTTP error: a refusal (no level
           // chosen, a secret, no route, a cap) is reported to the agent in
           // the body. The core validates every field again.
-          return json(await consultAsk(await parseConsultAskRequest(request)));
+          // The request's signal (a remote caller gone, a job's deadline)
+          // cancels the writer and the session before dispatch.
+          return json(await consultAsk(await parseConsultAskRequest(request), request.signal));
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer`) {

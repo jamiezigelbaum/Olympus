@@ -4209,8 +4209,8 @@ export async function main(): Promise<void> {
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
     // Bound late: the consult block below sets askAnonymouslyNow.
-    consultAsk: (input) => (askAnonymouslyNow
-      ? askAnonymouslyNow({ ...input, origin: 'agent' })
+    consultAsk: (input, signal) => (askAnonymouslyNow
+      ? askAnonymouslyNow({ ...input, origin: 'agent', signal })
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
@@ -4594,8 +4594,8 @@ export async function main(): Promise<void> {
       askAnonymouslyNow = async (input) => {
         const result = await askAnonymously(input, {
           settings: () => readConsultSettings(),
-          prepare: (writerInput, writer, level) => runChosenWriter(writerInput, {
-            kill: new AbortController().signal,
+          prepare: (writerInput, writer, level, signal) => runChosenWriter(writerInput, {
+            kill: signal ?? new AbortController().signal,
             deadlineMs: writer ? writer.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : CONSULT_WRITER_LIMITS.deadlineMs,
             level,
             writer,
@@ -4605,12 +4605,12 @@ export async function main(): Promise<void> {
           // transport's authorization boundary (review of PR #209). An
           // agent's question uses the model set for ChatGPT questions (or
           // the one-off model it named); the dashboard's box uses the route's.
-          send: async (text, authorize, { origin, model }) => {
+          send: async (text, authorize, { origin, model, signal }) => {
             const route = transport(origin === 'agent' ? 'chatgpt' : 'dashboard', model);
             if (!route) return undefined;
-            const opened = await openZkapiConsultSession(route);
+            const opened = await openZkapiConsultSession(route, signal ? { signal } : {});
             if (!opened.ok) return { ok: false, error: opened.error };
-            await opened.session.send(text, { authorize: () => authorize() });
+            await opened.session.send(text, { authorize: () => authorize(), ...(signal ? { signal } : {}) });
             return opened.session.finished;
           },
           // The agent's "remember" goes through the dashboard adapter: the

@@ -140,6 +140,7 @@ function askAnonymouslyContentText(payload: unknown): string | undefined {
     const how = result.rewritten ? 'the question was rewritten by your model before it left' : 'sent as written';
     const lines = ['Anonymous answer (zkAPI, ' + level + '; ' + how + '):', result.reply];
     if (result.rewritten && typeof result.sent === 'string') lines.push('', 'Sent:', result.sent);
+    if (typeof result.note === 'string') lines.push('', 'Note: ' + result.note);
     return lines.join('\n');
   }
   if (typeof result.message !== 'string') return undefined;

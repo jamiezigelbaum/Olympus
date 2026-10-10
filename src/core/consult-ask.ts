@@ -62,18 +62,26 @@ export interface ConsultAskInput {
    * conversation); the dashboard's own box uses the route's model.
    */
   readonly origin: 'agent' | 'dashboard';
+  /**
+   * The caller's cancellation (a remote client disconnecting before hand-off,
+   * a handed-off job's deadline). Before dispatch it stops the writer and
+   * the session with nothing sent or reserved; after dispatch the reply is
+   * waited for by the session, not by this call (Codex review of PR #215).
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface ConsultAskSendOptions {
   readonly origin: 'agent' | 'dashboard';
   readonly model?: string;
+  readonly signal?: AbortSignal;
 }
 
 export interface ConsultAskDependencies {
   /** consult.json, read once for this question. */
   readonly settings: () => ConsultSettingsRead;
   /** Runs the writer (the owner's own model when chosen, else the built-in one) at the given level. */
-  readonly prepare: (input: ConsultWriterInput, writer: ConsultWriterChoice | null, level: ConsultLevel) => Promise<ConsultWriterOutcome>;
+  readonly prepare: (input: ConsultWriterInput, writer: ConsultWriterChoice | null, level: ConsultLevel, signal?: AbortSignal) => Promise<ConsultWriterOutcome>;
   /**
    * One zkAPI consult; undefined when no route is configured. `authorize` is
    * the final authorization: the transport calls it immediately before
@@ -108,6 +116,8 @@ export type ConsultAskResult =
     /** True when the writer rewrote the question (Strict, or Standard light cleanup / custom). */
     readonly rewritten: boolean;
     readonly remembered: boolean;
+    /** A requested save that failed (the question still went): the user should hear it, or they are asked again next time. */
+    readonly note?: string;
   }
   | { readonly ok: false; readonly code: 'needs_choice'; readonly message: string; readonly options: ConsultAskChoiceOptions }
   | { readonly ok: false; readonly code: string; readonly message: string; readonly sent?: string };
@@ -128,6 +138,7 @@ export const CONSULT_ASK_MESSAGES = Object.freeze({
   cleanupCustomMissing: 'No custom instruction is saved on the Olympus dashboard, so "custom" cannot be used; choose as_written or light_cleanup.',
   rememberUnavailable: 'The choice could not be saved here; it was used for this question only.',
   modelInvalid: 'model must be a zkAPI model id such as anthropic/claude-sonnet-5.5.',
+  cancelled: 'The request was cancelled before the question was sent; nothing was charged.',
 });
 
 const MAX_MODEL_ID_CHARS = 128;
@@ -229,6 +240,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     }
   }
 
+  if (input.signal?.aborted) return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };
   const writer = read.state === 'valid' ? read.settings.writer ?? null : null;
   const strict = level === 'strict';
   let questions: readonly string[];
@@ -244,10 +256,12 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
         { question: typed, answer: '', gaps: [], ...(instruction !== undefined ? { instruction } : {}) },
         writer,
         strict ? 'general' : 'unnamed',
+        input.signal,
       );
     } catch {
       written = { kind: 'failed', reason: 'request_failed' };
     }
+    if (input.signal?.aborted) return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };
     if (written.kind === 'declined') return { ok: false, code: 'writer_declined', message: CONSULT_ASK_MESSAGES.declined };
     if (written.kind !== 'questions') return { ok: false, code: 'writer_failed', message: CONSULT_ASK_MESSAGES.writerFailed };
     questions = written.questions;
@@ -271,6 +285,8 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   const bound = askBinding(read);
   let stale = false;
   const authorize = (): boolean => {
+    // Cancelled before dispatch: refused with nothing reserved.
+    if (input.signal?.aborted) return false;
     let current: ConsultSettingsRead;
     try {
       current = deps.settings();
@@ -283,12 +299,13 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   };
   let result: ZkapiConsultResult | undefined;
   try {
-    result = await deps.send(sent, authorize, { origin: input.origin, ...(input.model !== undefined ? { model: input.model } : {}) });
+    result = await deps.send(sent, authorize, { origin: input.origin, ...(input.model !== undefined ? { model: input.model } : {}), ...(input.signal ? { signal: input.signal } : {}) });
   } catch {
     result = { ok: false, error: { code: 'internal_error', message: 'The zkAPI session failed inside Olympus.', outcome: 'unknown', networkIdentity: 'not_verified' } };
   }
   if (!result) return { ok: false, code: 'route_not_configured', message: CONSULT_ASK_MESSAGES.noRoute };
   if (stale) return { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale };
+  if (input.signal?.aborted && !result.ok && result.error.outcome === 'not_sent') return { ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled };
   if (!result.ok) return { ok: false, code: result.error.code, message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message, sent };
   return {
     ok: true,
@@ -299,6 +316,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     ...(strict ? {} : { cleanup }),
     rewritten,
     remembered,
+    ...(rememberNote ? { note: rememberNote } : {}),
   };
 }
 

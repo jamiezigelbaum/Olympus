@@ -21736,6 +21736,8 @@ function askAnonymouslyContentText(payload) {
     const lines = ["Anonymous answer (zkAPI, " + level + "; " + how + "):", result.reply];
     if (result.rewritten && typeof result.sent === "string")
       lines.push("", "Sent:", result.sent);
+    if (typeof result.note === "string")
+      lines.push("", "Note: " + result.note);
     return lines.join(`
 `);
   }

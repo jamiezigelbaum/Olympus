@@ -12,7 +12,7 @@ import { askAnonymouslyToolResult, isAskAnonymouslyResult } from '../src/workers
 
 const ask = operations.find((operation) => operation.name === 'ask_anonymously')!;
 
-function lane(consultAsk?: (input: ConsultAskWireRequest) => Promise<unknown>) {
+function lane(consultAsk?: (input: ConsultAskWireRequest, signal: AbortSignal) => Promise<unknown>) {
   const worker = createEmailSourceWorker(consultAsk ? { consultAsk } : {});
   const config = defaultConfig();
   config.email.enabled = true;
@@ -61,6 +61,17 @@ describe('ask_anonymously: operation → worker route → core', () => {
     expect(await ok.json()).toMatchObject({ ok: true, reply: 'y' });
   });
 
+  test('the caller\'s cancellation reaches the core through the client and the route', async () => {
+    let seen: AbortSignal | undefined;
+    const { ctx } = lane(async (_input, signal) => { seen = signal; return { ok: false, code: 'cancelled', message: 'cancelled' }; });
+    const controller = new AbortController();
+    await ctx.email.askAnonymously({ question: 'x', level: 'standard', signal: controller.signal });
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen!.aborted).toBe(false);
+    controller.abort();
+    expect(seen!.aborted).toBe(true);
+  });
+
   test('a disabled worker refuses with email_not_configured before any request', async () => {
     const { ctx } = lane(async () => { throw new Error('must not be called'); });
     ctx.config.email.enabled = false;
@@ -86,6 +97,10 @@ describe('ask_anonymously: the ChatGPT result', () => {
     const plain = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y\u0007', route: 'r', level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
     expect(plain.structuredContent).toEqual({ status: 'answered', answer: 'y', anonymous: true, level: 'standard', rewritten: false, sent: 'x', cleanup: 'as_written' });
     expect(plain.content[0]!.text).toContain('as written');
+    // A requested save that failed is told with the answer.
+    const unsaved = askAnonymouslyToolResult({ ok: true, sent: 'x', reply: 'y', route: 'r', level: 'standard', rewritten: false, remembered: false, note: 'Not saved; choose again next time.' });
+    expect(unsaved.structuredContent).toMatchObject({ status: 'answered', note: 'Not saved; choose again next time.' });
+    expect(unsaved.content[0]!.text).toContain('Tell the user: Not saved; choose again next time.');
   });
 
   test('needs_choice and refusals are results in the user\'s words, never errors; working hands off to source_answer_result', () => {
