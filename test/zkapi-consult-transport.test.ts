@@ -483,7 +483,7 @@ describe('zkAPI consult transport: a supervised session', () => {
         daemonVersion: '0.1.6',
         network: 'mainnet',
         listedAllowanceUsd: 1,
-        reservedUsd: 6,
+        reservedUsd: 1,
       },
     });
     const sent = completions();
@@ -501,7 +501,7 @@ describe('zkAPI consult transport: a supervised session', () => {
     expect(await portFree(daemonPort)).toBe(true);
     expect(await portFree(torPort)).toBe(true);
     const ledger = readFileSync(statePath, 'utf8');
-    expect(JSON.parse(ledger)).toMatchObject({ day: '2026-10-05', count: 1, reservedMicroUsd: 6_000_000, lastSession: { result: 'ok' } });
+    expect(JSON.parse(ledger)).toMatchObject({ day: '2026-10-05', count: 1, reservedMicroUsd: 1_000_000, lastSession: { result: 'ok' } });
     for (const forbidden of ['notice period', 'balance', 'cost', API_KEY]) expect(ledger).not.toContain(forbidden);
     expect(JSON.parse(ledger).running).toBeUndefined();
     expect(JSON.parse(ledger).fence).toBeUndefined();
@@ -1278,16 +1278,16 @@ describe('zkAPI consult transport: exclusivity, processes, caps', () => {
   test('no limit applies by default: many sequential consults are not refused by any cap', async () => {
     writePlan({ allowance: 1_000_000 });
     for (let index = 0; index < 11; index += 1) {
-      expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true, receipt: { listedAllowanceUsd: 1, reservedUsd: 6 } });
+      expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true, receipt: { listedAllowanceUsd: 1, reservedUsd: 1 } });
     }
     expect(completions()).toHaveLength(11);
-    // Still recorded for disclosure: each consult counts the $6 worst case.
-    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 11, reservedMicroUsd: 66_000_000 });
+    // Still recorded for disclosure: each consult counts its model's listed hold.
+    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 11, reservedMicroUsd: 11_000_000 });
   }, 120_000);
 
-  test('an owner-set money limit refuses at the boundary across a restart, counting the $6 worst case', async () => {
+  test('an owner-set money limit refuses at the boundary across a restart, counting each consult at its listed hold', async () => {
     writePlan({ allowance: 1_000_000 });
-    const limited = settings({ dailySpendCapUsd: 13 });
+    const limited = settings({ dailySpendCapUsd: 2 });
     expect(await sendZkapiConsult(QUESTION, transport({ settings: limited }))).toMatchObject({ ok: true });
     // A real second process over the same ledger stands in for a restart.
     expect(await runConsultInChildProcess({ ...transport({ settings: limited }) })).toEqual({ ok: true });
@@ -1296,7 +1296,14 @@ describe('zkAPI consult transport: exclusivity, processes, caps', () => {
       error: { code: 'spend_cap_reached', outcome: 'not_sent' },
     });
     expect(completions()).toHaveLength(2);
-    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 2, reservedMicroUsd: 12_000_000 });
+    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 2, reservedMicroUsd: 2_000_000 });
+    // A $6-tier model does not fit a $7 limit after $2 is used; refused at the send, after warming.
+    writePlan({ allowance: 6_000_000 });
+    expect(await sendZkapiConsult(QUESTION, transport({ settings: settings({ dailySpendCapUsd: 7 }) }))).toMatchObject({
+      ok: false,
+      error: { code: 'spend_cap_reached', outcome: 'not_sent' },
+    });
+    expect(completions()).toHaveLength(2);
   }, 60_000);
 
   test('an owner-set request limit refuses at the boundary, and an ambiguous send counts toward it', async () => {
@@ -1424,7 +1431,7 @@ describe('zkAPI consult transport: one-shot session', () => {
       providerVerification: 'verified',
       networkIdentity: 'not_verified',
       routeLabel: `${NO_CONFINEMENT_LABEL}; lease settlement pending`,
-      receipt: { settlement: 'pending', fence: 'held', reservedUsd: 6, postStopProbe: 'not_run' },
+      receipt: { settlement: 'pending', fence: 'held', reservedUsd: 1, postStopProbe: 'not_run' },
     });
     expect(session.state).toBe('replied');
     // At hand-over the money is still fenced and the session still owns its processes.
@@ -1442,11 +1449,11 @@ describe('zkAPI consult transport: one-shot session', () => {
       ok: true,
       text: 'Generally, notice scales with term length.',
       routeLabel: NO_CONFINEMENT_LABEL,
-      receipt: { settlement: 'confirmed', fence: 'clear', postStopProbe: 'route_lost', reservedUsd: 6 },
+      receipt: { settlement: 'confirmed', fence: 'clear', postStopProbe: 'route_lost', reservedUsd: 1 },
     });
     expect(session.state).toBe('finished');
     expect(zkapiUnresolvedSession(statePath)).toBe(false);
-    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 6_000_000 });
+    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 1_000_000 });
     const stageMs = result.ok ? result.receipt.stageMs! : {};
     expect(stageMs.replyHandedOverAtMs).toBe(replyStages.replyHandedOverAtMs!);
     expect(stageMs.warmTotalMs).toBe(replyStages.warmTotalMs!);
@@ -1603,13 +1610,13 @@ describe('zkAPI consult transport: one-shot session', () => {
     }) as typeof fetch;
     writePlan({ settleDelayMs: 300 });
     const session = await openReady({ fetchImpl: callThroughThenThrow });
-    expect(await session.send(QUESTION)).toMatchObject({ kind: 'failed', error: { code: 'transport_failed', outcome: 'unknown', receipt: { settlement: 'pending', fence: 'held', reservedUsd: 6 } } });
+    expect(await session.send(QUESTION)).toMatchObject({ kind: 'failed', error: { code: 'transport_failed', outcome: 'unknown', receipt: { settlement: 'pending', fence: 'held', reservedUsd: 1 } } });
     const result = await session.finished;
     // The daemon did see the request; its settlement evidence is what clears the fence, never a rollback.
     while (completions().length === 0) await Bun.sleep(20);
-    expect(result).toMatchObject({ ok: false, error: { code: 'transport_failed', outcome: 'unknown', receipt: { reservedUsd: 6 } } });
-    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 6_000_000 });
-    expect(ledger().lastSession).toMatchObject({ result: 'transport_failed', reservedUsd: 6 });
+    expect(result).toMatchObject({ ok: false, error: { code: 'transport_failed', outcome: 'unknown', receipt: { reservedUsd: 1 } } });
+    expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 1_000_000 });
+    expect(ledger().lastSession).toMatchObject({ result: 'transport_failed', reservedUsd: 1 });
     // A fetch that throws without sending is indistinguishable from the above and is treated the same.
     const throwingFetch = ((input: string | URL | Request, init?: RequestInit) => {
       if (String(input).endsWith('/v1/chat/completions')) throw new Error('never left the process');
@@ -1620,7 +1627,7 @@ describe('zkAPI consult transport: one-shot session', () => {
     const countBefore = zkapiUsageToday(statePath, NOW).count;
     expect(await sendZkapiConsult(QUESTION, transport({ fetchImpl: throwingFetch }))).toMatchObject({
       ok: false,
-      error: { code: 'transport_failed', outcome: 'unknown', receipt: { settlement: 'not_confirmed', fence: 'held', reservedUsd: 6 } },
+      error: { code: 'transport_failed', outcome: 'unknown', receipt: { settlement: 'not_confirmed', fence: 'held', reservedUsd: 1 } },
     });
     expect(zkapiUsageToday(statePath, NOW).count).toBe(countBefore + 1);
     expect(zkapiUnresolvedSession(statePath)).toBe(true);
@@ -1775,7 +1782,7 @@ describe('zkAPI consult transport: one-shot session', () => {
       // The ledger still names the session and the fence is held: the money is still fenced.
       expect(ledger().running).toBeDefined();
       expect(zkapiUnresolvedSession(statePath)).toBe(true);
-      expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 6_000_000 });
+      expect(zkapiUsageToday(statePath, NOW)).toEqual({ count: 1, reservedMicroUsd: 1_000_000 });
       // The watchdogs follow their supervisor; once they are gone an ordinary
       // reopen clears the stale record but is refused by the fence.
       const deadline = Date.now() + 15_000;
@@ -2267,7 +2274,7 @@ describe('doctor: zkapi_consult_transport', () => {
       'local API key configured',
       `acknowledgements complete (${ZKAPI_RISK_ACKNOWLEDGEMENTS.length}/${ZKAPI_RISK_ACKNOWLEDGEMENTS.length})`,
       'estimated expiry 2026-10-30 from the confirmed funding date (25 days left, notice none)',
-      'requests today 0 (no limit set), worst-case authorized today $0.00 (no limit set; each consult counts up to $6.00)',
+      'requests today 0 (no limit set), worst-case authorized today $0.00 (no limit set; each consult counts its model\'s hold, up to $6.00)',
       'no unresolved session',
       'balance, fee quotes and on-chain expiry not available from the daemon',
       'no consult run yet',
@@ -2280,7 +2287,7 @@ describe('doctor: zkapi_consult_transport', () => {
     const time = virtualTime();
     expect(await sendZkapiConsult(QUESTION, timedTransport(time))).toMatchObject({ ok: true });
     const after = await zkapiCheck(doctorDeps());
-    expect(after.detail).toContain('requests today 1 (no limit set), worst-case authorized today $6.00 (no limit set;');
+    expect(after.detail).toContain('requests today 1 (no limit set), worst-case authorized today $1.00 (no limit set;');
     expect(after.detail).toContain('(ok): key reuse verified_off, local auth verified, Tor per_consult, confinement none (self-test not_run), settlement confirmed');
     expect(after.detail).toContain(', stage timings lease acquire 1000 ms, confinement self-test 3001 ms, Tor start to bootstrapped 4002 ms,');
     expect(after.detail).toContain(`teardown 20000 ms, total ${time.values.at(-1)! - time.values[0]!} ms;`);
@@ -2315,9 +2322,13 @@ describe('doctor: zkapi_consult_transport', () => {
     expect(unlimited.detail).toContain('not ready: unresolved_session');
     expect(unlimited.detail).not.toContain('spend_cap_reached');
     expect(unlimited.detail).not.toContain('daily_cap_reached');
-    const exhausted = await zkapiCheck(doctorDeps({ zkapi: { dailyRequestCap: 5, dailySpendCapUsd: 20 } }));
+    // Before a session the next hold is unknown, so a limit blocks only once it is used up.
+    const room = await zkapiCheck(doctorDeps({ zkapi: { dailyRequestCap: 5, dailySpendCapUsd: 20 } }));
+    expect(room.detail).toContain('requests today 3 (limit 5), worst-case authorized today $18.00 (limit $20.00;');
+    expect(room.detail).not.toContain('spend_cap_reached');
+    const exhausted = await zkapiCheck(doctorDeps({ zkapi: { dailyRequestCap: 5, dailySpendCapUsd: 18 } }));
     expect(exhausted.ok).toBe(false);
-    expect(exhausted.detail).toContain('requests today 3 (limit 5), worst-case authorized today $18.00 (limit $20.00;');
+    expect(exhausted.detail).toContain('requests today 3 (limit 5), worst-case authorized today $18.00 (limit $18.00;');
     expect(exhausted.detail).toContain('not ready: unresolved_session, spend_cap_reached');
 
     const squatter = Bun.serve({ hostname: '127.0.0.1', port: daemonPort, fetch: () => new Response('x') });

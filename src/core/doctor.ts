@@ -711,7 +711,7 @@ function describeZkapiReadiness(readiness: ZkapiConsultReadiness): string {
   const deposit = money.depositAboveSuggestedCeiling ? '; deposit is above the suggested ceiling' : '';
   const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : 'no limit set';
   const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : 'no limit set';
-  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
+  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts its model's hold, up to $6.00)`;
   const fence = readiness.fences.length > 0
     ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ''})` : ''}${entry.thisWallet ? ', this wallet' : ', another wallet'}`).join('; ')}; run a recovery-only session before another consult`
     : 'no unresolved session';

@@ -115,7 +115,7 @@ export interface ZkapiConsultSettings {
   acknowledgements: { version: number; accepted: string[] };
   /** Optional owner-set daily request limit (UTC day). Unset: no limit. */
   dailyRequestCap?: number;
-  /** Optional owner-set daily worst-case spend limit; each request counts $6. Unset: no limit. */
+  /** Optional owner-set daily spend limit; each request counts its model's listed allowance ($1 to $6). Unset: no limit. */
   dailySpendCapUsd?: number;
   timeoutMs: number;
   torBootstrapTimeoutMs: number;

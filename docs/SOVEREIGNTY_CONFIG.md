@@ -589,8 +589,8 @@ earlier acknowledgement must be given again, and nothing is sent until it is):
   can pause deposits and withdrawals. Only add what you're comfortable losing.
 
 The card's "Everything to know first" list keeps the fuller detail: each
-question counts as $6 against any daily limit you set, and there is no daily
-limit unless you set one; there is no top-up (each deposit is a new note with
+question counts against any daily limit you set at the amount zkAPI holds for
+its model ($1 to $6), and there is no daily limit unless you set one; there is no top-up (each deposit is a new note with
 its own fee and 30-day clock); the expiry date is an estimate from the funding
 date you confirm; the fee buffer; the required API key and key reuse off; the
 operator's pause power and the single-party proof setup.
@@ -650,15 +650,22 @@ on, so deposit the smallest amount the service accepts.
   real expiry is set on-chain by the deposit block. Doctor and status show the
   estimated date, days left, and a notice at 10, 5 and 2 days. A recorded note
   past its estimated expiry refuses consults.
-- **No limit unless you set one.** The daemon can raise a request's allowance
-  from live policy after it is queued, so Olympus records every request at the
-  highest allowance of the reviewed versions ($6) before it is sent, in a
-  ledger that survives restarts, and doctor shows today's count and worst-case
-  total. To limit spending, add either or both to the profile's `zkapi` block:
-  `"dailyRequestCap": 5` (requests per UTC day) or `"dailySpendCapUsd": 30`
-  (worst-case dollars per UTC day; each consult counts $6). A set limit is
-  enforced before the send, atomically across processes; a request whose
-  outcome is unknown still counts toward it.
+- **No limit unless you set one.** Before each send Olympus records the
+  request at the per-request allowance the daemon's live model list states
+  for the chosen model (`oa_request_limit_micro_usd`, $1 to $6 by the model's
+  price tier; that is the amount the daemon holds), in a ledger that survives
+  restarts, and doctor shows today's count and worst-case total. The settled
+  price is never recorded: the daemon does not report it and Olympus reads no
+  balance. To limit spending, add either or both to the profile's `zkapi`
+  block: `"dailyRequestCap": 5` (requests per UTC day) or
+  `"dailySpendCapUsd": 30` (worst-case dollars per UTC day; each consult
+  counts its model's listed allowance). A set limit is enforced at the send,
+  atomically across processes; before a session, when the next model's
+  allowance is not yet known, the spend limit blocks only once it is used up.
+  A request whose outcome is unknown still counts toward it. Caveat: the
+  daemon recomputes a request's allowance from live policy after it is
+  queued, so a policy change between the listing and the send can move the
+  actual hold, bounded by the reviewed versions' $6 maximum.
 - **Unresolved sessions.** Before each send Olympus records a fence, and clears
   it only when the daemon reports that request's key settled. If that is not
   confirmed (a crash, a timeout, a missing log line), no further consult is

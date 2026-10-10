@@ -53472,7 +53472,7 @@ var init_vocabulary = __esm(() => {
     disclosureMore: "Everything to know first",
     disclosure: [
       "Olympus sends a question only within about five minutes of a private answer appearing in ChatGPT, and only if the panel was recently active. Closing the panel does not guarantee nothing is sent in that window.",
-      "A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question as $6 when checking the daily limits you set.",
+      "A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question at the amount held for its model (between $1 and $6) when checking the daily limits you set.",
       "There is no daily limit unless you set one under Balance and limits. Your balance is the most that can be spent.",
       "Adding money and taking it out are each an Ethereum transaction with its own network fee (about $7 each when Olympus last checked). There is no top-up: each deposit starts a new balance with its own fee and its own 30-day clock.",
       "Olympus estimates the 30-day date from the funding date you enter; the exact date is set on-chain when the deposit is confirmed.",
@@ -53495,8 +53495,8 @@ var init_vocabulary = __esm(() => {
       torMissing: "Tor not installed",
       key: "API key configured",
       keyMissing: "API key not configured",
-      today: "{n} requests today (${usd} counted at $6 each)",
-      todayOne: "1 request today (${usd} counted at $6 each)",
+      today: "{n} requests today (${usd} counted against your limits)",
+      todayOne: "1 request today (${usd} counted against your limits)",
       expiry: "balance estimated to expire {date} ({days} days left)",
       expired: "balance past its estimated expiry",
       expiryUnknown: "balance expiry unknown until you enter the funding date"
@@ -53548,7 +53548,7 @@ var init_vocabulary = __esm(() => {
     limitsToday: "Questions today: {n}, counted as up to ${usd} against your limits.",
     fundingDate: "Funding date: the day your deposit was confirmed (YYYY-MM-DD)",
     capRequests: "Daily question limit (optional)",
-    capUsd: "Daily spending limit in dollars, counted at $6 per question (optional)",
+    capUsd: "Daily spending limit in dollars, counting each question at the amount held for its model (optional)",
     noLimitIntro: "There is no daily limit unless you set one. Your balance is the most that can be spent.",
     removeLimits: "No daily limit",
     removeLimitsHint: "Clears both limits.",
@@ -58852,21 +58852,21 @@ function ownerLimits(settings) {
     ...settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1e6) } : {}
   };
 }
-function reserveZkapiRequest(path, limits, now, fence = { scope: "default", configDir: "unknown" }) {
+function reserveZkapiRequest(path, limits, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
   let refusal;
   updateState(path, now, (state) => {
     if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
       refusal = "daily_cap_reached";
       return;
     }
-    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limits.spendCapMicroUsd) {
+    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits.spendCapMicroUsd) {
       refusal = "spend_cap_reached";
       return;
     }
     return {
       ...state,
       count: state.count + 1,
-      reservedMicroUsd: state.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD,
+      reservedMicroUsd: state.reservedMicroUsd + allowanceMicroUsd,
       fences: (() => {
         const { scope, ...facts } = fence;
         return { ...state.fences, [scope]: { ...facts, at: now.toISOString() } };
@@ -59429,7 +59429,7 @@ async function zkapiConsultReadiness(options) {
   const limit = ownerLimits(settings);
   if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
     blockers.push("daily_cap_reached");
-  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
+  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
     blockers.push("spend_cap_reached");
   }
   return {
@@ -59700,7 +59700,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
     const limit = ownerLimits(settings);
     if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
       return refuse2("daily_cap_reached");
-    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd + ZKAPI_MAX_ALLOWANCE_MICRO_USD > limit.spendCapMicroUsd) {
+    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
       return refuse2("spend_cap_reached");
     }
   } catch {
@@ -59872,6 +59872,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
         return result = fail(sessionSignal.aborted ? interrupted() : "policy_unavailable");
       if (listing.allowance === undefined)
         return result = fail("model_unavailable");
+      const allowanceMicroUsd = Math.min(listing.allowance, ZKAPI_MAX_ALLOWANCE_MICRO_USD);
       receipt.listedAllowanceUsd = listing.allowance / 1e6;
       stage(undefined);
       timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
@@ -59943,13 +59944,13 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
           configDir: zkapiWalletDirectory(env),
           daemonExecutable,
           daemonPort
-        });
+        }, allowanceMicroUsd);
       } catch {
         return result = fail("state_unavailable");
       }
       if (!reservation.reserved)
         return result = fail(reservation.reason);
-      receipt.reservedUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD / 1e6;
+      receipt.reservedUsd = allowanceMicroUsd / 1e6;
       receipt.fence = "held";
       const requestsBefore = new Set(facts.requests.keys());
       sent.dispatched = true;
@@ -59960,7 +59961,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
         sent.dispatched = false;
         detachCaller = undefined;
         try {
-          releaseZkapiReservation(statePath, scope, fences[scope], now());
+          releaseZkapiReservation(statePath, scope, fences[scope], now(), allowanceMicroUsd);
           delete receipt.reservedUsd;
           receipt.fence = fenced || fencedElsewhere ? "held" : "clear";
         } catch {}
@@ -60091,7 +60092,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   } catch {}
   return final;
 }
-function releaseZkapiReservation(path, scope, earlierFence, now) {
+function releaseZkapiReservation(path, scope, earlierFence, now, allowanceMicroUsd) {
   updateState(path, now, (state) => {
     const { [scope]: _ours, ...others } = state.fences ?? {};
     const fences = earlierFence ? { ...others, [scope]: earlierFence } : others;
@@ -60099,7 +60100,7 @@ function releaseZkapiReservation(path, scope, earlierFence, now) {
     return {
       ...rest,
       count: Math.max(0, state.count - 1),
-      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - ZKAPI_MAX_ALLOWANCE_MICRO_USD),
+      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - allowanceMicroUsd),
       ...Object.keys(fences).length > 0 ? { fences } : {}
     };
   });
@@ -60413,7 +60414,7 @@ var init_consult_transport_zkapi = __esm(() => {
     policy_unavailable: "The daemon could not load the model policy in time.",
     model_unavailable: "The selected model is not in the daemon's live model list.",
     daily_cap_reached: "The daily zkAPI request limit you set is reached.",
-    spend_cap_reached: "Another request would exceed the daily worst-case zkAPI spend limit you set.",
+    spend_cap_reached: "Another request would exceed the daily zkAPI spend limit you set (each question counts the amount zkAPI holds for its model).",
     state_unavailable: "The persistent zkAPI session ledger could not be read or written.",
     timeout: "The zkAPI consult timed out; it may still have been charged.",
     aborted: "The zkAPI consult was cancelled; it may still have been charged.",
@@ -64228,7 +64229,7 @@ function describeZkapiReadiness(readiness) {
   const deposit = money.depositAboveSuggestedCeiling ? "; deposit is above the suggested ceiling" : "";
   const requestLimit = readiness.requestsToday.cap !== undefined ? `limit ${readiness.requestsToday.cap}` : "no limit set";
   const spendLimit = readiness.spendToday.capUsd !== undefined ? `limit $${readiness.spendToday.capUsd.toFixed(2)}` : "no limit set";
-  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts up to $6.00)`;
+  const usage = `requests today ${readiness.requestsToday.count} (${requestLimit}), worst-case authorized today $${readiness.spendToday.reservedUsd.toFixed(2)} (${spendLimit}; each consult counts its model's hold, up to $6.00)`;
   const fence = readiness.fences.length > 0 ? `UNRESOLVED SESSION: ${readiness.fences.map((entry) => `fence since ${entry.at} for wallet directory ${entry.configDir}${entry.daemonExecutable ? ` (daemon ${entry.daemonExecutable}${entry.daemonPort ? `, port ${entry.daemonPort}` : ""})` : ""}${entry.thisWallet ? ", this wallet" : ", another wallet"}`).join("; ")}; run a recovery-only session before another consult` : "no unresolved session";
   const stranded = readiness.stranded ? readiness.stranded.supervisorRunning ? `; a session is in progress (supervisor pid ${readiness.stranded.supervisorPid})` : `; STRANDED PROCESSES from an earlier session: ${readiness.stranded.groups.map((group) => `${group.role} process group ${group.pgid}`).join(", ") || "no group recorded"}` : "";
   const last = readiness.lastSession ? `last ${readiness.lastSession.recovery ? "recovery session" : "consult"} ${readiness.lastSession.at} (${readiness.lastSession.result}): key reuse ${readiness.lastSession.keyReuse}, local auth ${readiness.lastSession.inferenceAuth}, Tor ${readiness.lastSession.tor}, confinement ${readiness.lastSession.confinement} (self-test ${readiness.lastSession.confinementSelfTest}), settlement ${readiness.lastSession.settlement}${stageTimings(readiness.lastSession.stageMs)}` : "no consult run yet";

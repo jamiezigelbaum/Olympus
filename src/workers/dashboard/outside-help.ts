@@ -407,8 +407,9 @@ function renderRouteLine(route: DashboardOutsideHelpRoute): string {
 function usageLine(ready: DashboardOutsideHelpReadiness): string {
   const count = ready.requestsToday.count;
   const pieces = [count === 0 ? W.usageNone : count === 1 ? W.usageOne : fill(W.usageMany, { n: String(count) })];
-  // The ledger records the $6 hold per question, never the settled price, so
-  // the day's figure is what counts against limits, never money spent.
+  // The ledger records each question's hold (its model's allowance), never
+  // the settled price, so the day's figure is what counts against limits,
+  // never money spent.
   const head = count > 0 ? `${pieces[0]} ${fill(W.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}` : pieces[0]!;
   pieces.splice(0, 1, head);
   pieces.push(ready.expiry.state === 'active' && ready.expiry.expiryDate

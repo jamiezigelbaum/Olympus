@@ -265,7 +265,9 @@ card (a reminder before it is not built yet), and one-click off.
 - **Funding.** Olympus never runs `zkapi-clientd config` (a standing security
   rule), so "add money" needs one Terminal command that the dashboard watches.
   Open for redesign.
-- **Settled cost.** The ledger stores the $6 hold per consult, not the settled
+- **Settled cost.** The ledger stores each consult's hold (the allowance the
+  live model list states for its model, $1 to $6; fixed 2026-10-10, before
+  that every consult counted $6), not the settled
   price.
 - **Latency.** 70–180 s today; the target is about 45 s after the planned speed
   work.
