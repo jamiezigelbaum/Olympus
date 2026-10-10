@@ -1606,7 +1606,7 @@ function readIngestionHealthState(path: string): IngestionHealthDoctorState | un
 }
 
 function writeIngestionHealthState(path: string, state: IngestionHealthDoctorState): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 

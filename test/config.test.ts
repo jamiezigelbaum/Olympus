@@ -7,13 +7,50 @@ import {
   configWithEnvironmentOverrides,
   defaultConfig,
   loadConfig,
+  NATIVE_REMOTE_CONFIG_ENV,
   parseBoolean,
   parseLane,
   parseModelProfile,
 } from '../src/core/config.ts';
 import { workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
+import { resolveDemoConsent } from '../src/workers/remote-oauth/demo-consent.ts';
 
 describe('config', () => {
+  test('a Gateway-supervised worker reads the plugin remote section, demo sign-in included', () => {
+    // The worker child builds its config from its environment; before the
+    // handoff its remote section was always empty on OpenClaw hosts, so
+    // /connect/demo/authorize answered 404 on the hosted demo (2026-10-10).
+    const remote = {
+      enabled: true,
+      relayHost: ' relay.example.test ',
+      demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture', extra: 'dropped' },
+    };
+    const env = {
+      OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
+      OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'instance-1',
+      [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify(remote),
+    };
+    const config = loadConfig(env);
+    expect(config.remote).toEqual({
+      enabled: true,
+      relayHost: 'relay.example.test',
+      demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture' },
+    });
+    expect(resolveDemoConsent(config.remote, () => true)?.username).toBe('reviewer');
+    expect(configWithEnvironmentOverrides(defaultConfig(), env).remote?.demoConsent?.enabled).toBe(true);
+  });
+
+  test('the remote handoff is ignored outside a Gateway-supervised worker and refused when malformed', () => {
+    const base = { OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json' };
+    // A hand-edited worker.env cannot switch on remote access or demo sign-in.
+    expect(loadConfig({ ...base, [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify({ demoConsent: { enabled: true } }) }).remote)
+      .toBeUndefined();
+    expect(() => loadConfig({ ...base, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'i', [NATIVE_REMOTE_CONFIG_ENV]: '{nope' }))
+      .toThrow('is not valid JSON');
+    expect(() => loadConfig({ ...base, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'i', [NATIVE_REMOTE_CONFIG_ENV]: '[]' }))
+      .toThrow('must hold a JSON object');
+  });
+
   test('opaque explicit worker refs never inherit ambient credentials in inspection mode', () => {
     const config = configFromPluginConfig({ worker: { authToken: { source: 'file', provider: 'fixture', id: '/worker' }, service: { enabled: true } } }, { requireResolvedWorkerSecrets: false });
     expect(config.worker.authTokenSecretRefUnresolved).toBe(true);

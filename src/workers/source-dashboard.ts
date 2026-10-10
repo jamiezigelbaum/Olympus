@@ -1734,7 +1734,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
   private readonly db: Database;
 
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
-    if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true });
+    if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(dbPath);
     this.db.exec('PRAGMA busy_timeout = 10000;');
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());

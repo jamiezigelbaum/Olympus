@@ -523,12 +523,12 @@ function safeErrorMessage(error: unknown): string {
  * one, and never a half-written blend.
  */
 export function writeReport(path: string, report: VeniceCreditStatusReport): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writePrivateFileAtomicSync(path, `${JSON.stringify(report, null, 2)}\n`);
 }
 
 function writeProviderPause(path: string, report: VeniceCreditStatusReport): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writePrivateFileAtomicSync(path, `${JSON.stringify({
     active: true,
     kind: 'venice',

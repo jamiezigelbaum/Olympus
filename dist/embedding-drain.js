@@ -2402,7 +2402,7 @@ class EncryptedFileSecretStore {
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
       };
-      mkdirSync4(dirname4(this.encryptedFilePath), { recursive: true });
+      mkdirSync4(dirname4(this.encryptedFilePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.encryptedFilePath, JSON.stringify(encrypted, null, 2));
     } finally {
       key.fill(0);
@@ -2427,7 +2427,7 @@ class EncryptedFileSecretStore {
     return this.localRandomKey();
   }
   localRandomKey() {
-    mkdirSync4(dirname4(this.keyFilePath), { recursive: true });
+    mkdirSync4(dirname4(this.keyFilePath), { recursive: true, mode: 448 });
     if (!existsSync3(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString("base64"));
     }
@@ -2607,6 +2607,19 @@ function installedEngineConfig(env) {
   return parsed;
 }
 function applyEnvironmentOverrides(config, env) {
+  const nativeRemote = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
+  if (nativeRemote && env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()) {
+    let parsed;
+    try {
+      parsed = JSON.parse(nativeRemote);
+    } catch {
+      throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
+    }
+    const remote = asRecord4(parsed);
+    if (!remote)
+      throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
+    config.remote = parseRemoteConfig(remote);
+  }
   if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
     config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
   }
@@ -2710,6 +2723,24 @@ function applyEnvironmentOverrides(config, env) {
     };
   }
 }
+function parseRemoteConfig(remote) {
+  const parsed = { enabled: remote.enabled === true };
+  for (const key of ["relayHost", "publicBaseUrl"]) {
+    const value = remote[key];
+    if (typeof value === "string" && value.trim())
+      parsed[key] = value.trim();
+  }
+  const demo = asRecord4(remote.demoConsent);
+  if (demo) {
+    parsed.demoConsent = { enabled: demo.enabled === true };
+    for (const key of ["username", "passwordHash"]) {
+      const value = demo[key];
+      if (typeof value === "string" && value.trim())
+        parsed.demoConsent[key] = value.trim();
+    }
+  }
+  return parsed;
+}
 function configFromPluginConfig(pluginConfig, options = {}) {
   const requireResolvedWorkerSecrets = options.requireResolvedWorkerSecrets !== false;
   const config = defaultConfig();
@@ -2721,23 +2752,8 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   const email = asRecord4(root?.email);
   const sourceIndex = asRecord4(root?.sourceIndex);
   const remote = asRecord4(root?.remote);
-  if (remote) {
-    config.remote = { enabled: remote.enabled === true };
-    for (const key of ["relayHost", "publicBaseUrl"]) {
-      const value = remote[key];
-      if (typeof value === "string" && value.trim())
-        config.remote[key] = value.trim();
-    }
-    const demo = asRecord4(remote.demoConsent);
-    if (demo) {
-      config.remote.demoConsent = { enabled: demo.enabled === true };
-      for (const key of ["username", "passwordHash"]) {
-        const value = demo[key];
-        if (typeof value === "string" && value.trim())
-          config.remote.demoConsent[key] = value.trim();
-      }
-    }
-  }
+  if (remote)
+    config.remote = parseRemoteConfig(remote);
   if (sovereignty) {
     config.sovereignty = {};
     if (typeof sovereignty.configPath === "string" && sovereignty.configPath.trim()) {
@@ -3482,7 +3498,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
 function asRecord4(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
-var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, NATIVE_REMOTE_CONFIG_ENV = "OLYMPUS_NATIVE_REMOTE_CONFIG_JSON", ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -5185,7 +5201,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync6(dirname6(path), { recursive: true });
+  mkdirSync6(dirname6(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -5498,7 +5514,7 @@ class JsonCredentialOAuth2StateStore {
       }
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname7(this.path), { recursive: true });
+        await mkdir2(dirname7(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -5510,7 +5526,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname7(this.path), { recursive: true });
+        await mkdir2(dirname7(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -14235,7 +14251,7 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync8(dirname9(this.dbPath), { recursive: true });
+        mkdirSync8(dirname9(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database2(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       try {
