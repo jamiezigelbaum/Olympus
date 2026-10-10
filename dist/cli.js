@@ -9888,11 +9888,13 @@ import { isAbsolute as isAbsolutePath, join as join16, resolve as resolve5 } fro
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
-function loadConfig(env = process.env) {
+function loadConfig(env = process.env, options = {}) {
   const engineConfig = env.OLYMPUS_CONFIG ? undefined : installedEngineConfig(env);
   if (engineConfig) {
     const config2 = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
     applyEnvironmentOverrides(config2, env);
+    if (options.nativeRemoteHandoff === true)
+      applyNativeRemoteHandoff(config2, env);
     validateConfig(config2);
     return config2;
   }
@@ -9903,6 +9905,8 @@ function loadConfig(env = process.env) {
     mergeConfig(config, raw);
   }
   applyEnvironmentOverrides(config, env);
+  if (options.nativeRemoteHandoff === true)
+    applyNativeRemoteHandoff(config, env);
   validateConfig(config);
   return config;
 }
@@ -9932,19 +9936,6 @@ function configWithEnvironmentOverrides(config, env) {
   return next;
 }
 function applyEnvironmentOverrides(config, env) {
-  const nativeRemote = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
-  if (nativeRemote && env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()) {
-    let parsed;
-    try {
-      parsed = JSON.parse(nativeRemote);
-    } catch {
-      throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
-    }
-    const remote = asRecord4(parsed);
-    if (!remote)
-      throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
-    config.remote = parseRemoteConfig(remote);
-  }
   if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
     config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
   }
@@ -10047,6 +10038,23 @@ function applyEnvironmentOverrides(config, env) {
       policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
     };
   }
+}
+function applyNativeRemoteHandoff(config, env) {
+  const handoff = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
+  if (!handoff) {
+    delete config.remote;
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(handoff);
+  } catch {
+    throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
+  }
+  const remote = asRecord4(parsed);
+  if (!remote)
+    throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
+  config.remote = parseRemoteConfig(remote);
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
@@ -129358,7 +129366,7 @@ async function main() {
   if (dashboardSessionSecret.source !== "file") {
     console.log(`[dashboard] control-session secret ${dashboardSessionSecret.source} at ${dashboardSessionSecret.path}${dashboardSessionSecret.source === "memory" ? " (could not be written; sessions end with this worker)" : ""}`);
   }
-  const olympusConfig = loadConfig();
+  const olympusConfig = loadConfig(process.env, { nativeRemoteHandoff: workerLaunch.nativeServiceSupervised === true });
   const sourceCorpusRegistry2 = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,

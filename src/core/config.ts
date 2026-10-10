@@ -347,7 +347,10 @@ export function defaultConfig(): OlympusConfig {
   return structuredClone(DEFAULT_CONFIG);
 }
 
-export function loadConfig(env: Record<string, string | undefined> = process.env): OlympusConfig {
+export function loadConfig(
+  env: Record<string, string | undefined> = process.env,
+  options: { nativeRemoteHandoff?: boolean } = {},
+): OlympusConfig {
   // On a Mac running the standalone engine, its engine.json is the config:
   // a leftover ~/.olympus/config.json from an older setup (pointing at a
   // worker that no longer runs) must not win over it. OLYMPUS_CONFIG still does.
@@ -355,6 +358,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (engineConfig) {
     const config = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
     applyEnvironmentOverrides(config, env);
+    if (options.nativeRemoteHandoff === true) applyNativeRemoteHandoff(config, env);
     validateConfig(config);
     return config;
   }
@@ -367,6 +371,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
 
   applyEnvironmentOverrides(config, env);
+  if (options.nativeRemoteHandoff === true) applyNativeRemoteHandoff(config, env);
 
   validateConfig(config);
   return config;
@@ -419,18 +424,6 @@ export function configWithEnvironmentOverrides(
 }
 
 function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, string | undefined>): void {
-  const nativeRemote = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
-  if (nativeRemote && env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(nativeRemote);
-    } catch {
-      throw new OperationError('config_error', `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
-    }
-    const remote = asRecord(parsed);
-    if (!remote) throw new OperationError('config_error', `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
-    config.remote = parseRemoteConfig(remote);
-  }
   if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
     config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
   }
@@ -571,10 +564,35 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
  * through this variable (core/native-worker-service.ts): the worker child
  * builds its config from its environment, and without it a remote setting in
  * openclaw.json never reached the worker (demo sign-in 404 on a hosted demo,
- * 2026-10-10). Honored only alongside OLYMPUS_NATIVE_SERVICE_INSTANCE_ID, so a
- * hand-edited worker.env cannot switch on remote access or demo sign-in.
+ * 2026-10-10). Read only by `loadConfig(env, { nativeRemoteHandoff: true })`,
+ * which the worker passes after its entry point validated a native-service
+ * launch (cli.ts runWorkerForeground) — never from an ambient variable, so a
+ * worker.env or a foreground worker cannot switch on remote access or demo
+ * sign-in through it.
  */
 export const NATIVE_REMOTE_CONFIG_ENV = 'OLYMPUS_NATIVE_REMOTE_CONFIG_JSON';
+
+/**
+ * In a validated native-service launch the plugin config is the only source of
+ * `remote`: the handoff replaces whatever engine.json or config.json said, and
+ * no handoff means the plugin has no remote section, so none applies.
+ */
+function applyNativeRemoteHandoff(config: OlympusConfig, env: Record<string, string | undefined>): void {
+  const handoff = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
+  if (!handoff) {
+    delete config.remote;
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(handoff);
+  } catch {
+    throw new OperationError('config_error', `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
+  }
+  const remote = asRecord(parsed);
+  if (!remote) throw new OperationError('config_error', `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
+  config.remote = parseRemoteConfig(remote);
+}
 
 /** The `remote` plugin-config section, kept to its known fields. */
 export function parseRemoteConfig(remote: Record<string, unknown>): NonNullable<OlympusConfig['remote']> {

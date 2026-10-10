@@ -2533,19 +2533,6 @@ function configWithEnvironmentOverrides(config, env) {
   return next;
 }
 function applyEnvironmentOverrides(config, env) {
-  const nativeRemote = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
-  if (nativeRemote && env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()) {
-    let parsed;
-    try {
-      parsed = JSON.parse(nativeRemote);
-    } catch {
-      throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
-    }
-    const remote = asRecord4(parsed);
-    if (!remote)
-      throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
-    config.remote = parseRemoteConfig(remote);
-  }
   if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
     config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
   }

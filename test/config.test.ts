@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -27,28 +27,54 @@ describe('config', () => {
     };
     const env = {
       OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
-      OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'instance-1',
       [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify(remote),
     };
-    const config = loadConfig(env);
+    const config = loadConfig(env, { nativeRemoteHandoff: true });
     expect(config.remote).toEqual({
       enabled: true,
       relayHost: 'relay.example.test',
       demoConsent: { enabled: true, username: 'reviewer', passwordHash: '$argon2id$v=19$m=65536,t=2,p=1$fixture' },
     });
     expect(resolveDemoConsent(config.remote, () => true)?.username).toBe('reviewer');
-    expect(configWithEnvironmentOverrides(defaultConfig(), env).remote?.demoConsent?.enabled).toBe(true);
   });
 
-  test('the remote handoff is ignored outside a Gateway-supervised worker and refused when malformed', () => {
+  test('only a validated native launch reads the remote handoff, and refuses it malformed', () => {
     const base = { OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json' };
-    // A hand-edited worker.env cannot switch on remote access or demo sign-in.
-    expect(loadConfig({ ...base, [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify({ demoConsent: { enabled: true } }) }).remote)
-      .toBeUndefined();
-    expect(() => loadConfig({ ...base, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'i', [NATIVE_REMOTE_CONFIG_ENV]: '{nope' }))
+    // A worker.env or foreground worker carrying both variables is not a
+    // supervised launch: it cannot switch on remote access or demo sign-in.
+    const ambient = {
+      ...base,
+      OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '00000000-0000-4000-8000-000000000000',
+      [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify({ demoConsent: { enabled: true } }),
+    };
+    expect(loadConfig(ambient).remote).toBeUndefined();
+    expect(configWithEnvironmentOverrides(defaultConfig(), ambient).remote).toBeUndefined();
+    expect(() => loadConfig({ ...base, [NATIVE_REMOTE_CONFIG_ENV]: '{nope' }, { nativeRemoteHandoff: true }))
       .toThrow('is not valid JSON');
-    expect(() => loadConfig({ ...base, OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'i', [NATIVE_REMOTE_CONFIG_ENV]: '[]' }))
+    expect(() => loadConfig({ ...base, [NATIVE_REMOTE_CONFIG_ENV]: '[]' }, { nativeRemoteHandoff: true }))
       .toThrow('must hold a JSON object');
+  });
+
+  test('in a native launch the plugin remote section replaces engine.json, and its absence clears it', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-config-remote-handoff-'));
+    try {
+      mkdirSync(join(home, '.olympus'));
+      writeFileSync(join(home, '.olympus', 'engine.json'), JSON.stringify({
+        remote: { enabled: true, demoConsent: { enabled: true, username: 'stale', passwordHash: '$argon2id$stale' } },
+      }));
+      const env = { HOME: home, OLYMPUS_ENGINE_HOST: '1' };
+      // The standalone engine's own worker still reads engine.json.
+      expect(loadConfig(env).remote?.demoConsent?.username).toBe('stale');
+      // A Gateway with no remote section: nothing from engine.json survives.
+      expect(loadConfig(env, { nativeRemoteHandoff: true }).remote).toBeUndefined();
+      const disabled = loadConfig(
+        { ...env, [NATIVE_REMOTE_CONFIG_ENV]: JSON.stringify({ enabled: false, demoConsent: { enabled: false } }) },
+        { nativeRemoteHandoff: true },
+      );
+      expect(resolveDemoConsent(disabled.remote, () => true)).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('opaque explicit worker refs never inherit ambient credentials in inspection mode', () => {
