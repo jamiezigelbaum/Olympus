@@ -509,8 +509,7 @@ confirmed settlement (or no lease). This change does not relax those conditions.
 ### Required daemon
 
 The supervised macOS route requires the Olympus `zkapi-clientd` fork version
-`0.1.6-olympus2`, based on `olympus/supervisor-flags` in
-`jamiezigelbaum/zkapi`. It adds connection ownership verification for the managed
+`0.1.6-olympus2`, based on `olympus/supervisor-flags` in the maintained zkAPI fork. It adds connection ownership verification for the managed
 companion. Original upstream binaries and `0.1.6-olympus1` lack that proof;
 Olympus refuses before starting Tor with `daemon_supervisor_unsupported`.
 The current upstream managed-tools download is therefore insufficient on macOS.
