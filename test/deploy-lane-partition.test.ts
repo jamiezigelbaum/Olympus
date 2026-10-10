@@ -94,6 +94,7 @@ describe('test lane partition', () => {
       'bun',
       'test',
       '--parallel',
+      '--timeout=15000',
       join('test', 'one.test.ts'),
       join('test', 'two.test.ts'),
     ]);

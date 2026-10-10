@@ -63,8 +63,17 @@ export function parseTestLaneArgs(args: string[]): TestLaneOptions {
 
 export function buildTestLaneCommand(selected: string[], junitPath?: string): string[] {
   // --parallel runs files across one worker per core (each file isolated);
-  // the lane was CPU-bound on a single process before this.
-  const command = ['bun', 'test', '--parallel', ...selected.map((name) => join('test', name))];
+  // the lane was CPU-bound on a single process before this. Workers compete
+  // for the same cores, so a CPU-heavy test runs ~2-3x slower than alone (a
+  // 2.2 s corpus test hit Bun's 5 s default on main): the default per-test
+  // timeout scales to match and still catches hangs. Explicit timeouts win.
+  const command = [
+    'bun',
+    'test',
+    '--parallel',
+    '--timeout=15000',
+    ...selected.map((name) => join('test', name)),
+  ];
   if (junitPath) command.push('--reporter=junit', `--reporter-outfile=${junitPath}`);
   return command;
 }
