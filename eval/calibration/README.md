@@ -71,3 +71,36 @@ The full result is saved beside the labels. A file Olympus still holds for the
 model counts as Private, because that is what you experience.
 
 Targets: 95% precision and 99% recall. It takes about 2 to 3 seconds per file.
+
+## Venice embedding content preference (2026-10-10)
+
+Owner-approved on 2026-10-10, using only committed synthetic eval fixtures:
+7 versioned documents and 4 consult-leak candidates, their 6 existing answerable
+questions, and all 25 frozen `HELD_OUT_BLIND_2` questions as off-domain controls.
+The controls include housing and legal near misses; the documents do not answer
+them. No private calibration samples, live stores, engine or sovereignty settings
+are read. This is a bounded fixture calibration, not evidence of live-corpus
+precision or recall; the consult blind set was written for a different eval.
+
+The shipped Venice request format (title plus text, query instruction, 4096
+dimensions) gives an off-domain best-cosine peak of **0.42807838135881765** and
+an expected-document true-positive floor of **0.4829398465116097**. The smallest
+hundredth above that peak is **0.43**, below every measured positive. As with
+Gemini's 0.61 peak / 0.66 floor / 0.62 bar, this earns vector content preference
+in fusion; it does not add a vector-lane rejection floor or change embeddings.
+Local Qwen3 remains uncalibrated because its identity and dimension differ.
+
+`venice-relevance-result.json` records every score and the fixture digest;
+`embedding-ledger.jsonl` records approval and the numbers. To reproduce after
+obtaining approval for another credential-bearing API measurement, run on
+Xanthos (remote-build forbids secret-bearing jobs):
+
+```bash
+set -o pipefail
+VENICE_API_KEY=$(secret get Venice-API-Key) bun eval/calibration/venice-relevance.ts
+```
+
+The runner imports the production embedding provider and exits nonzero if no
+hundredth separates the controls from the expected positive documents. It never
+prints credentials. API usage is fixture-sized (42 input embeddings per final
+measurement); the repository estimate is $0.0125 per million tokens.
