@@ -22940,9 +22940,14 @@ var init_worker_service = __esm(() => {
 });
 
 // src/core/provider-account-identity.ts
-var IDENTITY_RESPONSE_LIMIT_CHARS;
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_CHARS;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+  };
   IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
 });
 

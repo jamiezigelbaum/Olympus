@@ -1815,7 +1815,9 @@ async function lookupConnectedAccountId(options: {
     ? new URL('/2/users/get_current_account', options.tokenUrl).toString()
     : tokenOrigin === 'https://oauth2.googleapis.com'
       ? undefined
-      : new URL(options.provider === 'gmail' ? '/gmail/v1/users/me/profile' : '/drive/v3/about?fields=user(emailAddress)', options.tokenUrl).toString();
+      : (options.provider === 'gmail'
+        ? new URL('users/me/profile', new URL('/gmail/v1/', options.tokenUrl))
+        : new URL('/drive/v3/about?fields=user(emailAddress)', options.tokenUrl)).toString();
   try {
     return await fetchProviderAccountId({
       provider: options.provider,

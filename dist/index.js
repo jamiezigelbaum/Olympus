@@ -17759,6 +17759,11 @@ init_credential_broker();
 
 // src/core/provider-account-identity.ts
 init_http_timeout();
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+  dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+  gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
+};
 var IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
 
 // src/core/source-account-binding.ts

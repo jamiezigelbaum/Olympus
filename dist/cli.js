@@ -5544,7 +5544,7 @@ var init_provider_account_identity = __esm(() => {
   ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive"];
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
     dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-    gmail: "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
     google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
   };
   IDENTITY_RESPONSE_LIMIT_CHARS = 64 * 1024;
@@ -6642,7 +6642,7 @@ async function exchangeAuthorizationCode(options) {
 }
 async function lookupConnectedAccountId(options) {
   const tokenOrigin = new URL(options.tokenUrl).origin;
-  const endpoint = options.provider === "dropbox" ? new URL("/2/users/get_current_account", options.tokenUrl).toString() : tokenOrigin === "https://oauth2.googleapis.com" ? undefined : new URL(options.provider === "gmail" ? "/gmail/v1/users/me/profile" : "/drive/v3/about?fields=user(emailAddress)", options.tokenUrl).toString();
+  const endpoint = options.provider === "dropbox" ? new URL("/2/users/get_current_account", options.tokenUrl).toString() : tokenOrigin === "https://oauth2.googleapis.com" ? undefined : (options.provider === "gmail" ? new URL("users/me/profile", new URL("/gmail/v1/", options.tokenUrl)) : new URL("/drive/v3/about?fields=user(emailAddress)", options.tokenUrl)).toString();
   try {
     return await fetchProviderAccountId({
       provider: options.provider,

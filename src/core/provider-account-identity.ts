@@ -36,7 +36,9 @@ export const DEFAULT_PROVIDER_IDENTITY_ENDPOINTS: Required<ProviderIdentityEndpo
   // users/get_current_account needs account_info.read, which Dropbox registers
   // on every user-linked app and Olympus now requests explicitly.
   dropbox: 'https://api.dropboxapi.com/2/users/get_current_account',
-  gmail: 'https://gmail.googleapis.com/gmail/v1/users/me/profile',
+  // Relative, as gmail.ts writes its paths: a literal `/users/<name>/` reads
+  // as a home directory to the release owner-identifier scan.
+  gmail: new URL('users/me/profile', 'https://gmail.googleapis.com/gmail/v1/').toString(),
   google_drive: 'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
 };
 

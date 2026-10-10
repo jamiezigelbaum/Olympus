@@ -2020,7 +2020,11 @@ describe('multi-source source dashboard', () => {
     });
     let tokenExchangeBody = '';
     const syncRequests: unknown[] = [];
-    const oauthFetch: OAuthFetch = async (_url, init) => {
+    const oauthFetch: OAuthFetch = async (url, init) => {
+      // Connect also asks Dropbox which account the grant belongs to.
+      if (String(url).endsWith('/2/users/get_current_account')) {
+        return new Response(JSON.stringify({ account_id: 'dbid:dashboard-fixture' }), { status: 200 });
+      }
       tokenExchangeBody = String(init?.body ?? '');
       return new Response(JSON.stringify({
         access_token: 'dropbox-access-token-fixture',
