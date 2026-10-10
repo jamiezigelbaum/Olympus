@@ -93,7 +93,7 @@ describe('reading leading items in depth', () => {
       seen = { items, options };
       return { answer: 'All values.', citations: [{ id: 'bw1', claim: 'c' }, { id: 'bw2', claim: 'c' }], unanswered: [], modelId: 'm' };
     }, {
-      relevance: async () => [0.366, 0.361, 0.350, 0.339],
+      relevance: async () => [0.366, 0.361, 0.325, 0.31],
       readItem: async (item, request) => {
         const id = ((item.provenance as { sourceItem: { localItemId: string } }).sourceItem.localItemId);
         readRequests.push({ id, maxChars: request.maxChars });

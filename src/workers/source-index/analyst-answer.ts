@@ -2662,11 +2662,19 @@ export interface PrivateEvidenceResult {
   candidates: PrivateEvidenceCandidate[];
 }
 
-export type PrivateEvidenceCandidate = EvidenceCandidate & { corpusId: string };
+export type PrivateEvidenceCandidate = EvidenceCandidate & {
+  corpusId: string;
+  /** A nearest neighbour the search did not return (privateNeighbours), not a match. */
+  neighbour?: true;
+};
 
 const PRIVATE_EVIDENCE_MAX_RESULTS = 12;
 const PRIVATE_DEPTH_MAX_PASSAGES = 24;
 const PRIVATE_EVIDENCE_BYTE_BUDGET = 20_000;
+// At most as many neighbours as the panel reads items (PANEL_ANSWER_LIMITS
+// maxItems). On the owner's blind sets (2026-10-10) four found every answer
+// that twelve did, and read fewer items for questions nothing answers.
+const PRIVATE_NEIGHBOURS_MAX = 4;
 
 export async function searchPrivateEvidence(input: {
   lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
@@ -2744,7 +2752,7 @@ async function privateNeighbours(
       if (!candidate.provenance.sourceItem?.localItemId || seen.has(key(candidate))) return false;
       seen.add(key(candidate));
       return true;
-    });
+    }).slice(0, PRIVATE_NEIGHBOURS_MAX).map((candidate) => ({ ...candidate, neighbour: true as const }));
   } catch {
     return [];
   }

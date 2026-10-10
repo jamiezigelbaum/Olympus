@@ -197,7 +197,7 @@ describe('the panel reads the newest version in every run', () => {
   test('every retrieval order of the same matches sends the model the same evidence, newest version included', async () => {
     const ids = ['offer-v1', 'offer-v2', 'offer-v3', 'offer-v3-scan', 'contract', 'lease'];
     // Fixed per-item relevance (a question's embedding scores do not depend on retrieval order).
-    const relevanceOf: Record<string, number> = { 'offer-v1': 0.61, 'offer-v2': 0.63, 'offer-v3': 0.60, 'offer-v3-scan': 0.62, contract: 0.59, lease: 0.2 };
+    const relevanceOf: Record<string, number> = { 'offer-v1': 0.61, 'offer-v2': 0.66, 'offer-v3': 0.60, 'offer-v3-scan': 0.62, contract: 0.59, lease: 0.2 };
     const prompts = new Set<string>();
     const readSets = new Set<string>();
     const answers = new Set<string>();
