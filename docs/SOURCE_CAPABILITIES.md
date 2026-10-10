@@ -48,9 +48,10 @@ does not create source-specific extraction, retrieval, or answer behavior.
   observed-runtime-qualified on the canonical spine. The durable receipts are
   recorded in `V0_4_RELEASE.md`; neither result substitutes for a new user's
   clean-install release qualification.
-- No source yet has a complete clean-install proof covering dashboard
-  authentication, scope, automatic sync, extraction accounting, retrieval,
-  citation, and secure answer release.
+- The owner has run fresh installs and connected sources through the
+  dashboard, including Dropbox sign-in and WhatsApp QR pairing (owner report,
+  2026-10-10). Per-row receipts against the qualification contract below are
+  not yet written down; until they are, a row is not marked v0.4-qualified.
 
 ## Host capability delta
 

@@ -1,9 +1,11 @@
 # Private answers
 
 Status: structure approved by the owner on 2026-10-07 (approved mockup:
-<https://claude.ai/artifact/XViZZCr6zpWcZQhmzXhNNE>). The one-click install of
-Tor and zkAPI (below) is built; the rest of this page is approved and not yet
-built unless it says so.
+<https://claude.ai/artifact/XViZZCr6zpWcZQhmzXhNNE>). Built and live by
+2026-10-10: the private answer panel, the private question panel and anonymous
+answers through zkAPI (#215, #225, #227 and follow-ups). Venice end-to-end
+encryption is not built. Where this page and the code differ, the code is
+current.
 
 ## Outcome
 

@@ -64720,7 +64720,7 @@ async function zkapiConsultTransportCheck(deps) {
   const engine = doctorSovereigntyEngine(deps);
   const profiles = engine ? Object.entries(engine.config.modelProfiles).filter(([, profile]) => profile.provider === "zkapi") : [];
   if (profiles.length === 0) {
-    return { name, ok: true, detail: "Not configured: the experimental zkAPI consult transport is off." };
+    return { name, ok: true, detail: "Not configured: the zkAPI route for anonymous answers is off." };
   }
   const env = deps.env ?? process.env;
   const home2 = env.HOME?.trim();
@@ -64744,10 +64744,10 @@ async function zkapiConsultTransportCheck(deps) {
   return {
     name,
     ok,
-    detail: `zkAPI consult transport (experimental, consults only; no consult is sent until the consult lane lands): ${lines.join(" | ")}`,
+    detail: `zkAPI route for anonymous answers: ${lines.join(" | ")}`,
     ...ok ? {} : {
       hint: [
-        lines.some((line) => line.includes("UNRESOLVED SESSION")) ? "A recovery-only zkAPI session is needed before another consult, run against the wallet directory that holds the fence. Until the consult lane offers it, run the developer harness from the Olympus checkout: bun scripts/zkapi-consult-recover.ts --yes (one content-free request, counted at $6). A fence whose wallet can no longer run can only be abandoned explicitly with that script's --abandon option; an unsettled lease may then settle under another session's identity." : undefined,
+        lines.some((line) => line.includes("UNRESOLVED SESSION")) ? "An unfinished payment is held, so no anonymous answer can be sent until it is cleared. Open Anonymous answers in the dashboard and press Recover (one fixed request with no content, held at up to $6). If that wallet can no longer run, press Abandon instead; the unsettled request may then settle under another session's network identity." : undefined,
         lines.some((line) => line.includes("STRANDED PROCESSES")) ? "An earlier session left processes Olympus could not prove its own. Find the listed process groups (ps -o pid,pgid,command -g <pgid>), stop them yourself, or reboot; the next session then sees them gone. Never delete the zkAPI ledger to clear this." : undefined,
         "Fix anything else the detail names in zkapi-clientd config or in the zkapi profile of sovereignty.json. Olympus never funds, withdraws or edits the daemon."
       ].filter((part) => part !== undefined).join(" ")
@@ -64757,7 +64757,7 @@ async function zkapiConsultTransportCheck(deps) {
 async function consultSettingsCheck(deps) {
   const name = "consult_settings";
   const read = doctorConsultSettings(deps);
-  const prefix = "Outside help (no consult is sent until the consult lane lands):";
+  const prefix = "Anonymous answers:";
   if (read.state === "absent")
     return { name, ok: true, detail: `${prefix} off (no settings file).` };
   if (read.state === "invalid") {
@@ -64794,7 +64794,7 @@ async function consultVocabularyCheck(deps) {
   return {
     name,
     ok: !integrityFailure,
-    detail: `Consult vocabulary (no consult is sent until the consult lane lands): languages ${settings.settings.languages.join(", ")} (${configured ? "configured" : "default"}); ${status.map((entry) => `${entry.id} ${entry.state}`).join(", ")}.`,
+    detail: `Consult vocabulary: languages ${settings.settings.languages.join(", ")} (${configured ? "configured" : "default"}); ${status.map((entry) => `${entry.id} ${entry.state}`).join(", ")}.`,
     ...hint ? { hint } : {}
   };
 }

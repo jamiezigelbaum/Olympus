@@ -1,4 +1,4 @@
-// Owner-declared settings for the experimental zkAPI consult transport
+// Owner-declared settings for the zkAPI route used by anonymous answers
 // (design: docs/design/frontier-consult-lane.md, track Z).
 //
 // zkAPI is a paid anonymous route to ordinary cloud models through a local
