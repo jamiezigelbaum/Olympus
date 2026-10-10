@@ -194,7 +194,7 @@ summary{cursor:pointer;border-radius:0.375rem}
 .why .plain{margin:0.25rem 0;font-size:0.875rem}
 .why-note{font-size:0.8125rem;color:var(--muted)}
 .why .files li{overflow-wrap:anywhere}
-.why .files .btn.link.file{min-height:0;padding:0.125rem 0;color:var(--text);text-align:left;text-decoration:underline;text-underline-offset:2px}
+.why .files .btn.link.file{min-height:0;padding:0.125rem 0;color:var(--accent);text-align:left}
 .landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
 @keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}

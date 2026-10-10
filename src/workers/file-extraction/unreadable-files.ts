@@ -17,8 +17,8 @@
  * for the panel to open. No path ever reaches the browser, and no path is
  * ever read from a request.
  *
- * Source-neutral: the provider's open target (a Dropbox web preview and its
- * synced copy, a Drive web link) is the composition root's to resolve.
+ * Source-neutral: the provider's open target (a web page, and a synced copy
+ * on this computer) is the composition root's to resolve.
  */
 import { randomBytes } from 'node:crypto';
 import type { ExtractionItemRef } from './types.ts';
@@ -30,7 +30,9 @@ export interface UnreadableFileLocation {
   providerConversationId?: string;
 }
 
-/** One tier lane's facts the verdict reads: which corpora it serves, its ledger and its secret index. */
+/**
+ * One tier lane's facts the verdict reads: which corpora it serves, its ledger and its secret index.
+ */
 export interface UnreadableVerdictLane {
   corpusIds: ReadonlySet<string>;
   ledger: { getCurrent(identity: TierLedgerIdentity): { metadataTier: string; contentTier: string } | undefined };
@@ -72,18 +74,30 @@ export function createUnreadableVerdict(input: {
 }
 
 export interface UnreadableFilesOptions {
-  /** The ledger's list for one corpus, newest failure first. */
+  /**
+   * The ledger's list for one corpus, newest failure first.
+   */
   items(corpusId: string): readonly ExtractionUnreadableItem[];
-  /** The verdict the counts use, asked again before a file opens. */
+  /**
+   * The verdict the counts use, asked again before a file opens.
+   */
   verdict(item: ExtractionUnreadableItem): ExtractionUnreadableVerdict;
-  /** Where the item lives now, with tier-copy visibility applied; undefined when no store serves it. */
+  /**
+   * Where the item lives now, with tier-copy visibility applied; undefined when no store serves it.
+   */
   locate(ref: ExtractionItemRef): UnreadableFileLocation | undefined;
-  /** The provider's open target for a locator: its web page (https) and, when synced here, a local path. */
+  /**
+   * The provider's open target for a locator: its web page (https) and, when synced here, a local path.
+   */
   openTarget(provider: string, locator: string): { url?: string; localPath?: string } | undefined;
-  /** Opens a local path on this computer, re-checking it first. Absent: synced copies are not opened here. */
+  /**
+   * Opens a local path on this computer, re-checking it first. Absent: synced copies are not opened here.
+   */
   openFile?(path: string): Promise<void>;
   now?: () => number;
-  /** How long a token stays good after the list that carried it was last read. */
+  /**
+   * How long a token stays good after the list that carried it was last read.
+   */
   tokenTtlMs?: number;
 }
 
@@ -97,26 +111,45 @@ export type UnreadableOpenResult =
 
 export interface UnreadableFileEntry {
   name: string;
-  /** Present when the file has a place to open: the one-time capability the open tool takes. */
+  /**
+   * Present when the file has a place to open: the one-time capability the open tool takes.
+   */
   token?: string;
 }
 
 export interface UnreadableFiles {
-  /** The newest unreadable files' names across these corpora, newest failure first. */
+  /**
+   * The newest unreadable files' names across these corpora, newest failure first.
+   */
   names(corpusIds: readonly string[], limit: number): string[];
-  /** The computer's list: up to `limit` files with open tokens, and how many more there are. */
+  /**
+   * The computer's list: up to `limit` files with open tokens, and how many more there are.
+   */
   computerList(corpusIds: readonly string[], limit: number): { files: UnreadableFileEntry[]; more: number };
-  /** Opens the file a token from computerList names. */
+  /**
+   * Opens the file a token from computerList names.
+   */
   open(token: unknown): Promise<UnreadableOpenResult>;
 }
 
-/** 32 random bytes, base64url. */
-export const UNREADABLE_OPEN_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const TOKEN_LENGTH = 43;
+const TOKEN_ALPHABET = new Set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_');
+
+/**
+ * Whether a value has the shape of an open token: 32 random bytes, base64url.
+ */
+export function isUnreadableOpenToken(value: unknown): value is string {
+  return typeof value === 'string' && value.length === TOKEN_LENGTH && Array.from(value).every((char) => TOKEN_ALPHABET.has(char));
+}
 
 const DEFAULT_TOKEN_TTL_MS = 30 * 60_000;
-/** Outstanding tokens across every list; the oldest go first. */
+/**
+ * Outstanding tokens across every list; the oldest go first.
+ */
 const MAX_TOKENS = 2_000;
-/** A burst of opens, then one a second. */
+/**
+ * A burst of opens, then one a second.
+ */
 const OPEN_RATE = { capacity: 10, refillPerSecond: 1 };
 const UNNAMED = 'Unnamed file';
 
@@ -169,7 +202,7 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     if (named) return named;
     // No name captured at enqueue: the last segment of a path locator, never a web address.
     const path = locator(item);
-    if (path && !/^[a-z][a-z0-9+.-]*:/i.test(path)) {
+    if (path && path.startsWith('/')) {
       const last = path.split('/').filter(Boolean).at(-1);
       if (last) return last;
     }
@@ -182,7 +215,7 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     try {
       const resolved = options.openTarget(item.ref.provider, found);
       if (!resolved) return undefined;
-      const url = resolved.url && /^https:\/\//.test(resolved.url) ? resolved.url : undefined;
+      const url = resolved.url && resolved.url.startsWith('https://') ? resolved.url : undefined;
       const localPath = options.openFile ? resolved.localPath : undefined;
       return url || localPath ? { ...(url ? { url } : {}), ...(localPath ? { localPath } : {}) } : undefined;
     } catch {
@@ -245,7 +278,7 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     },
 
     async open(token) {
-      if (typeof token !== 'string' || !UNREADABLE_OPEN_TOKEN_PATTERN.test(token)) return { status: 'invalid' };
+      if (!isUnreadableOpenToken(token)) return { status: 'invalid' };
       const at = now();
       sweep(at);
       const entry = byToken.get(token);

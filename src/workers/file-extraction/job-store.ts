@@ -462,15 +462,23 @@ export interface ExtractionScopedReadinessOptions {
    * (ExtractionUnreadableVerdict). Absent: every such item is unreadable.
    */
   classifyUnreadable?: (item: ExtractionUnreadableItem) => ExtractionUnreadableVerdict;
-  /** Handed the items counted as unreadable, newest failure first. */
+  /**
+   * Handed the items counted as unreadable, newest failure first.
+   */
   onUnreadable?: (items: readonly ExtractionUnreadableItem[]) => void;
 }
 
-/** One item extraction gave up on for good, as the readiness counts saw it. */
+/**
+ * One item extraction gave up on for good, as the readiness counts saw it.
+ */
 export interface ExtractionUnreadableItem {
-  /** From the item's newest `failed_terminal` job (its `name` is the bare file name captured at enqueue). */
+  /**
+   * From the item's newest `failed_terminal` job (its `name` is the bare file name captured at enqueue).
+   */
   ref: ExtractionItemRef;
-  /** When that job failed for good (its `updated_at`). */
+  /**
+   * When that job failed for good (its `updated_at`).
+   */
   failedAt: string;
 }
 
@@ -513,7 +521,9 @@ function settleUnreadable(
   return { items, blocked };
 }
 
-/** An item's unreadable entry: its newest `failed_terminal` job. */
+/**
+ * An item's unreadable entry: its newest `failed_terminal` job.
+ */
 function unreadableCandidate(itemRows: readonly ExtractionJobSqlRow[]): ExtractionUnreadableItem | undefined {
   let newest: ExtractionJobSqlRow | undefined;
   for (const row of itemRows) {

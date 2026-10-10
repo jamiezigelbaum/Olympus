@@ -23,6 +23,7 @@ import {
   DASHBOARD_TOOL_NAME,
   INDEX_FASTER_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
+  OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
   PANEL_TOOL_NAMES,
   PRIVACY_GET_TOOL_NAME,
@@ -31,7 +32,7 @@ import {
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { dashboardHostBridge, type DashboardHostBridgeConfig } from '../src/workers/dashboard/host-bridge.ts';
-import { COMPUTER_HOST_PAGE_CSP, DASHBOARD_TOOLS_CALL_PATH, renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
+import { COMPUTER_HOST_PAGE_CSP, DASHBOARD_TOOLS_CALL_PATH, computerOpenTargets, renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
 import { DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_HOST_GATE_COPY } from '../src/workers/dashboard/vocabulary.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
@@ -59,9 +60,10 @@ describe('the panel\'s tool lists', () => {
     expect(PANEL_TOOL_NAMES).toContain(PRIVACY_SET_TOOL_NAME);
   });
 
-  test('the computer adds exactly Index faster and Unpair; ChatGPT\'s conversation tools are on neither list', () => {
-    expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME]);
+  test('the computer adds exactly Index faster, Unpair and opening a file; ChatGPT\'s conversation tools are on neither list', () => {
+    expect([...COMPUTER_HOST_TOOL_NAMES]).toEqual([...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME, OPEN_UNREADABLE_FILE_TOOL_NAME]);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(UNPAIR_SOURCE_TOOL_NAME);
+    expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(OPEN_UNREADABLE_FILE_TOOL_NAME);
     for (const name of ['olympus_search', 'olympus_answer', 'olympus_source_status']) {
       expect(COMPUTER_HOST_TOOL_NAMES).not.toContain(name);
     }
@@ -136,6 +138,14 @@ describe('the host protocol', () => {
     expect(reply.result.hostContext.displayMode).toBe('fullscreen');
     expect(reply.result.hostContext.availableDisplayModes).toEqual(['fullscreen']);
     expect(reply.result.hostContext[OLYMPUS_HOST_CONTEXT_KEY]).toEqual({ kind: 'computer', readOnly: false, links: LINKS });
+  });
+
+  test('an open link\'s landing rides in the first ui/initialize reply only', async () => {
+    const host = bridge({ landing: { sourceId: 'dropbox.files' } });
+    host.send({ id: 30, method: 'ui/initialize', params: { protocolVersion: '2026-01-26' } });
+    expect((await host.reply(30)).result.hostContext[OLYMPUS_HOST_CONTEXT_KEY]).toEqual({ kind: 'computer', readOnly: false, links: LINKS, landing: { sourceId: 'dropbox.files' } });
+    host.send({ id: 31, method: 'ui/initialize', params: { protocolVersion: '2026-01-26' } });
+    expect((await host.reply(31)).result.hostContext[OLYMPUS_HOST_CONTEXT_KEY]).toEqual({ kind: 'computer', readOnly: false, links: LINKS });
   });
 
   test('tools/call runs a panel tool and returns its result as is', async () => {
@@ -602,6 +612,81 @@ describe('the panel on the computer', () => {
   });
 });
 
+const FILE_TOKEN = 'T'.repeat(43);
+const UNREADABLE_DROPBOX = {
+  id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Fresh', lastSyncAt: ago(MIN),
+  detail: "synced 1m ago · 3 files can't be read",
+  unreadable: {
+    count: 3, reasons: [{ code: 'damaged_or_unsupported', count: 3 }], names: ['ChatGPT name.pdf'],
+    more: { label: 'and 2 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: `${OPEN_BASE}unreadable/dropbox/`, openHref: true },
+  },
+} as DashboardViewModelV1['sources'][number];
+const UNREADABLE_META = { unreadable: [{ sourceId: 'dropbox.files', files: [{ name: 'Q3 deck.key', token: FILE_TOKEN }, { name: 'scan.tiff' }], more: 1 }] };
+
+describe('See why on the computer', () => {
+  test('lists the computer\'s own files: each with a token opens through the computer-only tool, the rest plain text', async () => {
+    const page = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
+    const why = page.win.document.querySelector('details.why')!;
+    expect(Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'scan.tiff', 'and 1 more']);
+    // The result's ChatGPT names and its "and N more" link give way to the computer's list.
+    expect(why.textContent).not.toContain('ChatGPT name.pdf');
+    expect(why.querySelectorAll('ul.files button').length).toBe(1);
+    const open = why.querySelector('ul.files button')! as unknown as HTMLButtonElement;
+    expect(open.getAttribute('aria-label')).toBe('Open Q3 deck.key');
+    open.click();
+    await settle();
+    const calls = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params);
+    expect(calls[calls.length - 1]).toEqual({ name: OPEN_UNREADABLE_FILE_TOOL_NAME, arguments: { token: FILE_TOKEN } });
+    page.respond('tools/call', { content: [{ type: 'text', text: 'Opening the file\'s page.' }], structuredContent: { status: 'open_link', url: 'https://www.dropbox.com/preview/Q3%20deck.key' } });
+    await settle();
+    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual(['https://www.dropbox.com/preview/Q3%20deck.key']);
+    // Opening a file changes nothing, so the dashboard is not read again.
+    expect(page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name)).toEqual([DASHBOARD_TOOL_NAME, OPEN_UNREADABLE_FILE_TOOL_NAME]);
+  });
+
+  test('a file that is gone says so beside it', async () => {
+    const page = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
+    (page.win.document.querySelector('details.why ul.files button') as unknown as HTMLButtonElement).click();
+    await settle();
+    page.respond('tools/call', { isError: true, content: [{ type: 'text', text: 'This file is no longer in the list. Refresh the dashboard.' }], structuredContent: { error: 'gone' } });
+    await settle();
+    expect(page.text()).toContain('This file is no longer in the list. Refresh the dashboard.');
+  });
+
+  test('a forged token is plain text, and a result without the computer\'s list shows the result\'s own names', async () => {
+    const forged = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), { unreadable: [{ sourceId: 'dropbox.files', files: [{ name: 'x.pdf', token: '../../etc' }], more: 0 }] });
+    expect(forged.win.document.querySelectorAll('details.why ul.files button').length).toBe(0);
+    expect(forged.win.document.querySelector('details.why ul.files')!.textContent).toBe('x.pdf');
+    const plain = await onHost(COMPUTER, model({ sources: [UNREADABLE_DROPBOX] }), { indexFaster: { on: false } });
+    expect(Array.from(plain.win.document.querySelectorAll('details.why ul.files li')).map((node) => node.textContent)).toEqual(['ChatGPT name.pdf', 'and 2 more']);
+  });
+
+  test('ChatGPT never shows the computer\'s list, even if a result carried it', async () => {
+    const page = await onHost(undefined, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
+    const files = Array.from(page.win.document.querySelectorAll('details.why ul.files li')).map((node) => node.textContent);
+    expect(files).toEqual(['ChatGPT name.pdf', 'and 2 more']);
+    expect(page.win.document.body.innerHTML).not.toContain(FILE_TOKEN);
+  });
+
+  test('an open link lands on that source\'s See why: open, focused, outlined briefly', async () => {
+    const page = await onHost({ ...COMPUTER, landing: { sourceId: 'dropbox.files' } }, model({ sources: [TELEGRAM, UNREADABLE_DROPBOX] }), UNREADABLE_META);
+    const why = page.win.document.querySelector('details.why')! as unknown as HTMLDetailsElement;
+    expect(why.open).toBe(true);
+    expect(why.classList.contains('landed')).toBe(true);
+    expect(page.win.document.activeElement).toBe(why.querySelector('summary') as never);
+    // Only once: a later read does not land again.
+    expect(page.win.document.querySelectorAll('.landed').length).toBe(1);
+  });
+
+  test('a landing in ChatGPT, or on a source that is not there, does nothing', async () => {
+    const chatgpt = await onHost({ kind: 'openclaw', readOnly: false, links: {}, landing: { sourceId: 'dropbox.files' } }, model({ sources: [UNREADABLE_DROPBOX] }));
+    expect(chatgpt.win.document.querySelector('.landed')).toBeNull();
+    const missing = await onHost({ ...COMPUTER, landing: { sourceId: 'gmail.email' } }, model({ sources: [UNREADABLE_DROPBOX] }));
+    expect(missing.win.document.querySelector('.landed')).toBeNull();
+    expect((missing.win.document.querySelector('details.why') as unknown as HTMLDetailsElement).open).toBe(false);
+  });
+});
+
 describe('the same panel in ChatGPT', () => {
   test('has no computer section, keeps Change models disabled with its reason, and never offers Index faster', async () => {
     const page = await onHost(undefined, model(), { indexFaster: { on: false } });
@@ -632,6 +717,15 @@ describe('the host page renderer', () => {
     const unlocked = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN, csrfToken: 'csrf-123' });
     expect(unlocked).toContain('data-state="locked" aria-label="' + DASHBOARD_HOST_GATE_COPY.title + '" hidden>');
     expect(unlocked).toContain('csrf-123');
+  });
+
+  test('a See why open link lands on the dashboard itself, named by its token, and the page knows only the closed list', () => {
+    const targets = computerOpenTargets(ORIGIN);
+    expect(targets['unreadable/dropbox']).toBe(`${ORIGIN}/dashboard#olympus-open=unreadable.dropbox`);
+    expect(targets['unreadable/drive']).toBe(`${ORIGIN}/dashboard#olympus-open=unreadable.drive`);
+    const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN });
+    expect(html).toContain('"unreadable.dropbox":"dropbox.files"');
+    expect(html).toContain('"unreadable.whatsapp":"whatsapp.personal.messages"');
   });
 
   test('its policy frames nothing else and is framed by nothing', () => {
@@ -719,7 +813,11 @@ describe('the host page when its session expires', () => {
       fetched.push(url);
       return new Response(JSON.stringify({ structuredContent: { ok: true } }), { status });
     };
-    const fakeWindow = { location: { assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') }, open: () => null };
+    const fakeWindow = {
+      location: { hash: '', pathname: '/dashboard', search: '', assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') },
+      history: { replaceState: () => undefined },
+      open: () => null,
+    };
     new Function('window', 'document', 'fetch', 'navigator', script)(fakeWindow, win.document, fakeFetch, win.navigator);
     const send = (message: Record<string, unknown>) => win.dispatchEvent(new win.MessageEvent('message', { data: { jsonrpc: '2.0', ...message }, source: child as any }));
     return { win, received, assigned, fetched, send, expire: () => { status = 401; } };

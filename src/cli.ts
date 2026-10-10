@@ -417,9 +417,10 @@ async function main(): Promise<void> {
       // Async because the opening link is MINTED against this install's own
       // configured worker, with a ticket that only that worker can redeem.
       const noOpen = args.includes('--no-open');
+      const target = dashboardTargetArg(args);
       const result = args.includes('--read-only')
         ? runDashboardReadOnlyCommand({ noOpen })
-        : await runDashboardCommand({ noOpen });
+        : await runDashboardCommand({ noOpen, ...(target ? { target } : {}) });
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
@@ -1268,7 +1269,7 @@ function printHelp(): void {
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
   console.log(`  ${ENGINE_CLI_USAGE['engine install']}`);
   console.log('  olympus engine uninstall|status|start|stop|restart|rollback|logs');
-  console.log('  olympus dashboard [--read-only] [--no-open]');
+  console.log('  olympus dashboard [--read-only] [--no-open] [--target <place>]');
   console.log('  olympus dashboard token');
   console.log('  olympus open olympus://open/<target>');
   console.log('  olympus open-handler install|uninstall|status');
@@ -1322,7 +1323,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
   'connections status': 'olympus connections status',
-  dashboard: 'olympus dashboard [--read-only] [--no-open]',
+  dashboard: 'olympus dashboard [--read-only] [--no-open] [--target <place>]',
   open: 'olympus open olympus://open/<target>',
   'open-handler install': 'olympus open-handler install',
   'open-handler uninstall': 'olympus open-handler uninstall',
@@ -2870,6 +2871,23 @@ export async function runDashboardCommand(
         + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
         + ` For the read-only view link instead, run ${olympusCommandHint()} dashboard --read-only.`,
   };
+}
+
+/**
+ * `olympus dashboard --target <place>`: the same closed list an olympus://
+ * link reads (core/open-targets.ts), by its path: `unreadable/dropbox` opens
+ * the dashboard with Dropbox's See why open. A place not on the list is
+ * refused here rather than opening somewhere else.
+ */
+export function dashboardTargetArg(args: readonly string[]): OpenTarget | undefined {
+  const at = args.indexOf('--target');
+  if (at < 0) return undefined;
+  const value = args[at + 1];
+  const target = typeof value === 'string' && /^[a-z/]{1,64}$/.test(value) ? parseOlympusOpenUrl(`olympus://open/${value}`) : undefined;
+  if (!target || ('fallback' in target && target.fallback)) {
+    throw new OperationError('invalid_params', `Unknown dashboard place: ${String(value ?? '')}.`, 'Usage: olympus dashboard --target unreadable/dropbox');
+  }
+  return target;
 }
 
 /**

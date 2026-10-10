@@ -17,6 +17,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync }
 import { dirname, join, relative } from 'node:path';
 import {
   OPEN_CONNECT_SOURCES,
+  OPEN_UNREADABLE_SOURCES,
   allOpenTargets,
   olympusOpenUrl,
   openTargetPath,
@@ -38,6 +39,9 @@ function handStep(target: OpenTarget): string | undefined {
       case 'search': return 'Open <strong>Models</strong> and check the search model.';
       case 'models': return 'Open <strong>Models</strong>.';
     }
+  }
+  if (target.kind === 'unreadable') {
+    return `Under <strong>Sources</strong>, open <strong>See why</strong> under <strong>${OPEN_UNREADABLE_SOURCES[target.source].label}</strong>. It lists every file that can't be read, and each one opens.`;
   }
   return undefined;
 }

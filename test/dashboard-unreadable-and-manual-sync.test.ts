@@ -132,11 +132,13 @@ describe('reading finishes when every in-scope file is read or unreadable', () =
     expect(extraction.measure).toEqual({ kind: 'ratio', done: 5, total: 12, percent: 41.7 });
   });
 
-  test('ChatGPT sees the same finished source, with counts only', () => {
+  test('ChatGPT sees the same finished source, with its count and a way to the list', () => {
     const v1 = buildChatGptDashboardViewModel(viewOf(finishedWithUnreadable()), { now: NOW });
     const dropbox = v1.sources.find((source) => source.id === 'dropbox.files')!;
     expect(dropbox.progress?.stage).toBe('done');
-    expect(dropbox.unreadable).toEqual({ count: 2, reasons: [{ code: 'damaged_or_unsupported', count: 2 }] });
+    expect(dropbox.unreadable).toMatchObject({ count: 2, reasons: [{ code: 'damaged_or_unsupported', count: 2 }] });
+    // No names were listed here, so "and 2 more" leads to the computer's list.
+    expect(dropbox.unreadable?.more).toMatchObject({ label: 'and 2 more', href: 'https://olympusplugin.ai/open/unreadable/dropbox/', openHref: true });
     expect(dropbox.detail).toContain("2 files can't be read");
     expect(dropbox.detail).not.toContain('paused');
   });

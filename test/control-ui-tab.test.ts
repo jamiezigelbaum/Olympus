@@ -17,6 +17,7 @@ import {
   INDEX_FASTER_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
   UNPAIR_SOURCE_TOOL_NAME,
+  OPEN_UNREADABLE_FILE_TOOL_NAME,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 
 const GLOBALS = ['window', 'document', 'HTMLElement'] as const;
@@ -148,12 +149,14 @@ describe('the Olympus tab', () => {
     expect(tab.requests).toEqual([[OLYMPUS_DASHBOARD_TOOL_METHOD, { name: 'olympus_sync_source', arguments: { source_id: 'gmail.email' } }]]);
   });
 
-  test('the computer\'s own tools are never sent: Index faster and Unpair stay on the computer', async () => {
+  test('the computer\'s own tools are never sent: Index faster, Unpair and opening a file stay on the computer', async () => {
     const tab = mountTab({ connected: true, canRead: true, canWrite: true });
     tab.send({ id: 3, method: 'tools/call', params: { name: INDEX_FASTER_TOOL_NAME, arguments: { on: true } } });
     tab.send({ id: 4, method: 'tools/call', params: { name: UNPAIR_SOURCE_TOOL_NAME, arguments: { source_id: 'telegram.messages' } } });
     expect((await tab.reply(3)).result.isError).toBe(true);
+    tab.send({ id: 9, method: 'tools/call', params: { name: OPEN_UNREADABLE_FILE_TOOL_NAME, arguments: { token: 'A'.repeat(43) } } });
     expect((await tab.reply(4)).result.isError).toBe(true);
+    expect((await tab.reply(9)).result.isError).toBe(true);
     expect(tab.requests).toEqual([]);
   });
 
