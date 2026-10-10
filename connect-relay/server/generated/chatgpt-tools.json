@@ -250,9 +250,9 @@
       },
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-question?v=aa989869e769"
+          "resourceUri": "ui://olympus/private-question?v=df2f56d88014"
         },
-        "openai/outputTemplate": "ui://olympus/private-question?v=aa989869e769"
+        "openai/outputTemplate": "ui://olympus/private-question?v=df2f56d88014"
       },
       "annotations": {
         "readOnlyHint": false,
@@ -905,7 +905,7 @@
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-question?v=aa989869e769",
+      "uri": "ui://olympus/private-question?v=df2f56d88014",
       "name": "Olympus private question",
       "mimeType": "text/html;profile=mcp-app"
     }

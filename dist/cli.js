@@ -53328,6 +53328,7 @@ var init_vocabulary = __esm(() => {
     title: "Private question",
     notSeen: "ChatGPT does not see this question or its answer. It goes out anonymously through zkAPI from your computer.",
     notSent: "Nothing was sent.",
+    mayHaveLeft: "The question left your computer but no answer came back. It may have been charged; check before asking again.",
     questionLabel: "Your question",
     strict: "Strict",
     strictHint: "Your own model rewrites it into general questions first, so nothing identifying can leave.",
@@ -118393,7 +118394,7 @@ async function askAnonymously(input, deps) {
   if (input.signal?.aborted && !result.ok && result.error.outcome === "not_sent")
     return { ok: false, code: "cancelled", message: CONSULT_ASK_MESSAGES.cancelled };
   if (!result.ok)
-    return { ok: false, code: result.error.code, message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message, sent };
+    return { ok: false, code: result.error.code, message: rememberNote ? `${result.error.message} ${rememberNote}` : result.error.message, sent, outcome: result.error.outcome };
   return {
     ok: true,
     sent,
@@ -118778,8 +118779,12 @@ function chatgptPrivateQuestionProgram(config2) {
   function readResult(value) {
     if (!value || typeof value !== "object" || value.v !== 1)
       return null;
-    if (value.state === "refused")
-      return typeof value.message === "string" ? { state: "refused", message: value.message } : null;
+    if (value.state === "refused") {
+      if (typeof value.message !== "string")
+        return null;
+      const left = value.outcome === "sent_failed" || value.outcome === "unknown";
+      return { state: "refused", message: value.message, left, sent: left && typeof value.sent === "string" ? value.sent : "" };
+    }
     if (value.state !== "answered" || typeof value.answer !== "string")
       return null;
     return {
@@ -119071,11 +119076,25 @@ function chatgptPrivateQuestionProgram(config2) {
   function doneView(shown) {
     const card = el("div", "card");
     if (shown.state === "refused") {
-      card.appendChild(head(T.notSent, true));
+      card.appendChild(head(shown.left ? T.mayHaveLeft : T.notSent, true));
       const text3 = el("div", "answer", shown.message);
       text3.setAttribute("data-key", "answer");
       text3.setAttribute("tabindex", "-1");
       card.appendChild(text3);
+      if (shown.sent) {
+        const toggle = el("button", "src-toggle", sentOpen ? T.hideSent : T.showSent);
+        toggle.type = "button";
+        toggle.setAttribute("aria-expanded", sentOpen ? "true" : "false");
+        toggle.setAttribute("data-key", "sent-toggle");
+        toggle.addEventListener("click", () => {
+          sentOpen = !sentOpen;
+          focusAfter = "sent-toggle";
+          render();
+        });
+        card.appendChild(toggle);
+        if (sentOpen)
+          card.appendChild(el("pre", "asked-text", shown.sent));
+      }
       card.appendChild(againButton());
       return card;
     }
@@ -119616,6 +119635,7 @@ function askAnonymouslyToolResult(raw) {
     structuredContent: {
       status: "refused",
       code: typeof record3.code === "string" ? record3.code.replace(UNSAFE_CHARS, "").slice(0, 64) : "refused",
+      ...record3.outcome === "sent_failed" || record3.outcome === "unknown" ? { outcome: record3.outcome, note: "The question had already left the user's computer when this failed, so it may have been charged; say so, and do not ask it again without asking the user." } : {},
       message
     }
   };
@@ -123996,7 +124016,14 @@ function resultOf(outcome) {
       networkIdentity: outcome.networkIdentity
     };
   }
-  return { v: 1, state: "refused", code: outcome.code, message: outcome.message };
+  return {
+    v: 1,
+    state: "refused",
+    code: outcome.code,
+    message: outcome.message,
+    ..."outcome" in outcome && outcome.outcome !== undefined ? { outcome: outcome.outcome } : {},
+    ..."sent" in outcome && outcome.sent !== undefined ? { sent: outcome.sent } : {}
+  };
 }
 var LEVELS, CLEANUPS, PENDING_RETRY_SECONDS2 = 5, WAITING_RETRY_SECONDS = 2, POLL_CAPACITY = 12, POLL_REFILL_PER_SECOND = 0.5, MAX_JOBS = 8;
 var init_private_question_jobs = __esm(() => {
