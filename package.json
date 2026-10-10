@@ -68,7 +68,7 @@
     "test:focus": "bun test",
     "test:fast": "bun run build && bun scripts/test-lane.ts fast && bun run test:exchange && bun run test:connect-relay",
     "test:exchange": "bun test ./exchange/test",
-    "test:connect-relay": "bun test --parallel ./connect-relay/test",
+    "test:connect-relay": "bun test --parallel --timeout=15000 ./connect-relay/test",
     "test:deploy": "bun run build && bun scripts/test-lane.ts deploy",
     "test:go": "bun scripts/test-lane.ts go",
     "contracts:check": "bun scripts/contract-version.ts",

@@ -94,9 +94,13 @@ describe('test lane partition', () => {
       'bun',
       'test',
       '--parallel',
+      '--timeout=15000',
       join('test', 'one.test.ts'),
       join('test', 'two.test.ts'),
     ]);
+    // Process-spawning lanes stay serial.
+    expect(buildTestLaneCommand(['one.test.ts'], undefined, 'deploy')).toEqual(['bun', 'test', join('test', 'one.test.ts')]);
+    expect(buildTestLaneCommand(['one.test.ts'], undefined, 'go')).toEqual(['bun', 'test', join('test', 'one.test.ts')]);
     expect(parseTestLaneArgs(['go'])).toEqual({ lane: 'go' });
   });
 

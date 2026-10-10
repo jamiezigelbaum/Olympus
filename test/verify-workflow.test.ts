@@ -81,7 +81,7 @@ describe('verification contract', () => {
     expect(pkg.scripts['test:fast']).toBe(
       'bun run build && bun scripts/test-lane.ts fast && bun run test:exchange && bun run test:connect-relay',
     );
-    expect(pkg.scripts['test:connect-relay']).toBe('bun test --parallel ./connect-relay/test');
+    expect(pkg.scripts['test:connect-relay']).toBe('bun test --parallel --timeout=15000 ./connect-relay/test');
     expect(existsSync(join(ROOT, 'connect-relay/test/relay-e2e.test.ts'))).toBe(true);
     // Directory discovery includes new exchange tests, including nested tests.
     expect(pkg.scripts['test:exchange']).toBe('bun test ./exchange/test');
