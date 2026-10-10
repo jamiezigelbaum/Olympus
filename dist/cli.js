@@ -123945,19 +123945,14 @@ class PrivateQuestionJobs {
     return true;
   }
   choice() {
-    let read;
     try {
-      read = this.options.settings();
+      const choice = this.options.choice();
+      const level = choice.level === "strict" ? "strict" : "standard";
+      const cleanup = CLEANUPS.includes(choice.cleanup) ? choice.cleanup : "as_written";
+      return { level, cleanup, customInstruction: cleanup === "custom" && choice.customInstruction === true };
     } catch {
-      read = undefined;
+      return { level: "standard", cleanup: "light_cleanup", customInstruction: false };
     }
-    const settings = read?.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS;
-    const standard = consultStandardBinding(settings);
-    return {
-      level: consultAskLevelFromSettings(settings.level),
-      cleanup: standard.mode,
-      customInstruction: standard.mode === "custom"
-    };
   }
 }
 function parseQuestion(text4) {
@@ -124005,8 +124000,6 @@ function resultOf(outcome) {
 }
 var LEVELS, CLEANUPS, PENDING_RETRY_SECONDS2 = 5, WAITING_RETRY_SECONDS = 2, POLL_CAPACITY = 12, POLL_REFILL_PER_SECOND = 0.5, MAX_JOBS = 8;
 var init_private_question_jobs = __esm(() => {
-  init_consult_ask();
-  init_consult_settings();
   init_private_answer();
   init_private_answer_crypto();
   init_private_question_contract();
@@ -128801,8 +128794,9 @@ async function main() {
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
   sourceAnswerJobSweep.unref?.();
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
-  const { readConsultSettings: readConsultSettings2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+  const { readConsultSettings: readConsultSettings2, DEFAULT_CONSULT_SETTINGS: DEFAULT_CONSULT_SETTINGS2, consultStandardBinding: consultStandardBinding2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
   const { PrivateQuestionJobs: PrivateQuestionJobs2 } = await Promise.resolve().then(() => (init_private_question_jobs(), exports_private_question_jobs));
+  const { consultAskLevelFromSettings: consultAskLevelFromSettings2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
   const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2, embeddingPanelRelevance: embeddingPanelRelevance2 } = await Promise.resolve().then(() => (init_private_answer_model(), exports_private_answer_model));
   const { DASHBOARD_UI_DOMAIN: DASHBOARD_UI_DOMAIN2 } = await Promise.resolve().then(() => (init_dashboard_resource(), exports_dashboard_resource));
   const { createDropboxOpenTargets: createDropboxOpenTargets2, localDropboxRoots: localDropboxRoots2, localOpenArguments: localOpenArguments2 } = await Promise.resolve().then(() => (init_open_target(), exports_open_target));
@@ -128853,7 +128847,12 @@ async function main() {
       callerProvider: "openai",
       signal: input.signal
     }) : Promise.resolve({ ok: false, code: "transport_unavailable", message: "Anonymous answers are not set up on this computer." }),
-    settings: () => readConsultSettings2()
+    choice: () => {
+      const read = readConsultSettings2();
+      const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS2;
+      const standard = consultStandardBinding2(settings);
+      return { level: consultAskLevelFromSettings2(settings.level), cleanup: standard.mode, customInstruction: standard.mode === "custom" };
+    }
   });
   const privateAnswerSweep = setInterval(() => {
     privateAnswers.sweep();
