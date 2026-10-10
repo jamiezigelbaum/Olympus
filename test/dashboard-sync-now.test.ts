@@ -188,8 +188,15 @@ describe('/dashboard/sync-now starts the sync and answers at once', () => {
       fixture.fail(new Error('upstream 503: <html>provider maintenance page for jamie@example.test</html>'));
       await settle(fixture);
       const card = await readwiseCard(fixture);
-      expect(card.last_manual_sync).toMatchObject({ outcome: 'failed' });
-      expect(dashboardManualSyncLine(card, new Date())).toBe('Couldn\'t check Readwise just now — Olympus will try again on its own');
+      // Not a failure Olympus can name: the line says so and gives the
+      // reference its log line carries (owner rule, 2026-10-10).
+      expect(card.last_manual_sync).toMatchObject({ outcome: 'failed', failure_kind: 'unknown' });
+      const ref = card.last_manual_sync!.failure_ref!;
+      expect(ref).toMatch(/^[0-9a-f]{16}$/);
+      expect(dashboardManualSyncLine(card, new Date())).toBe(
+        `Couldn't check Readwise just now: Olympus hit an error it doesn't recognise. Olympus's log on the computer has the details under reference ${ref}. Olympus will try again on its own.`,
+      );
+      expect(fixture.logged.some((line) => line.includes(`"ref":"${ref}"`) && line.includes('upstream 503'))).toBe(true);
       expect(JSON.stringify(card)).not.toContain('example.test');
     } finally {
       fixture.cleanup();
@@ -331,6 +338,8 @@ interface ReadwiseFixture {
   runs: number;
   release(result: unknown): void;
   fail(error: Error): void;
+  /** console.error lines while the fixture lives. */
+  logged: string[];
   cleanup(): void;
 }
 
@@ -351,13 +360,18 @@ function readwiseWorker(): ReadwiseFixture {
   let enter!: () => void;
   const entered = { promise: new Promise<void>((resolve) => { enter = resolve; }) };
   let settleRun: { resolve: (value: unknown) => void; reject: (error: Error) => void } | undefined;
+  const logged: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
   const fixture: ReadwiseFixture = {
     worker: undefined as unknown as ReadwiseFixture['worker'],
     entered,
     runs: 0,
     release: (result) => settleRun?.resolve(result),
     fail: (error) => settleRun?.reject(error),
+    logged,
     cleanup: () => {
+      console.error = originalError;
       settleRun?.resolve({ status: 'idle' });
       fixture.worker.close();
       rmSync(root, { recursive: true, force: true });

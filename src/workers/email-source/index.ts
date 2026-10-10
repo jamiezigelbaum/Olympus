@@ -4,7 +4,7 @@ import { runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import type { SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
 import { isSecureSensitivity, type SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { SecretLocationNote } from '../../core/evidence-pack.ts';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { FileLeaseBusyError } from '../../core/file-lease.ts';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -167,6 +167,7 @@ import { dashboardResourceHtml } from '../chatgpt/dashboard-resource.ts';
 import { DASHBOARD_TOOL_NAME } from '../chatgpt/dashboard-contract.ts';
 import type { DashboardPanelCallContext, DashboardPanelTools } from './dashboard-panel-tools.ts';
 import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine } from '../dashboard/vocabulary.ts';
+import { sourceFailureKind, type SourceFailureKind } from '../dashboard/source-failure.ts';
 import type { DashboardConsultBackend } from './dashboard-consult.ts';
 
 import type {
@@ -2007,11 +2008,19 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }));
           }).catch((error: unknown) => {
             // A provider's or a connector's words are never relayed: the row
-            // says it couldn't check, and the log keeps the rest.
-            if (!(error instanceof EmailSourceWorkerError) && !(error instanceof OperationError)) {
-              logSourceWorkerInternalError(request, error);
+            // says why as a closed word, and for a failure Olympus could not
+            // classify, the reference the log keeps the rest under.
+            const failureKind = manualSyncFailureKind(error);
+            const failureRef = failureKind === 'unknown' ? randomBytes(8).toString('hex') : undefined;
+            if (failureRef || (!(error instanceof EmailSourceWorkerError) && !(error instanceof OperationError))) {
+              logSourceWorkerInternalError(request, error, failureRef);
             }
-            dashboardManualSyncs.set(key, { at: new Date().toISOString(), outcome: 'failed' });
+            dashboardManualSyncs.set(key, {
+              at: new Date().toISOString(),
+              outcome: 'failed',
+              failure_kind: failureKind,
+              ...(failureRef ? { failure_ref: failureRef } : {}),
+            });
           }).finally(() => { dashboardManualSyncRuns.delete(key); });
           dashboardManualSyncRuns.set(key, work);
           return answer('checking', dashboardManualSyncPendingLine(label), checking);
@@ -3534,7 +3543,17 @@ function scrubSourceWorkerLogMessage(message: unknown): string {
   return String(message).slice(0, 200).replace(/[A-Za-z0-9._~+/=-]{24,}/g, '<redacted>');
 }
 
-function logSourceWorkerInternalError(request: Request, error: unknown): void {
+/**
+ * Why a Sync now press failed, from our own error codes only: a credential
+ * broker or worker error whose code the scheduler vocabulary knows, else
+ * `unknown` (the log carries the message under a reference).
+ */
+function manualSyncFailureKind(error: unknown): SourceFailureKind {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' ? sourceFailureKind(code) : 'unknown';
+}
+
+function logSourceWorkerInternalError(request: Request, error: unknown, ref?: string): void {
   const cause = error as { constructor?: { name?: string }; code?: unknown; message?: unknown } | null | undefined;
   const route = new URL(request.url).pathname;
   if (route.endsWith('/source/answer')) {
@@ -3552,6 +3571,7 @@ function logSourceWorkerInternalError(request: Request, error: unknown): void {
     errorClass: cause?.constructor?.name,
     code: cause?.code,
     message: scrubSourceWorkerLogMessage(cause?.message ?? error),
+    ...(ref ? { ref } : {}),
   }));
 }
 

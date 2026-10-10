@@ -84,6 +84,16 @@ type Any = any;
 
 type DashboardModels = DashboardViewModelV1['models'];
 
+/** What the last failed dashboard read got back (the unreachable banner's See why). */
+interface RelayFailure {
+  kind: 'no_answer' | 'error' | 'unreadable' | 'host';
+  /** `error`: Olympus's own fixed sentence; `host`: the chat app's error message. Capped. */
+  text?: string;
+  at: number;
+}
+
+const RELAY_FAILURE_TEXT_MAX = 300;
+
 /** One model's install line, read off the view model and validated (the values crossed the wire). */
 interface ModelInstallLine {
   which: 'search' | 'answers' | 'transcription';
@@ -138,6 +148,8 @@ export function chatgptDashboardClient(
     landing: string;
     /** The source row outlined after landing, until `until` (ms). */
     landed: { id: string; until: number } | null;
+    /** What the last failed read got back, for the unreachable banner's See why. */
+    lastFailure: RelayFailure | null;
   } = {
     data: null,
     relayDown: false,
@@ -159,6 +171,7 @@ export function chatgptDashboardClient(
     unreadablePages: {},
     landing: '',
     landed: null,
+    lastFailure: null,
   };
   const H = config.host;
 
@@ -265,10 +278,35 @@ export function chatgptDashboardClient(
     resultTimer = setTimeout(() => {
       resultTimer = null;
       if (!state.data) {
-        state.relayDown = true;
+        relayFailed({ kind: 'no_answer' });
         render();
       }
     }, config.resultTimeoutMs);
+  }
+
+  /**
+   * The relay or the computer did not give a dashboard: the banner says so,
+   * and its See why says what came back instead (owner rule, 2026-10-10).
+   */
+  function relayFailed(failure: Omit<RelayFailure, 'at'>): void {
+    state.relayDown = true;
+    state.lastFailure = { ...failure, at: Date.now() };
+  }
+
+  /** A tool error result's own fixed sentence (it names its log reference when it has one). */
+  function resultFailure(result: Any): Omit<RelayFailure, 'at'> {
+    if (!result || !result.isError) return { kind: 'unreadable' };
+    const parts = Array.isArray(result.content) ? result.content : [];
+    const said = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
+    const text = said ? String(said.text).slice(0, RELAY_FAILURE_TEXT_MAX) : '';
+    return text ? { kind: 'error', text } : { kind: 'unreadable' };
+  }
+
+  /** A rejected request: our own timeout, or the host's JSON-RPC error message (capped). */
+  function rejectionFailure(error: Any): Omit<RelayFailure, 'at'> {
+    if (error instanceof Error && error.message === 'timeout') return { kind: 'no_answer' };
+    const message = error && typeof error.message === 'string' ? error.message.replace(/\s+/g, ' ').trim().slice(0, RELAY_FAILURE_TEXT_MAX) : '';
+    return message ? { kind: 'host', text: message } : { kind: 'unreadable' };
   }
 
   function isDashboard(value: Any): boolean {
@@ -302,7 +340,7 @@ export function chatgptDashboardClient(
       resultTimer = null;
     }
     if (!result || result.isError) {
-      state.relayDown = true;
+      relayFailed(resultFailure(result));
       redraw();
       return false;
     }
@@ -324,7 +362,7 @@ export function chatgptDashboardClient(
       return true;
     }
     if (fromHost) {
-      state.relayDown = true;
+      relayFailed({ kind: 'unreadable' });
       redraw();
     }
     return false;
@@ -400,10 +438,10 @@ export function chatgptDashboardClient(
       }
       if (acceptResult(result, false)) return;
       if (!state.relayDown && name !== config.toolName) refresh();
-    }, () => {
+    }, (error: Any) => {
       if (state.busy === key) state.busy = '';
       if (name === config.syncTool) state.syncPressed = {};
-      if (mine === generation) state.relayDown = true;
+      if (mine === generation) relayFailed(rejectionFailure(error));
       redraw();
     });
   }
@@ -830,7 +868,25 @@ export function chatgptDashboardClient(
       if (state.helpOpen && !href && words.help) add(body, el('p', 'help', words.help));
     }
     if (actions.childNodes.length) add(body, actions);
+    if (current === 'relay_unavailable') add(body, relayWhy());
     return add(banner, body);
+  }
+
+  /** Under the unreachable banner: what the last failed read got back, and when. */
+  function relayWhy(): HTMLElement | null {
+    const failure = state.lastFailure;
+    if (!failure) return null;
+    const words = C.relay_unavailable.why;
+    let line: string;
+    if (failure.kind === 'no_answer') line = fill(words.no_answer, { seconds: Math.round(config.resultTimeoutMs / 1000) });
+    else if (failure.kind === 'error') line = fill(words.error, { text: failure.text || '' });
+    else if (failure.kind === 'host') line = fill(words.host, { text: failure.text || '' });
+    else line = words.unreadable;
+    const box = details('why:relay', doc.createTextNode(P.seeWhy), 'why');
+    const list = add(el('ul', 'plain'), el('li', '', line));
+    const when = ago(new Date(failure.at).toISOString());
+    if (when) add(list, el('li', 'muted', fill(words.at, { when })));
+    return add(box, list);
   }
 
   /** The source an attention item is about (`source:<id>`), for Connect and the pickers. */
@@ -949,7 +1005,8 @@ export function chatgptDashboardClient(
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
     }
-    const why = seeWhy(source, id);
+    // A pause the row shows (not one a Sync now line stands in for) gets its See why.
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual);
     if (why) add(main, why);
     // Landed on a source with nothing to see why about now: the row itself is outlined.
     else if (state.landed && state.landed.id === id) row.className += ' landed';
@@ -1001,20 +1058,26 @@ export function chatgptDashboardClient(
    * older engine's bare number has no reasons and shows nothing beyond the
    * row's own line.
    */
-  function seeWhy(source: Any, id: string): HTMLElement | null {
+  function seeWhy(source: Any, id: string, stalled: boolean): HTMLElement | null {
+    // Why the row is stalled first, then the files it can't read: one See why per row.
+    const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
     const unreadable = source.unreadable;
-    if (!unreadable || typeof unreadable !== 'object' || !Array.isArray(unreadable.reasons)) return null;
     const words = P.unreadableReasons as Any;
-    const lines = unreadable.reasons
-      .filter((reason: Any) => reason && words[reason.code] && Number(reason.count) > 0)
-      .map((reason: Any) => {
-        const n = Number(reason.count);
-        return add(el('li'), document.createTextNode(fill(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count(n) })));
-      });
-    if (!lines.length) return null;
+    const lines = unreadable && typeof unreadable === 'object' && Array.isArray(unreadable.reasons)
+      ? unreadable.reasons
+        .filter((reason: Any) => reason && words[reason.code] && Number(reason.count) > 0)
+        .map((reason: Any) => {
+          const n = Number(reason.count);
+          return add(el('li'), document.createTextNode(fill(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count(n) })));
+        })
+      : [];
+    if (!lines.length && !stall.length) return null;
     const box = details('why:' + id, document.createTextNode(P.seeWhy), 'why');
     if (state.landed && state.landed.id === id) box.className += ' landed';
-    add(box, add(el('ul', 'plain'), ...lines), unreadableFiles(unreadable, id), el('p', 'why-note', unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    if (stall.length) add(box, add(el('ul', 'plain stall-why'), ...stall.map((line) => el('li', '', line))));
+    if (lines.length) {
+      add(box, add(el('ul', 'plain'), ...lines), unreadableFiles(unreadable, id), el('p', 'why-note', unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    }
     return box;
   }
 
@@ -1142,7 +1205,52 @@ export function chatgptDashboardClient(
   function pauseFallback(item: Any, source: Any): string {
     const reason = item ? itemReason(item, source) : '';
     const detail = typeof source.detail === 'string' ? source.detail : '';
-    return capitalise(reason || detail || P.sourcePaused);
+    const progress = source && source.progress;
+    const why = progress && progress.stalled ? stallLines(progress.stall, source)[0] : '';
+    return capitalise(reason || detail || why || P.sourcePaused);
+  }
+
+  /**
+   * A stalled source's See why, in sentences (owner rule, 2026-10-10: never
+   * say something is wrong without a way to find out exactly what it is):
+   * why, from the engine's closed words; how many tries failed; when it last
+   * worked and tries again; and for a failure Olympus could not classify,
+   * the reference its log keeps the error under. [] when the engine sent no
+   * detail (an older engine).
+   */
+  function stallLines(stall: Any, source: Any): string[] {
+    if (!stall || typeof stall !== 'object') return [];
+    const label = String(source.label || '');
+    const lines: string[] = [];
+    const stage = (P.sourceStages as Any)[stall.stage] || P.findingItems;
+    const failure = typeof stall.failure === 'string' && Object.prototype.hasOwnProperty.call(P.sourceFailures, stall.failure)
+      ? stall.failure : '';
+    const failures = Number(stall.failures) || 0;
+    const stillSeconds = Number(stall.stillSeconds);
+    if (stall.cause === 'failing' || stall.cause === 'paused') {
+      if (failure) lines.push(fill((P.sourceFailures as Any)[failure], { source: label }));
+      if (stall.cause === 'failing' && failures > 0) {
+        lines.push(failures === 1 ? P.stallWhy.failedOnce : fill(P.stallWhy.failedMany, { count: count(failures) }));
+      }
+    } else if (stall.cause === 'switched_off') {
+      lines.push(fill(P.stallWhy.switchedOff, { stage }));
+    } else if (stall.cause === 'no_movement') {
+      lines.push(isFinite(stillSeconds) && stillSeconds > 0
+        ? fill(P.stallWhy.stillFor, { stage, duration: duration(stillSeconds) })
+        : fill(P.stallWhy.still, { stage }));
+    } else return [];
+    const worked = typeof stall.lastWorkedAt === 'string' ? ago(stall.lastWorkedAt) : '';
+    if (worked) lines.push(fill(P.stallWhy.lastWorked, { when: worked }));
+    const next = typeof stall.nextTryAt === 'string' ? Date.parse(stall.nextTryAt) - Date.now() : NaN;
+    if (isFinite(next) && next > 0) lines.push(fill(P.stallWhy.nextTry, { duration: duration(next / 1000) }));
+    if (failure === 'unknown' && typeof stall.ref === 'string' && /^[0-9a-f]{16}$/.test(stall.ref)) {
+      lines.push(fill(P.failureRef, { ref: stall.ref }));
+    } else if (failure === 'unknown') {
+      lines.push(P.failureLog);
+    } else if (stall.cause === 'no_movement') {
+      lines.push(P.stallWhy.watchLog);
+    }
+    return lines;
   }
 
   /** A source's progress while a stage is unfinished, else null. */
@@ -1300,7 +1408,7 @@ export function chatgptDashboardClient(
   function progressText(progress: Any): string {
     const phase = progress.phase === 'initial' ? P.progressInitial : P.progressRefresh;
     if (totalUnknown(progress)) {
-      const paused = progressPaused() ? ', ' + P.progressPaused : progress.stalled ? ', ' + P.stalled : '';
+      const paused = progressPaused() ? ', ' + P.progressPaused : progress.stalled ? ', ' + stalledNames() : '';
       return phase + ': ' + P.findingItems + paused;
     }
     const parts = [fill(P.percentDone, { percent: percent(progress.percent) })];
@@ -1313,8 +1421,26 @@ export function chatgptDashboardClient(
     if (typeof progress.etaSeconds === 'number' && progress.etaSeconds > 0 && !progress.stalled) {
       parts.push(fill(P.eta, { duration: duration(progress.etaSeconds) }));
     }
-    if (progress.stalled) parts.push(P.stalled);
+    if (progress.stalled) parts.push(stalledNames());
     return (progress.phase === 'initial' ? P.progressInitial : P.progressRefresh) + ': ' + parts.join(', ');
+  }
+
+  /**
+   * Which sources stopped, for the page-wide line ("Dropbox and Gmail
+   * paused"); each row's See why says why. A bare "stalled" only when no
+   * row reports one.
+   */
+  function stalledNames(): string {
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    const names = sources
+      .filter((source: Any) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === 'string' && source.label)
+      .map((source: Any) => String(source.label));
+    if (!names.length) return P.stalled;
+    let list: string;
+    if (names.length === 1) list = names[0]!;
+    else if (names.length === 2) list = fill(P.stalledAnd, { first: names[0]!, last: names[1]! });
+    else list = fill(P.stalledAnd, { first: names[0] + ', ' + names[1], last: fill(P.stalledMore, { count: count(names.length - 2) }) });
+    return fill(P.stalledSources, { sources: list });
   }
 
   function progressSection(progress: Any, withDetails: boolean): HTMLElement | null {
@@ -1410,7 +1536,7 @@ export function chatgptDashboardClient(
     let ready: string = P.modelReady;
     if (embedding.state === 'downloading') ready = fill(P.modelDownloading, { percent: percent(embedding.percent ?? 0) });
     else if (embedding.state === 'verifying') ready = P.modelChecking;
-    else if (embedding.state === 'failed') ready = P.modelNotWorking;
+    else if (embedding.state === 'failed') ready = notWorking(embedding.failedReason);
     const answers = models.answers;
     const answersWords = answers ? String(answers.label || '') + ' · ' + (answers.ready ? P.modelReady : P.modelNotReady) : '';
     const installs = installLines(models);
@@ -1422,6 +1548,19 @@ export function chatgptDashboardClient(
     return { summary: P.models + ' — ' + kind + ' · ' + overall, search: kind + ' · ' + ready, answers: answersWords };
   }
 
+  /** "Not working: the disk is full" when the failure says why, else "Not working". */
+  function notWorking(reason: Any): string {
+    const words = typeof reason === 'string' && Object.prototype.hasOwnProperty.call(P.modelInstallReasons, reason)
+      ? (P.modelInstallReasons as Any)[reason] : '';
+    return words ? fill(P.modelNotWorkingBecause, { reason: words }) : P.modelNotWorking;
+  }
+
+  /** "Couldn't start the transcription model: it took too long to start". */
+  function couldNotStart(model: string, reason: Any): string {
+    const words = (P.modelLoadFailedReasons as Any)[typeof reason === 'string' && Object.prototype.hasOwnProperty.call(P.modelLoadFailedReasons, reason) ? reason : 'unknown'];
+    return fill(P.modelCouldNotStartBecause, { model, reason: words });
+  }
+
   /** The transcription model's words after "Transcription:", or '' when the view model has none. */
   function transcriptionWords(models: DashboardModels): string {
     const entry = models.transcription;
@@ -1430,9 +1569,9 @@ export function chatgptDashboardClient(
       case 'not_needed': return P.modelNotNeededNoAudio;
       case 'not_downloaded': return P.modelNotDownloaded;
       case 'interrupted': return P.modelDownloadInterrupted;
-      case 'load_failed': return fill(P.modelCouldNotStart, { model: P.modelNames.transcription });
+      case 'load_failed': return couldNotStart(P.modelNames.transcription, entry.loadFailedReason);
       case 'ready': return P.modelBuiltIn + ' · ' + P.modelReady;
-      case 'failed': return P.modelBuiltIn + ' · ' + P.modelNotWorking;
+      case 'failed': return P.modelBuiltIn + ' · ' + notWorking(entry.failedReason);
       case 'verifying': return P.modelBuiltIn + ' · ' + P.modelChecking;
       case 'downloading': return P.modelBuiltIn + ' · ' + P.modelGettingReady;
       default: return '';
@@ -1760,11 +1899,11 @@ export function chatgptDashboardClient(
       if (!ok) refreshFailures++;
       acceptResult(result, true);
       scheduleRefresh();
-    }, () => {
+    }, (error: Any) => {
       refreshing = false;
       if (mine !== generation) return scheduleRefresh();
       refreshFailures++;
-      state.relayDown = true;
+      relayFailed(rejectionFailure(error));
       redraw();
       scheduleRefresh();
     });

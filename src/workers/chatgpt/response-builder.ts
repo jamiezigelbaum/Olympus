@@ -24,6 +24,7 @@
  */
 import { isValidPort, isValidSshTarget } from '../../core/remote-open.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
+import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type {
@@ -45,6 +46,7 @@ import type {
   MailWindow,
   ModelInstall,
   ModelInstallFailedReason,
+  ModelLoadFailedReason,
   ModelRetryResult,
   ModelSetResult,
   PrivacyRuleView,
@@ -56,9 +58,11 @@ import type {
   SearchEvidence,
   SearchResult,
   SourceProgress,
+  SourceStallDetail,
   SourceStalledReason,
   SyncSourceResult,
 } from './dashboard-contract.ts';
+import { isSourceFailureKind, sourceFailureRef } from '../dashboard/source-failure.ts';
 import {
   CONNECT_SOURCE_TOOL_NAME,
   DASHBOARD_TOOL_NAME,
@@ -75,6 +79,7 @@ import {
 } from './dashboard-contract.ts';
 import {
   DASHBOARD_CHATGPT_VOCABULARY,
+  DASHBOARD_FAILURE_REF,
   DASHBOARD_UNREADABLE_REASON_CODES,
   dashboardManualSyncBusyLine,
   dashboardManualSyncPendingLine,
@@ -202,6 +207,9 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     out.models.transcription = {
       ...install,
       state,
+      ...(state === 'load_failed' && transcription.loadFailedReason !== undefined
+        ? { loadFailedReason: LOAD_FAILED_REASONS.has(transcription.loadFailedReason) ? transcription.loadFailedReason : 'unknown' }
+        : {}),
       ...(transcription.download ? { download: copyFix(transcription.download) } : {}),
     };
   }
@@ -269,12 +277,15 @@ function copySource(source: DashboardSource): DashboardSource {
       at: manualAt,
       outcome: manual.outcome,
       ...(manual.newItems !== undefined ? { newItems: whole(manual.newItems) } : {}),
+      ...(manual.outcome === 'failed' && isSourceFailureKind(manual.failure) ? { failure: manual.failure } : {}),
+      ...(manual.outcome === 'failed' && manual.failure === 'unknown' && sourceFailureRef(manual.ref) ? { ref: manual.ref! } : {}),
     };
   }
   return out;
 }
 
 const TRANSCRIPTION_STATES = new Set<TranscriptionModelView['state']>(['not_needed', 'not_downloaded', 'interrupted', 'downloading', 'verifying', 'ready', 'failed', 'load_failed']);
+const LOAD_FAILED_REASONS = new Set<ModelLoadFailedReason>(['not_installed', 'stopped_while_starting', 'too_slow', 'port_taken', 'unknown']);
 
 /**
  * Counts, closed reason codes, at most UNREADABLE_NAMES_IN_RESULT file names
@@ -305,6 +316,32 @@ const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync
 
 const SOURCE_STAGES = new Set<SourceProgress['stage']>(['listing', 'reading', 'indexing', 'done']);
 const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'provider_unavailable', 'model_downloading']);
+const STALL_CAUSES = new Set<SourceStallDetail['cause']>(['failing', 'paused', 'switched_off', 'no_movement']);
+const STALL_STAGES = new Set<NonNullable<SourceStallDetail['stage']>>(['listing', 'reading', 'indexing']);
+
+/**
+ * A stall's See why: its cause and failure from their closed sets, counts as
+ * whole numbers, times as ISO, and the log reference only for a failure
+ * Olympus could not classify. Nothing else crosses.
+ */
+function copyStallDetail(value: unknown): SourceStallDetail | undefined {
+  const raw = value as Partial<SourceStallDetail> | undefined;
+  if (!raw || typeof raw !== 'object' || !STALL_CAUSES.has(raw.cause as SourceStallDetail['cause'])) return undefined;
+  const failure = isSourceFailureKind(raw.failure) ? raw.failure : undefined;
+  const lastWorkedAt = iso(raw.lastWorkedAt);
+  const nextTryAt = iso(raw.nextTryAt);
+  const ref = failure === 'unknown' ? sourceFailureRef(raw.ref) : undefined;
+  return {
+    cause: raw.cause!,
+    ...(failure ? { failure } : {}),
+    ...(finite(raw.failures) && whole(raw.failures) > 0 ? { failures: whole(raw.failures) } : {}),
+    ...(lastWorkedAt ? { lastWorkedAt } : {}),
+    ...(nextTryAt ? { nextTryAt } : {}),
+    ...(finite(raw.stillSeconds) ? { stillSeconds: whole(raw.stillSeconds) } : {}),
+    ...(STALL_STAGES.has(raw.stage as NonNullable<SourceStallDetail['stage']>) ? { stage: raw.stage } : {}),
+    ...(ref ? { ref } : {}),
+  };
+}
 
 /** Enums from their closed sets, counts as whole numbers; a reason only on a stall. */
 function copySourceProgress(progress: SourceProgress): SourceProgress {
@@ -312,6 +349,7 @@ function copySourceProgress(progress: SourceProgress): SourceProgress {
   const reason = stalled && STALLED_REASONS.has(progress.stalledReason as SourceStalledReason)
     ? progress.stalledReason
     : undefined;
+  const stall = stalled ? copyStallDetail(progress.stall) : undefined;
   return {
     stage: SOURCE_STAGES.has(progress.stage) ? progress.stage : 'listing',
     unit: UNITS.has(progress.unit) ? progress.unit : 'items',
@@ -320,6 +358,7 @@ function copySourceProgress(progress: SourceProgress): SourceProgress {
     percent: percent(progress.percent),
     stalled,
     ...(reason ? { stalledReason: reason } : {}),
+    ...(stall ? { stall } : {}),
   };
 }
 
@@ -1181,12 +1220,51 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
 
 export type ChatGptErrorCode = keyof typeof ERROR_TEXT;
 
-/** A tool-level error with a fixed sentence; the internal message never leaves. */
+/**
+ * The codes whose fixed sentence cannot say what went wrong ("could not
+ * complete this request"). Each such result carries a reference, logged on
+ * the computer beside the error's own bounded message (owner rule,
+ * 2026-10-10: never say something is wrong without a way to find out exactly
+ * what it is).
+ */
+const REFERENCED_ERROR_CODES: ReadonlySet<ChatGptErrorCode> = new Set<ChatGptErrorCode>([
+  'internal',
+  'email_error',
+  'source_index_error',
+  'argus_error',
+]);
+
+/** The sentence a referenced error adds after its fixed one. */
+export function errorReferenceSentence(ref: string): string {
+  return DASHBOARD_FAILURE_REF.replace('{ref}', ref);
+}
+
+/** 16 hex characters, from the platform's random source (Bun, Workers and browsers alike). */
+function mintErrorRef(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * A tool-level error with a fixed sentence; the internal message never
+ * leaves. An opaque one also names the reference its log line carries.
+ */
 export function errorToolResult(error: unknown): ChatGptToolResult {
   const code = errorCode(error);
+  if (!REFERENCED_ERROR_CODES.has(code)) {
+    return {
+      content: [{ type: 'text', text: ERROR_TEXT[code] }],
+      structuredContent: { error: code },
+      isError: true,
+    };
+  }
+  const ref = mintErrorRef();
+  const errorClass = error instanceof Error ? error.name : typeof error;
+  console.error(`[olympus:chatgpt] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass)} error_message=${boundedLogErrorMessage(error)}`);
   return {
-    content: [{ type: 'text', text: ERROR_TEXT[code] }],
-    structuredContent: { error: code },
+    content: [{ type: 'text', text: `${ERROR_TEXT[code]} ${errorReferenceSentence(ref)}` }],
+    structuredContent: { error: code, ref },
     isError: true,
   };
 }

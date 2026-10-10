@@ -24795,11 +24795,33 @@ var init_scheduler_markers = __esm(() => {
   ]);
 });
 
+// src/workers/dashboard/source-failure.ts
+var SOURCE_FAILURE_KINDS, KIND_SET;
+var init_source_failure = __esm(() => {
+  init_scheduler_markers();
+  SOURCE_FAILURE_KINDS = [
+    "sign_in",
+    "network",
+    "timeout",
+    "rate_limited",
+    "provider_busy",
+    "provider_refused",
+    "daily_limit",
+    "search_model_unavailable",
+    "reader_unavailable",
+    "busy_here",
+    "setup",
+    "not_started",
+    "unknown"
+  ];
+  KIND_SET = new Set(SOURCE_FAILURE_KINDS);
+});
+
 // src/workers/dashboard/vocabulary.ts
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -24839,6 +24861,21 @@ var init_vocabulary = __esm(() => {
       one: "{count} file is damaged or in a format Olympus can't read",
       other: "{count} files are damaged or in a format Olympus can't read"
     }
+  };
+  DASHBOARD_SOURCE_FAILURE_WORDS = {
+    sign_in: "{source} needs you to sign in again.",
+    network: "Olympus couldn't reach {source} over the network.",
+    timeout: "{source} took too long to answer.",
+    rate_limited: "{source} asked Olympus to slow down for a while.",
+    provider_busy: "{source} was busy and asked Olympus to try later.",
+    provider_refused: "{source} refused Olympus's request.",
+    daily_limit: "Olympus reached its daily limit for {source}.",
+    search_model_unavailable: "The search model wasn't running.",
+    reader_unavailable: "The file reader wasn't running.",
+    busy_here: "Olympus was busy with other work.",
+    setup: "{source}'s setup isn't finished.",
+    not_started: "The check didn't start.",
+    unknown: "Olympus hit an error it doesn't recognise."
   };
   DASHBOARD_CHATGPT_VOCABULARY = {
     installingNoSource: "Connect a source to begin",
@@ -24889,7 +24926,14 @@ var init_vocabulary = __esm(() => {
     },
     relay_unavailable: {
       title: "Olympus can't reach your computer right now.",
-      disabledReason: "Can't reach your computer"
+      disabledReason: "Can't reach your computer",
+      why: {
+        no_answer: "Olympus didn't answer within {seconds} seconds.",
+        error: "Olympus answered with an error: {text}",
+        unreadable: "Olympus answered with something this page can't read.",
+        host: "The connection to Olympus failed: {text}",
+        at: "Last tried {when}."
+      }
     },
     actions: {
       connect: { label: "Connect Olympus", help: "" },
@@ -24940,6 +24984,15 @@ var init_vocabulary = __esm(() => {
     modelNotDownloaded: "Not downloaded",
     modelDownloadInterrupted: "Download stopped before it finished",
     modelCouldNotStart: "Couldn't start {model}",
+    modelCouldNotStartBecause: "Couldn't start {model}: {reason}",
+    modelLoadFailedReasons: {
+      not_installed: "its files are missing or incomplete; Download now fetches them again",
+      stopped_while_starting: "it stopped while starting",
+      too_slow: "it took too long to start",
+      port_taken: "another program was using the port it needs",
+      unknown: "Olympus's log on the computer has the details"
+    },
+    modelNotWorkingBecause: "Not working: {reason}",
     modelInstallDownloading: "Downloading {model}",
     modelInstallVerifying: "Checking {model}…",
     modelInstallFailed: "Couldn't download {model}: {reason}",
@@ -24978,6 +25031,22 @@ var init_vocabulary = __esm(() => {
     sourceStages: { listing: "Finding items", reading: "Reading", indexing: "Indexing" },
     findingItems: "Finding items",
     sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
+    stalledSources: "{sources} paused",
+    stalledAnd: "{first} and {last}",
+    stalledMore: "{count} more",
+    sourceFailures: DASHBOARD_SOURCE_FAILURE_WORDS,
+    failureRef: DASHBOARD_FAILURE_REF,
+    failureLog: DASHBOARD_FAILURE_LOG,
+    stallWhy: {
+      failedOnce: "The last try failed.",
+      failedMany: "The last {count} tries failed.",
+      switchedOff: "{stage} is turned off in Olympus's settings.",
+      stillFor: "{stage} hasn't moved for {duration}.",
+      still: "{stage} hasn't moved for a while.",
+      lastWorked: "Last worked {when}.",
+      nextTry: "Olympus tries again in {duration}.",
+      watchLog: "Olympus's log on the computer shows what it is doing."
+    },
     stalledReasons: {
       waiting_for_credentials: "Paused: Olympus needs you to sign in to {source} again",
       scope_pending: "Paused until you choose folders",
@@ -25523,6 +25592,7 @@ var init_source_dashboard = __esm(() => {
   init_source_corpus_registry();
   init_types();
   init_scheduler_markers();
+  init_source_failure();
   init_answer_ready_coverage();
   init_vocabulary();
   init_phases();
@@ -25626,7 +25696,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     computerMeta: null,
     unreadablePages: {},
     landing: "",
-    landed: null
+    landed: null,
+    lastFailure: null
   };
   const H = config.host;
   let nextId = 1;
@@ -25735,10 +25806,28 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     resultTimer = setTimeout(() => {
       resultTimer = null;
       if (!state.data) {
-        state.relayDown = true;
+        relayFailed({ kind: "no_answer" });
         render();
       }
     }, config.resultTimeoutMs);
+  }
+  function relayFailed(failure) {
+    state.relayDown = true;
+    state.lastFailure = { ...failure, at: Date.now() };
+  }
+  function resultFailure(result) {
+    if (!result || !result.isError)
+      return { kind: "unreadable" };
+    const parts = Array.isArray(result.content) ? result.content : [];
+    const said = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    const text = said ? String(said.text).slice(0, RELAY_FAILURE_TEXT_MAX) : "";
+    return text ? { kind: "error", text } : { kind: "unreadable" };
+  }
+  function rejectionFailure(error) {
+    if (error instanceof Error && error.message === "timeout")
+      return { kind: "no_answer" };
+    const message = error && typeof error.message === "string" ? error.message.replace(/\s+/g, " ").trim().slice(0, RELAY_FAILURE_TEXT_MAX) : "";
+    return message ? { kind: "host", text: message } : { kind: "unreadable" };
   }
   function isDashboard(value) {
     return !!value && typeof value === "object" && value.v === 1 && !!value.connection && typeof value.connection.state === "string";
@@ -25760,7 +25849,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       resultTimer = null;
     }
     if (!result || result.isError) {
-      state.relayDown = true;
+      relayFailed(resultFailure(result));
       redraw();
       return false;
     }
@@ -25780,7 +25869,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return true;
     }
     if (fromHost) {
-      state.relayDown = true;
+      relayFailed({ kind: "unreadable" });
       redraw();
     }
     return false;
@@ -25852,13 +25941,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         return;
       if (!state.relayDown && name !== config.toolName)
         refresh();
-    }, () => {
+    }, (error) => {
       if (state.busy === key)
         state.busy = "";
       if (name === config.syncTool)
         state.syncPressed = {};
       if (mine === generation)
-        state.relayDown = true;
+        relayFailed(rejectionFailure(error));
       redraw();
     });
   }
@@ -26249,7 +26338,30 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     if (actions.childNodes.length)
       add(body, actions);
+    if (current === "relay_unavailable")
+      add(body, relayWhy());
     return add(banner, body);
+  }
+  function relayWhy() {
+    const failure = state.lastFailure;
+    if (!failure)
+      return null;
+    const words = C.relay_unavailable.why;
+    let line;
+    if (failure.kind === "no_answer")
+      line = fill2(words.no_answer, { seconds: Math.round(config.resultTimeoutMs / 1000) });
+    else if (failure.kind === "error")
+      line = fill2(words.error, { text: failure.text || "" });
+    else if (failure.kind === "host")
+      line = fill2(words.host, { text: failure.text || "" });
+    else
+      line = words.unreadable;
+    const box = details("why:relay", doc.createTextNode(P.seeWhy), "why");
+    const list = add(el("ul", "plain"), el("li", "", line));
+    const when = ago(new Date(failure.at).toISOString());
+    if (when)
+      add(list, el("li", "muted", fill2(words.at, { when })));
+    return add(box, list);
   }
   function itemSource(item) {
     const id = typeof item.id === "string" && item.id.indexOf("source:") === 0 ? item.id.slice(7) : "";
@@ -26353,7 +26465,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
-    const why = seeWhy(source, id);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual);
     if (why)
       add(main, why);
     else if (state.landed && state.landed.id === id)
@@ -26391,21 +26503,24 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     return row;
   }
-  function seeWhy(source, id) {
+  function seeWhy(source, id, stalled) {
+    const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
     const unreadable = source.unreadable;
-    if (!unreadable || typeof unreadable !== "object" || !Array.isArray(unreadable.reasons))
-      return null;
     const words = P.unreadableReasons;
-    const lines = unreadable.reasons.filter((reason) => reason && words[reason.code] && Number(reason.count) > 0).map((reason) => {
+    const lines = unreadable && typeof unreadable === "object" && Array.isArray(unreadable.reasons) ? unreadable.reasons.filter((reason) => reason && words[reason.code] && Number(reason.count) > 0).map((reason) => {
       const n = Number(reason.count);
       return add(el("li"), document.createTextNode(fill2(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count(n) })));
-    });
-    if (!lines.length)
+    }) : [];
+    if (!lines.length && !stall.length)
       return null;
     const box = details("why:" + id, document.createTextNode(P.seeWhy), "why");
     if (state.landed && state.landed.id === id)
       box.className += " landed";
-    add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    if (stall.length)
+      add(box, add(el("ul", "plain stall-why"), ...stall.map((line) => el("li", "", line))));
+    if (lines.length) {
+      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    }
     return box;
   }
   function unreadableFiles(unreadable, id) {
@@ -26507,7 +26622,45 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function pauseFallback(item, source) {
     const reason = item ? itemReason(item, source) : "";
     const detail = typeof source.detail === "string" ? source.detail : "";
-    return capitalise(reason || detail || P.sourcePaused);
+    const progress = source && source.progress;
+    const why = progress && progress.stalled ? stallLines(progress.stall, source)[0] : "";
+    return capitalise(reason || detail || why || P.sourcePaused);
+  }
+  function stallLines(stall, source) {
+    if (!stall || typeof stall !== "object")
+      return [];
+    const label = String(source.label || "");
+    const lines = [];
+    const stage = P.sourceStages[stall.stage] || P.findingItems;
+    const failure = typeof stall.failure === "string" && Object.prototype.hasOwnProperty.call(P.sourceFailures, stall.failure) ? stall.failure : "";
+    const failures = Number(stall.failures) || 0;
+    const stillSeconds = Number(stall.stillSeconds);
+    if (stall.cause === "failing" || stall.cause === "paused") {
+      if (failure)
+        lines.push(fill2(P.sourceFailures[failure], { source: label }));
+      if (stall.cause === "failing" && failures > 0) {
+        lines.push(failures === 1 ? P.stallWhy.failedOnce : fill2(P.stallWhy.failedMany, { count: count(failures) }));
+      }
+    } else if (stall.cause === "switched_off") {
+      lines.push(fill2(P.stallWhy.switchedOff, { stage }));
+    } else if (stall.cause === "no_movement") {
+      lines.push(isFinite(stillSeconds) && stillSeconds > 0 ? fill2(P.stallWhy.stillFor, { stage, duration: duration(stillSeconds) }) : fill2(P.stallWhy.still, { stage }));
+    } else
+      return [];
+    const worked = typeof stall.lastWorkedAt === "string" ? ago(stall.lastWorkedAt) : "";
+    if (worked)
+      lines.push(fill2(P.stallWhy.lastWorked, { when: worked }));
+    const next = typeof stall.nextTryAt === "string" ? Date.parse(stall.nextTryAt) - Date.now() : NaN;
+    if (isFinite(next) && next > 0)
+      lines.push(fill2(P.stallWhy.nextTry, { duration: duration(next / 1000) }));
+    if (failure === "unknown" && typeof stall.ref === "string" && /^[0-9a-f]{16}$/.test(stall.ref)) {
+      lines.push(fill2(P.failureRef, { ref: stall.ref }));
+    } else if (failure === "unknown") {
+      lines.push(P.failureLog);
+    } else if (stall.cause === "no_movement") {
+      lines.push(P.stallWhy.watchLog);
+    }
+    return lines;
   }
   function sourceProgress(source) {
     const progress = source && source.progress;
@@ -26641,7 +26794,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function progressText(progress) {
     const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
     if (totalUnknown(progress)) {
-      const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + P.stalled : "";
+      const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "";
       return phase + ": " + P.findingItems + paused;
     }
     const parts = [fill2(P.percentDone, { percent: percent(progress.percent) })];
@@ -26655,8 +26808,22 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       parts.push(fill2(P.eta, { duration: duration(progress.etaSeconds) }));
     }
     if (progress.stalled)
-      parts.push(P.stalled);
+      parts.push(stalledNames());
     return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
+  }
+  function stalledNames() {
+    const sources = state.data && Array.isArray(state.data.sources) ? state.data.sources : [];
+    const names = sources.filter((source) => source && source.progress && source.progress.stalled && !source.connecting && typeof source.label === "string" && source.label).map((source) => String(source.label));
+    if (!names.length)
+      return P.stalled;
+    let list;
+    if (names.length === 1)
+      list = names[0];
+    else if (names.length === 2)
+      list = fill2(P.stalledAnd, { first: names[0], last: names[1] });
+    else
+      list = fill2(P.stalledAnd, { first: names[0] + ", " + names[1], last: fill2(P.stalledMore, { count: count(names.length - 2) }) });
+    return fill2(P.stalledSources, { sources: list });
   }
   function progressSection(progress, withDetails) {
     if (!progress || progressFinished(progress))
@@ -26741,7 +26908,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     else if (embedding.state === "verifying")
       ready = P.modelChecking;
     else if (embedding.state === "failed")
-      ready = P.modelNotWorking;
+      ready = notWorking(embedding.failedReason);
     const answers = models.answers;
     const answersWords = answers ? String(answers.label || "") + " · " + (answers.ready ? P.modelReady : P.modelNotReady) : "";
     const installs = installLines(models);
@@ -26755,6 +26922,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       overall = P.modelNotReady;
     return { summary: P.models + " — " + kind + " · " + overall, search: kind + " · " + ready, answers: answersWords };
   }
+  function notWorking(reason) {
+    const words = typeof reason === "string" && Object.prototype.hasOwnProperty.call(P.modelInstallReasons, reason) ? P.modelInstallReasons[reason] : "";
+    return words ? fill2(P.modelNotWorkingBecause, { reason: words }) : P.modelNotWorking;
+  }
+  function couldNotStart(model, reason) {
+    const words = P.modelLoadFailedReasons[typeof reason === "string" && Object.prototype.hasOwnProperty.call(P.modelLoadFailedReasons, reason) ? reason : "unknown"];
+    return fill2(P.modelCouldNotStartBecause, { model, reason: words });
+  }
   function transcriptionWords(models) {
     const entry = models.transcription;
     if (!entry || typeof entry !== "object")
@@ -26767,11 +26942,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       case "interrupted":
         return P.modelDownloadInterrupted;
       case "load_failed":
-        return fill2(P.modelCouldNotStart, { model: P.modelNames.transcription });
+        return couldNotStart(P.modelNames.transcription, entry.loadFailedReason);
       case "ready":
         return P.modelBuiltIn + " · " + P.modelReady;
       case "failed":
-        return P.modelBuiltIn + " · " + P.modelNotWorking;
+        return P.modelBuiltIn + " · " + notWorking(entry.failedReason);
       case "verifying":
         return P.modelBuiltIn + " · " + P.modelChecking;
       case "downloading":
@@ -27084,12 +27259,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         refreshFailures++;
       acceptResult(result, true);
       scheduleRefresh();
-    }, () => {
+    }, (error) => {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
       refreshFailures++;
-      state.relayDown = true;
+      relayFailed(rejectionFailure(error));
       redraw();
       scheduleRefresh();
     });
@@ -27136,6 +27311,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   if (!state.data)
     waitForResult();
 }
+var RELAY_FAILURE_TEXT_MAX = 300;
 
 // src/workers/dashboard/shared-privacy-logic.ts
 function privacyLogic(config) {
@@ -32178,6 +32354,7 @@ init_vocabulary();
 init_dashboard_resource();
 init_dashboard_contract();
 init_vocabulary();
+init_source_failure();
 init_mail_source_scope();
 init_http();
 

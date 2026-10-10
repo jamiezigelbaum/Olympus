@@ -22,6 +22,7 @@ import type {
 } from '../core/sovereignty.ts';
 import type { ConnectedHandleRegistry, ConnectedCredentialHandle } from './credential-broker/connected-handles.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './dashboard/scheduler-markers.ts';
+import { sourceFailureKind, sourceFailureRef, type SourceFailureKind } from './dashboard/source-failure.ts';
 import {
   BLOCKED_BY_POLICY_COUNT_KEY,
   ITEMS_WITH_TEXT_COUNT_KEY,
@@ -385,6 +386,11 @@ export interface DashboardSourceSchedule {
   last_attempt_at?: string;
   next_run_at?: string;
   last_error_kind?: string;
+  /**
+   * The newest failing task's `error_hash`: the value its log line carries,
+   * so an unclassified failure can be found there.
+   */
+  last_error_hash?: string;
   degraded_reason?: string;
 }
 
@@ -625,6 +631,10 @@ export interface DashboardManualSync {
   at: string;
   outcome: 'checking' | 'checked' | 'failed' | 'busy';
   new_items?: number;
+  /** `failed` only: why, as a closed word (dashboard/source-failure.ts). */
+  failure_kind?: SourceFailureKind;
+  /** `failure_kind: 'unknown'` only: the reference Olympus's log carries the error under. */
+  failure_ref?: string;
 }
 
 /**
@@ -694,8 +704,15 @@ export function dashboardManualSyncOutcome(input: {
     }
     const tasks = (result.sources as SourceSchedulerSourceStatus[]).filter(matches).flatMap((source) => source.tasks);
     const ran = tasks.filter((task) => task.last_attempt_at !== undefined && task.last_attempt_at !== previous.get(task.id));
-    if (ran.length === 0) return { at, outcome: tasks.some((task) => task.running) ? 'busy' : 'failed' };
-    if (ran.some((task) => task.last_result?.status === 'failed')) return { at, outcome: 'failed' };
+    if (ran.length === 0) {
+      return tasks.some((task) => task.running) ? { at, outcome: 'busy' } : { at, outcome: 'failed', failure_kind: 'not_started' };
+    }
+    const failed = ran.find((task) => task.last_result?.status === 'failed');
+    if (failed) {
+      const kind = sourceFailureKind(failed.last_error_kind, failed.degraded_reason);
+      const ref = kind === 'unknown' ? sourceFailureRef(failed.last_error_hash) : undefined;
+      return { at, outcome: 'failed', failure_kind: kind, ...(ref ? { failure_ref: ref } : {}) };
+    }
     const syncs = ran.filter((task) => task.kind === 'sync');
     const newItems = changedItems((syncs.length > 0 ? syncs : ran).map((task) => task.last_result));
     return { at, outcome: 'checked', ...(newItems === undefined ? {} : { new_items: newItems }) };
@@ -2746,6 +2763,7 @@ function scheduleFromSchedulers(
     .filter((task) => task.consecutive_failures > 0)
     .sort((left, right) => (Date.parse(right.last_attempt_at ?? '') || 0) - (Date.parse(left.last_attempt_at ?? '') || 0));
   const lastErrorKind = failing.find((task) => task.last_error_kind)?.last_error_kind;
+  const lastErrorHash = failing.find((task) => task.last_error_hash)?.last_error_hash;
   const degradedReason = tasks.find((task) => task.degraded_reason)?.degraded_reason;
   const lastSuccessAt = latestIsoTimestamp(tasks.map((task) => task.last_success_at));
   const lastAttemptAt = latestIsoTimestamp(tasks.map((task) => task.last_attempt_at));
@@ -2757,6 +2775,7 @@ function scheduleFromSchedulers(
     ...(lastAttemptAt ? { last_attempt_at: lastAttemptAt } : {}),
     ...(nextRunAt ? { next_run_at: nextRunAt } : {}),
     ...(lastErrorKind ? { last_error_kind: lastErrorKind } : {}),
+    ...(lastErrorHash ? { last_error_hash: lastErrorHash } : {}),
     ...(degradedReason ? { degraded_reason: degradedReason } : {}),
   };
 }
