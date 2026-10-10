@@ -4902,7 +4902,7 @@ function providerLabel(provider: SovereigntyProfileProvider): string {
     case 'built-in':
       return 'Built into Olympus';
     case 'zkapi':
-      return 'zkAPI (experimental, consults only)';
+      return 'zkAPI (anonymous answers only)';
   }
 }
 

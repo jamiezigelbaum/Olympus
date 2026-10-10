@@ -123,6 +123,7 @@ const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dr
 
 /** The only connection labels the engine writes; anything else becomes ''. */
 const KNOWN_CONNECTION_LABELS = new Set([
+  'Reconnect Google to continue syncing',
   'not connected',
   'connection state unreadable',
   'awaiting browser consent',
@@ -380,7 +381,7 @@ function sourceEntry(
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition) : undefined;
+  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === 'Needs you' || status === 'Failing';
   const primary = connecting
     ? connecting.fix
@@ -480,7 +481,7 @@ function attentionItem(
   const fix = scopePending(card)
     ? scopeFix(definition, card) ?? checkAgainFix()
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
-      ? reconnectFix(definition)
+      ? reconnectFix(definition, card)
       : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
@@ -554,10 +555,10 @@ function connectingFor(
  * source (X, Readwise) is signed in again on the computer, so its Reconnect
  * opens the help page's steps for that.
  */
-function reconnectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
+function reconnectFix(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard): DashboardFix {
   const source = oauthSource(definition);
   return source
-    ? { label: source === 'gmail' || source === 'google-drive' ? 'Reconnect Google' : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
+    ? { label: (source === 'gmail' || source === 'google-drive') && card.connection.label === 'Reconnect Google to continue syncing' ? 'Reconnect Google' : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
     : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, 'reconnect'));
 }
 

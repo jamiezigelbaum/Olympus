@@ -59829,7 +59829,7 @@ function providerLabel2(provider) {
     case "built-in":
       return "Built into Olympus";
     case "zkapi":
-      return "zkAPI (experimental, consults only)";
+      return "zkAPI (anonymous answers only)";
   }
 }
 function registryCorpusSourceIds(registry) {
@@ -118290,7 +118290,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
-  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition) : undefined;
+  const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === "Needs you" || status === "Failing";
   const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : undefined);
   const menu = [];
@@ -118352,7 +118352,7 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   }
   const reason = dashboardAttentionLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition) : sync ?? checkAgainFix();
+  const fix = scopePending(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function syncFix(definition, card, status, actionKind, degraded, progress) {
@@ -118380,9 +118380,9 @@ function connectingFor(definition, card, now) {
     fix: { label: DASHBOARD_CHATGPT_PICKER_COPY.connectReopen, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
   };
 }
-function reconnectFix(definition) {
+function reconnectFix(definition, card) {
   const source = oauthSource(definition);
-  return source ? { label: source === "gmail" || source === "google-drive" ? "Reconnect Google" : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, "reconnect"));
+  return source ? { label: (source === "gmail" || source === "google-drive") && card.connection.label === "Reconnect Google to continue syncing" ? "Reconnect Google" : DASHBOARD_CHATGPT_VOCABULARY.reconnect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_VOCABULARY.reconnect, openOnComputer(definition, "reconnect"));
 }
 function helpLinkFix(label, href) {
   return { label, tool: DASHBOARD_TOOL_NAME, args: {}, href, openHref: true };
@@ -118827,6 +118827,7 @@ var init_dashboard_view_model = __esm(() => {
   DISCONNECT_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   SYNC_SOURCE_IDS = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "readwise.library"]);
   KNOWN_CONNECTION_LABELS = new Set([
+    "Reconnect Google to continue syncing",
     "not connected",
     "connection state unreadable",
     "awaiting browser consent",
