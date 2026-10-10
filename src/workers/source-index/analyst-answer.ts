@@ -56,6 +56,7 @@ import {
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import type {
+  SourceIndexCorpusSearchAdapter,
   SourceIndexRouterAdapterMap,
   SourceIndexSkippedCorpus,
   SourceIndexVisibilityGate,
@@ -2654,7 +2655,9 @@ export interface PrivateEvidenceResult {
   matched: number;
   // Every matched Private candidate, with whatever passages its store could
   // read (an empty `chunks` means unreadable; the consumer must not answer
-  // from its title alone). Each names the Private corpus it came from, so
+  // from its title alone), then, when anything matched, the nearest Private
+  // items in meaning the search did not return (privateNeighbours: not
+  // matches, not counted). Each names the Private corpus it came from, so
   // readPrivateEvidenceItem can read it again in depth.
   candidates: PrivateEvidenceCandidate[];
 }
@@ -2685,24 +2688,66 @@ export async function searchPrivateEvidence(input: {
     max_results: maxResults,
   };
   const lanes = input.lanes(request);
-  const detail = await buildEvidencePackDetailed({
-    question,
-    maxResults,
-    // Private only, and no query leaves this computer.
-    searchContext: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false },
-    registry: lanes.registry,
-    adapters: lanes.adapters,
-    contentProviders: lanes.contentProviders,
-    maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
-    evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
-    ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
-    ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
-  });
-  assertEvidencePackModelEligible(detail.pack);
-  const candidates = detail.pack.candidates
-    .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
-    .filter((candidate) => candidate.trustDomain === 'secure_local' && candidate.corpusId !== '');
-  return { matched: candidates.length, candidates };
+  const build = async (adapters: SourceIndexRouterAdapterMap): Promise<PrivateEvidenceCandidate[]> => {
+    const detail = await buildEvidencePackDetailed({
+      question,
+      maxResults,
+      // Private only, and no query leaves this computer.
+      searchContext: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false },
+      registry: lanes.registry,
+      adapters,
+      contentProviders: lanes.contentProviders,
+      maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+      evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
+      ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
+      ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+    });
+    assertEvidencePackModelEligible(detail.pack);
+    return detail.pack.candidates
+      .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
+      .filter((candidate) => candidate.trustDomain === 'secure_local' && candidate.corpusId !== '');
+  };
+  const matches = await build(lanes.adapters);
+  // Only a question that matched gets neighbours: the count (what leaves this
+  // computer) and whether there is a panel at all stay the matches' alone.
+  if (matches.length === 0) return { matched: 0, candidates: [] };
+  return { matched: matches.length, candidates: [...matches, ...await privateNeighbours(lanes.adapters, build, matches)] };
+}
+
+/**
+ * The nearest Private items in meaning that the search did not return, after
+ * the matches: candidates for the panel's own ranking (it reads only the few
+ * most relevant, private-answer-model.ts), never matches. The vector lane's
+ * relevance bar decides whether a question matches; against an item written
+ * in another language, a short question can sit just under it, so the item
+ * that answers it was found by neither lane (2026-10-10: ChatGPT's "Letter of
+ * Intent notary" never reached a Spanish letter of intent, whose nearest
+ * versions all scored 0.70-0.725 under a 0.73 bar). Best effort: a failure
+ * keeps the matches alone.
+ */
+async function privateNeighbours(
+  adapters: SourceIndexRouterAdapterMap,
+  build: (adapters: SourceIndexRouterAdapterMap) => Promise<PrivateEvidenceCandidate[]>,
+  matches: readonly PrivateEvidenceCandidate[],
+): Promise<PrivateEvidenceCandidate[]> {
+  const neighbourAdapters: Record<string, SourceIndexCorpusSearchAdapter> = {};
+  for (const [corpusId, adapter] of Object.entries(adapters)) {
+    const neighbours = adapter?.semanticNeighbours;
+    if (neighbours) neighbourAdapters[corpusId] = (request) => neighbours(request);
+  }
+  if (Object.keys(neighbourAdapters).length === 0) return [];
+  const key = (candidate: PrivateEvidenceCandidate) =>
+    `${candidate.corpusId}\u0000${candidate.provenance.sourceItem?.localItemId ?? ''}`;
+  const seen = new Set(matches.map(key));
+  try {
+    return (await build(neighbourAdapters)).filter((candidate) => {
+      if (!candidate.provenance.sourceItem?.localItemId || seen.has(key(candidate))) return false;
+      seen.add(key(candidate));
+      return true;
+    });
+  } catch {
+    return [];
+  }
 }
 
 /**

@@ -158,6 +158,49 @@ describe('the private match floor', () => {
       expect(paraphrase.matched).toBe(1);
     }, 'secure_local');
   });
+
+  // 2026-10-10: ChatGPT asked the panel "Letter of Intent notary". The owner's
+  // letter of intent is in Spanish, under an acronym name: no keyword reaches
+  // it, and every vector row sat just under the bar, so the panel read four
+  // other files and said there was no letter of intent. Its nearest neighbours
+  // now join the panel's evidence after the matches, without being counted.
+  test('a question that matched also gets its nearest neighbours below the bar, uncounted', async () => {
+    const mandate: FixtureItem = {
+      id: 'mandate',
+      name: 'sale-mandate.pdf',
+      text: 'The notary is chosen by the buyer. Fees below the agreed rate.',
+    };
+    const letter: FixtureItem = {
+      id: 'letter',
+      name: 'LOI_house_16-12-2025.pdf',
+      text: 'Carta de intención. La escritura pública se firmará ante el notario que designe la parte compradora.',
+    };
+    await withStore([mandate, letter], async (store) => {
+      const provider = builtInLikeProvider();
+      await store.embedChunks({ provider });
+      // The vector lane alone: every item, at 0.39 (under the 0.40 bar), and no match.
+      const adapter = createConnectorStoreCorpusAdapter({ store, embeddingProvider: provider, retrievalMode: 'hybrid' });
+      const near = await adapter.semanticNeighbours!({
+        query: 'zzq below',
+        maxResults: 5,
+        corpus: { corpusId: store.corpusId, family: 'file', trustDomain: 'secure_local' },
+        context: { allowedTrustDomains: ['secure_local'] },
+      } as never);
+      expect(hitIds(near).sort()).toEqual(['letter', 'mandate']);
+      expect(near.matchCount?.matchedItems).toBe(0);
+
+      const lanes = privateLanes(store, provider);
+      // "notary" and "below" are only in the mandate: one match, and the
+      // letter follows it as a neighbour.
+      const found = await searchPrivateEvidence({ lanes, question: 'notary below' });
+      expect(found.matched).toBe(1);
+      expect(found.candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId)).toEqual(['mandate', 'letter']);
+      expect(found.candidates[1]!.chunks.join(' ')).toContain('escritura pública');
+      // Nothing matched: no neighbours either, so no panel.
+      const offTopic = await searchPrivateEvidence({ lanes, question: 'zzq below' });
+      expect(offTopic).toEqual({ matched: 0, candidates: [] });
+    }, 'secure_local');
+  });
 });
 
 // A stand-in with the Arctic built-in model's identity (so its calibrated bar

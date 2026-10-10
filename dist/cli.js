@@ -18188,6 +18188,33 @@ function createConnectorStoreCorpusAdapter(options) {
       backend: embeddingProvider.backend
     };
   };
+  adapter.semanticNeighbours = async (request) => {
+    assertConnectorStoreCorpusRequest(store, request);
+    const startedAt = Date.now();
+    const none = { matchedItems: 0, contentMatchedItems: 0, saturated: false };
+    if (!embeddingProvider || (options.retrievalMode ?? "hybrid") !== "hybrid" || store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider) || !store.hasEmbeddings(embeddingProvider.modelId)) {
+      return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
+    }
+    const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
+    const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs);
+    return {
+      hits: lane.rows.map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, options.resultProjector, filters?.locatorPathScope)),
+      latencyMs: Date.now() - startedAt,
+      laneAudits: [{
+        laneName: `${store.corpusId}:connector_store_vector_neighbours`,
+        laneType: "semantic",
+        candidateCount: lane.rows.length,
+        returnedCount: lane.rows.length,
+        ...lane.skippedReason !== undefined ? { skippedReason: lane.skippedReason } : {},
+        modelId: embeddingProvider.modelId,
+        backend: VECTOR_BACKEND,
+        localOnly: true,
+        rawExposed: false
+      }],
+      matchCount: none,
+      rawExposed: false
+    };
+  };
   return adapter;
 }
 function chatRecencyLaneRows(store, accountScope, filters) {
@@ -35711,21 +35738,48 @@ async function searchPrivateEvidence(input) {
     max_results: maxResults
   };
   const lanes = input.lanes(request);
-  const detail = await buildEvidencePackDetailed({
-    question,
-    maxResults,
-    searchContext: { allowedTrustDomains: ["secure_local"], allowCloudQueries: false },
-    registry: lanes.registry,
-    adapters: lanes.adapters,
-    contentProviders: lanes.contentProviders,
-    maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
-    evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
-    ...input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {},
-    ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}
-  });
-  assertEvidencePackModelEligible(detail.pack);
-  const candidates = detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => candidate.trustDomain === "secure_local" && candidate.corpusId !== "");
-  return { matched: candidates.length, candidates };
+  const build = async (adapters) => {
+    const detail = await buildEvidencePackDetailed({
+      question,
+      maxResults,
+      searchContext: { allowedTrustDomains: ["secure_local"], allowCloudQueries: false },
+      registry: lanes.registry,
+      adapters,
+      contentProviders: lanes.contentProviders,
+      maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+      evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
+      ...input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {},
+      ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}
+    });
+    assertEvidencePackModelEligible(detail.pack);
+    return detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => candidate.trustDomain === "secure_local" && candidate.corpusId !== "");
+  };
+  const matches = await build(lanes.adapters);
+  if (matches.length === 0)
+    return { matched: 0, candidates: [] };
+  return { matched: matches.length, candidates: [...matches, ...await privateNeighbours(lanes.adapters, build, matches)] };
+}
+async function privateNeighbours(adapters, build, matches) {
+  const neighbourAdapters = {};
+  for (const [corpusId, adapter] of Object.entries(adapters)) {
+    const neighbours = adapter?.semanticNeighbours;
+    if (neighbours)
+      neighbourAdapters[corpusId] = (request) => neighbours(request);
+  }
+  if (Object.keys(neighbourAdapters).length === 0)
+    return [];
+  const key = (candidate) => `${candidate.corpusId}\x00${candidate.provenance.sourceItem?.localItemId ?? ""}`;
+  const seen = new Set(matches.map(key));
+  try {
+    return (await build(neighbourAdapters)).filter((candidate) => {
+      if (!candidate.provenance.sourceItem?.localItemId || seen.has(key(candidate)))
+        return false;
+      seen.add(key(candidate));
+      return true;
+    });
+  } catch {
+    return [];
+  }
 }
 async function checkPrivateEvidenceItems(input) {
   if (input.items.length === 0)

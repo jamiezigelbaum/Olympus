@@ -125,6 +125,15 @@ export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount
 export interface SourceIndexCorpusSearchAdapter {
   (request: SourceIndexCorpusSearchRequest): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>;
   hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
+  /**
+   * The corpus's nearest semantic neighbours of the query, nearest first,
+   * whatever their similarity: no relevance bar vets them, so they are never
+   * matches and never counted (`matchCount` is zero). Only a consumer that
+   * ranks candidates on its own may add them beside the matches (the private
+   * answer panel, analyst-answer.ts searchPrivateEvidence). Absent when the
+   * adapter has no semantic lane.
+   */
+  semanticNeighbours?: (request: SourceIndexCorpusSearchRequest) => Promise<SourceIndexCorpusSearchResponse>;
 }
 
 export function withSourceIndexHybridAvailability(
