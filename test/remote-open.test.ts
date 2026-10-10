@@ -388,6 +388,25 @@ describe.skipIf(!linuxLoopback)('port matching through a forwarded port', () => 
     return server.port as number;
   }
 
+  /**
+   * An engine whose port number is also free on 127.0.0.1, with the tunnel
+   * listening there: the same number at both ends. Retried, never skipped, so
+   * a collision with another process cannot turn this proof into a silent pass.
+   */
+  async function engineWithSamePortTunnel(): Promise<number> {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const port = await engine();
+      try {
+        const tunnel = await forward(port, port);
+        closers.push(() => tunnel.close());
+        return port;
+      } catch {
+        continue;
+      }
+    }
+    throw new Error('no port free on both loopback addresses');
+  }
+
   /** What the browser on the computer does with the link: load the page, redeem the ticket, use the session. */
   async function openInBrowser(link: string, browserPort: number) {
     const url = new URL(link);
@@ -414,15 +433,7 @@ describe.skipIf(!linuxLoopback)('port matching through a forwarded port', () => 
   }
 
   test('a tunnel on the SAME port number: the link opens and the dashboard unlocks', async () => {
-    const port = await engine();
-    let tunnel: Server;
-    try {
-      tunnel = await forward(port, port);
-    } catch {
-      // Another process holds 127.0.0.1:<port> on this machine; nothing to prove with a different number.
-      return;
-    }
-    closers.push(() => tunnel.close());
+    const port = await engineWithSamePortTunnel();
     const link = await mintDashboardOpeningUrl(`http://127.0.0.1:${port}`, TOKEN, { fetchImpl: serverSideFetch(port) });
     expect(link.startsWith(`http://127.0.0.1:${port}/dashboard/launch#`)).toBe(true);
     const opened = await openInBrowser(link, port);
@@ -430,7 +441,7 @@ describe.skipIf(!linuxLoopback)('port matching through a forwarded port', () => 
   });
 
   test('a tunnel on a DIFFERENT local port: the link is refused as no longer valid, and is not used up', async () => {
-    const port = await engine();
+    const port = await engineWithSamePortTunnel();
     const tunnel = await forward(0, port);
     closers.push(() => tunnel.close());
     const otherPort = (tunnel.address() as { port: number }).port;
@@ -441,26 +452,12 @@ describe.skipIf(!linuxLoopback)('port matching through a forwarded port', () => 
     const wrong = await openInBrowser(link.replace(`:${port}/`, `:${otherPort}/`), otherPort);
     expect(wrong).toMatchObject({ page: 200, redeem: 403, code: 'dashboard_launch_origin_mismatch' });
     expect(wrong.control).toBeUndefined();
-    // The refusal does not burn the ticket: with the tunnel on the right number, the same link still opens.
-    let right: Server;
-    try {
-      right = await forward(port, port);
-    } catch {
-      return;
-    }
-    closers.push(() => right.close());
+    // The refusal does not burn the ticket: through the tunnel on the right number, the same link still opens.
     expect(await openInBrowser(link, port)).toMatchObject({ redeem: 200, control: 200 });
   });
 
   test('a session unlocked on one port does not carry to another', async () => {
-    const port = await engine();
-    let same: Server;
-    try {
-      same = await forward(port, port);
-    } catch {
-      return;
-    }
-    closers.push(() => same.close());
+    const port = await engineWithSamePortTunnel();
     const other = await forward(0, port);
     closers.push(() => other.close());
     const otherPort = (other.address() as { port: number }).port;
