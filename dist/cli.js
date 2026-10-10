@@ -123770,6 +123770,15 @@ __export(exports_consult_ask, {
   CONSULT_ASK_MESSAGES: () => CONSULT_ASK_MESSAGES,
   CONSULT_ASK_MAX_CHARS: () => CONSULT_ASK_MAX_CHARS
 });
+function askBinding(read) {
+  const settings = read.state === "valid" ? read.settings : undefined;
+  return JSON.stringify([
+    read.state,
+    settings?.revision ?? 0,
+    consultWriterIdentity(settings?.writer ?? null),
+    settings ? consultStandardBinding(settings) : null
+  ]);
+}
 async function askAnonymously(question, deps) {
   const typed = typeof question === "string" ? question.trim() : "";
   if (!typed)
@@ -123803,17 +123812,33 @@ async function askAnonymously(question, deps) {
   }
   const sent = questions.join(`
 `);
-  const verdict = evaluateConsultRequest([...questions], { entries: [], overflow: false }, {}, {}, { net: "secrets" });
+  const context = { entries: [{ kind: "text", text: typed, path: "writerVisible[]", group: -2 }], overflow: false };
+  const verdict = evaluateConsultRequest([...questions], context, {}, {}, { net: "secrets" });
   if (verdict.decision !== "pass")
     return { ok: false, code: "secret_detected", message: CONSULT_ASK_MESSAGES.secret, sent };
+  const bound = askBinding(read);
+  let stale = false;
+  const authorize = () => {
+    let current;
+    try {
+      current = deps.settings();
+    } catch {
+      stale = true;
+      return false;
+    }
+    stale = askBinding(current) !== bound;
+    return !stale;
+  };
   let result;
   try {
-    result = await deps.send(sent);
+    result = await deps.send(sent, authorize);
   } catch {
     result = { ok: false, error: { code: "internal_error", message: "The zkAPI session failed inside Olympus.", outcome: "unknown", networkIdentity: "not_verified" } };
   }
   if (!result)
     return { ok: false, code: "route_not_configured", message: CONSULT_ASK_MESSAGES.noRoute };
+  if (stale)
+    return { ok: false, code: "settings_stale", message: CONSULT_ASK_MESSAGES.stale };
   if (!result.ok)
     return { ok: false, code: result.error.code, message: result.error.message, sent };
   return { ok: true, sent, reply: result.text, route: result.routeLabel };
@@ -123829,7 +123854,8 @@ var init_consult_ask = __esm(() => {
     declined: "Your model chose not to send anything.",
     writerFailed: "Your model could not prepare the question, so nothing was sent.",
     secret: "Not sent: the question looks like it contains a password, key or token.",
-    noRoute: "Set up the zkAPI route first."
+    noRoute: "Set up the zkAPI route first.",
+    stale: "The anonymous answers settings changed while the question was being prepared, so nothing was sent. Ask again."
   });
 });
 
@@ -128058,7 +128084,6 @@ async function main() {
     {
       const { askAnonymously: askAnonymously2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
       const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
-      const { sendZkapiConsult: sendZkapiConsult2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
       askAnonymouslyNow = (question) => askAnonymously2(question, {
         settings: () => readConsultSettings2(),
         prepare: (input, writer) => runChosenWriter(input, {
@@ -128067,9 +128092,15 @@ async function main() {
           level: "unnamed",
           writer
         }),
-        send: async (text4) => {
+        send: async (text4, authorize) => {
           const route = transport("dashboard");
-          return route ? sendZkapiConsult2(text4, route) : undefined;
+          if (!route)
+            return;
+          const opened = await openZkapiConsultSession2(route);
+          if (!opened.ok)
+            return { ok: false, error: opened.error };
+          await opened.session.send(text4, { authorize: () => authorize() });
+          return opened.session.finished;
         }
       });
     }
