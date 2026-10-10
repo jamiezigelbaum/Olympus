@@ -495,7 +495,7 @@ describe('collecting the private answer', () => {
     expect(host.doc.getElementById('panel')!.children).toHaveLength(1);
     expect(card.querySelector('.answer')).not.toBeNull();
     // Answer, then the Sources row, then the quiet gaps line: nothing else.
-    expect(Array.from(card.children).map((child) => child.className)).toEqual(['row', 'answer', 'sources', 'gaps']);
+    expect(Array.from(card.children).map((child) => child.className)).toEqual(['row', 'answer md', 'sources', 'gaps']);
     // Revealing by itself does not pull focus into the frame.
     expect(host.doc.activeElement?.getAttribute('data-key')).toBeNull();
     expectNoJargon(host);

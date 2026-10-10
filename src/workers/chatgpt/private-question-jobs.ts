@@ -180,6 +180,31 @@ export class PrivateQuestionJobs {
     return this.outcome(job);
   }
 
+  /**
+   * Ask another, in place: a new job for the panel that asked `jobId`, once
+   * its outcome is in (owner request 2026-10-10: the panel opened a new
+   * question only by asking ChatGPT for a new panel). The panel proves
+   * itself with the key that asked; any other key, a job still running, or
+   * one this install never minted gets the same answers as a collection.
+   * The new job's meta travels in the clear like the tool result's: the
+   * relay sees job ids on every request anyway, and the host never sees
+   * this response (it is the panel's own fetch).
+   */
+  async another(jobId: string, publicKey: unknown): Promise<ClaimResponse> {
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || privateAnswerInstallId(jobId) !== this.options.installId()) return gone();
+    const panel = await importPanelPublicKey(publicKey);
+    if (!panel) return invalid();
+    if (this.jobs.get(jobId) !== job) return gone();
+    if (job.claimKey === undefined || job.claimKey !== panel.raw) return { status: 409, body: { status: 'claimed' } };
+    if (job.state !== 'done') return { status: 409, body: { status: 'pending' } };
+    if (!this.takePoll(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    const meta = await this.begin();
+    if (!meta) return { status: 503, body: { status: 'mac_offline' }, retryAfterSeconds: 30 };
+    return { status: 200, body: { status: 'opened', v: 1, meta } };
+  }
+
   sweep(at = this.now()): void {
     for (const [id, job] of this.jobs) if (job.expiresAt <= at) this.drop(id);
   }

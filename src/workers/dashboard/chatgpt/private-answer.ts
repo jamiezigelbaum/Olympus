@@ -39,6 +39,7 @@
  * JSON is padded with trailing spaces.
  */
 import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY } from '../vocabulary.ts';
+import { CHATGPT_MARKDOWN_CSS, chatgptMarkdownRender } from './markdown.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../../chatgpt/private-answer-contract.ts';
 import { CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_LIGHT } from './page.ts';
 
@@ -826,8 +827,15 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     const body = el('div', 'answer');
     body.setAttribute('tabindex', '-1');
     body.setAttribute('data-key', 'answer');
-    const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
-    for (const part of paragraphs) body.appendChild(el('p', '', part));
+    // Rendered Markdown (text-built nodes, never HTML); plain paragraphs when the renderer is missing.
+    const markdown = (window as Any).olympusMarkdown;
+    if (typeof markdown === 'function') {
+      body.className = 'answer md';
+      markdown(doc, body, shown.text);
+    } else {
+      const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+      for (const part of paragraphs) body.appendChild(el('p', '', part));
+    }
     view.card.appendChild(body);
     if (shown.sources.length) view.card.appendChild(sourcesView(shown.sources));
     // The backend marks a cut-off item with its own ellipsis; the panel adds none.
@@ -987,6 +995,7 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .bar{height:0.25rem;margin-top:0.375rem;border-radius:999px;background:var(--hair);overflow:hidden}
 .bar-fill{height:100%;background:var(--run)}
 .answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
+${CHATGPT_MARKDOWN_CSS}
 .answer:focus{outline:none}
 .sources{margin-top:0.5rem}
 .src-toggle{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.8125rem;font-weight:500;line-height:1.4;color:var(--muted);background:none;border:0;border-radius:6px;padding:0.125rem 0;margin:0;cursor:pointer;-webkit-appearance:none;appearance:none}
@@ -1038,7 +1047,7 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     '</head>',
     '<body>',
     '<div id="panel"></div>',
-    `<script>(${chatgptPrivateAnswerProgram.toString()})(${scriptJson(config)});</script>`,
+    `<script>window.olympusMarkdown=(${chatgptMarkdownRender.toString()});(${chatgptPrivateAnswerProgram.toString()})(${scriptJson(config)});</script>`,
     '</body>',
     '</html>',
     '',

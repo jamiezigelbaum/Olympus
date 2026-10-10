@@ -81,9 +81,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=00441e0e316a"
+          "resourceUri": "ui://olympus/private-answer?v=94266444cf7d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=00441e0e316a"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=94266444cf7d"
       }
     },
     {
@@ -145,9 +145,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=00441e0e316a"
+          "resourceUri": "ui://olympus/private-answer?v=94266444cf7d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=00441e0e316a"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=94266444cf7d"
       }
     },
     {
@@ -180,9 +180,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=00441e0e316a"
+          "resourceUri": "ui://olympus/private-answer?v=94266444cf7d"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=00441e0e316a"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=94266444cf7d"
       }
     },
     {
@@ -250,9 +250,9 @@
       },
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-question?v=df2f56d88014"
+          "resourceUri": "ui://olympus/private-question?v=e4bec3c76114"
         },
-        "openai/outputTemplate": "ui://olympus/private-question?v=df2f56d88014"
+        "openai/outputTemplate": "ui://olympus/private-question?v=e4bec3c76114"
       },
       "annotations": {
         "readOnlyHint": false,
@@ -900,12 +900,12 @@
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-answer?v=00441e0e316a",
+      "uri": "ui://olympus/private-answer?v=94266444cf7d",
       "name": "Olympus private answer",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-question?v=df2f56d88014",
+      "uri": "ui://olympus/private-question?v=e4bec3c76114",
       "name": "Olympus private question",
       "mimeType": "text/html;profile=mcp-app"
     }
