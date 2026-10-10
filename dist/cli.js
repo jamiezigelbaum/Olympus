@@ -2663,7 +2663,7 @@ var init_worker_service = __esm(() => {
   init_operation_error();
   init_worker_auth();
   WORKER_LOG_TAIL_BYTES = 64 * 1024;
-  MANAGED_WORKER_ENV_SECRET_KEYS = ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "OLYMPUS_SERVER_MODE", "OLYMPUS_SERVER_SSH_TARGET"];
+  MANAGED_WORKER_ENV_SECRET_KEYS = ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "OLYMPUS_SERVER_MODE", "OLYMPUS_SERVER_SSH_TARGET", "OLYMPUS_SERVER_AGENT_ROUTE"];
 });
 
 // src/core/http-timeout.ts
@@ -65454,7 +65454,8 @@ function resolveServerMode(input) {
   const setting = parseServerModeSetting(input.fileEnv?.[SERVER_MODE_ENV]) ?? parseServerModeSetting(input.env[SERVER_MODE_ENV]) ?? "auto";
   const rawTarget = input.fileEnv?.[SERVER_SSH_TARGET_ENV] ?? input.env[SERVER_SSH_TARGET_ENV];
   const sshTarget = isValidSshTarget(rawTarget) ? rawTarget.trim() : undefined;
-  const withTarget = (mode) => sshTarget ? { ...mode, sshTarget } : mode;
+  const agentRoute = (input.fileEnv?.[SERVER_AGENT_ROUTE_ENV] ?? input.env[SERVER_AGENT_ROUTE_ENV])?.trim().toLowerCase() !== "off";
+  const withTarget = (mode) => sshTarget ? { ...mode, sshTarget, agentRoute } : { ...mode, agentRoute };
   if (setting === "on")
     return withTarget({ remote: true, setting, basis: "declared" });
   if (setting === "off")
@@ -65504,7 +65505,7 @@ function remoteOpenNodeCommands(input) {
     windows: { tunnel: `ssh ${forward}`, open: `cmd /c start "" "${input.link}"`, tunnelInBackground: true }
   };
 }
-var SERVER_MODE_ENV = "OLYMPUS_SERVER_MODE", SERVER_SSH_TARGET_ENV = "OLYMPUS_SERVER_SSH_TARGET", SERVER_MODE_SETTINGS, SSH_TARGET_PLACEHOLDER = "you@your-server", DEFAULT_ENGINE_PORT = 8010, REMOTE_TUNNEL_SECONDS = 1800, OPENING_LINK_PATTERN;
+var SERVER_MODE_ENV = "OLYMPUS_SERVER_MODE", SERVER_SSH_TARGET_ENV = "OLYMPUS_SERVER_SSH_TARGET", SERVER_AGENT_ROUTE_ENV = "OLYMPUS_SERVER_AGENT_ROUTE", SERVER_MODE_SETTINGS, SSH_TARGET_PLACEHOLDER = "you@your-server", DEFAULT_ENGINE_PORT = 8010, REMOTE_TUNNEL_SECONDS = 1800, OPENING_LINK_PATTERN;
 var init_remote_open = __esm(() => {
   init_open_targets();
   SERVER_MODE_SETTINGS = ["on", "off", "auto"];
@@ -101509,6 +101510,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     } else if (typeof fix.tool === "string" && fix.tool)
       action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
+      if (remoteMode()) {
+        const toggle = button(P.howOnMac, key, () => toggleRemote(key), style);
+        toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
+        return add(wrap, toggle, remoteBox(key, helpHref(fix.href), source));
+      }
       return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {
@@ -129335,7 +129341,7 @@ async function main() {
     remote: () => {
       const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv() });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === "openclaw";
-      return mode.remote ? { port, ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {}, agent: underOpenClaw } : undefined;
+      return mode.remote ? { port, ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {}, agent: underOpenClaw && mode.agentRoute } : undefined;
     },
     privacy: () => {
       const settings = readChatGptPrivacySettings2(process.env, pendingClassificationCount());
@@ -134825,7 +134831,7 @@ function printHelp() {
   console.log("  olympus dashboard token");
   console.log("  olympus open olympus://open/<target>");
   console.log("  olympus open-handler install|uninstall|status");
-  console.log("  olympus server-mode status|on|off|auto [--ssh-target <user@host>]");
+  console.log("  olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]");
   console.log("  olympus doctor");
   console.log("  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
   console.log("  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
@@ -134882,9 +134888,9 @@ var PUBLIC_LEAF_USAGE = {
   "open-handler uninstall": "olympus open-handler uninstall",
   "open-handler status": "olympus open-handler status",
   "server-mode status": "olympus server-mode status",
-  "server-mode on": "olympus server-mode on [--ssh-target <user@host>]",
+  "server-mode on": "olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]",
   "server-mode off": "olympus server-mode off",
-  "server-mode auto": "olympus server-mode auto [--ssh-target <user@host>]",
+  "server-mode auto": "olympus server-mode auto [--ssh-target <user@host>] [--agent-route on|off]",
   "source extract-pdfs": "olympus source extract-pdfs [--run] [--requeue] [--max-minutes <n>]",
   "data export": "olympus data export --output <dir> [--source <id>]",
   "data verify": "olympus data verify --input <dir>",
@@ -136194,9 +136200,18 @@ function runServerModeCommand(args, options = {}) {
       throw new OperationError("invalid_params", "--ssh-target takes user@host (or an ssh_config name) as your computer reaches this server.", "For example: olympus server-mode on --ssh-target you@your-server");
     }
   }
+  let agentRoute;
+  const routeAt = rest.indexOf("--agent-route");
+  if (routeAt >= 0) {
+    agentRoute = rest[routeAt + 1];
+    rest.splice(routeAt, 2);
+    if (agentRoute !== "on" && agentRoute !== "off") {
+      throw new OperationError("invalid_params", "--agent-route takes on or off.", "Use off when your assistant cannot run commands on your computer (for example Hermes).");
+    }
+  }
   const action = rest[0] ?? "";
   if (rest.length !== 1 || action !== "status" && parseServerModeSetting(action) !== action) {
-    throw new OperationError("invalid_params", "Usage: olympus server-mode status|on|off|auto [--ssh-target <user@host>]");
+    throw new OperationError("invalid_params", "Usage: olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]");
   }
   const writeOptions = {
     ...options.platform ? { platform: options.platform } : {},
@@ -136207,13 +136222,16 @@ function runServerModeCommand(args, options = {}) {
     writeManagedWorkerEnvSecret({ key: "OLYMPUS_SERVER_MODE", value: action, ...writeOptions });
   if (sshTarget)
     writeManagedWorkerEnvSecret({ key: "OLYMPUS_SERVER_SSH_TARGET", value: sshTarget.trim(), ...writeOptions });
+  if (agentRoute)
+    writeManagedWorkerEnvSecret({ key: "OLYMPUS_SERVER_AGENT_ROUTE", value: agentRoute, ...writeOptions });
   const fileEnv = readWorkerSetupEnv({ env, ...options.homeDir ? { homeDir: options.homeDir } : {}, ...options.envPath ? { workerEnvPath: options.envPath } : {} });
   const mode = resolveServerMode({ env, fileEnv });
   return {
     setting: mode.setting,
     remote: mode.remote,
     basis: mode.basis,
-    ssh_target: mode.sshTarget ?? null
+    ssh_target: mode.sshTarget ?? null,
+    agent_route: mode.agentRoute
   };
 }
 function dashboardTargetArg(args) {

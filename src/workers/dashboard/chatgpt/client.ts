@@ -686,7 +686,14 @@ export function chatgptDashboardClient(
       };
     } else if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
-      // No tool, only a help page: the control is the link to it.
+      // No tool, only a help page: the control is the link to it. In remote
+      // mode it shows the tunnel instructions in place: the open page's
+      // olympus:// would wake Olympus on this computer, not the server's.
+      if (remoteMode()) {
+        const toggle = button(P.howOnMac, key, () => toggleRemote(key), style);
+        toggle.setAttribute('aria-expanded', state.open['remote:' + key] ? 'true' : 'false');
+        return add(wrap, toggle, remoteBox(key, helpHref(fix.href), source));
+      }
       return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {

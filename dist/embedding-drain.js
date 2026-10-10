@@ -26102,6 +26102,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     } else if (typeof fix.tool === "string" && fix.tool)
       action = () => callTool(fix.tool, fix.args || {}, key);
     else if (helpHref(fix.href)) {
+      if (remoteMode()) {
+        const toggle = button(P.howOnMac, key, () => toggleRemote(key), style);
+        toggle.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
+        return add(wrap, toggle, remoteBox(key, helpHref(fix.href), source));
+      }
       return add(wrap, button(P.howOnMac, key, () => openLink(helpHref(fix.href)), style));
     }
     if (fix.destructive && action) {

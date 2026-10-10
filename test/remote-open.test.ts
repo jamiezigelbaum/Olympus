@@ -27,7 +27,7 @@ import {
 import { OPEN_REMOTE_TOOL_NAME, openRemote } from '../src/core/remote-open-tool.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
-import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { OLYMPUS_HOST_CONTEXT_KEY, type DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY } from '../src/workers/dashboard/vocabulary.ts';
 import { renderOpenPage } from '../scripts/build-open-pages.ts';
@@ -311,6 +311,37 @@ describe('the panel in remote mode', () => {
       'ssh -N -L 8010:127.0.0.1:8010 you@your-server',
       'olympus dashboard --no-open --target connect/x',
     ]);
+  });
+
+  // Jamie's live test, 2026-10-10: the OpenClaw Control UI tab on a headless
+  // server, reached through a tunnel. Models' "Fix this on your computer"
+  // went to /open/fix/models/, whose olympus:// opened the dashboard of a
+  // DIFFERENT Olympus, the one on his laptop. With the engine's declaration,
+  // the Control UI panel must show the remote instructions instead.
+  test('the OpenClaw Control UI host, engine on a server: Models never routes through the olympus:// open page', () => {
+    const model: DashboardViewModelV1 = {
+      ...remoteModel({ port: 19789, agent: true }),
+      models: {
+        embedding: { kind: 'built_in', state: 'ready' },
+        change: { label: 'Change', tool: 'olympus_dashboard', args: {}, href: 'https://olympusplugin.ai/open/fix/models/', disabledReason: 'Change models on your computer.' },
+      } as DashboardViewModelV1['models'],
+    };
+    const { win, sent, buttons } = mount(model);
+    hosts.push(win);
+    win.dispatchEvent(new win.MessageEvent('message', {
+      data: { jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: { [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'openclaw' } } },
+      source: win.parent as never,
+    }));
+    const how = buttons().filter((node) => node.textContent === DASHBOARD_CHATGPT_PAGE_COPY.howOnMac);
+    expect(how.length).toBeGreaterThan(0);
+    for (const node of how) node.click();
+    expect(sent.some((message) => message.method === 'ui/open-link')).toBe(false);
+    const box = win.document.querySelector('.remote-box')!;
+    expect(box).not.toBeNull();
+    expect(box.textContent).toContain(DASHBOARD_CHATGPT_PAGE_COPY.remote.askLine);
+    const expected = remoteOpenInstructions({ port: 19789, target: { kind: 'fix', section: 'models' } });
+    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual(['Open Olympus on my computer', expected.onComputer, expected.onServer]);
+    expect(win.document.body.innerHTML).not.toContain('olympusplugin.ai/open/');
   });
 
   test('not remote: Connect still opens the /open/ page', () => {

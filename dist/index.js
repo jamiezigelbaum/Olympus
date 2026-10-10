@@ -20396,6 +20396,7 @@ init_operation_error();
 // src/core/remote-open.ts
 var SERVER_MODE_ENV = "OLYMPUS_SERVER_MODE";
 var SERVER_SSH_TARGET_ENV = "OLYMPUS_SERVER_SSH_TARGET";
+var SERVER_AGENT_ROUTE_ENV = "OLYMPUS_SERVER_AGENT_ROUTE";
 var SERVER_MODE_SETTINGS = ["on", "off", "auto"];
 function parseServerModeSetting(value) {
   if (typeof value !== "string")
@@ -20407,7 +20408,8 @@ function resolveServerMode(input) {
   const setting = parseServerModeSetting(input.fileEnv?.[SERVER_MODE_ENV]) ?? parseServerModeSetting(input.env[SERVER_MODE_ENV]) ?? "auto";
   const rawTarget = input.fileEnv?.[SERVER_SSH_TARGET_ENV] ?? input.env[SERVER_SSH_TARGET_ENV];
   const sshTarget = isValidSshTarget(rawTarget) ? rawTarget.trim() : undefined;
-  const withTarget = (mode) => sshTarget ? { ...mode, sshTarget } : mode;
+  const agentRoute = (input.fileEnv?.[SERVER_AGENT_ROUTE_ENV] ?? input.env[SERVER_AGENT_ROUTE_ENV])?.trim().toLowerCase() !== "off";
+  const withTarget = (mode) => sshTarget ? { ...mode, sshTarget, agentRoute } : { ...mode, agentRoute };
   if (setting === "on")
     return withTarget({ remote: true, setting, basis: "declared" });
   if (setting === "off")
