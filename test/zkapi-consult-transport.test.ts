@@ -885,7 +885,7 @@ describe('doctor: zkapi_consult_transport', () => {
     expect(check).toEqual({
       name: 'zkapi_consult_transport',
       ok: true,
-      detail: 'Not configured: the experimental zkAPI consult transport is off.',
+      detail: 'Not configured: the zkAPI route for anonymous answers is off.',
     });
   }, SLOW);
 
@@ -893,7 +893,7 @@ describe('doctor: zkapi_consult_transport', () => {
     const before = await zkapiCheck(doctorDeps());
     expect(before.ok).toBe(true);
     for (const part of [
-      'no consult is sent until the consult lane lands',
+      'zkAPI route for anonymous answers: ',
       'zkapi-clientd 0.1.6',
       'tor found (a fresh client per consult)',
       'confinement on this platform: ',
@@ -945,7 +945,7 @@ describe('doctor: zkapi_consult_transport', () => {
     const unlimited = await zkapiCheck(doctorDeps());
     expect(unlimited.detail).toContain('requests today 3 (no limit set), worst-case authorized today $18.00 (no limit set;');
     expect(unlimited.detail).toContain(`UNRESOLVED SESSION: fence since 2026-10-05T12:00:00.000Z for wallet directory ${configDir}, this wallet`);
-    expect(unlimited.hint).toContain('scripts/zkapi-consult-recover.ts --yes');
+    expect(unlimited.hint).toContain('press Recover');
     expect(unlimited.detail).toContain('not ready: unresolved_session');
     expect(unlimited.detail).not.toContain('spend_cap_reached');
     expect(unlimited.detail).not.toContain('daily_cap_reached');

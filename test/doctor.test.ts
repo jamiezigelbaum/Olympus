@@ -254,7 +254,7 @@ describe('runDoctor', () => {
       expect(checkByName(checks, 'consult_settings')).toEqual({
         name: 'consult_settings',
         ok: true,
-        detail: 'Outside help (no consult is sent until the consult lane lands): off (no settings file).',
+        detail: 'Anonymous answers: off (no settings file).',
       });
       expect(checkByName(checks, 'consult_vocabulary').detail).toContain('languages en (default)');
 
@@ -271,7 +271,7 @@ describe('runDoctor', () => {
       expect(checkByName(checks, 'consult_settings')).toEqual({
         name: 'consult_settings',
         ok: true,
-        detail: 'Outside help (no consult is sent until the consult lane lands): on (settings revision 1).',
+        detail: 'Anonymous answers: on (settings revision 1).',
       });
       // The vocabulary line now checks the configured languages' packs.
       const vocabulary = checkByName(checks, 'consult_vocabulary');
@@ -282,7 +282,7 @@ describe('runDoctor', () => {
       checks = await run();
       expect(checkByName(checks, 'consult_settings')).toMatchObject({
         ok: false,
-        detail: 'Outside help (no consult is sent until the consult lane lands): off, because the settings file is invalid (invalid_shape).',
+        detail: 'Anonymous answers: off, because the settings file is invalid (invalid_shape).',
       });
       expect(checkByName(checks, 'consult_settings').hint).toContain('Outside help stays off');
       expect(checkByName(checks, 'consult_vocabulary').detail).toContain('languages en (default)');
@@ -330,12 +330,12 @@ describe('runDoctor', () => {
     expect(checkByName(result.checks, 'consult_settings')).toEqual({
       name: 'consult_settings',
       ok: true,
-      detail: 'Outside help (no consult is sent until the consult lane lands): off (no settings file).',
+      detail: 'Anonymous answers: off (no settings file).',
     });
     expect(checkByName(result.checks, 'consult_vocabulary')).toEqual({
       name: 'consult_vocabulary',
       ok: true,
-      detail: 'Consult vocabulary (no consult is sent until the consult lane lands): languages en (default); cldr-countries verified, cldr-units verified, en-esdb verified, olympus-terms verified, places verified, rx-ingredients verified.',
+      detail: 'Consult vocabulary: languages en (default); cldr-countries verified, cldr-units verified, en-esdb verified, olympus-terms verified, places verified, rx-ingredients verified.',
     });
     expect(checkByName(result.checks, 'argus_model_pool').detail).toContain('no sovereignty posture configured yet');
     expect(checkByName(result.checks, 'email_worker').detail).toContain('no worker health or credential failures');

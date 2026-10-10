@@ -1,6 +1,6 @@
 # Design: per-item four-tier classification for every Olympus source
 
-Status: proposal, revised 2026-09-23 after owner review (§8). Scope: the plugin only. Work on the owner's own installations is tracked separately, outside this repository.
+Status: built (per-item classifier, owner tier rules, privacy profile and photo judge are live); this page is the design record, revised 2026-09-23 after owner review (§8). Scope: the plugin only. Work on the owner's own installations is tracked separately, outside this repository.
 Date: 2026-09-23
 Risk class: **Critical**. It changes source contracts, trust routing and destructive data behavior.
 Authority: the owner's ruling of 2026-09-23: every item from every source is judged individually into Public, Personal, Private or Secrets. Private material is still searched; Argus (the private analyst) handles it, and Castor receives only OPSEC-scanned derivatives. No embedding change may throw away existing embeddings, and every embedding/re-embed decision needs advance owner approval plus a ledger entry.
