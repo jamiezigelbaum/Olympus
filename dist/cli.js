@@ -55581,10 +55581,10 @@ function dashboardSourceFailureSentence(kind, label, ref) {
     return sentence;
   return `${sentence} ${ref ? DASHBOARD_FAILURE_REF.replace("{ref}", ref) : DASHBOARD_FAILURE_LOG}`;
 }
-function dashboardManualSyncFailedLine(label, failure, ref, when = "just now") {
-  if (!failure)
+function dashboardManualSyncFailedLine(label, failure2, ref, when = "just now") {
+  if (!failure2)
     return `Couldn't check ${label} ${when} — Olympus will try again on its own`;
-  return `Couldn't check ${label} ${when}: ${dashboardSourceFailureSentence(failure, label, ref)} Olympus will try again on its own.`;
+  return `Couldn't check ${label} ${when}: ${dashboardSourceFailureSentence(failure2, label, ref)} Olympus will try again on its own.`;
 }
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
