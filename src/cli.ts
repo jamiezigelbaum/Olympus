@@ -3030,7 +3030,7 @@ export function runServerModeCommand(
 }
 
 /** `--target <path>` for `olympus dashboard`: one of the closed list, or a refusal naming them. */
-function dashboardTargetArg(args: readonly string[]): OpenTarget | undefined {
+export function dashboardTargetArg(args: readonly string[]): OpenTarget | undefined {
   const index = args.indexOf('--target');
   if (index < 0) return undefined;
   const value = args[index + 1];

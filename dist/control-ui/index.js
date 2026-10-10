@@ -22,6 +22,8 @@ var SYNC_SOURCE_TOOL_NAME = "olympus_sync_source";
 var OLYMPUS_HOST_CONTEXT_KEY = "olympus/host";
 var INDEX_FASTER_TOOL_NAME = "olympus_index_faster";
 var UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source";
+var OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file";
+var UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files";
 var PANEL_TOOL_NAMES = [
   DASHBOARD_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
@@ -34,23 +36,35 @@ var PANEL_TOOL_NAMES = [
   "olympus_privacy_set",
   SYNC_SOURCE_TOOL_NAME
 ];
-var COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
+var COMPUTER_HOST_TOOL_NAMES = [
+  ...PANEL_TOOL_NAMES,
+  INDEX_FASTER_TOOL_NAME,
+  UNPAIR_SOURCE_TOOL_NAME,
+  OPEN_UNREADABLE_FILE_TOOL_NAME,
+  UNREADABLE_FILES_PAGE_TOOL_NAME
+];
 
 // src/workers/dashboard/host-bridge.ts
 function dashboardHostBridge(config, io) {
   const view = io.frame.ownerDocument.defaultView || window;
   const media = typeof view.matchMedia === "function" ? view.matchMedia("(prefers-color-scheme: dark)") : null;
   let readOnly = config.readOnly;
+  let landing = config.landing;
   function theme() {
     return media && media.matches ? "dark" : "light";
   }
-  function hostContext() {
+  function hostContext(initial) {
     const context = {
       theme: theme(),
       displayMode: "fullscreen",
       availableDisplayModes: ["fullscreen"]
     };
-    context[config.contextKey] = { kind: config.kind, readOnly, links: config.links };
+    const own = { kind: config.kind, readOnly, links: config.links };
+    if (initial && landing) {
+      own.landing = { sourceId: landing.sourceId };
+      landing = undefined;
+    }
+    context[config.contextKey] = own;
     return context;
   }
   function post(message) {
@@ -120,7 +134,7 @@ function dashboardHostBridge(config, io) {
           protocolVersion: params && typeof params.protocolVersion === "string" ? params.protocolVersion : "2026-01-26",
           hostInfo: { name: "olympus", version: "1" },
           hostCapabilities: { openLinks: {}, serverTools: {} },
-          hostContext: hostContext()
+          hostContext: hostContext(true)
         });
         return;
       case "tools/call":

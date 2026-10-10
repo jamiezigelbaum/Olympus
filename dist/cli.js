@@ -10913,7 +10913,8 @@ function allOpenTargets() {
   return [
     { kind: "dashboard" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section }))
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
   ];
 }
 function openTargetPath(target) {
@@ -10921,6 +10922,8 @@ function openTargetPath(target) {
     return `connect/${target.source}`;
   if (target.kind === "fix")
     return `fix/${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable/${target.source}`;
   return "dashboard";
 }
 function openTargetFromPath(path) {
@@ -10956,6 +10959,8 @@ function openTargetToken(target) {
     return `connect.${target.source}`;
   if (target.kind === "fix")
     return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
   return;
 }
 function openTargetTokenPattern() {
@@ -10969,7 +10974,26 @@ function keysOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
-var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function panelOpenTargetSources() {
+  const out = {};
+  for (const target of allOpenTargets()) {
+    if (target.kind !== "unreadable")
+      continue;
+    out[openTargetToken(target)] = OPEN_UNREADABLE_SOURCES[target.source].sourceId;
+  }
+  return out;
+}
+function openUnreadableSourceFor(sourceId) {
+  return Object.keys(OPEN_UNREADABLE_SOURCES).find((source) => OPEN_UNREADABLE_SOURCES[source].sourceId === sourceId);
+}
+var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -10978,6 +11002,11 @@ var init_open_targets = __esm(() => {
     whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
   };
   OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+  OPEN_UNREADABLE_SOURCES = {
+    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
 });
 
 // src/core/dashboard-launch.ts
@@ -11088,6 +11117,7 @@ var init_dashboard_launch = __esm(() => {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var PANEL = /${panelOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -11115,8 +11145,11 @@ var init_dashboard_launch = __esm(() => {
           if (response.ok) {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
+            // A panel target (See why on one source) lands on the dashboard there.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            window.location.replace(KEYS.test(open)
+              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -25315,7 +25348,8 @@ var init_local_index = __esm(() => {
         truncated,
         storedChunks: chunkRows.length,
         mimeType: row.mime_type,
-        ...row.locator_uri ? { locatorUri: row.locator_uri } : {}
+        ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       };
     }
     itemReactions(localItemId) {
@@ -52723,6 +52757,9 @@ function dashboardUnreadablePhrase(source) {
 function dashboardPhaseUnreadableWords(read, unreadable) {
   return `Done · ${dashboardCount(read)} read · ${dashboardCount(unreadable)} can't be read`;
 }
+function dashboardUnreadableMoreLabel(count) {
+  return DASHBOARD_UNREADABLE_MORE.replace("{count}", dashboardCount(count));
+}
 function dashboardManualSyncFailedLine(label) {
   return `Couldn't check ${label} just now — Olympus will try again on its own`;
 }
@@ -52842,7 +52879,7 @@ function degradedInput(degraded) {
 function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -53089,6 +53126,8 @@ var init_vocabulary = __esm(() => {
     syncChecking: "Checking…",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
     seeWhy: "See why",
+    unreadableMore: DASHBOARD_UNREADABLE_MORE,
+    unreadableOpen: "Open {name}",
     unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
     unreadableNote: DASHBOARD_UNREADABLE_NOTE,
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
@@ -55149,6 +55188,7 @@ class SqliteSourceDashboardHistory {
 }
 function buildSourceDashboardViewModel(options) {
   const now = options.now ?? new Date;
+  const statusCorpora = recheckedUnreadableCorpora(options.sourceIndexStatus.corpora, options.unreadableRecheck);
   const degradedCredentials = [
     ...options.sourceIndexStatus.degraded_credentials ?? [],
     ...credentialHealthDegradations(options.credentialHealth, now)
@@ -55161,16 +55201,18 @@ function buildSourceDashboardViewModel(options) {
   const unpairedSources = new Map((options.unpairedSources ?? []).map((state) => [state.source_id, state]));
   const claimedCorpusIds = new Set;
   const cards = DASHBOARD_SUPPORTED_SOURCES.map((definition) => {
-    const corpora = options.sourceIndexStatus.corpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
+    const corpora = statusCorpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
     const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false);
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
     const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
+    const unreadableFiles = unreadableFilesFor(built, corpora, options.unreadableFileNames);
     const card = {
       ...built,
       ...tierClassification ? { tier_classification: tierClassification } : {},
-      ...manualSync ? { last_manual_sync: { ...manualSync } } : {}
+      ...manualSync ? { last_manual_sync: { ...manualSync } } : {},
+      ...unreadableFiles ? { unreadable_files: unreadableFiles } : {}
     };
     const syncSource = definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined)
@@ -55182,7 +55224,7 @@ function buildSourceDashboardViewModel(options) {
     withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
     return withSyncAnswer;
   });
-  const unassignedCorpora = unassignedCorporaFrom(options.sourceIndexStatus.corpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)), schedulerByCorpus, now);
+  const unassignedCorpora = unassignedCorporaFrom(statusCorpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)), schedulerByCorpus, now);
   const samples = cards.map((card) => ({
     source_id: card.source_id,
     corpus_id: card.corpus_id,
@@ -55268,6 +55310,51 @@ function answerLaneFromDefinition(definition, registry, credentialHealth, apiKey
       handles: handles.map((handle) => handle.handle).sort((a, b) => a.localeCompare(b))
     }
   };
+}
+function recheckedUnreadableCorpora(corpora, recheck) {
+  if (!recheck)
+    return [...corpora];
+  return corpora.map((corpus) => {
+    const counts = "counts" in corpus ? corpus.counts : undefined;
+    const counted = counts?.[UNREADABLE_ITEMS_COUNT_KEY];
+    if (!counts || typeof counted !== "number" || !(counted > 0))
+      return corpus;
+    let now;
+    try {
+      now = recheck(corpus.corpus_id);
+    } catch {
+      now = undefined;
+    }
+    if (!now)
+      return corpus;
+    const unreadable = Math.min(counted, Math.max(0, Math.trunc(now.unreadable)));
+    const moved = Math.min(counted - unreadable, Math.max(0, Math.trunc(now.blocked)));
+    if (unreadable === counted)
+      return corpus;
+    const blocked = counts[BLOCKED_BY_POLICY_COUNT_KEY];
+    return {
+      ...corpus,
+      counts: {
+        ...counts,
+        [UNREADABLE_ITEMS_COUNT_KEY]: unreadable,
+        ...moved > 0 ? { [BLOCKED_BY_POLICY_COUNT_KEY]: (typeof blocked === "number" ? blocked : 0) + moved } : {}
+      }
+    };
+  });
+}
+function unreadableFilesFor(card, corpora, names) {
+  if (!names || !((card.coverage.unreadable_items ?? 0) > 0))
+    return;
+  const corpusIds = corpora.filter((corpus) => (numericCounts(corpus)[UNREADABLE_ITEMS_COUNT_KEY] ?? 0) > 0).map((corpus) => corpus.corpus_id);
+  if (corpusIds.length === 0)
+    return;
+  let listed;
+  try {
+    listed = names(corpusIds, CARD_UNREADABLE_NAMES);
+  } catch {
+    listed = [];
+  }
+  return { names: listed.slice(0, CARD_UNREADABLE_NAMES), corpus_ids: corpusIds };
 }
 function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired, fileSourceScopeStatus, fileSourceScopeIngestionEnabled) {
   const corpusCards = withoutCustodialDoubleCount(corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)), corpora);
@@ -56767,7 +56854,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_privacy_language();
   init_sqlite_migrations();
@@ -89256,6 +89343,36 @@ import { createHash as createHash49, randomUUID as randomUUID22 } from "node:cry
 import { homedir as homedir51 } from "node:os";
 import { dirname as dirname51, join as join71 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
+function settleUnreadable(candidates, classify) {
+  const items = [];
+  let blocked = 0;
+  for (const candidate of candidates) {
+    let verdict = "unreadable";
+    if (classify) {
+      try {
+        verdict = classify(candidate);
+      } catch {
+        verdict = "blocked_policy";
+      }
+    }
+    if (verdict === "blocked_policy")
+      blocked += 1;
+    else if (verdict === "unreadable")
+      items.push(candidate);
+  }
+  items.sort((a, b) => a.failedAt === b.failedAt ? a.ref.localItemId.localeCompare(b.ref.localItemId) : a.failedAt < b.failedAt ? 1 : -1);
+  return { items, blocked };
+}
+function unreadableCandidate(itemRows) {
+  let newest;
+  for (const row of itemRows) {
+    if (row.status !== "failed_terminal")
+      continue;
+    if (!newest || row.updated_at > newest.updated_at)
+      newest = row;
+  }
+  return newest ? { ref: refFromRow(newest), failedAt: newest.updated_at } : undefined;
+}
 function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
@@ -89881,7 +89998,7 @@ class LocalFileExtractionJobStore {
     }
     let blockedByPolicyItems = 0;
     let metadataOnlyExpectedItems = 0;
-    let unreadableItems = 0;
+    const unreadableCandidates = [];
     const settledFailedItems = new Set;
     for (const [itemId, itemRows] of byItem) {
       if (itemRows.some((row) => row.status === "indexed"))
@@ -89894,9 +90011,15 @@ class LocalFileExtractionJobStore {
       } else if (itemRows.some((row) => row.status === "metadata_only" || row.status === "skipped_unsupported" || row.status === "skipped_too_large")) {
         metadataOnlyExpectedItems += 1;
       } else if (settledFailed) {
-        unreadableItems += 1;
+        const candidate = unreadableCandidate(itemRows);
+        if (candidate)
+          unreadableCandidates.push(candidate);
       }
     }
+    const unreadable = settleUnreadable(unreadableCandidates, options.classifyUnreadable);
+    blockedByPolicyItems += unreadable.blocked;
+    const unreadableItems = unreadable.items.length;
+    options.onUnreadable?.(unreadable.items);
     const now = (options.now ?? new Date).toISOString();
     const count = (status) => rows.filter((row) => row.status === status).length;
     const failedRows = rows.filter((row) => row.status === "failed_retryable" || row.status === "failed_terminal");
@@ -89941,12 +90064,43 @@ class LocalFileExtractionJobStore {
       SELECT
         SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 1 THEN 1 ELSE 0 END) AS blocked_items,
         SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 1
-            THEN 1 ELSE 0 END) AS metadata_only_items,
-        SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 0
-            AND terminal_failed_jobs = 1 AND in_flight_jobs = 0
-            THEN 1 ELSE 0 END) AS unreadable_items
+            THEN 1 ELSE 0 END) AS metadata_only_items
       FROM item_state
     `).get(...itemRetry.params, corpus);
+    const failedRows = this.db.query(`
+      WITH item_state AS (
+        SELECT
+          local_item_id,
+          MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
+          MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
+          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
+              THEN 1 ELSE 0 END) AS metadata_only_jobs,
+          MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
+          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
+              THEN 1 ELSE 0 END) AS in_flight_jobs,
+          MAX(CASE WHEN status = 'failed_terminal' THEN updated_at END) AS failed_at
+        FROM extraction_jobs x
+        WHERE corpus_id = ?
+        GROUP BY local_item_id
+      )
+      SELECT j.*
+      FROM item_state s
+      JOIN extraction_jobs j
+        ON j.corpus_id = ? AND j.local_item_id = s.local_item_id
+        AND j.status = 'failed_terminal' AND j.updated_at = s.failed_at
+      WHERE s.indexed_jobs = 0 AND s.blocked_jobs = 0 AND s.metadata_only_jobs = 0
+        AND s.terminal_failed_jobs = 1 AND s.in_flight_jobs = 0
+    `).all(...itemRetry.params, corpus, corpus);
+    const seen = new Set;
+    const candidates = [];
+    for (const row of failedRows) {
+      if (seen.has(row.local_item_id))
+        continue;
+      seen.add(row.local_item_id);
+      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at });
+    }
+    const unreadable = settleUnreadable(candidates, options.classifyUnreadable);
+    options.onUnreadable?.(unreadable.items);
     const jobs = this.db.query(`
       SELECT
         SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
@@ -89992,14 +90146,14 @@ class LocalFileExtractionJobStore {
     const count = (value) => Math.max(0, Math.trunc(value ?? 0));
     const jobCount = (key) => count(typeof jobs?.[key] === "number" ? jobs[key] : undefined);
     return {
-      blockedByPolicyItems: count(items?.blocked_items),
+      blockedByPolicyItems: count(items?.blocked_items) + unreadable.blocked,
       metadataOnlyExpectedItems: count(items?.metadata_only_items),
       queuedJobs: jobCount("queued_jobs"),
       leasedJobs: jobCount("leased_jobs"),
       failedRetryableJobs: jobCount("failed_retryable_jobs"),
       failedTerminalJobs: jobCount("failed_terminal_jobs"),
       failedActionableJobs: jobCount("failed_actionable_jobs"),
-      unreadableItems: count(items?.unreadable_items),
+      unreadableItems: unreadable.items.length,
       retryableDueJobs: jobCount("retryable_due_jobs"),
       ...typeof jobs?.oldest_actionable_at === "string" ? { oldestActionableAt: jobs.oldest_actionable_at } : {},
       ...typeof jobs?.newest_terminal_progress_at === "string" ? { newestTerminalProgressAt: jobs.newest_terminal_progress_at } : {}
@@ -96259,6 +96413,7 @@ function createFileExtractionRuntime(options) {
   const sourceFactories = options.sourceFactories ?? defaultSourceFactories(env, options.credentialBroker ? { credentialBroker: options.credentialBroker } : {});
   const jobs = new LocalFileExtractionJobStore(options.jobsDbPath ?? defaultFileExtractionJobsDbPath(env));
   const corpora = [];
+  const itemStores = new Map;
   for (const config2 of roster) {
     const store = storesByCorpusId.get(config2.corpusId);
     if (!store) {
@@ -96275,6 +96430,10 @@ function createFileExtractionRuntime(options) {
       throw new Error(`[file-extraction] corpus=${config2.corpusId} tier set does not hold its store.`);
     }
     const view = tierSet ? tieredExtractionView(tierSet, { home: store.trustDomain }) : undefined;
+    itemStores.set(config2.corpusId, tierSet ? () => TIER_DOMAIN_ORDER.flatMap((domain) => {
+      const leg = tierSet.store(domain);
+      return leg ? [leg] : [];
+    }) : () => [store]);
     if (store.trustDomain !== "secure_local") {
       try {
         if (tierSet)
@@ -96380,6 +96539,18 @@ function createFileExtractionRuntime(options) {
     jobs,
     corpusIds: corpora.map((corpus) => corpus.corpusId),
     terminalRetryPaths: terminalRetryPaths(registry2, reclassificationRules),
+    locateItem(ref) {
+      for (const holder of itemStores.get(ref.corpusId)?.() ?? []) {
+        const found = holder.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
+        if (!found)
+          continue;
+        return {
+          ...found.locatorUri ? { locatorUri: found.locatorUri } : {},
+          ...found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}
+        };
+      }
+      return;
+    },
     close() {
       jobs.close();
     }
@@ -96613,12 +96784,20 @@ var init_file_extraction_runtime = __esm(() => {
   init_store_sink();
   init_tiered_store_sink();
   init_tiered_extraction();
+  init_tiered_store_set();
   DROPBOX_SCOPE_ACCOUNT = /^dropbox\.([a-z0-9_-]+):/i;
 });
 
 // src/workers/file-extraction/readiness-ledger.ts
 function createExtractionReadinessLedger(jobs, options = {}) {
-  return {
+  const lastUnreadable = new Map;
+  const listing = (corpusId) => ({
+    ...options.classifyUnreadable ? { classifyUnreadable: options.classifyUnreadable } : {},
+    onUnreadable: (items) => {
+      lastUnreadable.set(corpusId, items);
+    }
+  });
+  const ledger = {
     snapshotForCorpus(corpusId) {
       const lanes = options.lanesForCorpus?.(corpusId);
       if (lanes !== undefined) {
@@ -96627,7 +96806,8 @@ function createExtractionReadinessLedger(jobs, options = {}) {
         try {
           return readinessSnapshot(jobs.scopedReadiness(lanes, {
             ...options.currentItem ? { currentItem: options.currentItem } : {},
-            ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}
+            ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
+            ...listing(corpusId)
           }));
         } catch {
           return;
@@ -96636,14 +96816,21 @@ function createExtractionReadinessLedger(jobs, options = {}) {
       let readiness;
       try {
         readiness = jobs.corpusReadiness(corpusId, new Date, {
-          ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}
+          ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
+          ...listing(corpusId)
         });
       } catch {
         return;
       }
       return readinessSnapshot(readiness);
+    },
+    unreadableItems(corpusId) {
+      if (!lastUnreadable.has(corpusId))
+        ledger.snapshotForCorpus(corpusId);
+      return lastUnreadable.get(corpusId) ?? [];
     }
   };
+  return ledger;
 }
 function readinessSnapshot(readiness) {
   return {
@@ -96668,6 +96855,247 @@ function readinessSnapshot(readiness) {
 }
 var init_readiness_ledger = __esm(() => {
   init_answer_ready_coverage();
+});
+
+// src/workers/file-extraction/unreadable-files.ts
+import { createHash as createHash53, randomBytes as randomBytes15 } from "node:crypto";
+function createUnreadableVerdict(input) {
+  return (item) => {
+    const located = input.locate(item.ref);
+    const identity = {
+      provider: item.ref.provider,
+      accountScope: item.ref.accountScope,
+      providerItemId: item.ref.providerItemId,
+      ...located?.providerConversationId ? { providerConversationId: located.providerConversationId } : {}
+    };
+    for (const lane of input.lanes()) {
+      if (!lane.corpusIds.has(item.ref.corpusId))
+        continue;
+      const record3 = lane.ledger.getCurrent(identity);
+      if (record3 && (record3.metadataTier === "secrets" || record3.contentTier === "secrets"))
+        return "blocked_policy";
+      const override = lane.ledger.getOverride?.(identity);
+      if (override?.kind === "tier" && override.tier === "secrets")
+        return "blocked_policy";
+      if (lane.secrets?.get(identity) !== undefined)
+        return "blocked_policy";
+    }
+    return located ? "unreadable" : "hidden";
+  };
+}
+function isUnreadableOpenToken(value) {
+  return typeof value === "string" && value.length === TOKEN_LENGTH && Array.from(value).every((char) => TOKEN_ALPHABET.has(char));
+}
+function isUnreadablePageCursor(value) {
+  if (typeof value !== "string")
+    return false;
+  const split = value.indexOf("~");
+  if (split < 10 || split > 40 || value.length !== split + 1 + 22)
+    return false;
+  return Array.from(value.slice(0, split)).every((char) => CURSOR_TIME_ALPHABET.has(char)) && Array.from(value.slice(split + 1)).every((char) => TOKEN_ALPHABET.has(char));
+}
+function createUnreadableFiles(options) {
+  const now = options.now ?? Date.now;
+  const ttl = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
+  const byToken = new Map;
+  const tokenBySlot = new Map;
+  let bucket = OPEN_RATE.capacity;
+  let refilledAt = now();
+  const keyOf = (ref) => `${ref.corpusId}\x00${ref.localItemId}`;
+  function verdictOf(item) {
+    try {
+      return options.verdict(item);
+    } catch {
+      return "blocked_policy";
+    }
+  }
+  function placeOf(item) {
+    return { at: item.failedAt, id: createHash53("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
+  }
+  function cursorOf(item) {
+    const place = placeOf(item);
+    return `${place.at}~${place.id}`;
+  }
+  function isAfter(place, cursor) {
+    const split = cursor.lastIndexOf("~");
+    const at = cursor.slice(0, split);
+    const id = cursor.slice(split + 1);
+    return place.at < at || place.at === at && place.id > id;
+  }
+  function listed(corpusId) {
+    try {
+      return options.items(corpusId);
+    } catch {
+      return [];
+    }
+  }
+  function current(corpusIds) {
+    return merged(corpusIds).filter((item) => verdictOf(item) === "unreadable");
+  }
+  function merged(corpusIds) {
+    const seen = new Set;
+    const out = [];
+    for (const corpusId of new Set(corpusIds)) {
+      for (const item of listed(corpusId)) {
+        const key = keyOf(item.ref);
+        if (seen.has(key))
+          continue;
+        seen.add(key);
+        out.push(item);
+      }
+    }
+    const places = new Map(out.map((item) => [item, placeOf(item)]));
+    return out.sort((a, b) => {
+      const pa = places.get(a);
+      const pb = places.get(b);
+      if (pa.at !== pb.at)
+        return pa.at < pb.at ? 1 : -1;
+      return pa.id === pb.id ? 0 : pa.id < pb.id ? -1 : 1;
+    });
+  }
+  function locator(item) {
+    try {
+      return options.locate(item.ref)?.locatorUri;
+    } catch {
+      return;
+    }
+  }
+  function displayName(item) {
+    const named = item.ref.name?.trim();
+    if (named)
+      return named;
+    const path = locator(item);
+    if (path && path.startsWith("/")) {
+      const last = path.split("/").filter(Boolean).at(-1);
+      if (last)
+        return last;
+    }
+    return UNNAMED;
+  }
+  function target(item) {
+    const found = locator(item);
+    if (!found)
+      return;
+    try {
+      const resolved = options.openTarget(item.ref.provider, found);
+      if (!resolved)
+        return;
+      const url = resolved.url && resolved.url.startsWith("https://") ? resolved.url : undefined;
+      const localPath = options.openFile ? resolved.localPath : undefined;
+      return url || localPath ? { ...url ? { url } : {}, ...localPath ? { localPath } : {} } : undefined;
+    } catch {
+      return;
+    }
+  }
+  function drop(token, entry) {
+    byToken.delete(token);
+    if (tokenBySlot.get(entry.slot) === token)
+      tokenBySlot.delete(entry.slot);
+  }
+  function sweep(at) {
+    for (const [token, entry] of byToken) {
+      if (entry.expiresAt <= at)
+        drop(token, entry);
+    }
+  }
+  function mint(item, opener, at) {
+    const slot = `${opener}\x00${keyOf(item.ref)}`;
+    const existing = tokenBySlot.get(slot);
+    if (existing && byToken.has(existing)) {
+      byToken.get(existing).item = item;
+      return existing;
+    }
+    const token = randomBytes15(32).toString("base64url");
+    byToken.set(token, { slot, opener, item, expiresAt: at + ttl });
+    tokenBySlot.set(slot, token);
+    while (byToken.size > MAX_TOKENS) {
+      const [oldest, old] = byToken.entries().next().value;
+      drop(oldest, old);
+    }
+    return token;
+  }
+  function takeOpen(at) {
+    bucket = Math.min(OPEN_RATE.capacity, bucket + (at - refilledAt) / 1000 * OPEN_RATE.refillPerSecond);
+    refilledAt = at;
+    if (bucket < 1)
+      return false;
+    bucket -= 1;
+    return true;
+  }
+  return {
+    recheck(corpusId) {
+      let unreadable = 0;
+      let blocked = 0;
+      for (const item of listed(corpusId)) {
+        const verdict = verdictOf(item);
+        if (verdict === "unreadable")
+          unreadable += 1;
+        else if (verdict === "blocked_policy")
+          blocked += 1;
+      }
+      return { unreadable, blocked };
+    },
+    names(corpusIds, limit) {
+      return current(corpusIds).slice(0, Math.max(0, limit)).map(displayName);
+    },
+    computerList(corpusIds, limit, list = {}) {
+      const at = now();
+      sweep(at);
+      const cursor = list.after;
+      const all = merged(corpusIds).filter((item) => !cursor || isAfter(placeOf(item), cursor));
+      const shown = [];
+      let more = 0;
+      for (const item of all) {
+        if (verdictOf(item) !== "unreadable")
+          continue;
+        if (shown.length < Math.max(0, limit))
+          shown.push(item);
+        else
+          more += 1;
+      }
+      const opener = list.opener;
+      const files = shown.map((item) => {
+        const name = displayName(item);
+        return opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
+      });
+      const last = shown.at(-1);
+      return { files, more, ...last ? { after: cursorOf(last) } : {} };
+    },
+    async open(token, opener) {
+      if (!isUnreadableOpenToken(token))
+        return { status: "invalid" };
+      const at = now();
+      sweep(at);
+      const entry = byToken.get(token);
+      if (!entry || !opener || entry.opener !== opener)
+        return { status: "gone" };
+      if (!takeOpen(at))
+        return { status: "rate_limited" };
+      drop(token, entry);
+      if (verdictOf(entry.item) !== "unreadable")
+        return { status: "gone" };
+      const resolved = target(entry.item);
+      if (!resolved)
+        return { status: "gone" };
+      if (resolved.localPath && options.openFile) {
+        try {
+          await options.openFile(resolved.localPath);
+          return { status: "opened" };
+        } catch {
+          if (!resolved.url)
+            return { status: "failed" };
+        }
+      }
+      return resolved.url ? { status: "open_link", url: resolved.url } : { status: "gone" };
+    }
+  };
+}
+var TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS = 2000, OPEN_RATE, UNNAMED = "Unnamed file", CURSOR_TIME_ALPHABET;
+var init_unreadable_files = __esm(() => {
+  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+  OPEN_RATE = { capacity: 10, refillPerSecond: 1 };
+  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
 });
 
 // src/core/analyst-openai.ts
@@ -97510,7 +97938,7 @@ var init_openai_compatible_client = __esm(() => {
 });
 
 // src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes15 } from "node:crypto";
+import { randomBytes as randomBytes16 } from "node:crypto";
 function hostnameOf(host) {
   try {
     return new URL(`https://${host}`).hostname;
@@ -97540,7 +97968,7 @@ function consentSecurityHeaders(nonce, redirectOrigin) {
   };
 }
 function renderConsentPage(input) {
-  const nonce = randomBytes15(16).toString("base64");
+  const nonce = randomBytes16(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const provenance = input.verifiedHost ? `<div class="host">${escapeHtml(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
@@ -97585,7 +98013,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderLoopbackConsentPage(input) {
-  const nonce = randomBytes15(16).toString("base64");
+  const nonce = randomBytes16(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const body = `<!doctype html>
 <html lang="en">
@@ -97624,7 +98052,7 @@ ${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${esca
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderDemoSignInPage(input) {
-  const nonce = randomBytes15(16).toString("base64");
+  const nonce = randomBytes16(16).toString("base64");
   const name = escapeHtml(input.clientName);
   const error2 = input.error ? `<p class="err" role="alert">${escapeHtml(input.error)}</p>` : "";
   const body = `<!doctype html>
@@ -97663,7 +98091,7 @@ ${error2}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderConsentErrorPage(message) {
-  const nonce = randomBytes15(16).toString("base64");
+  const nonce = randomBytes16(16).toString("base64");
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -98009,7 +98437,7 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash53 } from "node:crypto";
+import { createHash as createHash54 } from "node:crypto";
 import { readFileSync as readFileSync48 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir55 } from "node:os";
@@ -98502,7 +98930,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2565(value) {
-  return createHash53("sha256").update(value, "utf8").digest("hex");
+  return createHash54("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -99923,7 +100351,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash54 } from "node:crypto";
+import { createHash as createHash55 } from "node:crypto";
 function escapeHtml2(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -99974,14 +100402,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash54("sha256").update(normalised).digest("hex");
+  return createHash55("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash54("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash55("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -101032,7 +101460,20 @@ var init_outside_help = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+function unreadableNames(input) {
+  if (!Array.isArray(input))
+    return [];
+  return input.flatMap((value) => {
+    if (typeof value !== "string")
+      return [];
+    const line = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim();
+    if (!line)
+      return [];
+    const chars = Array.from(line);
+    return [chars.length > UNREADABLE_NAME_MAX_CHARS ? `${chars.slice(0, UNREADABLE_NAME_MAX_CHARS - 1).join("")}…` : line];
+  });
+}
+var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -101046,7 +101487,13 @@ var init_dashboard_contract = __esm(() => {
     "olympus_privacy_set",
     SYNC_SOURCE_TOOL_NAME
   ];
-  COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
+  COMPUTER_HOST_TOOL_NAMES = [
+    ...PANEL_TOOL_NAMES,
+    INDEX_FASTER_TOOL_NAME,
+    UNPAIR_SOURCE_TOOL_NAME,
+    OPEN_UNREADABLE_FILE_TOOL_NAME,
+    UNREADABLE_FILES_PAGE_TOOL_NAME
+  ];
 });
 
 // src/workers/dashboard/chatgpt/client.ts
@@ -101073,7 +101520,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     hostKind: "",
     hostReadOnly: false,
     hostLinks: {},
-    computerMeta: null
+    computerMeta: null,
+    unreadablePages: {},
+    landing: "",
+    landed: null
   };
   const H = config2.host;
   let nextId = 1;
@@ -101150,6 +101600,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         links[key] = href;
     }
     state.hostLinks = value.kind === "computer" ? links : {};
+    const landing = value.landing;
+    if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
+      state.landing = landing.sourceId;
+    }
   }
   function onComputer() {
     return state.hostKind === "computer";
@@ -101212,6 +101666,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       state.data = content;
       const meta2 = result._meta && typeof result._meta === "object" ? result._meta[H.computerMetaKey] : null;
       state.computerMeta = meta2 && typeof meta2 === "object" ? meta2 : null;
+      state.unreadablePages = {};
       state.relayDown = false;
       if (!state.busy)
         state.syncPressed = {};
@@ -101231,7 +101686,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config2.inlineErrorCodes.indexOf(code) < 0 && !(name && name === H.unpairTool))
+    if (config2.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -101260,6 +101715,26 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         }
         state.actionError = { key, text: failed };
         render(key);
+        return;
+      }
+      if (name === H.unreadableOpenTool) {
+        const url = result && result.structuredContent ? result.structuredContent.url : "";
+        if (typeof url === "string" && url)
+          openLink(url);
+        refresh();
+        return;
+      }
+      if (name === H.unreadablePageTool) {
+        const page = result && result.structuredContent;
+        if (page && page.status === "listed" && typeof page.source_id === "string" && Array.isArray(page.files)) {
+          const prior = state.unreadablePages[page.source_id];
+          state.unreadablePages[page.source_id] = {
+            files: (prior ? prior.files : []).concat(unreadableEntries(page.files)),
+            more: moreCount(page.more),
+            after: cursorOf(page.after)
+          };
+        }
+        redraw();
         return;
       }
       if (name === H.unpairTool) {
@@ -101474,7 +101949,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     render(key);
   }
   function openPath(href) {
-    const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix)\/[a-z]+)\/$/.exec(href);
+    const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix|unreadable)\/[a-z]+)\/$/.exec(href);
     return match ? match[1] : "";
   }
   function remoteLines(href) {
@@ -101778,6 +102253,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const why = seeWhy(source, id);
     if (why)
       add(main, why);
+    else if (state.landed && state.landed.id === id)
+      row.className += " landed";
     add(row, main);
     const controls = el("div", "source-actions");
     const context = { id, label: String(source.label || id) };
@@ -101823,8 +102300,85 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!lines.length)
       return null;
     const box = details("why:" + id, document.createTextNode(P.seeWhy), "why");
-    add(box, add(el("ul", "plain"), ...lines), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     return box;
+  }
+  function unreadableFiles(unreadable, id) {
+    const list = el("ul", "plain files");
+    const own = computerUnreadable(id);
+    if (own) {
+      own.files.forEach((file, index) => {
+        const item = el("li");
+        if (typeof file.token === "string" && file.token) {
+          const key = "why-file:" + id + ":" + index;
+          const control = fixControl({ label: file.name, tool: H.unreadableOpenTool, args: { token: file.token } }, key, "plain", false);
+          const opener = control.querySelector("button");
+          if (opener && opener.textContent === file.name) {
+            opener.className = "btn link file";
+            opener.setAttribute("aria-label", fill2(P.unreadableOpen, { name: file.name }));
+          }
+          add(item, control);
+        } else
+          add(item, document.createTextNode(file.name));
+        add(list, item);
+      });
+      if (own.more > 0) {
+        const label = fill2(P.unreadableMore, { count: count(own.more) });
+        add(list, own.after ? add(el("li"), fixControl({ label, tool: H.unreadablePageTool, args: { source_id: id, after: own.after } }, "why-page:" + id, "plain", false)) : el("li", "muted", label));
+      }
+      return list.childNodes.length ? list : null;
+    }
+    const names = Array.isArray(unreadable.names) ? unreadable.names.filter((name) => typeof name === "string" && name) : [];
+    names.forEach((name) => add(list, el("li", "", name)));
+    if (unreadable.more && typeof unreadable.more === "object") {
+      add(list, add(el("li"), fixControl(unreadable.more, "why-more:" + id, "plain", false)));
+    }
+    return list.childNodes.length ? list : null;
+  }
+  function computerUnreadable(id) {
+    const meta2 = state.computerMeta;
+    if (!onComputer() || !meta2 || !Array.isArray(meta2.unreadable))
+      return null;
+    const entry = meta2.unreadable.filter((item) => item && item.sourceId === id)[0];
+    if (!entry || !Array.isArray(entry.files))
+      return null;
+    const pages = state.unreadablePages[id];
+    const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
+    const more = pages ? pages.more : moreCount(entry.more);
+    const after = pages ? pages.after : cursorOf(entry.after);
+    return files.length || more ? { files, more, after } : null;
+  }
+  function cursorOf(value) {
+    return typeof value === "string" && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : "";
+  }
+  function unreadableEntries(input) {
+    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
+  }
+  function moreCount(value) {
+    return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+  function applyLanding() {
+    const id = state.landing;
+    if (!id || !state.data || state.relayDown || editorOpen() || compact2())
+      return;
+    state.landing = "";
+    const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
+    if (!sources.some((source) => source && source.id === id))
+      return;
+    state.open["why:" + id] = true;
+    state.landed = { id, until: Date.now() + H.landedMs };
+    render("summary:why:" + id);
+    const node = root.querySelector(".landed");
+    if (node && typeof node.scrollIntoView === "function")
+      node.scrollIntoView({ block: "center" });
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector(".landed");
+      if (shown)
+        shown.classList.remove("landed");
+    }, H.landedMs);
   }
   function syncChecking(source) {
     if (!source || source.connecting)
@@ -102289,6 +102843,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       }
     }
     reportHeight();
+    if (state.landing && !picking && !privacyOpen)
+      applyLanding();
   }
   function reportHeight() {
     const height = Math.ceil(doc2.documentElement.scrollHeight || doc2.body.scrollHeight || 0);
@@ -104939,6 +105495,9 @@ function chatgptDashboardPageHtml(options = {}) {
       computerMetaKey: COMPUTER_META_KEY,
       indexFasterTool: INDEX_FASTER_TOOL_NAME,
       unpairTool: UNPAIR_SOURCE_TOOL_NAME,
+      unreadableOpenTool: OPEN_UNREADABLE_FILE_TOOL_NAME,
+      unreadablePageTool: UNREADABLE_FILES_PAGE_TOOL_NAME,
+      landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
   };
@@ -104966,7 +105525,7 @@ function privacyProgramSource() {
 function scriptJson(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_DASHBOARD_LANDED_MS = 4000;
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
@@ -105108,6 +105667,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .why summary{color:var(--muted);font-size:0.875rem;padding:0.125rem 0}
 .why .plain{margin:0.25rem 0;font-size:0.875rem}
 .why-note{font-size:0.8125rem;color:var(--muted)}
+.why .files li{overflow-wrap:anywhere}
+.why .files .btn.link.file{min-height:0;padding:0.125rem 0;color:var(--accent);text-align:left}
+.landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
+@keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
 .remote-box p{margin:0}
@@ -105218,7 +105781,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 });
 
@@ -105227,16 +105790,22 @@ function dashboardHostBridge(config2, io) {
   const view = io.frame.ownerDocument.defaultView || window;
   const media = typeof view.matchMedia === "function" ? view.matchMedia("(prefers-color-scheme: dark)") : null;
   let readOnly = config2.readOnly;
+  let landing = config2.landing;
   function theme() {
     return media && media.matches ? "dark" : "light";
   }
-  function hostContext() {
+  function hostContext(initial) {
     const context = {
       theme: theme(),
       displayMode: "fullscreen",
       availableDisplayModes: ["fullscreen"]
     };
-    context[config2.contextKey] = { kind: config2.kind, readOnly, links: config2.links };
+    const own = { kind: config2.kind, readOnly, links: config2.links };
+    if (initial && landing) {
+      own.landing = { sourceId: landing.sourceId };
+      landing = undefined;
+    }
+    context[config2.contextKey] = own;
     return context;
   }
   function post2(message) {
@@ -105306,7 +105875,7 @@ function dashboardHostBridge(config2, io) {
           protocolVersion: params && typeof params.protocolVersion === "string" ? params.protocolVersion : "2026-01-26",
           hostInfo: { name: "olympus", version: "1" },
           hostCapabilities: { openLinks: {}, serverTools: {} },
-          hostContext: hostContext()
+          hostContext: hostContext(true)
         });
         return;
       case "tools/call":
@@ -105367,6 +105936,8 @@ function computerOpenTargets(origin, token) {
       out[path] = `${origin}${dashboardHomeHref(token)}`;
     else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref("keys", token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
+    } else if (isPanelOpenTarget(target)) {
+      out[path] = `${origin}${dashboardHomeHref(token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     }
   }
   return out;
@@ -105436,7 +106007,16 @@ function hostProgram(input, bridge) {
       return response.ok ? response.json().then((result) => remember(name, result)) : failed();
     });
   }
-  handle = bridge(input.bridge, {
+  let landing;
+  if (window.location.hash.indexOf(input.openFragment) === 0) {
+    const wanted = window.location.hash.slice(input.openFragment.length);
+    try {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch {}
+    if (Object.prototype.hasOwnProperty.call(input.landings, wanted))
+      landing = { sourceId: input.landings[wanted] };
+  }
+  handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
     callTool,
     openUrl(url) {
@@ -105528,6 +106108,8 @@ function renderComputerHostPage(input) {
     csrfToken: input.csrfToken ?? "",
     readUrl,
     lockedUrl: dashboardHomeHref(token),
+    openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,
+    landings: panelOpenTargetSources(),
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     words: DASHBOARD_HOST_GATE_COPY
@@ -106584,9 +107166,9 @@ __export(exports_dashboard_resource, {
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
-import { createHash as createHash55 } from "node:crypto";
+import { createHash as createHash56 } from "node:crypto";
 function versionedResourceUri(base, html) {
-  return `${base}?v=${createHash55("sha256").update(html).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash56("sha256").update(html).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -106653,7 +107235,7 @@ var init_request_peer = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac3, randomBytes as randomBytes16, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes17, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -106673,7 +107255,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = createHmac3("sha256", options.sessionSecret?.trim() || randomBytes16(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
+  const sessionSecret = createHmac3("sha256", options.sessionSecret?.trim() || randomBytes17(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -106795,6 +107377,9 @@ function withWorkerBearerAuth(fetchHandler, options) {
         if (isDashboardConsultControlRoute(request)) {
           if (authorization.grade !== "local")
             return dashboardConsultMacOnlyResponse();
+          return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
+        }
+        if (isDashboardToolsCallRoute(request)) {
           return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
         }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
@@ -107003,6 +107588,9 @@ function dashboardConsultMacOnlyResponse() {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
   });
 }
+function isDashboardToolsCallRoute(request) {
+  return request.method === "POST" && new URL(request.url).pathname === "/dashboard/tools/call";
+}
 function isDashboardControlRoute(request) {
   if (request.method !== "POST")
     return false;
@@ -107066,7 +107654,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bearer") {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes16(24).toString("base64url"),
+    nonce: randomBytes17(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(sessionSecret, origin),
     grade
@@ -107745,7 +108333,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash56 } from "node:crypto";
+import { createHash as createHash57 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -107773,7 +108361,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash56("sha256").update(value).digest("hex");
+  return createHash57("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -107978,7 +108566,7 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash57, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash58, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 import { readFileSync as readFileSync50, statSync as statSync25 } from "node:fs";
 import { homedir as homedir56 } from "node:os";
 import { join as join82, resolve as resolve10 } from "node:path";
@@ -108446,6 +109034,8 @@ function createEmailSourceWorker(options = {}) {
               ...registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {},
               unpairedSources: dashboardUnpairedSourceStates(dashboardUnpairedSources, sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
+              ...options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {},
+              ...options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {},
               ...credentialHealth ? { credentialHealth } : {},
               oauthClientIds: dashboardClientIdSets.all,
               oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
@@ -108500,7 +109090,10 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceDashboard.panelTools.allows(name)) {
             throw new EmailSourceWorkerError(404, "unknown_tool", "That tool is not available to the dashboard.");
           }
-          return json(await sourceDashboard.panelTools.call(name, args, dashboardPanelCallContext(url, request)));
+          return json(await sourceDashboard.panelTools.call(name, args, {
+            ...dashboardPanelCallContext(url, request),
+            opener: dashboardPanelOpener(request)
+          }));
         }
         const oauthCallbackDone = /^\/oauth\/callback\/([^/]+)\/done$/.exec(url.pathname);
         if (request.method === "GET" && oauthCallbackDone) {
@@ -111239,7 +111832,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual6(createHash57("sha256").update(expected).digest(), createHash57("sha256").update(state).digest());
+  return timingSafeEqual6(createHash58("sha256").update(expected).digest(), createHash58("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -111454,6 +112047,10 @@ function dashboardGoogleOAuthSource(source) {
 }
 function dashboardOAuthClientSecretRequired(source) {
   return source === "x";
+}
+function dashboardPanelOpener(request) {
+  const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  return csrf ? `session:${createHash58("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -112764,7 +113361,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash58 } from "node:crypto";
+import { createHash as createHash59 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -113592,7 +114189,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash58("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash59("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -114250,7 +114847,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash58("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash59("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -115213,7 +115810,7 @@ var init_answer_activity = __esm(() => {
 });
 
 // src/workers/classification/privacy-profile.ts
-import { createHash as createHash59 } from "node:crypto";
+import { createHash as createHash60 } from "node:crypto";
 import { mkdirSync as mkdirSync43 } from "node:fs";
 import { homedir as homedir57 } from "node:os";
 import { dirname as dirname60, join as join84 } from "node:path";
@@ -115356,7 +115953,7 @@ function privacyRuleToTierRule(rule) {
 }
 function privacyRuleId(rule) {
   const matched = rule.kind === "sender" ? rule.value ?? "" : rule.key ?? "";
-  const digest2 = createHash59("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
+  const digest2 = createHash60("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest2}`;
 }
 function writePrivacyProfile(update, options = {}) {
@@ -116310,6 +116907,176 @@ var init_remote_access_control = __esm(() => {
   init_source_watch_runtime();
 });
 
+// src/workers/dropbox-files/open-target.ts
+var exports_open_target = {};
+__export(exports_open_target, {
+  localOpenArguments: () => localOpenArguments,
+  localDropboxRoots: () => localDropboxRoots,
+  dropboxPreviewUrl: () => dropboxPreviewUrl,
+  createDropboxOpenTargets: () => createDropboxOpenTargets,
+  OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
+});
+import { existsSync as existsSync52, lstatSync as lstatSync23, readFileSync as readFileSync52, readdirSync as readdirSync10, realpathSync as realpathSync5, statSync as statSync26 } from "node:fs";
+import { homedir as homedir58 } from "node:os";
+import { extname as extname2, join as join85, sep as sep8 } from "node:path";
+function dropboxPreviewUrl(displayPath) {
+  const segments = dropboxSegments(displayPath);
+  if (!segments || segments.length === 0)
+    return;
+  const name = segments[segments.length - 1];
+  const folder = segments.slice(0, -1).map((segment) => `/${encodeURIComponent(segment)}`).join("");
+  return `https://www.dropbox.com/home${folder}?preview=${encodeURIComponent(name)}`;
+}
+function localDropboxRoots(options = {}) {
+  const env = options.env ?? process.env;
+  const home2 = options.home ?? homedir58();
+  const candidates = [];
+  for (const name of ["OLYMPUS_SOURCE_INDEX_DROPBOX_LOCATOR_LOCAL_ROOT", "DROPBOX_LOCAL_ROOT"]) {
+    const value = env[name]?.trim();
+    if (value)
+      candidates.push(value);
+  }
+  try {
+    for (const root of parseDropboxLocalFileRootsFromEnv(env)) {
+      if (!root.dropboxPathPrefix)
+        candidates.push(root.rootPath);
+    }
+  } catch {}
+  try {
+    const info = JSON.parse(readFileSync52(join85(home2, ".dropbox", "info.json"), "utf8"));
+    if (info && typeof info === "object") {
+      for (const account of Object.values(info)) {
+        const path = account && typeof account === "object" ? account.path : undefined;
+        if (typeof path === "string" && path.trim())
+          candidates.push(path.trim());
+      }
+    }
+  } catch {}
+  try {
+    const cloud = join85(home2, "Library", "CloudStorage");
+    for (const entry of readdirSync10(cloud).sort()) {
+      if (/^Dropbox/.test(entry))
+        candidates.push(join85(cloud, entry));
+    }
+  } catch {}
+  candidates.push(join85(home2, "Dropbox"));
+  const roots = [];
+  for (const candidate of candidates) {
+    try {
+      const real = realpathSync5.native(candidate);
+      if (statSync26(real).isDirectory() && !roots.includes(real))
+        roots.push(real);
+    } catch {}
+  }
+  return roots;
+}
+function createDropboxOpenTargets(options = {}) {
+  const now = options.now ?? Date.now;
+  const ttl = options.rootsTtlMs ?? 5 * 60000;
+  let roots;
+  let foundAt = 0;
+  return (displayPath) => {
+    const url = dropboxPreviewUrl(displayPath);
+    if (!url)
+      return;
+    if (!roots || now() - foundAt > ttl) {
+      roots = localDropboxRoots(options);
+      foundAt = now();
+    }
+    const segments = dropboxSegments(displayPath);
+    for (const root of roots) {
+      const localPath = localFileUnder(root, segments);
+      if (localPath)
+        return { url, localPath };
+    }
+    return { url };
+  };
+}
+function localOpenArguments(path, roots) {
+  if (!path.startsWith("/") || path.includes("\x00"))
+    return;
+  try {
+    const link = lstatSync23(path);
+    if (link.isSymbolicLink() || !link.isFile())
+      return;
+    if (realpathSync5.native(path) !== path)
+      return;
+  } catch {
+    return;
+  }
+  if (!roots.some((root) => path.startsWith(root.endsWith(sep8) ? root : `${root}${sep8}`)))
+    return;
+  const extension = extname2(path).slice(1).toLowerCase();
+  return OPENABLE_EXTENSIONS.has(extension) ? [path] : ["-R", path];
+}
+function localFileUnder(root, segments) {
+  const path = join85(root, ...segments);
+  try {
+    if (!existsSync52(path))
+      return;
+    const real = realpathSync5.native(path);
+    if (!real.startsWith(root.endsWith(sep8) ? root : `${root}${sep8}`))
+      return;
+    return statSync26(real).isFile() ? real : undefined;
+  } catch {
+    return;
+  }
+}
+function dropboxSegments(displayPath) {
+  const trimmed2 = displayPath.trim();
+  if (!trimmed2.startsWith("/") || trimmed2.includes("\x00") || trimmed2.includes("\\"))
+    return;
+  const segments = trimmed2.split("/").filter((segment) => segment.length > 0);
+  if (segments.some((segment) => segment === "." || segment === ".."))
+    return;
+  return segments;
+}
+var OPENABLE_EXTENSIONS;
+var init_open_target = __esm(() => {
+  OPENABLE_EXTENSIONS = new Set([
+    "pdf",
+    "txt",
+    "md",
+    "markdown",
+    "rtf",
+    "csv",
+    "tsv",
+    "epub",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "odt",
+    "ods",
+    "odp",
+    "pages",
+    "numbers",
+    "key",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "heic",
+    "heif",
+    "tif",
+    "tiff",
+    "bmp",
+    "webp",
+    "mp3",
+    "m4a",
+    "aac",
+    "wav",
+    "aiff",
+    "aif",
+    "flac",
+    "mp4",
+    "m4v",
+    "mov"
+  ]);
+});
+
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardStreamableHttp.js
 class WebStandardStreamableHTTPServerTransport {
   constructor(options = {}) {
@@ -117048,7 +117815,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     ...connecting ? { connecting: { expiresAt: connecting.expiresAt } } : {},
     ...progress ? { progress } : {},
     ...menu.length > 0 ? { menu } : {},
-    ...unreadable > 0 ? { unreadable: unreadableView(card, unreadable) } : {},
+    ...unreadable > 0 ? { unreadable: unreadableView(definition, card, unreadable) } : {},
     ...manual ? {
       lastManualSync: {
         at: manual.at,
@@ -117058,11 +117825,18 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     } : {}
   };
 }
-function unreadableView(card, count) {
+function unreadableView(definition, card, count) {
+  const names = unreadableNames(card.unreadable_files?.names).slice(0, Math.min(count, UNREADABLE_NAMES_IN_RESULT));
+  const rest = count - names.length;
+  const target = openUnreadableSourceFor(definition.source_id);
   return {
     count,
     reasons: [{ code: "damaged_or_unsupported", count }],
-    ...card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? { many: true } : {}
+    ...card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL ? { many: true } : {},
+    ...names.length > 0 ? { names } : {},
+    ...rest > 0 ? {
+      more: helpLinkFix(dashboardUnreadableMoreLabel(rest), openPageUrl(target ? { kind: "unreadable", source: target } : { kind: "dashboard" }))
+    } : {}
   };
 }
 function attentionItem(definition, card, actionKind, degraded, connecting, progress, sync) {
@@ -117443,6 +118217,7 @@ function scrubCard(definition, card) {
       }
     } : {},
     ...isoOrUndefined(card.last_sync_at) ? { last_sync_at: isoOrUndefined(card.last_sync_at) } : {},
+    ...card.unreadable_files ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } } : {},
     ...card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at) && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome) ? {
       last_manual_sync: {
         at: isoOrUndefined(card.last_manual_sync.at),
@@ -120283,10 +121058,13 @@ function copyUnreadable(value) {
   if (count2 <= 0)
     return;
   const reasons = (Array.isArray(raw.reasons) ? raw.reasons : []).filter((reason) => reason && DASHBOARD_UNREADABLE_REASON_CODES.includes(reason.code) && whole(reason.count) > 0).map((reason) => ({ code: reason.code, count: whole(reason.count) }));
+  const names = unreadableNames(raw.names).slice(0, Math.min(count2, UNREADABLE_NAMES_IN_RESULT));
   return {
     count: count2,
     reasons: reasons.length > 0 ? reasons : [{ code: "damaged_or_unsupported", count: count2 }],
-    ...raw.many === true ? { many: true } : {}
+    ...raw.many === true ? { many: true } : {},
+    ...names.length > 0 ? { names } : {},
+    ...raw.more && names.length < count2 ? { more: copyFix(raw.more) } : {}
   };
 }
 function copySourceProgress(progress) {
@@ -122434,7 +123212,7 @@ __export(exports_remote_mcp, {
   authenticateRemoteRequest: () => authenticateRemoteRequest,
   REMOTE_MCP_PATH: () => REMOTE_MCP_PATH
 });
-import { existsSync as existsSync52 } from "node:fs";
+import { existsSync as existsSync53 } from "node:fs";
 function isRemoteMcpRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_MCP_PATH;
@@ -122516,7 +123294,7 @@ function lazyRemoteConnectionStore(resolvePath4, open7) {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync52(dbPath))
+    if (!options.create && !existsSync53(dbPath))
       return;
     store = open7(dbPath);
     return store;
@@ -122744,7 +123522,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash60, randomBytes as randomBytes17, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash61, randomBytes as randomBytes18, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -122862,8 +123640,8 @@ function createRemoteOAuthHandler(options) {
     }
     sweep();
     admitPending();
-    const requestId = randomBytes17(16).toString("hex");
-    const csrf = randomBytes17(32).toString("base64url");
+    const requestId = randomBytes18(16).toString("hex");
+    const csrf = randomBytes18(32).toString("base64url");
     const entry = {
       client,
       redirectUri,
@@ -122893,7 +123671,7 @@ function createRemoteOAuthHandler(options) {
   const issueCode = (requestId, entry, u) => {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = u.installId ? mintCredential("code", u.installId) : randomBytes17(32).toString("base64url");
+    const code = u.installId ? mintCredential("code", u.installId) : randomBytes18(32).toString("base64url");
     codes.set(sha2566(code), {
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -123062,7 +123840,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash60("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash61("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -123317,7 +124095,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual8(a, b);
 }
 function sha2566(value) {
-  return createHash60("sha256").update(value).digest("hex");
+  return createHash61("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -123672,8 +124450,8 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_CLAIM_HOLD_MS: () => PRIVATE_ANSWER_CLAIM_HOLD_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
-import { randomBytes as randomBytes18 } from "node:crypto";
-import { lstatSync as lstatSync23 } from "node:fs";
+import { randomBytes as randomBytes19 } from "node:crypto";
+import { lstatSync as lstatSync24 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
   if (timing.outcome === "failed")
@@ -123826,7 +124604,7 @@ class PrivateAnswerJobs {
         break;
       this.drop(oldest);
     }
-    const id = `oly2p.${installId}.${randomBytes18(32).toString("base64url")}`;
+    const id = `oly2p.${installId}.${randomBytes19(32).toString("base64url")}`;
     const at = this.now();
     const job = {
       id,
@@ -123909,7 +124687,7 @@ class PrivateAnswerJobs {
       return gone();
     let isFile = false;
     try {
-      isFile = lstatSync23(path).isFile();
+      isFile = lstatSync24(path).isFile();
     } catch {
       isFile = false;
     }
@@ -124412,7 +125190,7 @@ class PrivateAnswerJobs {
       const path = localPaths[index];
       if (!path)
         return citation;
-      const token = randomBytes18(32).toString("base64url");
+      const token = randomBytes19(32).toString("base64url");
       opens.set(token, path);
       return { ...citation, open: { kind: "mac", token } };
     });
@@ -124634,7 +125412,7 @@ __export(exports_private_question_jobs, {
   resultOf: () => resultOf,
   PrivateQuestionJobs: () => PrivateQuestionJobs
 });
-import { randomBytes as randomBytes19 } from "node:crypto";
+import { randomBytes as randomBytes20 } from "node:crypto";
 function gone2() {
   return { status: 410, body: { status: "gone" } };
 }
@@ -124668,7 +125446,7 @@ class PrivateQuestionJobs {
     const engine = await generateEngineKeyPair();
     const at = this.now();
     const job = {
-      id: `oly2p.${installId}.${randomBytes19(32).toString("base64url")}`,
+      id: `oly2p.${installId}.${randomBytes20(32).toString("base64url")}`,
       createdAt: at,
       expiresAt: at + this.ttlMs,
       enginePrivateKey: engine.privateKey,
@@ -125357,176 +126135,6 @@ var init_private_answer_model = __esm(() => {
   };
 });
 
-// src/workers/dropbox-files/open-target.ts
-var exports_open_target = {};
-__export(exports_open_target, {
-  localOpenArguments: () => localOpenArguments,
-  localDropboxRoots: () => localDropboxRoots,
-  dropboxPreviewUrl: () => dropboxPreviewUrl,
-  createDropboxOpenTargets: () => createDropboxOpenTargets,
-  OPENABLE_EXTENSIONS: () => OPENABLE_EXTENSIONS
-});
-import { existsSync as existsSync53, lstatSync as lstatSync24, readFileSync as readFileSync52, readdirSync as readdirSync10, realpathSync as realpathSync5, statSync as statSync26 } from "node:fs";
-import { homedir as homedir58 } from "node:os";
-import { extname as extname2, join as join85, sep as sep8 } from "node:path";
-function dropboxPreviewUrl(displayPath) {
-  const segments = dropboxSegments(displayPath);
-  if (!segments || segments.length === 0)
-    return;
-  const name = segments[segments.length - 1];
-  const folder = segments.slice(0, -1).map((segment) => `/${encodeURIComponent(segment)}`).join("");
-  return `https://www.dropbox.com/home${folder}?preview=${encodeURIComponent(name)}`;
-}
-function localDropboxRoots(options = {}) {
-  const env = options.env ?? process.env;
-  const home2 = options.home ?? homedir58();
-  const candidates = [];
-  for (const name of ["OLYMPUS_SOURCE_INDEX_DROPBOX_LOCATOR_LOCAL_ROOT", "DROPBOX_LOCAL_ROOT"]) {
-    const value = env[name]?.trim();
-    if (value)
-      candidates.push(value);
-  }
-  try {
-    for (const root of parseDropboxLocalFileRootsFromEnv(env)) {
-      if (!root.dropboxPathPrefix)
-        candidates.push(root.rootPath);
-    }
-  } catch {}
-  try {
-    const info = JSON.parse(readFileSync52(join85(home2, ".dropbox", "info.json"), "utf8"));
-    if (info && typeof info === "object") {
-      for (const account of Object.values(info)) {
-        const path = account && typeof account === "object" ? account.path : undefined;
-        if (typeof path === "string" && path.trim())
-          candidates.push(path.trim());
-      }
-    }
-  } catch {}
-  try {
-    const cloud = join85(home2, "Library", "CloudStorage");
-    for (const entry of readdirSync10(cloud).sort()) {
-      if (/^Dropbox/.test(entry))
-        candidates.push(join85(cloud, entry));
-    }
-  } catch {}
-  candidates.push(join85(home2, "Dropbox"));
-  const roots = [];
-  for (const candidate of candidates) {
-    try {
-      const real = realpathSync5.native(candidate);
-      if (statSync26(real).isDirectory() && !roots.includes(real))
-        roots.push(real);
-    } catch {}
-  }
-  return roots;
-}
-function createDropboxOpenTargets(options = {}) {
-  const now = options.now ?? Date.now;
-  const ttl = options.rootsTtlMs ?? 5 * 60000;
-  let roots;
-  let foundAt = 0;
-  return (displayPath) => {
-    const url = dropboxPreviewUrl(displayPath);
-    if (!url)
-      return;
-    if (!roots || now() - foundAt > ttl) {
-      roots = localDropboxRoots(options);
-      foundAt = now();
-    }
-    const segments = dropboxSegments(displayPath);
-    for (const root of roots) {
-      const localPath = localFileUnder(root, segments);
-      if (localPath)
-        return { url, localPath };
-    }
-    return { url };
-  };
-}
-function localOpenArguments(path, roots) {
-  if (!path.startsWith("/") || path.includes("\x00"))
-    return;
-  try {
-    const link = lstatSync24(path);
-    if (link.isSymbolicLink() || !link.isFile())
-      return;
-    if (realpathSync5.native(path) !== path)
-      return;
-  } catch {
-    return;
-  }
-  if (!roots.some((root) => path.startsWith(root.endsWith(sep8) ? root : `${root}${sep8}`)))
-    return;
-  const extension = extname2(path).slice(1).toLowerCase();
-  return OPENABLE_EXTENSIONS.has(extension) ? [path] : ["-R", path];
-}
-function localFileUnder(root, segments) {
-  const path = join85(root, ...segments);
-  try {
-    if (!existsSync53(path))
-      return;
-    const real = realpathSync5.native(path);
-    if (!real.startsWith(root.endsWith(sep8) ? root : `${root}${sep8}`))
-      return;
-    return statSync26(real).isFile() ? real : undefined;
-  } catch {
-    return;
-  }
-}
-function dropboxSegments(displayPath) {
-  const trimmed2 = displayPath.trim();
-  if (!trimmed2.startsWith("/") || trimmed2.includes("\x00") || trimmed2.includes("\\"))
-    return;
-  const segments = trimmed2.split("/").filter((segment) => segment.length > 0);
-  if (segments.some((segment) => segment === "." || segment === ".."))
-    return;
-  return segments;
-}
-var OPENABLE_EXTENSIONS;
-var init_open_target = __esm(() => {
-  OPENABLE_EXTENSIONS = new Set([
-    "pdf",
-    "txt",
-    "md",
-    "markdown",
-    "rtf",
-    "csv",
-    "tsv",
-    "epub",
-    "doc",
-    "docx",
-    "xls",
-    "xlsx",
-    "ppt",
-    "pptx",
-    "odt",
-    "ods",
-    "odp",
-    "pages",
-    "numbers",
-    "key",
-    "png",
-    "jpg",
-    "jpeg",
-    "gif",
-    "heic",
-    "heif",
-    "tif",
-    "tiff",
-    "bmp",
-    "webp",
-    "mp3",
-    "m4a",
-    "aac",
-    "wav",
-    "aiff",
-    "aif",
-    "flac",
-    "mp4",
-    "m4v",
-    "mov"
-  ]);
-});
-
 // src/workers/remote-openapi.ts
 var exports_remote_openapi = {};
 __export(exports_remote_openapi, {
@@ -125539,7 +126147,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash61 } from "node:crypto";
+import { createHash as createHash62 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -125556,7 +126164,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text4 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text4, etag: `"${createHash61("sha256").update(text4).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text4, etag: `"${createHash62("sha256").update(text4).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -125879,7 +126487,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash62 } from "node:crypto";
+import { createHash as createHash63 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -125903,7 +126511,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest2 = createHash62("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest2 = createHash63("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest2.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -126851,6 +127459,7 @@ var init_dashboard_consult = __esm(() => {
 var exports_dashboard_panel_tools = {};
 __export(exports_dashboard_panel_tools, {
   createDashboardPanelTools: () => createDashboardPanelTools,
+  computerUnreadableEntries: () => computerUnreadableEntries,
   computerUnpairEntries: () => computerUnpairEntries
 });
 function refused(text4, code) {
@@ -126921,6 +127530,83 @@ async function unpairSource(options, args) {
   const text4 = typeof parsed.status_message === "string" ? parsed.status_message : "Unpaired.";
   return { content: [{ type: "text", text: text4 }], structuredContent: { status: "saved", source_id: args.source_id } };
 }
+async function openUnreadableFile(options, args, context) {
+  const keys = Object.keys(args);
+  if (typeof args.token !== "string" || keys.some((key) => key !== "token"))
+    return refused("token must be a file token from the dashboard.", "invalid_params");
+  const files = options.unreadableFiles?.();
+  if (!files || !context.opener)
+    return refused("Olympus cannot open this file here.", "unavailable");
+  const opened = await files.open(args.token, context.opener);
+  switch (opened.status) {
+    case "opened":
+      return { content: [{ type: "text", text: "Opened the file on this computer." }], structuredContent: { status: "opened" } };
+    case "open_link":
+      return { content: [{ type: "text", text: "Opening the file's page." }], structuredContent: { status: "open_link", url: opened.url } };
+    case "invalid":
+      return refused("token must be a file token from the dashboard.", "invalid_params");
+    case "rate_limited":
+      return refused("Too many files opened at once. Try again in a moment.", "rate_limited");
+    case "failed":
+      return refused("The file could not be opened.", "internal");
+    default:
+      return refused("This file is no longer in the list. Refresh the dashboard.", "gone");
+  }
+}
+async function unreadableFilesPage(options, args, context) {
+  const keys = Object.keys(args);
+  const after = args.after;
+  if (typeof args.source_id !== "string" || !isUnreadablePageCursor(after) || keys.some((key) => key !== "source_id" && key !== "after")) {
+    return refused("source_id and after must come from the dashboard.", "invalid_params");
+  }
+  const files = options.unreadableFiles?.();
+  if (!files || !context.opener)
+    return refused("Olympus cannot list these files here.", "unavailable");
+  const sourceId = args.source_id;
+  const view = await options.surface().dashboardView(context.signal).catch(() => {
+    return;
+  });
+  const corpusIds = view?.sources.find((card) => card.source_id === sourceId)?.unreadable_files?.corpus_ids;
+  if (!corpusIds?.length)
+    return refused("This list changed. Refresh the dashboard.", "gone");
+  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { after, opener: context.opener });
+  const page2 = entriesOf(listed.files);
+  return {
+    content: [{ type: "text", text: `${page2.length} more files.` }],
+    structuredContent: {
+      status: "listed",
+      source_id: args.source_id,
+      files: page2,
+      more: listed.more,
+      ...listed.more > 0 && listed.after ? { after: listed.after } : {}
+    }
+  };
+}
+function entriesOf(files) {
+  return files.flatMap((file) => {
+    const [name] = unreadableNames([file.name]);
+    return name ? [{ name, ...file.token ? { token: file.token } : {} }] : [];
+  });
+}
+function computerUnreadableEntries(view, files, opener) {
+  if (!view || !files)
+    return [];
+  return view.sources.flatMap((card) => {
+    const count2 = Math.max(0, Math.trunc(card.coverage.unreadable_items ?? 0));
+    const corpusIds = card.unreadable_files?.corpus_ids ?? [];
+    if (count2 === 0 || corpusIds.length === 0)
+      return [];
+    let listed;
+    try {
+      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, opener ? { opener } : {});
+    } catch {
+      return [];
+    }
+    const entries = entriesOf(listed.files);
+    const more = Math.max(0, listed.more, count2 - entries.length);
+    return [{ sourceId: card.source_id, files: entries, more, ...more > 0 && listed.after ? { after: listed.after } : {} }];
+  });
+}
 function computerUnpairEntries(view) {
   if (!view)
     return [];
@@ -126942,6 +127628,10 @@ function createDashboardPanelTools(options) {
         return await indexFaster(options, args);
       if (name === UNPAIR_SOURCE_TOOL_NAME)
         return await unpairSource(options, args);
+      if (name === OPEN_UNREADABLE_FILE_TOOL_NAME)
+        return await openUnreadableFile(options, args, context);
+      if (name === UNREADABLE_FILES_PAGE_TOOL_NAME)
+        return await unreadableFilesPage(options, args, context);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       let view;
@@ -126957,11 +127647,13 @@ function createDashboardPanelTools(options) {
         return;
       });
       const unpair = computerUnpairEntries(view);
-      if (on === undefined && unpair.length === 0)
+      const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context.opener);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0)
         return result;
       const meta2 = {
         ...on !== undefined ? { indexFaster: { on } } : {},
-        ...unpair.length > 0 ? { unpair } : {}
+        ...unpair.length > 0 ? { unpair } : {},
+        ...unreadable.length > 0 ? { unreadable } : {}
       };
       const existing = result._meta && typeof result._meta === "object" ? result._meta : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta2 } };
@@ -126971,6 +127663,7 @@ function createDashboardPanelTools(options) {
 var UNPAIR_SOURCE_IDS;
 var init_dashboard_panel_tools = __esm(() => {
   init_dashboard_contract();
+  init_unreadable_files();
   init_mcp_surface();
   init_setup_tools();
   init_http();
@@ -128944,6 +129637,64 @@ async function main() {
       executor: sourceWatchExecutor
     })
   } : undefined;
+  const unreadableVerdict = createUnreadableVerdict({
+    locate: (ref) => fileExtractionRuntime?.locateItem(ref),
+    lanes: () => tierLanes
+  });
+  const extractionReadinessLedger = fileExtractionRuntime ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+    terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
+    classifyUnreadable: unreadableVerdict,
+    currentItem(ref) {
+      if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
+        return false;
+      }
+      const readScope = connectorStoreReadScope(dropboxConnectorStore);
+      return readScope.allowed && readScope.contentAllowed && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
+    },
+    lanesForCorpus(corpusId) {
+      if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
+        return;
+      const ref = fileSourceScopeAuthority?.policyRef("dropbox.files");
+      if (!ref || !fileSourceScopeAuthority)
+        return [];
+      const approval = fileSourceScopeAuthority.assertCurrent(ref);
+      const scopes = dropboxPolicyFullExtractionScopeKeys(fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval));
+      const handle = selectedSourceCredentialHandle({
+        env: process.env,
+        pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
+        provider: "dropbox",
+        capability: "dropbox.files.sync",
+        handles: readActiveConnectedHandles(process.env)
+      });
+      const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || "personal";
+      return scopes.map((approvedScopeKey) => ({
+        corpusId,
+        provider: "dropbox",
+        accountScope,
+        approvedScopeKey
+      }));
+    }
+  }) : undefined;
+  const { createDropboxOpenTargets: unreadableDropboxTargets, localDropboxRoots: unreadableDropboxRoots, localOpenArguments: unreadableOpenArguments } = await Promise.resolve().then(() => (init_open_target(), exports_open_target));
+  const unreadableOpenTargets = {
+    dropbox: unreadableDropboxTargets()
+  };
+  const unreadableFiles = extractionReadinessLedger && fileExtractionRuntime ? createUnreadableFiles({
+    items: (corpusId) => extractionReadinessLedger.unreadableItems(corpusId),
+    verdict: unreadableVerdict,
+    locate: (ref) => fileExtractionRuntime.locateItem(ref),
+    openTarget: (provider, locator) => Object.hasOwn(unreadableOpenTargets, provider) ? unreadableOpenTargets[provider](locator) : provider === "google_drive" && googleFilePage(locator) ? { url: locator } : undefined,
+    ...process.platform === "darwin" ? {
+      openFile: (path) => new Promise((resolve11, reject) => {
+        const args = unreadableOpenArguments(path, unreadableDropboxRoots());
+        if (!args) {
+          reject(new Error("open refused"));
+          return;
+        }
+        execFile2("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve11());
+      })
+    } : {}
+  }) : undefined;
   const sourceIndexStatus = sourceIndexReadEnabled ? createSourceIndexStatusHandler({
     corpusDefinitions: () => sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
     connectorStores,
@@ -128960,41 +129711,7 @@ async function main() {
       } : undefined;
     },
     tierMigration: () => tierMigrationStatusSummary(resolveTierMigrationPaths(process.env, resolveEmbeddingLedgerPath(process.env)).statePath),
-    ...fileExtractionRuntime ? {
-      readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
-        terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
-        currentItem(ref) {
-          if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
-            return false;
-          }
-          const readScope = connectorStoreReadScope(dropboxConnectorStore);
-          return readScope.allowed && readScope.contentAllowed && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
-        },
-        lanesForCorpus(corpusId) {
-          if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
-            return;
-          const ref = fileSourceScopeAuthority?.policyRef("dropbox.files");
-          if (!ref || !fileSourceScopeAuthority)
-            return [];
-          const approval = fileSourceScopeAuthority.assertCurrent(ref);
-          const scopes = dropboxPolicyFullExtractionScopeKeys(fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval));
-          const handle = selectedSourceCredentialHandle({
-            env: process.env,
-            pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
-            provider: "dropbox",
-            capability: "dropbox.files.sync",
-            handles: readActiveConnectedHandles(process.env)
-          });
-          const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || "personal";
-          return scopes.map((approvedScopeKey) => ({
-            corpusId,
-            provider: "dropbox",
-            accountScope,
-            approvedScopeKey
-          }));
-        }
-      })
-    } : {}
+    ...extractionReadinessLedger ? { readinessLedger: extractionReadinessLedger } : {}
   }) : undefined;
   const sourceDashboardHistory = sourceIndexReadEnabled ? new SqliteSourceDashboardHistory : undefined;
   const sourceIngestionLedger = sourceIndexReadEnabled ? new SqliteSourceIngestionLedgerStore : undefined;
@@ -129234,7 +129951,7 @@ async function main() {
   const mailScopeSummaryCache = new Map;
   const MAIL_SCOPE_SUMMARY_CACHE_MAX = 16;
   let gmailPickerRequestBudget;
-  const MAIL_SCOPE_SUMMARY_TTL_MS = 10 * 60000;
+  const MAIL_SCOPE_SUMMARY_TTL_MS = 600000;
   const gmailScopeHandle = () => selectedSourceCredentialHandle({
     env: process.env,
     pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
@@ -129491,6 +130208,10 @@ async function main() {
     consultAsk: ({ caller, ...input }, signal) => askAnonymouslyNow ? askAnonymouslyNow({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }) : Promise.resolve({ ok: false, code: "ask_unavailable", message: "Asking anonymously is not available in this worker." }),
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
+    ...unreadableFiles ? {
+      unreadableFileNames: (corpusIds, limit) => unreadableFiles.names(corpusIds, limit),
+      unreadableRecheck: (corpusId) => unreadableFiles.recheck(corpusId)
+    } : {},
     currentReadwiseSync,
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,
@@ -130005,7 +130726,8 @@ async function main() {
     indexFasterState: async () => {
       const runtime = await readEmbeddingRuntime({ env: process.env });
       return runtime.state === "unknown" ? undefined : runtime.overrideOn;
-    }
+    },
+    unreadableFiles: () => unreadableFiles
   });
   const server = Bun.serve({
     hostname,
@@ -130594,6 +131316,14 @@ function mergeConnectorStores(stores) {
   }
   return [...byCorpusId.values()];
 }
+function googleFilePage(locator) {
+  try {
+    const url = new URL(locator);
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && (url.hostname === "drive.google.com" || url.hostname === "docs.google.com");
+  } catch {
+    return false;
+  }
+}
 var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
 var init_server5 = __esm(async () => {
   init_package_root();
@@ -130607,6 +131337,7 @@ var init_server5 = __esm(async () => {
   init_dashboard_session_secret();
   init_file_extraction_runtime();
   init_readiness_ledger();
+  init_unreadable_files();
   init_venice_client();
   init_openai_compatible_client();
   init_apple_vision_ocr();
@@ -131030,7 +131761,7 @@ init_messaging_capture();
 init_config();
 init_dashboard_opening();
 init_open_targets();
-import { randomBytes as randomBytes20 } from "node:crypto";
+import { randomBytes as randomBytes21 } from "node:crypto";
 import { readFileSync as readFileSync53, openSync as openSync14, closeSync as closeSync14, writeSync as writeSync4 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -136086,7 +136817,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes20(32).toString("base64url");
+  return randomBytes21(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};
@@ -137013,5 +137744,6 @@ export {
   lifecycleRecoverySignalsFromWorkerHttpState,
   isV04PublicCliInvocation,
   formatCliFatalError,
-  doctorFailureSummary
+  doctorFailureSummary,
+  dashboardTargetArg
 };

@@ -295,6 +295,15 @@ export function withWorkerBearerAuth(
             now(),
           );
         }
+        // A panel tool call carries which session made it, so a file token
+        // the dashboard read minted for this session opens for it alone.
+        if (isDashboardToolsCallRoute(request)) {
+          return withRenewedDashboardControlCookie(
+            await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)),
+            authorization,
+            now(),
+          );
+        }
         return withRenewedDashboardControlCookie(await fetchHandler(request), authorization, now());
       }
       if (authorization.status === 'origin_mismatch' || authorization.status === 'csrf_mismatch') {
@@ -577,6 +586,10 @@ function dashboardConsultMacOnlyResponse(): Response {
     status: 403,
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   });
+}
+
+function isDashboardToolsCallRoute(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === '/dashboard/tools/call';
 }
 
 function isDashboardControlRoute(request: Request): boolean {

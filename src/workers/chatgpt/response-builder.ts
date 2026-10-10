@@ -70,6 +70,8 @@ import {
   SCOPE_LIST_TOOL_NAME,
   SCOPE_UI_META_KEY,
   SYNC_SOURCE_TOOL_NAME,
+  UNREADABLE_NAMES_IN_RESULT,
+  unreadableNames,
 } from './dashboard-contract.ts';
 import {
   DASHBOARD_CHATGPT_VOCABULARY,
@@ -275,8 +277,10 @@ function copySource(source: DashboardSource): DashboardSource {
 const TRANSCRIPTION_STATES = new Set<TranscriptionModelView['state']>(['not_needed', 'not_downloaded', 'interrupted', 'downloading', 'verifying', 'ready', 'failed', 'load_failed']);
 
 /**
- * Counts and closed reason codes only: anything else on the input (a name, a
- * path, an unknown code) is dropped here, so none can reach the panel. A bare
+ * Counts, closed reason codes, at most UNREADABLE_NAMES_IN_RESULT file names
+ * (each display text of at most UNREADABLE_NAME_MAX_CHARS; owner ruling
+ * 2026-10-10) and the "and N more" fix: anything else on the input (a path,
+ * an unknown code) is dropped here, so none can reach the panel. A bare
  * number from an older producer reads as one reason.
  */
 function copyUnreadable(value: unknown): DashboardUnreadable | undefined {
@@ -287,10 +291,13 @@ function copyUnreadable(value: unknown): DashboardUnreadable | undefined {
   const reasons = (Array.isArray(raw.reasons) ? raw.reasons : [])
     .filter((reason) => reason && (DASHBOARD_UNREADABLE_REASON_CODES as readonly string[]).includes(reason.code) && whole(reason.count) > 0)
     .map((reason) => ({ code: reason.code, count: whole(reason.count) }));
+  const names = unreadableNames(raw.names).slice(0, Math.min(count, UNREADABLE_NAMES_IN_RESULT));
   return {
     count,
     reasons: reasons.length > 0 ? reasons : [{ code: 'damaged_or_unsupported', count }],
     ...(raw.many === true ? { many: true as const } : {}),
+    ...(names.length > 0 ? { names } : {}),
+    ...(raw.more && names.length < count ? { more: copyFix(raw.more) } : {}),
   };
 }
 

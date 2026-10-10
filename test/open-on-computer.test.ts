@@ -11,7 +11,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Window } from 'happy-dom';
-import { runOpenCommand } from '../src/cli.ts';
+import { dashboardTargetArg, runOpenCommand } from '../src/cli.ts';
 import { DASHBOARD_LAUNCH_PAGE_HTML } from '../src/core/dashboard-launch.ts';
 import { runEngineCommand } from '../src/core/engine-cli.ts';
 import { formatSpaceToFree, modelInstallSpaceToFree } from '../src/core/model-install-failure.ts';
@@ -31,7 +31,10 @@ import {
 } from '../src/core/open-handler.ts';
 import {
   OPEN_CONNECT_SOURCES,
+  OPEN_UNREADABLE_SOURCES,
   allOpenTargets,
+  openUnreadableSourceFor,
+  panelOpenTargetSources,
   olympusOpenUrl,
   openPageUrl,
   openTargetPath,
@@ -54,6 +57,7 @@ describe('olympus:// targets', () => {
       'dashboard',
       'connect/x', 'connect/readwise', 'connect/telegram', 'connect/whatsapp',
       'fix/connect', 'fix/reconnect', 'fix/answers', 'fix/search', 'fix/models',
+      'unreadable/dropbox', 'unreadable/drive', 'unreadable/whatsapp',
     ]);
     for (const target of allOpenTargets()) {
       expect(parseOlympusOpenUrl(olympusOpenUrl(target))).toEqual(target);
@@ -89,6 +93,31 @@ describe('olympus:// targets', () => {
       `olympus://open/${'a'.repeat(200)}`, 'olympus://open/dashbоard',
     ]) {
       expect(parseOlympusOpenUrl(link)).toBeUndefined();
+    }
+  });
+
+  test('See why on a source round-trips: olympus:// link, token, source id', () => {
+    const target = { kind: 'unreadable', source: 'dropbox' } as const;
+    expect(olympusOpenUrl(target)).toBe('olympus://open/unreadable/dropbox');
+    expect(parseOlympusOpenUrl('olympus://open/unreadable/dropbox')).toEqual(target);
+    expect(openTargetToken(target)).toBe('unreadable.dropbox');
+    expect(openPageUrl(target)).toBe('https://olympusplugin.ai/open/unreadable/dropbox/');
+    expect(panelOpenTargetSources()).toEqual({
+      'unreadable.dropbox': 'dropbox.files',
+      'unreadable.drive': 'google_drive.docs',
+      'unreadable.whatsapp': 'whatsapp.personal.messages',
+    });
+    for (const [source, { sourceId }] of Object.entries(OPEN_UNREADABLE_SOURCES)) expect(openUnreadableSourceFor(sourceId)).toBe(source as never);
+    expect(openUnreadableSourceFor('gmail.email')).toBeUndefined();
+    expect(parseOlympusOpenUrl('olympus://open/unreadable/gmail')).toEqual({ kind: 'dashboard', fallback: true });
+  });
+
+  test('olympus dashboard --target takes a place on the same closed list, and nothing else', () => {
+    expect(dashboardTargetArg(['dashboard'])).toBeUndefined();
+    expect(dashboardTargetArg(['dashboard', '--target', 'unreadable/dropbox'])).toEqual({ kind: 'unreadable', source: 'dropbox' });
+    expect(dashboardTargetArg(['dashboard', '--no-open', '--target', 'fix/models'])).toEqual({ kind: 'fix', section: 'models' });
+    for (const bad of [['--target'], ['--target', 'unreadable/gmail'], ['--target', '../keys'], ['--target', 'https://evil.example/']]) {
+      expect(() => dashboardTargetArg(['dashboard', ...bad])).toThrow('--target takes one of the places Olympus can open.');
     }
   });
 
@@ -150,6 +179,12 @@ describe('olympus open: no state change from a link', () => {
     expect(r.opened).toEqual([`http://127.0.0.1:8010/dashboard/launch#olympus_launch_ticket=${TICKET}&olympus_open=connect.x`]);
   });
 
+  test('a See why link opens the launch page with its token', async () => {
+    const r = recorder();
+    expect(await runOpenCommand(['olympus://open/unreadable/dropbox'], r.deps)).toEqual({ opened: true, target: 'unreadable/dropbox' });
+    expect(r.opened).toEqual([`http://127.0.0.1:8010/dashboard/launch#olympus_launch_ticket=${TICKET}&olympus_open=unreadable.dropbox`]);
+  });
+
   test('the plain dashboard and an unknown link carry no target', async () => {
     for (const link of ['olympus://open/dashboard', 'olympus://open/connect/gmail']) {
       const r = recorder();
@@ -196,6 +231,15 @@ describe('the opening page carries only an allowlisted target', () => {
     expect(landed).toEqual(['/dashboard?keys#olympus-open=connect.whatsapp']);
     expect(plain).toEqual(['/dashboard']);
     for (const navigated of hostile) expect(navigated).toEqual(['/dashboard']);
+  });
+
+  test('a See why target lands on the dashboard itself, carrying its token for the host page', async () => {
+    const ticket = 'A'.repeat(43);
+    const landed = run(`#olympus_launch_ticket=${ticket}&olympus_open=unreadable.drive`);
+    const hostile = run(`#olympus_launch_ticket=${ticket}&olympus_open=unreadable.gmail`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(landed).toEqual(['/dashboard#olympus-open=unreadable.drive']);
+    expect(hostile).toEqual(['/dashboard']);
   });
 
   test('only a Keys target (Connect, a model fix) lands on Keys; a reconnect or connect fix lands on the dashboard', async () => {
@@ -616,6 +660,7 @@ describe('olympusplugin.ai /open/ pages', () => {
       expect(html).toContain('<code>olympus dashboard</code>');
       expect(html).toContain('href="/help/on-your-computer/#');
       if (target.kind === 'connect') expect(html).toContain(`<strong>${OPEN_CONNECT_SOURCES[target.source].label}</strong>`);
+      if (target.kind === 'unreadable') expect(html).toContain(`open <strong>See why</strong> under <strong>${OPEN_UNREADABLE_SOURCES[target.source].label}</strong>`);
       // Plain: no script, nothing from another site, no Mac-only wording.
       expect(html).not.toMatch(/<script|<iframe|<img/i);
       expect(html.match(/(?:src|href)="https?:\/\/[^"]*"/g) ?? []).toEqual([]);

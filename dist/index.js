@@ -7277,7 +7277,7 @@ var init_answer_ready_coverage = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -7440,6 +7440,8 @@ var init_vocabulary = __esm(() => {
     syncChecking: "Checking…",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
     seeWhy: "See why",
+    unreadableMore: DASHBOARD_UNREADABLE_MORE,
+    unreadableOpen: "Open {name}",
     unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
     unreadableNote: DASHBOARD_UNREADABLE_NOTE,
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
@@ -12083,11 +12085,17 @@ var OPEN_CONNECT_SOURCES = {
   whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
 };
 var OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+var OPEN_UNREADABLE_SOURCES = {
+  dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+  drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+  whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+};
 function allOpenTargets() {
   return [
     { kind: "dashboard" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section }))
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
   ];
 }
 function openTargetPath(target) {
@@ -12095,6 +12103,8 @@ function openTargetPath(target) {
     return `connect/${target.source}`;
   if (target.kind === "fix")
     return `fix/${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable/${target.source}`;
   return "dashboard";
 }
 function openTargetFromPath(path) {
@@ -12107,6 +12117,8 @@ function openTargetToken(target) {
     return `connect.${target.source}`;
   if (target.kind === "fix")
     return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
   return;
 }
 function openTargetTokenPattern() {
@@ -12118,6 +12130,13 @@ function isKeysOpenTarget(target) {
 }
 function keysOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 var DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open";
@@ -12219,6 +12238,7 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var PANEL = /${panelOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -12246,8 +12266,11 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           if (response.ok) {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
+            // A panel target (See why on one source) lands on the dashboard there.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            window.location.replace(KEYS.test(open)
+              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403

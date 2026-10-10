@@ -20,16 +20,32 @@
  *   overnight guard's own files, and which paired apps Unpair can end, read
  *   off the same view the dashboard result was built from. ChatGPT never sees
  *   any of it.
+ * - the computer lists every unreadable file (`_meta['olympus/computer']`
+ *   `unreadable`, up to COMPUTER_UNREADABLE_FILES_LIMIT per source) with a
+ *   one-time token each, and opens one through `olympus_open_unreadable_file
+ *   {token}`: the synced copy here, or the file's own web page for the panel
+ *   to open. The token is the only argument; a path is never taken. Tokens
+ *   are minted only for an unlocked control session (or the worker bearer),
+ *   bound to it, open once, and last 30 minutes from issue; a locked reader
+ *   gets the names alone. Past the first page, `olympus_unreadable_files
+ *   {source_id, after}` lists the next (a keyset cursor, so a file judged
+ *   Secrets between pages moves nothing), so every file is reachable.
  */
 import {
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
+  COMPUTER_UNREADABLE_FILES_LIMIT,
   DASHBOARD_TOOL_NAME,
   INDEX_FASTER_TOOL_NAME,
+  OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
+  UNREADABLE_FILES_PAGE_TOOL_NAME,
+  unreadableNames,
   type ComputerDashboardMeta,
   type ComputerUnpairEntry,
+  type ComputerUnreadableEntry,
 } from '../chatgpt/dashboard-contract.ts';
+import { isUnreadablePageCursor, type UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import { callChatGptTool, type ChatGptSurfaceOptions } from '../chatgpt/mcp-surface.ts';
 import type { ChatGptToolResult } from '../chatgpt/response-builder.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from '../chatgpt/setup-tools.ts';
@@ -44,6 +60,11 @@ export interface DashboardPanelCallContext {
   /** Set when the request came through the gateway: the start route re-reads it. */
   gatewayOrigin?: string;
   signal?: AbortSignal;
+  /**
+   * Who may open unreadable files from this call: an unlocked control session
+   * or the worker bearer. Absent (a locked dash_ reader): names, no tokens.
+   */
+  opener?: string;
 }
 
 export interface DashboardPanelTools {
@@ -63,6 +84,8 @@ export interface DashboardPanelToolsOptions {
   makeContext: (signal: AbortSignal) => OperationContext;
   /** The embedding-priority override, or undefined when the guard's state is unknown here. */
   indexFasterState: () => Promise<boolean | undefined>;
+  /** Which files can't be read, and opening one; absent without the extraction factory. */
+  unreadableFiles?: () => UnreadableFiles | undefined;
 }
 
 function refused(text: string, code: string): ChatGptToolResult {
@@ -141,6 +164,105 @@ async function unpairSource(options: DashboardPanelToolsOptions, args: Record<st
   return { content: [{ type: 'text', text }], structuredContent: { status: 'saved', source_id: args.source_id } };
 }
 
+/** Opening one unreadable file by its one-time token; the token is the only argument. */
+async function openUnreadableFile(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (typeof args.token !== 'string' || keys.some((key) => key !== 'token')) return refused('token must be a file token from the dashboard.', 'invalid_params');
+  const files = options.unreadableFiles?.();
+  if (!files || !context.opener) return refused('Olympus cannot open this file here.', 'unavailable');
+  const opened = await files.open(args.token, context.opener);
+  switch (opened.status) {
+    case 'opened':
+      return { content: [{ type: 'text', text: 'Opened the file on this computer.' }], structuredContent: { status: 'opened' } };
+    case 'open_link':
+      return { content: [{ type: 'text', text: 'Opening the file\'s page.' }], structuredContent: { status: 'open_link', url: opened.url } };
+    case 'invalid':
+      return refused('token must be a file token from the dashboard.', 'invalid_params');
+    case 'rate_limited':
+      return refused('Too many files opened at once. Try again in a moment.', 'rate_limited');
+    case 'failed':
+      return refused('The file could not be opened.', 'internal');
+    default:
+      return refused('This file is no longer in the list. Refresh the dashboard.', 'gone');
+  }
+}
+
+/**
+ * The next page of one source's unreadable files (`{source_id, after}`), with
+ * open tokens for this opener: what the first page's "more" counts, so every
+ * file is reachable however many there are. The source's corpora are the ones
+ * the dashboard view names now.
+ */
+async function unreadableFilesPage(
+  options: DashboardPanelToolsOptions,
+  args: Record<string, unknown>,
+  context: DashboardPanelCallContext,
+): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  const after = args.after;
+  if (
+    typeof args.source_id !== 'string'
+    || !isUnreadablePageCursor(after)
+    || keys.some((key) => key !== 'source_id' && key !== 'after')
+  ) {
+    return refused('source_id and after must come from the dashboard.', 'invalid_params');
+  }
+  const files = options.unreadableFiles?.();
+  if (!files || !context.opener) return refused('Olympus cannot list these files here.', 'unavailable');
+  const sourceId = args.source_id;
+  const view = await options.surface().dashboardView(context.signal).catch(() => undefined);
+  const corpusIds = view?.sources.find((card) => card.source_id === sourceId)?.unreadable_files?.corpus_ids;
+  if (!corpusIds?.length) return refused('This list changed. Refresh the dashboard.', 'gone');
+  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { after, opener: context.opener });
+  const page = entriesOf(listed.files);
+  return {
+    content: [{ type: 'text', text: `${page.length} more files.` }],
+    structuredContent: {
+      status: 'listed',
+      source_id: args.source_id,
+      files: page,
+      more: listed.more,
+      ...(listed.more > 0 && listed.after ? { after: listed.after } : {}),
+    },
+  };
+}
+
+function entriesOf(files: ReturnType<UnreadableFiles['computerList']>['files']): ComputerUnreadableEntry['files'] {
+  return files.flatMap((file) => {
+    const [name] = unreadableNames([file.name]);
+    return name ? [{ name, ...(file.token ? { token: file.token } : {}) }] : [];
+  });
+}
+
+/**
+ * Every unreadable file per source the view counts, first page, for the
+ * computer's See why: with open tokens bound to `opener` when there is one
+ * (an unlocked session, or the bearer), names alone for a locked reader.
+ */
+export function computerUnreadableEntries(
+  view: SourceDashboardViewModel | undefined,
+  files: UnreadableFiles | undefined,
+  opener?: string,
+): ComputerUnreadableEntry[] {
+  if (!view || !files) return [];
+  return view.sources.flatMap((card) => {
+    const count = Math.max(0, Math.trunc(card.coverage.unreadable_items ?? 0));
+    const corpusIds = card.unreadable_files?.corpus_ids ?? [];
+    if (count === 0 || corpusIds.length === 0) return [];
+    let listed: ReturnType<UnreadableFiles['computerList']>;
+    try {
+      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, opener ? { opener } : {});
+    } catch {
+      return [];
+    }
+    const entries = entriesOf(listed.files);
+    // Past the limit the list says how many more; the row's count is the word,
+    // so a count read a moment apart from the list never shows fewer.
+    const more = Math.max(0, listed.more, count - entries.length);
+    return [{ sourceId: card.source_id, files: entries, more, ...(more > 0 && listed.after ? { after: listed.after } : {}) }];
+  });
+}
+
 /** Which paired apps this computer can unpair, off the view the dashboard result came from. */
 export function computerUnpairEntries(view: SourceDashboardViewModel | undefined): ComputerUnpairEntry[] {
   if (!view) return [];
@@ -159,6 +281,8 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (!allowed.has(name)) return refused('This tool is not available here.', 'unknown_tool');
       if (name === INDEX_FASTER_TOOL_NAME) return await indexFaster(options, args);
       if (name === UNPAIR_SOURCE_TOOL_NAME) return await unpairSource(options, args);
+      if (name === OPEN_UNREADABLE_FILE_TOOL_NAME) return await openUnreadableFile(options, args, context);
+      if (name === UNREADABLE_FILES_PAGE_TOOL_NAME) return await unreadableFilesPage(options, args, context);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       // Keep the view the dashboard result is built from, for Unpair's entries.
@@ -172,10 +296,12 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (name !== DASHBOARD_TOOL_NAME || result.isError) return result;
       const on = await options.indexFasterState().catch(() => undefined);
       const unpair = computerUnpairEntries(view);
-      if (on === undefined && unpair.length === 0) return result;
+      const unreadable = computerUnreadableEntries(view, options.unreadableFiles?.(), context.opener);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0) return result;
       const meta: ComputerDashboardMeta = {
         ...(on !== undefined ? { indexFaster: { on } } : {}),
         ...(unpair.length > 0 ? { unpair } : {}),
+        ...(unreadable.length > 0 ? { unreadable } : {}),
       };
       const existing = result._meta && typeof result._meta === 'object' ? result._meta as Record<string, unknown> : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta } };

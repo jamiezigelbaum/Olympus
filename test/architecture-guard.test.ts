@@ -217,6 +217,10 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/store-sink.ts',
   'src/workers/file-extraction/tiered-store-sink.ts',
   'src/workers/file-extraction/types.ts',
+  // Which files can't be read, and opening one: the readiness ledger's own list
+  // and a one-time token per file. The provider's open target is the
+  // composition root's to resolve, so nothing here may name a source.
+  'src/workers/file-extraction/unreadable-files.ts',
   'src/workers/source-index/analyst-answer.ts',
   'src/workers/source-index/answer-types.ts',
 ];

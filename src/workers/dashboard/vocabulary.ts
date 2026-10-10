@@ -1027,6 +1027,16 @@ export function dashboardUnreadableSentence(source: DashboardSourceCard): string
 /** The note under See why, and the detail page's tail: nothing to do, the rest answers. */
 export const DASHBOARD_UNREADABLE_NOTE = 'Olympus does not retry these, and nothing is waiting on you.';
 
+/**
+ * The unreadable files a list leaves out ("and 12 more"): in ChatGPT the
+ * link to the computer's full list, on the computer the tail past its limit.
+ */
+export const DASHBOARD_UNREADABLE_MORE = 'and {count} more';
+
+export function dashboardUnreadableMoreLabel(count: number): string {
+  return DASHBOARD_UNREADABLE_MORE.replace('{count}', dashboardCount(count));
+}
+
 /** The same note past DASHBOARD_UNREADABLE_ALARM_SHARE, where the row already says Needs you. */
 export const DASHBOARD_UNREADABLE_NOTE_MANY =
   'That is more than a healthy source has, so it may be a problem in Olympus rather than your files.'
@@ -1037,7 +1047,8 @@ export const DASHBOARD_UNREADABLE_NOTE_MANY =
  * Today extraction records one permanent failure, so one reason exists: a
  * damaged file and a format nothing reads are the same to the engine. More
  * codes need extraction to store one first. The view model carries a code and
- * a count, never a file name; the panel holds these words.
+ * a count per code (names travel beside it, never in a reason); the panel
+ * holds these words.
  */
 export const DASHBOARD_UNREADABLE_REASON_CODES = ['damaged_or_unsupported'] as const;
 export type DashboardUnreadableReasonCode = (typeof DASHBOARD_UNREADABLE_REASON_CODES)[number];
@@ -1509,8 +1520,15 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    */
   syncChecking: 'Checking…',
   syncCheckingLine: dashboardManualSyncPendingLine('{source}'),
-  /** The disclosure under a row whose files can't be read (counts and reasons, never names). */
+  /**
+   * The disclosure under a row whose files can't be read: counts and
+   * reasons, then the files' names (owner ruling, 2026-10-10); on the
+   * computer each name opens its file.
+   */
   seeWhy: 'See why',
+  unreadableMore: DASHBOARD_UNREADABLE_MORE,
+  /** The accessible name of an unreadable file's open control: "Open report.pdf". */
+  unreadableOpen: 'Open {name}',
   unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
   unreadableNote: DASHBOARD_UNREADABLE_NOTE,
   unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY,

@@ -1800,6 +1800,8 @@ export interface ConnectorStoreLocalContent {
   storedChunks: number;
   /** The item's stored media type: the spine's only durable extraction signal. */
   mimeType: string;
+  /** The conversation the item belongs to, when it has one (its tier ledger identity needs it). */
+  providerConversationId?: string;
 }
 
 export interface ConnectorStoreItemPresence {
@@ -9977,6 +9979,7 @@ export class LocalConnectorStore {
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
       ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
     };
   }
 

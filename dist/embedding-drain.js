@@ -18793,7 +18793,8 @@ var init_local_index = __esm(() => {
         truncated,
         storedChunks: chunkRows.length,
         mimeType: row.mime_type,
-        ...row.locator_uri ? { locatorUri: row.locator_uri } : {}
+        ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       };
     }
     itemReactions(localItemId) {
@@ -22894,7 +22895,8 @@ function allOpenTargets() {
   return [
     { kind: "dashboard" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section }))
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
   ];
 }
 function openTargetToken(target) {
@@ -22902,6 +22904,8 @@ function openTargetToken(target) {
     return `connect.${target.source}`;
   if (target.kind === "fix")
     return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
   return;
 }
 function openTargetTokenPattern() {
@@ -22915,7 +22919,14 @@ function keysOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -22924,6 +22935,11 @@ var init_open_targets = __esm(() => {
     whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
   };
   OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+  OPEN_UNREADABLE_SOURCES = {
+    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
 });
 
 // src/core/remote-open.ts
@@ -23604,6 +23620,14 @@ var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
 
 // src/workers/dashboard/answer-ready-coverage.ts
 var init_answer_ready_coverage = () => {};
+
+// src/workers/file-extraction/unreadable-files.ts
+var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
+var init_unreadable_files = __esm(() => {
+  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+});
 
 // src/workers/remote-oauth/consent-page.ts
 var init_consent_page = () => {};
@@ -24775,7 +24799,7 @@ var init_scheduler_markers = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -24981,6 +25005,8 @@ var init_vocabulary = __esm(() => {
     syncChecking: "Checking…",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
     seeWhy: "See why",
+    unreadableMore: DASHBOARD_UNREADABLE_MORE,
+    unreadableOpen: "Open {name}",
     unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
     unreadableNote: DASHBOARD_UNREADABLE_NOTE,
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
@@ -25550,7 +25576,7 @@ var init_source_dashboard = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -25564,7 +25590,13 @@ var init_dashboard_contract = __esm(() => {
     "olympus_privacy_set",
     SYNC_SOURCE_TOOL_NAME
   ];
-  COMPUTER_HOST_TOOL_NAMES = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
+  COMPUTER_HOST_TOOL_NAMES = [
+    ...PANEL_TOOL_NAMES,
+    INDEX_FASTER_TOOL_NAME,
+    UNPAIR_SOURCE_TOOL_NAME,
+    OPEN_UNREADABLE_FILE_TOOL_NAME,
+    UNREADABLE_FILES_PAGE_TOOL_NAME
+  ];
 });
 
 // src/workers/dashboard/chatgpt/client.ts
@@ -25591,7 +25623,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     hostKind: "",
     hostReadOnly: false,
     hostLinks: {},
-    computerMeta: null
+    computerMeta: null,
+    unreadablePages: {},
+    landing: "",
+    landed: null
   };
   const H = config.host;
   let nextId = 1;
@@ -25668,6 +25703,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         links[key] = href;
     }
     state.hostLinks = value.kind === "computer" ? links : {};
+    const landing = value.landing;
+    if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
+      state.landing = landing.sourceId;
+    }
   }
   function onComputer() {
     return state.hostKind === "computer";
@@ -25730,6 +25769,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       state.data = content;
       const meta = result._meta && typeof result._meta === "object" ? result._meta[H.computerMetaKey] : null;
       state.computerMeta = meta && typeof meta === "object" ? meta : null;
+      state.unreadablePages = {};
       state.relayDown = false;
       if (!state.busy)
         state.syncPressed = {};
@@ -25749,7 +25789,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && name === H.unpairTool))
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -25778,6 +25818,26 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         }
         state.actionError = { key, text: failed };
         render(key);
+        return;
+      }
+      if (name === H.unreadableOpenTool) {
+        const url = result && result.structuredContent ? result.structuredContent.url : "";
+        if (typeof url === "string" && url)
+          openLink(url);
+        refresh();
+        return;
+      }
+      if (name === H.unreadablePageTool) {
+        const page = result && result.structuredContent;
+        if (page && page.status === "listed" && typeof page.source_id === "string" && Array.isArray(page.files)) {
+          const prior = state.unreadablePages[page.source_id];
+          state.unreadablePages[page.source_id] = {
+            files: (prior ? prior.files : []).concat(unreadableEntries(page.files)),
+            more: moreCount(page.more),
+            after: cursorOf(page.after)
+          };
+        }
+        redraw();
         return;
       }
       if (name === H.unpairTool) {
@@ -25992,7 +26052,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     render(key);
   }
   function openPath(href) {
-    const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix)\/[a-z]+)\/$/.exec(href);
+    const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix|unreadable)\/[a-z]+)\/$/.exec(href);
     return match ? match[1] : "";
   }
   function remoteLines(href) {
@@ -26296,6 +26356,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const why = seeWhy(source, id);
     if (why)
       add(main, why);
+    else if (state.landed && state.landed.id === id)
+      row.className += " landed";
     add(row, main);
     const controls = el("div", "source-actions");
     const context = { id, label: String(source.label || id) };
@@ -26341,8 +26403,85 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!lines.length)
       return null;
     const box = details("why:" + id, document.createTextNode(P.seeWhy), "why");
-    add(box, add(el("ul", "plain"), ...lines), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     return box;
+  }
+  function unreadableFiles(unreadable, id) {
+    const list = el("ul", "plain files");
+    const own = computerUnreadable(id);
+    if (own) {
+      own.files.forEach((file, index) => {
+        const item = el("li");
+        if (typeof file.token === "string" && file.token) {
+          const key = "why-file:" + id + ":" + index;
+          const control = fixControl({ label: file.name, tool: H.unreadableOpenTool, args: { token: file.token } }, key, "plain", false);
+          const opener = control.querySelector("button");
+          if (opener && opener.textContent === file.name) {
+            opener.className = "btn link file";
+            opener.setAttribute("aria-label", fill2(P.unreadableOpen, { name: file.name }));
+          }
+          add(item, control);
+        } else
+          add(item, document.createTextNode(file.name));
+        add(list, item);
+      });
+      if (own.more > 0) {
+        const label = fill2(P.unreadableMore, { count: count(own.more) });
+        add(list, own.after ? add(el("li"), fixControl({ label, tool: H.unreadablePageTool, args: { source_id: id, after: own.after } }, "why-page:" + id, "plain", false)) : el("li", "muted", label));
+      }
+      return list.childNodes.length ? list : null;
+    }
+    const names = Array.isArray(unreadable.names) ? unreadable.names.filter((name) => typeof name === "string" && name) : [];
+    names.forEach((name) => add(list, el("li", "", name)));
+    if (unreadable.more && typeof unreadable.more === "object") {
+      add(list, add(el("li"), fixControl(unreadable.more, "why-more:" + id, "plain", false)));
+    }
+    return list.childNodes.length ? list : null;
+  }
+  function computerUnreadable(id) {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.unreadable))
+      return null;
+    const entry = meta.unreadable.filter((item) => item && item.sourceId === id)[0];
+    if (!entry || !Array.isArray(entry.files))
+      return null;
+    const pages = state.unreadablePages[id];
+    const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
+    const more = pages ? pages.more : moreCount(entry.more);
+    const after = pages ? pages.after : cursorOf(entry.after);
+    return files.length || more ? { files, more, after } : null;
+  }
+  function cursorOf(value) {
+    return typeof value === "string" && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : "";
+  }
+  function unreadableEntries(input) {
+    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
+  }
+  function moreCount(value) {
+    return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+  function applyLanding() {
+    const id = state.landing;
+    if (!id || !state.data || state.relayDown || editorOpen() || compact())
+      return;
+    state.landing = "";
+    const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
+    if (!sources.some((source) => source && source.id === id))
+      return;
+    state.open["why:" + id] = true;
+    state.landed = { id, until: Date.now() + H.landedMs };
+    render("summary:why:" + id);
+    const node = root.querySelector(".landed");
+    if (node && typeof node.scrollIntoView === "function")
+      node.scrollIntoView({ block: "center" });
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector(".landed");
+      if (shown)
+        shown.classList.remove("landed");
+    }, H.landedMs);
   }
   function syncChecking(source) {
     if (!source || source.connecting)
@@ -26807,6 +26946,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       }
     }
     reportHeight();
+    if (state.landing && !picking && !privacyOpen)
+      applyLanding();
   }
   function reportHeight() {
     const height = Math.ceil(doc.documentElement.scrollHeight || doc.body.scrollHeight || 0);
@@ -29457,6 +29598,9 @@ function chatgptDashboardPageHtml(options = {}) {
       computerMetaKey: COMPUTER_META_KEY,
       indexFasterTool: INDEX_FASTER_TOOL_NAME,
       unpairTool: UNPAIR_SOURCE_TOOL_NAME,
+      unreadableOpenTool: OPEN_UNREADABLE_FILE_TOOL_NAME,
+      unreadablePageTool: UNREADABLE_FILES_PAGE_TOOL_NAME,
+      landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
   };
@@ -29484,7 +29628,7 @@ function privacyProgramSource() {
 function scriptJson(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_DASHBOARD_LANDED_MS = 4000;
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
@@ -29626,6 +29770,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .why summary{color:var(--muted);font-size:0.875rem;padding:0.125rem 0}
 .why .plain{margin:0.25rem 0;font-size:0.875rem}
 .why-note{font-size:0.8125rem;color:var(--muted)}
+.why .files li{overflow-wrap:anywhere}
+.why .files .btn.link.file{min-height:0;padding:0.125rem 0;color:var(--accent);text-align:left}
+.landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
+@keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
 .remote-box p{margin:0}
@@ -29736,7 +29884,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 });
 
@@ -29856,6 +30004,7 @@ var init_dashboard_launch = __esm(() => {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var PANEL = /${panelOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
         var open = '';
         function take() {
@@ -29883,8 +30032,11 @@ var init_dashboard_launch = __esm(() => {
           if (response.ok) {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
+            // A panel target (See why on one source) lands on the dashboard there.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
+            window.location.replace(KEYS.test(open)
+              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open : '/dashboard');
             return;
           }
           status.textContent = response.status === 403
@@ -31152,8 +31304,14 @@ init_tiered_store_set();
 init_tier_ledger();
 init_tiered_store_set();
 
+// src/workers/email-source/file-extraction-runtime.ts
+init_tiered_store_set();
+
 // src/workers/file-extraction/readiness-ledger.ts
 init_answer_ready_coverage();
+
+// src/workers/email-source/server.ts
+init_unreadable_files();
 
 // src/core/analyst-openai.ts
 init_operation_error();

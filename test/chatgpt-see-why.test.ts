@@ -1,14 +1,16 @@
 /**
  * "See why" (unified dashboard, phase 3): a source whose files can't be read
- * shows a count per reason and one note under its row. Counts and closed
- * reason codes only: no file name or path can reach the view model or the
- * panel, on ChatGPT or on the computer (which serves the same panel).
+ * shows a count per reason and one note under its row. Owner ruling
+ * 2026-10-10: it also names the files (never say something is wrong without
+ * a way to find out exactly what): up to 5 names, capped at 120 characters,
+ * then "and N more", which opens the computer's full list. File names may
+ * reach ChatGPT; paths never do, and only the card's own list is read.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
-import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { DASHBOARD_TOOL_NAME, type DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import {
   DASHBOARD_CHATGPT_PAGE_COPY,
@@ -58,11 +60,27 @@ function viewModelOf(source: DashboardSourceCard): DashboardViewModelV1 {
 
 const dropboxOf = (model: DashboardViewModelV1) => model.sources.find((source) => source.id === 'dropbox.files')!;
 
+const MORE_HREF = 'https://olympusplugin.ai/open/unreadable/dropbox/';
+const moreFix = (count: number) => ({ label: `and ${count} more`, tool: DASHBOARD_TOOL_NAME, args: {}, href: MORE_HREF, openHref: true as const });
+
+function named(unreadable: number, names: string[]): DashboardSourceCard {
+  return { ...card(unreadable), unreadable_files: { names, corpus_ids: ['secure_local.dropbox.files'] } };
+}
+
 describe('the view model carries a count per closed reason', () => {
-  test('two unreadable files are one reason with a count', () => {
+  test('two unreadable files are one reason with a count, and their names', () => {
+    expect(dropboxOf(viewModelOf(named(2, ['b.pdf', 'a.pdf']))).unreadable).toEqual({
+      count: 2,
+      reasons: [{ code: 'damaged_or_unsupported', count: 2 }],
+      names: ['b.pdf', 'a.pdf'],
+    });
+  });
+
+  test('with no names to hand, "and N more" still leads to the full list', () => {
     expect(dropboxOf(viewModelOf(card(2))).unreadable).toEqual({
       count: 2,
       reasons: [{ code: 'damaged_or_unsupported', count: 2 }],
+      more: moreFix(2),
     });
   });
 
@@ -83,33 +101,57 @@ describe('the view model carries a count per closed reason', () => {
   });
 });
 
-describe('no file name or path can reach the view model', () => {
-  test('a card is read for counts only: names planted in its text fields never leave through unreadable', () => {
+describe('the names: newest first, capped, and only the card\'s own list', () => {
+  test('up to 5 names in the card\'s order, then "and N more" with the right arithmetic', () => {
+    const names = ['f.pdf', 'e.pdf', 'd.pdf', 'c.pdf', 'b.pdf', 'a.pdf'];
+    const unreadable = dropboxOf(viewModelOf(named(12, names))).unreadable!;
+    expect(unreadable.names).toEqual(names.slice(0, 5));
+    expect(unreadable.more).toEqual(moreFix(7));
+    // Never more names than the count says.
+    expect(dropboxOf(viewModelOf(named(2, names))).unreadable!.names).toEqual(['f.pdf', 'e.pdf']);
+    expect('more' in dropboxOf(viewModelOf(named(2, names))).unreadable!).toBe(false);
+  });
+
+  test('each name is one line of at most 120 characters', () => {
+    const long = `${'x'.repeat(200)}.pdf`;
+    const [first, second] = dropboxOf(viewModelOf(named(2, [long, 'two\nlines\u2028here.pdf']))).unreadable!.names!;
+    expect(Array.from(first!)).toHaveLength(120);
+    expect(first!.endsWith('…')).toBe(true);
+    expect(second).toBe('two lines here.pdf');
+  });
+
+  test('a card is read for its own list only: names planted elsewhere never leave', () => {
     const planted = card(2);
-    (planted as any).unreadable_files = [SECRET_NAME, SECRET_PATH];
-    (planted.coverage as any).unreadable_names = [SECRET_NAME];
+    (planted.coverage as any).unreadable_names = [SECRET_NAME, SECRET_PATH];
+    (planted as any).unreadable = [SECRET_NAME];
     const unreadable = dropboxOf(viewModelOf(planted)).unreadable!;
-    expect(JSON.stringify(unreadable)).not.toContain('pdf');
-    expect(Object.keys(unreadable).sort()).toEqual(['count', 'reasons']);
+    expect(Object.keys(unreadable).sort()).toEqual(['count', 'more', 'reasons']);
     expect(Object.keys(unreadable.reasons[0]!).sort()).toEqual(['code', 'count']);
     expect(JSON.stringify(viewModelOf(planted))).not.toContain(SECRET_NAME);
     expect(JSON.stringify(viewModelOf(planted))).not.toContain(SECRET_PATH);
   });
 
-  test('the response sanitizer drops any name, path, unknown code or extra key a producer adds', () => {
-    const model = viewModelOf(card(2));
-    (dropboxOf(model).unreadable as any).files = [SECRET_NAME];
-    (dropboxOf(model).unreadable as any).reasons.push(
+  test('the response sanitizer keeps capped names and a safe "more", and drops any other key or code', () => {
+    const model = viewModelOf(named(9, ['e.pdf', 'd.pdf']));
+    const raw = dropboxOf(model).unreadable as any;
+    raw.files = [SECRET_PATH];
+    raw.names = ['1.pdf', '2.pdf', '3.pdf', '4.pdf', '5.pdf', '6.pdf', `${'y'.repeat(300)}`, 7];
+    raw.reasons.push(
       { code: SECRET_PATH, count: 1 },
       { code: 'damaged_or_unsupported', count: 1, name: SECRET_NAME, path: SECRET_PATH },
     );
-    const copied = JSON.stringify(copyDashboardViewModel(model));
-    expect(copied).not.toContain(SECRET_NAME);
-    expect(copied).not.toContain(SECRET_PATH);
-    expect(dropboxOf(copyDashboardViewModel(model)).unreadable).toEqual({
-      count: 2,
-      reasons: [{ code: 'damaged_or_unsupported', count: 2 }, { code: 'damaged_or_unsupported', count: 1 }],
+    const copied = copyDashboardViewModel(model);
+    expect(JSON.stringify(copied)).not.toContain(SECRET_NAME);
+    expect(JSON.stringify(copied)).not.toContain(SECRET_PATH);
+    expect(dropboxOf(copied).unreadable).toEqual({
+      count: 9,
+      reasons: [{ code: 'damaged_or_unsupported', count: 9 }, { code: 'damaged_or_unsupported', count: 1 }],
+      names: ['1.pdf', '2.pdf', '3.pdf', '4.pdf', '5.pdf'],
+      more: moreFix(7),
     });
+    // A "more" that would open anything but a safe link loses its link.
+    raw.more = { ...moreFix(7), href: 'javascript:alert(1)' };
+    expect(dropboxOf(copyDashboardViewModel(model)).unreadable!.more!.href).toBeUndefined();
   });
 
   test('a bare count from an older producer still reads, as one reason', () => {
@@ -136,14 +178,14 @@ describe('the panel renders See why', () => {
     while (windows.length) await windows.pop()!.happyDOM.close();
   });
 
-  function mount(model: DashboardViewModelV1) {
+  function mount(model: DashboardViewModelV1, sent: any[] = []) {
     const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000 });
     const start = html.indexOf('<script>') + '<script>'.length;
     const script = html.slice(start, html.indexOf('</script>', start));
     const win = new Window({ url: 'https://sandbox.test/' });
     windows.push(win);
     win.document.write(html.slice(0, start - '<script>'.length) + html.slice(html.indexOf('</script>', start) + '</script>'.length));
-    const parent = { postMessage: () => undefined };
+    const parent = { postMessage: (message: unknown) => { sent.push(message); } };
     Object.defineProperty(win, 'parent', { value: parent, configurable: true });
     new Function('window', 'document', script)(win, win.document);
     win.dispatchEvent(new win.MessageEvent('message', {
@@ -188,7 +230,50 @@ describe('the panel renders See why', () => {
     expect(mount(fresh({ unreadable: 2 as any })).document.querySelector('details.why')).toBeNull();
   });
 
-  test('no file name or path reaches the panel, whatever the data carries', () => {
+  test('the names sit inside the closed See why, and "and N more" opens the computer\'s list', () => {
+    const sent: any[] = [];
+    const win = mount(fresh({ unreadable: {
+      count: 7,
+      reasons: [{ code: 'damaged_or_unsupported', count: 7 }],
+      names: ['Q3 board deck.key', 'scan-0042.tiff'],
+      more: { label: 'and 5 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: MORE_HREF, openHref: true },
+    } }), sent);
+    const row = win.document.querySelector('.row.source')!;
+    const why = row.querySelector('details.why')! as unknown as HTMLDetailsElement;
+    expect(why.open).toBe(false);
+    expect(row.querySelector('.source-main .muted')!.textContent).toBe("Synced 12m ago · 2 files can't be read");
+    expect(why.querySelector('summary')!.textContent).not.toContain('Q3 board deck.key');
+    expect(why.querySelector('summary')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.seeWhy);
+    const files = Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent);
+    expect(files).toEqual(['Q3 board deck.key', 'scan-0042.tiff', 'and 5 more']);
+    const more = Array.from(why.querySelectorAll('ul.files button')).find((node) => node.textContent === 'and 5 more') as unknown as HTMLButtonElement;
+    more.click();
+    expect(sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([MORE_HREF]);
+  });
+
+  // On a server, the computer's full list is the remote route: the tunnel
+  // and `olympus dashboard --no-open --target unreadable/dropbox`, never the
+  // /open/ page (its olympus:// link would open the laptop's own Olympus).
+  test('engine on a server: "and N more" shows the remote lines for unreadable/dropbox, never the /open/ page', () => {
+    const sent: any[] = [];
+    const win = mount({ ...fresh({ unreadable: {
+      count: 7,
+      reasons: [{ code: 'damaged_or_unsupported', count: 7 }],
+      names: ['Q3 board deck.key', 'scan-0042.tiff'],
+      more: { label: 'and 5 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: MORE_HREF, openHref: true },
+    } }), remote: { port: 8123, sshTarget: 'jamie@sparta', agent: false } }, sent);
+    const more = Array.from(win.document.querySelectorAll('details.why ul.files button')).find((node) => node.textContent === 'and 5 more') as unknown as HTMLButtonElement;
+    more.click();
+    expect(sent.some((message) => message.method === 'ui/open-link')).toBe(false);
+    const box = win.document.querySelector('.remote-box')!;
+    expect(box).not.toBeNull();
+    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual([
+      'ssh -N -L 8123:127.0.0.1:8123 jamie@sparta',
+      'olympus dashboard --no-open --target unreadable/dropbox',
+    ]);
+  });
+
+  test('no file path reaches the panel, whatever the data carries', () => {
     const hostile = { count: 2, files: [SECRET_NAME, SECRET_PATH], reasons: [
       { code: 'damaged_or_unsupported', count: 2, name: SECRET_NAME, path: SECRET_PATH },
       { code: SECRET_NAME, count: 1 },
@@ -198,6 +283,6 @@ describe('the panel renders See why', () => {
     expect(page).not.toContain(SECRET_NAME);
     expect(page).not.toContain(SECRET_PATH);
     expect(page).not.toContain('Taxes');
-    expect(win.document.querySelectorAll('details.why li').length).toBe(1);
+    expect(win.document.querySelectorAll('details.why ul:not(.files) li').length).toBe(1);
   });
 });

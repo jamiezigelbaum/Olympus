@@ -25,6 +25,7 @@ import {
   parseFileExtractionCorporaEnv,
 } from './file-extraction-runtime.ts';
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
+import { createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
 import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
 import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
@@ -3437,6 +3438,86 @@ export async function main(): Promise<void> {
           }),
       }
     : undefined;
+  // An item extraction gave up on is named on the dashboard only when it is
+  // really unreadable: a Secrets item (by its tier ledger row, or located as a
+  // secret) counts with the policy exit and is never named or counted as
+  // unreadable, on any host; an item no store serves any more is left out of
+  // both the count and the list. Source-neutral: every lane's ledger and
+  // secret index, by corpus.
+  const unreadableVerdict = createUnreadableVerdict({
+    locate: (ref) => fileExtractionRuntime?.locateItem(ref),
+    lanes: () => tierLanes,
+  });
+  const extractionReadinessLedger = fileExtractionRuntime
+    ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+        terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
+        classifyUnreadable: unreadableVerdict,
+        currentItem(ref) {
+          if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
+            return false;
+          }
+          const readScope = connectorStoreReadScope(dropboxConnectorStore);
+          return readScope.allowed
+            && readScope.contentAllowed
+            && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
+        },
+        lanesForCorpus(corpusId) {
+          if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
+          const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
+          if (!ref || !fileSourceScopeAuthority) return [];
+          const approval = fileSourceScopeAuthority.assertCurrent(ref);
+          const scopes = dropboxPolicyFullExtractionScopeKeys(
+            fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval),
+          );
+          const handle = selectedSourceCredentialHandle({
+            env: process.env,
+            pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
+            provider: 'dropbox',
+            capability: 'dropbox.files.sync',
+            handles: readActiveConnectedHandles(process.env),
+          });
+          const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || 'personal';
+          return scopes.map((approvedScopeKey) => ({
+            corpusId,
+            provider: 'dropbox',
+            accountScope,
+            approvedScopeKey,
+          }));
+        },
+      })
+    : undefined;
+  // Which files can't be read, and opening one on this computer (the panel's
+  // See why): the ledger's own list, so the names are the files its count
+  // counted. A file opens where its provider says: a Dropbox file's synced
+  // copy here, else its web page.
+  const { createDropboxOpenTargets: unreadableDropboxTargets, localDropboxRoots: unreadableDropboxRoots, localOpenArguments: unreadableOpenArguments } = await import('../dropbox-files/open-target.ts');
+  const unreadableOpenTargets: Record<string, (locator: string) => { url?: string; localPath?: string } | undefined> = {
+    dropbox: unreadableDropboxTargets(),
+  };
+  const unreadableFiles = extractionReadinessLedger && fileExtractionRuntime
+    ? createUnreadableFiles({
+        items: (corpusId) => extractionReadinessLedger.unreadableItems(corpusId),
+        verdict: unreadableVerdict,
+        locate: (ref) => fileExtractionRuntime.locateItem(ref),
+        // The provider's own resolver, else a Drive file's own Google page.
+        // Nothing else opens: a locator is provider data, not a link to trust.
+        openTarget: (provider, locator) => (Object.hasOwn(unreadableOpenTargets, provider)
+          ? unreadableOpenTargets[provider]!(locator)
+          : provider === 'google_drive' && googleFilePage(locator) ? { url: locator } : undefined),
+        ...(process.platform === 'darwin'
+          ? {
+              openFile: (path: string) => new Promise<void>((resolve, reject) => {
+                const args = unreadableOpenArguments(path, unreadableDropboxRoots());
+                if (!args) {
+                  reject(new Error('open refused'));
+                  return;
+                }
+                execFile('/usr/bin/open', args, { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+              }),
+            }
+          : {}),
+      })
+    : undefined;
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
       // Read per request: a per-tier store its tier set creates while the
@@ -3470,45 +3551,7 @@ export async function main(): Promise<void> {
       // extraction queue rather than from any source's own index. Absent when
       // the factory is switched off, which leaves the coverage math on the
       // store's own per-item count alone.
-      ...(fileExtractionRuntime
-        ? {
-            readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
-              terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
-              currentItem(ref) {
-                if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
-                  return false;
-                }
-                const readScope = connectorStoreReadScope(dropboxConnectorStore);
-                return readScope.allowed
-                  && readScope.contentAllowed
-                  && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
-              },
-              lanesForCorpus(corpusId) {
-                if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
-                const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
-                if (!ref || !fileSourceScopeAuthority) return [];
-                const approval = fileSourceScopeAuthority.assertCurrent(ref);
-                const scopes = dropboxPolicyFullExtractionScopeKeys(
-                  fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval),
-                );
-                const handle = selectedSourceCredentialHandle({
-                  env: process.env,
-                  pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
-                  provider: 'dropbox',
-                  capability: 'dropbox.files.sync',
-                  handles: readActiveConnectedHandles(process.env),
-                });
-                const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || 'personal';
-                return scopes.map((approvedScopeKey) => ({
-                  corpusId,
-                  provider: 'dropbox',
-                  accountScope,
-                  approvedScopeKey,
-                }));
-              },
-            }),
-          }
-        : {}),
+      ...(extractionReadinessLedger ? { readinessLedger: extractionReadinessLedger } : {}),
     })
     : undefined;
   const sourceDashboardHistory = sourceIndexReadEnabled
@@ -4215,6 +4258,12 @@ export async function main(): Promise<void> {
       : Promise.resolve({ ok: false as const, code: 'ask_unavailable', message: 'Asking anonymously is not available in this worker.' })),
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
+    ...(unreadableFiles
+      ? {
+          unreadableFileNames: (corpusIds: readonly string[], limit: number) => unreadableFiles.names(corpusIds, limit),
+          unreadableRecheck: (corpusId: string) => unreadableFiles.recheck(corpusId),
+        }
+      : {}),
     currentReadwiseSync,
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,
@@ -4896,6 +4945,7 @@ export async function main(): Promise<void> {
       const runtime = await readEmbeddingRuntime({ env: process.env });
       return runtime.state === 'unknown' ? undefined : runtime.overrideOn;
     },
+    unreadableFiles: () => unreadableFiles,
   });
 
   const server = Bun.serve({
@@ -5964,4 +6014,15 @@ function mergeConnectorStores(stores: readonly LocalConnectorStore[]): LocalConn
     }
   }
   return [...byCorpusId.values()];
+}
+
+/** A Google Drive file's own page: https on drive.google.com or docs.google.com, nothing else. */
+function googleFilePage(locator: string): boolean {
+  try {
+    const url = new URL(locator);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && (url.hostname === 'drive.google.com' || url.hostname === 'docs.google.com');
+  } catch {
+    return false;
+  }
 }

@@ -124,12 +124,17 @@ export interface DashboardSource {
   /**
    * In-scope items extraction gave up on for good (damaged, or a format
    * nothing reads). A fact, not a problem: `detail` already says it in words.
-   * Counts and reasons only, never a file name or path; absent when zero.
+   * Absent when zero, and never a path.
    * Contract v1 addition (2026-10-09): this was a bare count. `reasons` is a
    * closed list (today one code: the engine records a single permanent
    * failure) whose counts add up to `count`; `many` is set past the share
    * where it stops being a few damaged files. A reader that still gets a bare
    * number treats it as `{count}` with no reasons.
+   * Contract v1 addition (2026-10-10, owner ruling reversing "never a file
+   * name"): `names` are the newest unreadable files' names (file names may
+   * reach ChatGPT, even of Private items; only content is Private), and
+   * `more` opens the computer's full list when `count` is more than `names`
+   * shows. Secrets items are never counted or named here.
    */
   unreadable?: DashboardUnreadable;
   /**
@@ -147,6 +152,39 @@ export interface DashboardUnreadable {
   count: number;
   reasons: Array<{ code: DashboardUnreadableReasonCode; count: number }>;
   many?: true;
+  /**
+   * The newest unreadable files' names, newest failure first: at most
+   * UNREADABLE_NAMES_IN_RESULT, each at most UNREADABLE_NAME_MAX_CHARS.
+   * Absent when the engine has no names to give.
+   */
+  names?: string[];
+  /**
+   * "and N more" (N = `count` minus the names shown): opens
+   * olympusplugin.ai/open/unreadable/<source>/ (`openHref`), which opens the
+   * computer's dashboard with See why expanded on this source, where every
+   * file is listed. Absent when `names` already shows them all.
+   */
+  more?: DashboardFix;
+}
+
+/** At most this many unreadable file names per source in the tool result. */
+export const UNREADABLE_NAMES_IN_RESULT = 5;
+/** A longer file name is cut to this many characters (ending in "…"). */
+export const UNREADABLE_NAME_MAX_CHARS = 120;
+/** At most this many unreadable files per source in the computer's own list. */
+export const COMPUTER_UNREADABLE_FILES_LIMIT = 200;
+
+/** File names as display text: one line, no control characters, at most UNREADABLE_NAME_MAX_CHARS. */
+export function unreadableNames(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input.flatMap((value) => {
+    if (typeof value !== 'string') return [];
+    // eslint-disable-next-line no-control-regex
+    const line = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!line) return [];
+    const chars = Array.from(line);
+    return [chars.length > UNREADABLE_NAME_MAX_CHARS ? `${chars.slice(0, UNREADABLE_NAME_MAX_CHARS - 1).join('')}…` : line];
+  });
 }
 
 /** A Sync now press's state on the row: `checking` while its sync runs, then what it found. */
@@ -353,12 +391,19 @@ export interface OlympusHostContext {
   readOnly?: boolean;
   /** Computer only: the local pages the "On this computer" section opens. */
   links?: Partial<Record<'keys' | 'agents' | 'outsideHelp' | 'connector', string>>;
+  /**
+   * Computer only, in the first `ui/initialize` answer only: the source an
+   * open link asked to land on (core/open-targets.ts `unreadable/<source>`).
+   * The panel expands that source's See why and outlines it briefly.
+   */
+  landing?: { sourceId: string };
 }
 
 /**
  * Computer only: the `olympus_dashboard` result's `_meta` key carrying what
  * only the computer shows (Index faster's position, which paired chat apps
- * Unpair can end). ChatGPT never sees it.
+ * Unpair can end, every unreadable file with its open token). ChatGPT never
+ * sees it.
  */
 export const COMPUTER_META_KEY = 'olympus/computer';
 
@@ -371,12 +416,29 @@ export interface ComputerDashboardMeta {
    * own confirmation sentence (what stays, and where to unlink the device).
    */
   unpair?: ComputerUnpairEntry[];
+  /**
+   * Every unreadable file per source, newest failure first, up to
+   * COMPUTER_UNREADABLE_FILES_LIMIT (`more` counts the rest, which
+   * UNREADABLE_FILES_PAGE_TOOL_NAME lists). For an unlocked session, a file
+   * with a place to open carries a one-time `token` for
+   * OPEN_UNREADABLE_FILE_TOOL_NAME, bound to that session; the engine keeps
+   * where it opens (never a path in the browser).
+   */
+  unreadable?: ComputerUnreadableEntry[];
 }
 
 export interface ComputerUnpairEntry {
   sourceId: string;
   label: string;
   confirmation: string;
+}
+
+export interface ComputerUnreadableEntry {
+  sourceId: string;
+  files: Array<{ name: string; token?: string }>;
+  more: number;
+  /** Present when `more` is: the cursor UNREADABLE_FILES_PAGE_TOOL_NAME reads the next page from. */
+  after?: string;
 }
 
 /**
@@ -391,6 +453,22 @@ export const INDEX_FASTER_TOOL_NAME = 'olympus_index_faster';
  * computer, so ending it does too (design, 2026-10-09).
  */
 export const UNPAIR_SOURCE_TOOL_NAME = 'olympus_unpair_source';
+
+/**
+ * Computer only, never listed to ChatGPT: open one unreadable file
+ * (`{token}`, a one-time token from ComputerDashboardMeta.unreadable). The
+ * engine opens its synced copy on this computer, or answers `{url}` (the
+ * file's own web page) for the panel to open. Never takes a path.
+ */
+export const OPEN_UNREADABLE_FILE_TOOL_NAME = 'olympus_open_unreadable_file';
+
+/**
+ * Computer only, never listed to ChatGPT: the next page of one source's
+ * unreadable files (`{source_id, after}`: the `after` cursor the last page
+ * gave), past the first COMPUTER_UNREADABLE_FILES_LIMIT, with open tokens.
+ * Answers `{status: 'listed', files, more, after?}`.
+ */
+export const UNREADABLE_FILES_PAGE_TOOL_NAME = 'olympus_unreadable_files';
 
 /**
  * Every tool the panel calls, and so the only tools an Olympus host runs for
@@ -410,8 +488,14 @@ export const PANEL_TOOL_NAMES = [
   SYNC_SOURCE_TOOL_NAME,
 ] as const;
 
-/** The computer adds Index faster and Unpair to the panel's tools. */
-export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [...PANEL_TOOL_NAMES, INDEX_FASTER_TOOL_NAME, UNPAIR_SOURCE_TOOL_NAME];
+/** The computer adds Index faster, Unpair, and listing and opening unreadable files to the panel's tools. */
+export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [
+  ...PANEL_TOOL_NAMES,
+  INDEX_FASTER_TOOL_NAME,
+  UNPAIR_SOURCE_TOOL_NAME,
+  OPEN_UNREADABLE_FILE_TOOL_NAME,
+  UNREADABLE_FILES_PAGE_TOOL_NAME,
+];
 
 /** The `_meta` key carrying the picker's names to the widget only. */
 export const SCOPE_UI_META_KEY = 'olympus/scope';
