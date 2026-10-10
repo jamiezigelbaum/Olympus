@@ -15,6 +15,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import type { ConsultAskResult } from '../../core/consult-ask.ts';
+import type { ZkapiDailyLimitState } from '../../core/consult-transport-zkapi.ts';
 import { privateAnswerInstallId } from '../../../connect-relay/shared/private-answer.ts';
 import {
   generateEngineKeyPair,
@@ -43,7 +44,35 @@ export interface PrivateQuestionAskInput {
   readonly level: PrivateQuestionLevel;
   readonly cleanup?: PrivateQuestionCleanup;
   readonly signal: AbortSignal;
+  /** The transport's final check before it reserves and dispatches (ConsultAskInput.stillAuthorized): the opening connection is not revoked. */
+  readonly stillAuthorized: () => boolean;
 }
+
+/**
+ * Who opened the panel (the tool call's verified connection). A job and every
+ * job minted from it by "Ask another" carry it: a revoked connection asks
+ * nothing more and mints no successor, though an outcome already in can still
+ * be collected. A read-only (demo) grant asks only while the zkAPI route has
+ * an owner-set daily limit that is not yet reached.
+ */
+export interface PrivateQuestionOrigin {
+  readonly connectionId?: string;
+  readonly readOnly?: boolean;
+}
+
+/** Why `begin` opened no panel for a read-only grant. */
+export interface PrivateQuestionBeginRefusal {
+  readonly refused: 'daily_limit_unset' | 'daily_limit_reached';
+}
+
+/** The panel's words when a read-only grant's question is stopped by the daily limit (ChatGPT-hosted: no money words). */
+export const PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS = {
+  daily_limit_unset: {
+    code: 'daily_limit_unset',
+    message: 'Questions from this demo sign-in need a daily zkAPI limit set in Olympus, and none is set, so nothing was sent.',
+  },
+  daily_limit_reached: { code: 'daily_limit_reached', message: 'The daily zkAPI limit you set is reached.' },
+} as const;
 
 export interface PrivateQuestionJobsOptions {
   /** This install's id (the relay routes the panel's requests by it); undefined means no job can be opened. */
@@ -56,6 +85,10 @@ export interface PrivateQuestionJobsOptions {
    * settings file (test/consult-settings.test.ts holds who may read it).
    */
   readonly choice: () => PrivateQuestionChoice;
+  /** Whether a connection is still approved (not revoked). A job with a connection and no answer here is treated as revoked. */
+  readonly connectionActive?: (connectionId: string) => boolean;
+  /** The zkAPI route's daily limit (consult-transport-zkapi.ts zkapiDailyLimitState); absent counts as unset. */
+  readonly dailyLimit?: () => ZkapiDailyLimitState;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly maxJobs?: number;
@@ -75,6 +108,7 @@ interface Job {
   readonly expiresAt: number;
   readonly enginePrivateKey: CryptoKey;
   readonly askKey: string;
+  readonly origin: PrivateQuestionOrigin;
   /** The panel key that asked (base64url raw); set by the first `ask`. */
   claimKey?: string;
   panelKey?: CryptoKey;
@@ -105,10 +139,20 @@ export class PrivateQuestionJobs {
     this.maxJobs = options.maxJobs ?? MAX_JOBS;
   }
 
-  /** Opens a job for the panel; undefined when this install has no id yet (not linked to the relay). */
-  async begin(): Promise<PrivateQuestionMetaV1 | undefined> {
+  /**
+   * Opens a job for the panel; undefined when this install has no id yet (not
+   * linked to the relay). A read-only grant gets a refusal instead unless the
+   * daily limit is set and not reached.
+   */
+  begin(): Promise<PrivateQuestionMetaV1 | undefined>;
+  begin(origin: PrivateQuestionOrigin): Promise<PrivateQuestionMetaV1 | PrivateQuestionBeginRefusal | undefined>;
+  async begin(origin: PrivateQuestionOrigin = {}): Promise<PrivateQuestionMetaV1 | PrivateQuestionBeginRefusal | undefined> {
     const installId = this.options.installId();
     if (!installId) return undefined;
+    if (origin.readOnly) {
+      const limit = this.dailyLimit();
+      if (limit !== 'available') return { refused: limit === 'reached' ? 'daily_limit_reached' : 'daily_limit_unset' };
+    }
     this.sweep();
     // Over the cap, the oldest job that is not running is dropped; a job whose ask was dispatched (possibly paid for) is
     // never evicted, so the panel that asked it still collects its outcome (Codex review of PR #227). When every retained
@@ -126,6 +170,7 @@ export class PrivateQuestionJobs {
       expiresAt: at + this.ttlMs,
       enginePrivateKey: engine.privateKey,
       askKey: engine.publicKey,
+      origin: { ...(origin.connectionId !== undefined ? { connectionId: origin.connectionId } : {}), ...(origin.readOnly ? { readOnly: true } : {}) },
       state: 'open',
       abort: new AbortController(),
       pollTokens: POLL_CAPACITY,
@@ -161,6 +206,8 @@ export class PrivateQuestionJobs {
     const plaintext = parseQuestion(text);
     if (!plaintext) return invalid();
     if (this.jobs.get(jobId) !== job || job.state !== 'open') return this.jobs.get(jobId) === job ? this.outcome(job) : gone();
+    // A revoked connection's panel asks nothing (checked last, just before dispatch).
+    if (!this.originActive(job)) return gone();
     job.claimKey = panel.raw;
     job.panelKey = panel.key;
     job.state = 'working';
@@ -201,8 +248,12 @@ export class PrivateQuestionJobs {
     if (job.claimKey === undefined || job.claimKey !== panel.raw) return { status: 409, body: { status: 'claimed' } };
     if (job.state !== 'done') return { status: 409, body: { status: 'pending' } };
     if (!this.takePoll(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
-    const meta = await this.begin();
+    // The successor carries this job's origin: a revoked connection mints none.
+    if (!this.originActive(job)) return gone();
+    const meta = await this.begin(job.origin);
     if (!meta) return { status: 503, body: { status: 'mac_offline' }, retryAfterSeconds: 30 };
+    // A read-only grant past its daily limit: no new job; the panel shows it as it shows a job gone.
+    if ('refused' in meta) return gone();
     return { status: 200, body: { status: 'opened', v: 1, meta } };
   }
 
@@ -218,16 +269,24 @@ export class PrivateQuestionJobs {
 
   private async run(job: Job, plaintext: PrivateQuestionPlaintextV1): Promise<void> {
     let result: PrivateQuestionResultV1;
-    try {
-      const outcome = await this.options.ask({
-        question: plaintext.question,
-        level: plaintext.level,
-        ...(plaintext.cleanup !== undefined ? { cleanup: plaintext.cleanup } : {}),
-        signal: job.abort.signal,
-      });
-      result = resultOf(outcome);
-    } catch {
-      result = { v: 1, state: 'refused', code: 'internal_error', message: 'The question could not be asked from this computer.' };
+    // A read-only grant's question is sent only while the daily limit is set and not reached (the transport enforces the cap itself too).
+    const limit = job.origin.readOnly ? this.dailyLimit() : 'available';
+    if (limit !== 'available') {
+      result = { v: 1, state: 'refused', ...PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS[limit === 'reached' ? 'daily_limit_reached' : 'daily_limit_unset'] };
+    } else {
+      try {
+        const outcome = await this.options.ask({
+          question: plaintext.question,
+          level: plaintext.level,
+          ...(plaintext.cleanup !== undefined ? { cleanup: plaintext.cleanup } : {}),
+          signal: job.abort.signal,
+          // Revoked while the question was being prepared or the session started: nothing is sent.
+          stillAuthorized: () => this.originActive(job),
+        });
+        result = resultOf(outcome);
+      } catch {
+        result = { v: 1, state: 'refused', code: 'internal_error', message: 'The question could not be asked from this computer.' };
+      }
     }
     if (this.jobs.get(job.id) !== job || !job.panelKey) return;
     try {
@@ -244,6 +303,24 @@ export class PrivateQuestionJobs {
     if (!job) return;
     this.jobs.delete(id);
     job.abort.abort();
+  }
+
+  private originActive(job: Job): boolean {
+    const id = job.origin.connectionId;
+    if (id === undefined) return true;
+    try {
+      return this.options.connectionActive?.(id) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private dailyLimit(): ZkapiDailyLimitState {
+    try {
+      return this.options.dailyLimit?.() ?? 'unset';
+    } catch {
+      return 'reached';
+    }
   }
 
   private takePoll(job: Job): boolean {

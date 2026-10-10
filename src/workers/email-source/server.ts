@@ -4532,6 +4532,8 @@ export async function main(): Promise<void> {
   // "Ask anonymously" (the ask_anonymously agent tool: the only way a
   // question goes to zkAPI), wired inside the consult block below.
   let askAnonymouslyNow: ((input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
+  // The zkAPI route's daily limit (a demo grant's private questions need one set), wired inside the consult block below.
+  let zkapiDailyLimitNow: (() => import('../../core/consult-transport-zkapi.ts').ZkapiDailyLimitState) | undefined;
   // The last time the ChatGPT model was missing from the live zkAPI listing (for the card); cleared by a reply.
   let chatgptModelProblem: { at: string; message: string } | undefined;
   const privateAnswers = new PrivateAnswerJobs({
@@ -4570,6 +4572,7 @@ export async function main(): Promise<void> {
         ...(input.cleanup !== undefined ? { cleanup: input.cleanup } : {}),
         callerProvider: 'openai',
         signal: input.signal,
+        stillAuthorized: input.stillAuthorized,
       })
       : Promise.resolve({ ok: false as const, code: 'transport_unavailable', message: 'Anonymous answers are not set up on this computer.' })),
     // The panel's default choice: the dashboard's saved level and Standard preparation (consult.json, read at every open).
@@ -4579,6 +4582,9 @@ export async function main(): Promise<void> {
       const standard = consultStandardBinding(settings);
       return { level: consultAskLevelFromSettings(settings.level), cleanup: standard.mode, customInstruction: standard.mode === 'custom' };
     },
+    // A job asks, and mints a successor, only while the connection that opened it is not revoked.
+    connectionActive: (connectionId) => remoteConnections()?.list().some((connection) => connection.id === connectionId && connection.revokedAt === null) === true,
+    dailyLimit: () => zkapiDailyLimitNow?.() ?? 'unset',
   });
   const privateAnswerSweep = setInterval(() => {
     privateAnswers.sweep();
@@ -4587,7 +4593,7 @@ export async function main(): Promise<void> {
   privateAnswerSweep.unref?.();
   {
     const { CONSULT_WRITER_LIMITS, createConsultWriterServer, defaultConsultMemoryProbe, runConsultWriter, runOwnConsultWriter } = await import('../../core/consult-writer.ts');
-    const { openZkapiConsultSession, resolveZkapiConsultTransport } = await import('../../core/consult-transport-zkapi.ts');
+    const { defaultZkapiStatePath, openZkapiConsultSession, resolveZkapiConsultTransport, zkapiDailyLimitState } = await import('../../core/consult-transport-zkapi.ts');
     type WriterServer = import('../../core/consult-writer.ts').ConsultWriterServer;
     // The writer's own llama-server on the answer model's verified files,
     // created once those files are installed in this process; started on
@@ -4616,6 +4622,11 @@ export async function main(): Promise<void> {
       (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
       { env: process.env, model },
     );
+    // The route's settings and today's record only: no key is resolved for this check.
+    zkapiDailyLimitNow = () => {
+      const route = resolveZkapiConsultTransport(sovereigntyEngine.config.modelProfiles, () => undefined, { env: process.env });
+      return route ? zkapiDailyLimitState(route.settings, route.statePath ?? defaultZkapiStatePath(), new Date()) : 'unset';
+    };
     // The owner's own writer model (consult.json `writer`) arrives as the Ask
     // read it (control.writer; null: the built-in model writes), never reread
     // here, so the writer that runs is the one whose gate net applies. Its key

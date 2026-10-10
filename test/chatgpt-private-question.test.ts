@@ -4,7 +4,12 @@
 // `/private/<job>/ask` through with a larger body.
 
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ConsultAskResult } from '../src/core/consult-ask.ts';
+import { reserveZkapiRequest, ZKAPI_CONSULT_ERROR_MESSAGES, zkapiDailyLimitState, type ZkapiDailyLimitState } from '../src/core/consult-transport-zkapi.ts';
+import type { ZkapiConsultSettings } from '../src/core/zkapi-consult-settings.ts';
 import {
   generateEngineKeyPair,
   generatePanelKeyPair,
@@ -40,6 +45,8 @@ interface Harness {
   /** Resolves the running ask with the given outcome. */
   answer: (outcome: ConsultAskResult | Error) => void;
   aborted: () => boolean;
+  /** The last ask's final check, as the transport calls it just before dispatch. */
+  stillAuthorized: () => boolean;
 }
 
 function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs>[0]> = {}, auto?: ConsultAskResult): Harness {
@@ -48,11 +55,13 @@ function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs
   let resolve: ((outcome: ConsultAskResult) => void) | undefined;
   let reject: ((error: Error) => void) | undefined;
   let signal: AbortSignal | undefined;
+  let stillAuthorized: (() => boolean) | undefined;
   const jobs = new PrivateQuestionJobs({
     installId: () => INSTALL,
     ask: (input) => {
       asked.push({ question: input.question, level: input.level, ...(input.cleanup ? { cleanup: input.cleanup } : {}) });
       signal = input.signal;
+      stillAuthorized = input.stillAuthorized;
       if (auto) return Promise.resolve(auto);
       return new Promise<ConsultAskResult>((res, rej) => { resolve = res; reject = rej; });
     },
@@ -66,6 +75,7 @@ function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs
     asked,
     answer: (outcome) => (outcome instanceof Error ? reject!(outcome) : resolve!(outcome)),
     aborted: () => signal?.aborted === true,
+    stillAuthorized: () => stillAuthorized!(),
   };
 }
 
@@ -297,6 +307,115 @@ describe('the jobs: begin → ask → collect', () => {
     expect(resultOf({ ok: false, code: 'needs_choice', message: 'm', options: {} as never })).toEqual({ v: 1, state: 'refused', code: 'needs_choice', message: 'm' });
     // A send that failed after the question left carries the transport's outcome and what left.
     expect(resultOf({ ok: false, code: 'session_spent', message: 'm', sent: 'What left?', outcome: 'sent_failed' })).toEqual({ v: 1, state: 'refused', code: 'session_spent', message: 'm', outcome: 'sent_failed', sent: 'What left?' });
+  });
+});
+
+describe('a job\'s origin: the connection that opened it, and a demo grant\'s daily limit', () => {
+  test('a revoked connection asks nothing and mints no successor; an outcome already in is still collected', async () => {
+    let active = true;
+    const h = harness({ connectionActive: (id) => id === 'conn-1' && active });
+    const meta = (await h.jobs.begin({ connectionId: 'conn-1' })) as PrivateQuestionMetaV1;
+    const { panel, body } = await panelAsk(meta, { v: 1, question: 'q', level: 'strict' });
+    expect((await h.jobs.ask(meta.jobId, body)).status).toBe(202);
+    h.answer(ANSWERED);
+    await settle();
+    // A successor carries the origin: still active, it opens.
+    const next = (((await h.jobs.another(meta.jobId, panel.publicKey)).body) as unknown as { meta: PrivateQuestionMetaV1 }).meta;
+    active = false;
+    expect((await opened(h.jobs, meta.jobId, panel)).state).toBe('answered');
+    expect(await h.jobs.another(meta.jobId, panel.publicKey)).toEqual({ status: 410, body: { status: 'gone' } });
+    const second = await panelAsk(next, { v: 1, question: 'q2', level: 'strict' });
+    expect(await h.jobs.ask(next.jobId, second.body)).toEqual({ status: 410, body: { status: 'gone' } });
+    expect(h.asked).toEqual([{ question: 'q', level: 'strict' }]);
+    // No answer from the connection check counts as revoked.
+    const unchecked = harness();
+    const lone = (await unchecked.jobs.begin({ connectionId: 'conn-1' })) as PrivateQuestionMetaV1;
+    expect((await unchecked.jobs.ask(lone.jobId, (await panelAsk(lone, { v: 1, question: 'q', level: 'strict' })).body)).status).toBe(410);
+    expect(unchecked.asked).toEqual([]);
+  });
+
+  test('revoked while the question is prepared: the final check before dispatch refuses; revoked after dispatch: the outcome is still collected', async () => {
+    let active = true;
+    const h = harness({ connectionActive: () => active });
+    // Paused in preparation (the ask lane has the question, nothing dispatched yet), then revoked.
+    const meta = (await h.jobs.begin({ connectionId: 'conn-1' })) as PrivateQuestionMetaV1;
+    const { panel, body } = await panelAsk(meta, { v: 1, question: 'q', level: 'strict' });
+    expect((await h.jobs.ask(meta.jobId, body)).status).toBe(202);
+    active = false;
+    expect(h.stillAuthorized()).toBe(false);
+    // What the transport answers when its final authorization says no.
+    h.answer({ ok: false, code: 'authorization_refused', message: ZKAPI_CONSULT_ERROR_MESSAGES.authorization_refused, outcome: 'not_sent' } as ConsultAskResult);
+    await settle();
+    expect(await opened(h.jobs, meta.jobId, panel)).toMatchObject({ state: 'refused', code: 'authorization_refused' });
+    // Dispatched while approved, revoked before the answer: the answer is still collected.
+    active = true;
+    const next = (await h.jobs.begin({ connectionId: 'conn-1' })) as PrivateQuestionMetaV1;
+    const second = await panelAsk(next, { v: 1, question: 'q2', level: 'strict' });
+    expect((await h.jobs.ask(next.jobId, second.body)).status).toBe(202);
+    expect(h.stillAuthorized()).toBe(true);
+    active = false;
+    h.answer(ANSWERED);
+    await settle();
+    expect((await opened(h.jobs, next.jobId, second.panel)).state).toBe('answered');
+  });
+
+  test('a read-only grant opens a panel only while a daily limit is set and not reached; the owner is unaffected', async () => {
+    let limit: ZkapiDailyLimitState = 'unset';
+    const h = harness({ dailyLimit: () => limit });
+    expect(await h.jobs.begin({ readOnly: true })).toEqual({ refused: 'daily_limit_unset' });
+    expect('jobId' in ((await h.jobs.begin()) as PrivateQuestionMetaV1)).toBe(true);
+    expect(await harness().jobs.begin({ readOnly: true })).toEqual({ refused: 'daily_limit_unset' });
+    limit = 'reached';
+    expect(await h.jobs.begin({ readOnly: true })).toEqual({ refused: 'daily_limit_reached' });
+    limit = 'available';
+    const meta = (await h.jobs.begin({ readOnly: true })) as PrivateQuestionMetaV1;
+    // Reached by the time the question arrives: refused, sealed, and nothing dispatched.
+    limit = 'reached';
+    const { panel, body } = await panelAsk(meta, { v: 1, question: 'q', level: 'strict' });
+    expect((await h.jobs.ask(meta.jobId, body)).status).toBe(202);
+    await settle();
+    expect(h.asked).toEqual([]);
+    expect(await opened(h.jobs, meta.jobId, panel)).toEqual({ v: 1, state: 'refused', code: 'daily_limit_reached', message: 'The daily zkAPI limit you set is reached.' });
+    // And no successor past the limit.
+    expect(await h.jobs.another(meta.jobId, panel.publicKey)).toEqual({ status: 410, body: { status: 'gone' } });
+  });
+
+  test('with the real daily record: once the cap is used up, a demo grant\'s further questions are not dispatched', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-pq-limit-'));
+    try {
+      const statePath = join(dir, 'zkapi-consult-state.json');
+      const now = new Date('2026-10-10T12:00:00Z');
+      const settings = { dailyRequestCap: 1 } as unknown as ZkapiConsultSettings;
+      expect(zkapiDailyLimitState({} as ZkapiConsultSettings, statePath, now)).toBe('unset');
+      // A daily request cap alone is an enforced limit: no spend cap is needed.
+      expect(zkapiDailyLimitState(settings, statePath, now)).toBe('available');
+      const dispatched: string[] = [];
+      const jobs = new PrivateQuestionJobs({
+        installId: () => INSTALL,
+        // The transport's own reservation, as a send makes it.
+        ask: async (input) => {
+          dispatched.push(input.question);
+          expect(reserveZkapiRequest(statePath, { requestCap: 1 }, now).reserved).toBe(true);
+          return ANSWERED;
+        },
+        choice: () => ({ level: 'strict', cleanup: 'as_written', customInstruction: false }),
+        dailyLimit: () => zkapiDailyLimitState(settings, statePath, now),
+      });
+      const first = (await jobs.begin({ readOnly: true })) as PrivateQuestionMetaV1;
+      const second = (await jobs.begin({ readOnly: true })) as PrivateQuestionMetaV1;
+      const a = await panelAsk(first, { v: 1, question: 'one', level: 'strict' });
+      expect((await jobs.ask(first.jobId, a.body)).status).toBe(202);
+      await settle();
+      expect(zkapiDailyLimitState(settings, statePath, now)).toBe('reached');
+      const b = await panelAsk(second, { v: 1, question: 'two', level: 'strict' });
+      expect((await jobs.ask(second.jobId, b.body)).status).toBe(202);
+      await settle();
+      expect(dispatched).toEqual(['one']);
+      expect(await opened(jobs, second.jobId, b.panel)).toMatchObject({ state: 'refused', code: 'daily_limit_reached' });
+      expect(await jobs.begin({ readOnly: true })).toEqual({ refused: 'daily_limit_reached' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
