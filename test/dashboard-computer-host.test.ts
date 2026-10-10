@@ -622,7 +622,8 @@ const UNREADABLE_DROPBOX = {
     more: { label: 'and 2 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: `${OPEN_BASE}unreadable/dropbox/`, openHref: true },
   },
 } as DashboardViewModelV1['sources'][number];
-const UNREADABLE_META = { unreadable: [{ sourceId: 'dropbox.files', files: [{ name: 'Q3 deck.key', token: FILE_TOKEN }, { name: 'scan.tiff' }], more: 1 }] };
+const PAGE_CURSOR = `2026-10-01T00:00:00.000Z~${'C'.repeat(22)}`;
+const UNREADABLE_META = { unreadable: [{ sourceId: 'dropbox.files', files: [{ name: 'Q3 deck.key', token: FILE_TOKEN }, { name: 'scan.tiff' }], more: 1, after: PAGE_CURSOR }] };
 
 describe('See why on the computer', () => {
   test('lists the computer\'s own files: each with a token opens through the computer-only tool, the rest plain text', async () => {
@@ -653,9 +654,9 @@ describe('See why on the computer', () => {
     more()!.click();
     await settle();
     const calls = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params);
-    expect(calls[calls.length - 1]).toEqual({ name: UNREADABLE_FILES_PAGE_TOOL_NAME, arguments: { source_id: 'dropbox.files', offset: 2 } });
+    expect(calls[calls.length - 1]).toEqual({ name: UNREADABLE_FILES_PAGE_TOOL_NAME, arguments: { source_id: 'dropbox.files', after: PAGE_CURSOR } });
     const NEXT = 'N'.repeat(43);
-    page.respond('tools/call', { content: [{ type: 'text', text: '1 more files.' }], structuredContent: { status: 'listed', source_id: 'dropbox.files', offset: 2, files: [{ name: 'page two.pdf', token: NEXT }], more: 0 } });
+    page.respond('tools/call', { content: [{ type: 'text', text: '1 more files.' }], structuredContent: { status: 'listed', source_id: 'dropbox.files', files: [{ name: 'page two.pdf', token: NEXT }], more: 0 } });
     await settle();
     const why = page.win.document.querySelector('details.why')!;
     expect(Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'scan.tiff', 'page two.pdf']);

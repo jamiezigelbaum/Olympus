@@ -96858,7 +96858,7 @@ var init_readiness_ledger = __esm(() => {
 });
 
 // src/workers/file-extraction/unreadable-files.ts
-import { randomBytes as randomBytes15 } from "node:crypto";
+import { createHash as createHash53, randomBytes as randomBytes15 } from "node:crypto";
 function createUnreadableVerdict(input) {
   return (item) => {
     const located = input.locate(item.ref);
@@ -96886,30 +96886,41 @@ function createUnreadableVerdict(input) {
 function isUnreadableOpenToken(value) {
   return typeof value === "string" && value.length === TOKEN_LENGTH && Array.from(value).every((char) => TOKEN_ALPHABET.has(char));
 }
+function isUnreadablePageCursor(value) {
+  if (typeof value !== "string")
+    return false;
+  const split = value.indexOf("~");
+  if (split < 10 || split > 40 || value.length !== split + 1 + 22)
+    return false;
+  return Array.from(value.slice(0, split)).every((char) => CURSOR_TIME_ALPHABET.has(char)) && Array.from(value.slice(split + 1)).every((char) => TOKEN_ALPHABET.has(char));
+}
 function createUnreadableFiles(options) {
   const now = options.now ?? Date.now;
   const ttl = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
   const byToken = new Map;
   const tokenBySlot = new Map;
-  const verdicts = new Map;
   let bucket = OPEN_RATE.capacity;
   let refilledAt = now();
   const keyOf = (ref) => `${ref.corpusId}\x00${ref.localItemId}`;
-  function verdictOf(item, at) {
-    const key = keyOf(item.ref);
-    const known = verdicts.get(key);
-    if (known && at - known.at < VERDICT_REUSE_MS && at >= known.at)
-      return known.verdict;
-    let verdict;
+  function verdictOf(item) {
     try {
-      verdict = options.verdict(item);
+      return options.verdict(item);
     } catch {
-      verdict = "blocked_policy";
+      return "blocked_policy";
     }
-    verdicts.set(key, { verdict, at });
-    if (verdicts.size > MAX_TOKENS)
-      verdicts.delete(verdicts.keys().next().value);
-    return verdict;
+  }
+  function placeOf(item) {
+    return { at: item.failedAt, id: createHash53("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
+  }
+  function cursorOf(item) {
+    const place = placeOf(item);
+    return `${place.at}~${place.id}`;
+  }
+  function isAfter(place, cursor) {
+    const split = cursor.lastIndexOf("~");
+    const at = cursor.slice(0, split);
+    const id = cursor.slice(split + 1);
+    return place.at < at || place.at === at && place.id > id;
   }
   function listed(corpusId) {
     try {
@@ -96918,8 +96929,8 @@ function createUnreadableFiles(options) {
       return [];
     }
   }
-  function current(corpusIds, at) {
-    return merged(corpusIds).filter((item) => verdictOf(item, at) === "unreadable");
+  function current(corpusIds) {
+    return merged(corpusIds).filter((item) => verdictOf(item) === "unreadable");
   }
   function merged(corpusIds) {
     const seen = new Set;
@@ -96933,7 +96944,14 @@ function createUnreadableFiles(options) {
         out.push(item);
       }
     }
-    return out.sort((a, b) => a.failedAt === b.failedAt ? 0 : a.failedAt < b.failedAt ? 1 : -1);
+    const places = new Map(out.map((item) => [item, placeOf(item)]));
+    return out.sort((a, b) => {
+      const pa = places.get(a);
+      const pb = places.get(b);
+      if (pa.at !== pb.at)
+        return pa.at < pb.at ? 1 : -1;
+      return pa.id === pb.id ? 0 : pa.id < pb.id ? -1 : 1;
+    });
   }
   function locator(item) {
     try {
@@ -97006,11 +97024,10 @@ function createUnreadableFiles(options) {
   }
   return {
     recheck(corpusId) {
-      const at = now();
       let unreadable = 0;
       let blocked = 0;
       for (const item of listed(corpusId)) {
-        const verdict = verdictOf(item, at);
+        const verdict = verdictOf(item);
         if (verdict === "unreadable")
           unreadable += 1;
         else if (verdict === "blocked_policy")
@@ -97019,20 +97036,30 @@ function createUnreadableFiles(options) {
       return { unreadable, blocked };
     },
     names(corpusIds, limit) {
-      return current(corpusIds, now()).slice(0, Math.max(0, limit)).map(displayName);
+      return current(corpusIds).slice(0, Math.max(0, limit)).map(displayName);
     },
     computerList(corpusIds, limit, list = {}) {
       const at = now();
       sweep(at);
-      const all = current(corpusIds, at);
-      const offset = Math.max(0, Math.trunc(list.offset ?? 0));
-      const shown = all.slice(offset, offset + Math.max(0, limit));
+      const cursor = list.after;
+      const all = merged(corpusIds).filter((item) => !cursor || isAfter(placeOf(item), cursor));
+      const shown = [];
+      let more = 0;
+      for (const item of all) {
+        if (verdictOf(item) !== "unreadable")
+          continue;
+        if (shown.length < Math.max(0, limit))
+          shown.push(item);
+        else
+          more += 1;
+      }
       const opener = list.opener;
       const files = shown.map((item) => {
         const name = displayName(item);
         return opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
       });
-      return { files, more: Math.max(0, all.length - offset - shown.length) };
+      const last = shown.at(-1);
+      return { files, more, ...last ? { after: cursorOf(last) } : {} };
     },
     async open(token, opener) {
       if (!isUnreadableOpenToken(token))
@@ -97045,8 +97072,7 @@ function createUnreadableFiles(options) {
       if (!takeOpen(at))
         return { status: "rate_limited" };
       drop(token, entry);
-      verdicts.delete(keyOf(entry.item.ref));
-      if (verdictOf(entry.item, at) !== "unreadable")
+      if (verdictOf(entry.item) !== "unreadable")
         return { status: "gone" };
       const resolved = target(entry.item);
       if (!resolved)
@@ -97064,11 +97090,12 @@ function createUnreadableFiles(options) {
     }
   };
 }
-var TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS = 2000, OPEN_RATE, UNNAMED = "Unnamed file", VERDICT_REUSE_MS = 1000;
+var TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS = 2000, OPEN_RATE, UNNAMED = "Unnamed file", CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   OPEN_RATE = { capacity: 10, refillPerSecond: 1 };
+  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
 });
 
 // src/core/analyst-openai.ts
@@ -98410,7 +98437,7 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash53 } from "node:crypto";
+import { createHash as createHash54 } from "node:crypto";
 import { readFileSync as readFileSync48 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir55 } from "node:os";
@@ -98903,7 +98930,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2565(value) {
-  return createHash53("sha256").update(value, "utf8").digest("hex");
+  return createHash54("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -100324,7 +100351,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash54 } from "node:crypto";
+import { createHash as createHash55 } from "node:crypto";
 function escapeHtml2(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -100375,14 +100402,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash54("sha256").update(normalised).digest("hex");
+  return createHash55("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash54("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash55("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -101700,8 +101727,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       if (name === H.unreadablePageTool) {
         const page = result && result.structuredContent;
         if (page && page.status === "listed" && typeof page.source_id === "string" && Array.isArray(page.files)) {
-          const prior = state.unreadablePages[page.source_id] || { files: [], more: 0 };
-          state.unreadablePages[page.source_id] = { files: prior.files.concat(unreadableEntries(page.files)), more: moreCount(page.more) };
+          const prior = state.unreadablePages[page.source_id];
+          state.unreadablePages[page.source_id] = {
+            files: (prior ? prior.files : []).concat(unreadableEntries(page.files)),
+            more: moreCount(page.more),
+            after: cursorOf(page.after)
+          };
         }
         redraw();
         return;
@@ -102294,8 +102325,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         add(list, item);
       });
       if (own.more > 0) {
-        const more = { label: fill2(P.unreadableMore, { count: count(own.more) }), tool: H.unreadablePageTool, args: { source_id: id, offset: own.files.length } };
-        add(list, add(el("li"), fixControl(more, "why-page:" + id, "plain", false)));
+        const label = fill2(P.unreadableMore, { count: count(own.more) });
+        add(list, own.after ? add(el("li"), fixControl({ label, tool: H.unreadablePageTool, args: { source_id: id, after: own.after } }, "why-page:" + id, "plain", false)) : el("li", "muted", label));
       }
       return list.childNodes.length ? list : null;
     }
@@ -102316,7 +102347,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const pages = state.unreadablePages[id];
     const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
     const more = pages ? pages.more : moreCount(entry.more);
-    return files.length || more ? { files, more } : null;
+    const after = pages ? pages.after : cursorOf(entry.after);
+    return files.length || more ? { files, more, after } : null;
+  }
+  function cursorOf(value) {
+    return typeof value === "string" && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : "";
   }
   function unreadableEntries(input) {
     return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
@@ -107131,9 +107166,9 @@ __export(exports_dashboard_resource, {
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
-import { createHash as createHash55 } from "node:crypto";
+import { createHash as createHash56 } from "node:crypto";
 function versionedResourceUri(base, html) {
-  return `${base}?v=${createHash55("sha256").update(html).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash56("sha256").update(html).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -108298,7 +108333,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash56 } from "node:crypto";
+import { createHash as createHash57 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -108326,7 +108361,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash56("sha256").update(value).digest("hex");
+  return createHash57("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -108531,7 +108566,7 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash57, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash58, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 import { readFileSync as readFileSync50, statSync as statSync25 } from "node:fs";
 import { homedir as homedir56 } from "node:os";
 import { join as join82, resolve as resolve10 } from "node:path";
@@ -111797,7 +111832,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual6(createHash57("sha256").update(expected).digest(), createHash57("sha256").update(state).digest());
+  return timingSafeEqual6(createHash58("sha256").update(expected).digest(), createHash58("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -112015,7 +112050,7 @@ function dashboardOAuthClientSecretRequired(source) {
 }
 function dashboardPanelOpener(request) {
   const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return csrf ? `session:${createHash57("sha256").update(csrf).digest("base64url")}` : "bearer";
+  return csrf ? `session:${createHash58("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -113326,7 +113361,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash58 } from "node:crypto";
+import { createHash as createHash59 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -114154,7 +114189,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash58("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash59("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -114812,7 +114847,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash58("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash59("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -115775,7 +115810,7 @@ var init_answer_activity = __esm(() => {
 });
 
 // src/workers/classification/privacy-profile.ts
-import { createHash as createHash59 } from "node:crypto";
+import { createHash as createHash60 } from "node:crypto";
 import { mkdirSync as mkdirSync43 } from "node:fs";
 import { homedir as homedir57 } from "node:os";
 import { dirname as dirname60, join as join84 } from "node:path";
@@ -115918,7 +115953,7 @@ function privacyRuleToTierRule(rule) {
 }
 function privacyRuleId(rule) {
   const matched = rule.kind === "sender" ? rule.value ?? "" : rule.key ?? "";
-  const digest2 = createHash59("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
+  const digest2 = createHash60("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest2}`;
 }
 function writePrivacyProfile(update, options = {}) {
@@ -123487,7 +123522,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash60, randomBytes as randomBytes18, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash61, randomBytes as randomBytes18, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -123805,7 +123840,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash60("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash61("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -124060,7 +124095,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual8(a, b);
 }
 function sha2566(value) {
-  return createHash60("sha256").update(value).digest("hex");
+  return createHash61("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -126112,7 +126147,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash61 } from "node:crypto";
+import { createHash as createHash62 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -126129,7 +126164,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text4 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text4, etag: `"${createHash61("sha256").update(text4).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text4, etag: `"${createHash62("sha256").update(text4).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -126452,7 +126487,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash62 } from "node:crypto";
+import { createHash as createHash63 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -126476,7 +126511,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest2 = createHash62("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest2 = createHash63("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest2.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -127520,9 +127555,9 @@ async function openUnreadableFile(options, args, context) {
 }
 async function unreadableFilesPage(options, args, context) {
   const keys = Object.keys(args);
-  const offset = args.offset;
-  if (typeof args.source_id !== "string" || typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > 1e6 || keys.some((key) => key !== "source_id" && key !== "offset")) {
-    return refused("source_id and offset must come from the dashboard.", "invalid_params");
+  const after = args.after;
+  if (typeof args.source_id !== "string" || !isUnreadablePageCursor(after) || keys.some((key) => key !== "source_id" && key !== "after")) {
+    return refused("source_id and after must come from the dashboard.", "invalid_params");
   }
   const files = options.unreadableFiles?.();
   if (!files || !context.opener)
@@ -127534,11 +127569,17 @@ async function unreadableFilesPage(options, args, context) {
   const corpusIds = view?.sources.find((card) => card.source_id === sourceId)?.unreadable_files?.corpus_ids;
   if (!corpusIds?.length)
     return refused("This list changed. Refresh the dashboard.", "gone");
-  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { offset, opener: context.opener });
+  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { after, opener: context.opener });
   const page2 = entriesOf(listed.files);
   return {
     content: [{ type: "text", text: `${page2.length} more files.` }],
-    structuredContent: { status: "listed", source_id: args.source_id, offset, files: page2, more: listed.more }
+    structuredContent: {
+      status: "listed",
+      source_id: args.source_id,
+      files: page2,
+      more: listed.more,
+      ...listed.more > 0 && listed.after ? { after: listed.after } : {}
+    }
   };
 }
 function entriesOf(files) {
@@ -127563,7 +127604,7 @@ function computerUnreadableEntries(view, files, opener) {
     }
     const entries = entriesOf(listed.files);
     const more = Math.max(0, listed.more, count2 - entries.length);
-    return [{ sourceId: card.source_id, files: entries, more }];
+    return [{ sourceId: card.source_id, files: entries, more, ...more > 0 && listed.after ? { after: listed.after } : {} }];
   });
 }
 function computerUnpairEntries(view) {
@@ -127622,6 +127663,7 @@ function createDashboardPanelTools(options) {
 var UNPAIR_SOURCE_IDS;
 var init_dashboard_panel_tools = __esm(() => {
   init_dashboard_contract();
+  init_unreadable_files();
   init_mcp_surface();
   init_setup_tools();
   init_http();

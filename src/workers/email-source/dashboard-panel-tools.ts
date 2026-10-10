@@ -28,7 +28,8 @@
  *   are minted only for an unlocked control session (or the worker bearer),
  *   bound to it, open once, and last 30 minutes from issue; a locked reader
  *   gets the names alone. Past the first page, `olympus_unreadable_files
- *   {source_id, offset}` lists the next, so every file is reachable.
+ *   {source_id, after}` lists the next (a keyset cursor, so a file judged
+ *   Secrets between pages moves nothing), so every file is reachable.
  */
 import {
   COMPUTER_HOST_TOOL_NAMES,
@@ -44,7 +45,7 @@ import {
   type ComputerUnpairEntry,
   type ComputerUnreadableEntry,
 } from '../chatgpt/dashboard-contract.ts';
-import type { UnreadableFiles } from '../file-extraction/unreadable-files.ts';
+import { isUnreadablePageCursor, type UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import { callChatGptTool, type ChatGptSurfaceOptions } from '../chatgpt/mcp-surface.ts';
 import type { ChatGptToolResult } from '../chatgpt/response-builder.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from '../chatgpt/setup-tools.ts';
@@ -187,7 +188,7 @@ async function openUnreadableFile(options: DashboardPanelToolsOptions, args: Rec
 }
 
 /**
- * The next page of one source's unreadable files (`{source_id, offset}`), with
+ * The next page of one source's unreadable files (`{source_id, after}`), with
  * open tokens for this opener: what the first page's "more" counts, so every
  * file is reachable however many there are. The source's corpora are the ones
  * the dashboard view names now.
@@ -198,13 +199,13 @@ async function unreadableFilesPage(
   context: DashboardPanelCallContext,
 ): Promise<ChatGptToolResult> {
   const keys = Object.keys(args);
-  const offset = args.offset;
+  const after = args.after;
   if (
     typeof args.source_id !== 'string'
-    || typeof offset !== 'number' || !Number.isInteger(offset) || offset < 0 || offset > 1_000_000
-    || keys.some((key) => key !== 'source_id' && key !== 'offset')
+    || !isUnreadablePageCursor(after)
+    || keys.some((key) => key !== 'source_id' && key !== 'after')
   ) {
-    return refused('source_id and offset must come from the dashboard.', 'invalid_params');
+    return refused('source_id and after must come from the dashboard.', 'invalid_params');
   }
   const files = options.unreadableFiles?.();
   if (!files || !context.opener) return refused('Olympus cannot list these files here.', 'unavailable');
@@ -212,11 +213,17 @@ async function unreadableFilesPage(
   const view = await options.surface().dashboardView(context.signal).catch(() => undefined);
   const corpusIds = view?.sources.find((card) => card.source_id === sourceId)?.unreadable_files?.corpus_ids;
   if (!corpusIds?.length) return refused('This list changed. Refresh the dashboard.', 'gone');
-  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { offset, opener: context.opener });
+  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { after, opener: context.opener });
   const page = entriesOf(listed.files);
   return {
     content: [{ type: 'text', text: `${page.length} more files.` }],
-    structuredContent: { status: 'listed', source_id: args.source_id, offset, files: page, more: listed.more },
+    structuredContent: {
+      status: 'listed',
+      source_id: args.source_id,
+      files: page,
+      more: listed.more,
+      ...(listed.more > 0 && listed.after ? { after: listed.after } : {}),
+    },
   };
 }
 
@@ -252,7 +259,7 @@ export function computerUnreadableEntries(
     // Past the limit the list says how many more; the row's count is the word,
     // so a count read a moment apart from the list never shows fewer.
     const more = Math.max(0, listed.more, count - entries.length);
-    return [{ sourceId: card.source_id, files: entries, more }];
+    return [{ sourceId: card.source_id, files: entries, more, ...(more > 0 && listed.after ? { after: listed.after } : {}) }];
   });
 }
 

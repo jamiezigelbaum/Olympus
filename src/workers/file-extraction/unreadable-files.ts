@@ -20,7 +20,7 @@
  * Source-neutral: the provider's open target (a web page, and a synced copy
  * on this computer) is the composition root's to resolve.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { ExtractionItemRef } from './types.ts';
 import type { ExtractionUnreadableItem, ExtractionUnreadableVerdict } from './job-store.ts';
 import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
@@ -149,15 +149,17 @@ export interface UnreadableFiles {
    */
   names(corpusIds: readonly string[], limit: number): string[];
   /**
-   * The computer's list from `offset`: up to `limit` files, and how many more
-   * there are after them. Only with an `opener` (an unlocked control session,
-   * or the worker bearer) does a file carry an open token, bound to that opener.
+   * The computer's list after the `after` cursor (from the start without
+   * one): up to `limit` files, how many more there are after them, and the
+   * cursor to read those (`after`, present when a file was listed). Only with
+   * an `opener` (an unlocked control session, or the worker bearer) does a
+   * file carry an open token, bound to that opener.
    */
   computerList(
     corpusIds: readonly string[],
     limit: number,
-    options?: { offset?: number; opener?: string },
-  ): { files: UnreadableFileEntry[]; more: number };
+    options?: { after?: string; opener?: string },
+  ): { files: UnreadableFileEntry[]; more: number; after?: string };
   /**
    * Opens the file a token from computerList names, for the opener it was issued to. A token opens once.
    */
@@ -186,10 +188,21 @@ const OPEN_RATE = { capacity: 10, refillPerSecond: 1 };
 const UNNAMED = 'Unnamed file';
 
 /**
- * A verdict asked within this long is reused: one dashboard read asks for the
- * count, the names and the computer's list of the same items.
+ * A page cursor: the last listed file's failure time and an opaque digest of
+ * its identity (never the identity itself).
  */
-const VERDICT_REUSE_MS = 1_000;
+const CURSOR_TIME_ALPHABET = new Set('0123456789TZ:.+-');
+
+/**
+ * Whether a value has the shape of a page cursor computerList hands out.
+ */
+export function isUnreadablePageCursor(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const split = value.indexOf('~');
+  if (split < 10 || split > 40 || value.length !== split + 1 + 22) return false;
+  return Array.from(value.slice(0, split)).every((char) => CURSOR_TIME_ALPHABET.has(char))
+    && Array.from(value.slice(split + 1)).every((char) => TOKEN_ALPHABET.has(char));
+}
 
 interface TokenEntry {
   /**
@@ -206,28 +219,46 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
   const ttl = options.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
   const byToken = new Map<string, TokenEntry>();
   const tokenBySlot = new Map<string, string>();
-  const verdicts = new Map<string, { verdict: ExtractionUnreadableVerdict; at: number }>();
   let bucket = OPEN_RATE.capacity;
   let refilledAt = now();
 
   const keyOf = (ref: ExtractionItemRef) => `${ref.corpusId}\u0000${ref.localItemId}`;
 
   /**
-   * The verdict now (a throw counts as Secrets), reused for VERDICT_REUSE_MS.
+   * The verdict now, asked every time and never reused (a throw counts as
+   * Secrets): an override or a secret-index write in any process shows on
+   * the very next read.
    */
-  function verdictOf(item: ExtractionUnreadableItem, at: number): ExtractionUnreadableVerdict {
-    const key = keyOf(item.ref);
-    const known = verdicts.get(key);
-    if (known && at - known.at < VERDICT_REUSE_MS && at >= known.at) return known.verdict;
-    let verdict: ExtractionUnreadableVerdict;
+  function verdictOf(item: ExtractionUnreadableItem): ExtractionUnreadableVerdict {
     try {
-      verdict = options.verdict(item);
+      return options.verdict(item);
     } catch {
-      verdict = 'blocked_policy';
+      return 'blocked_policy';
     }
-    verdicts.set(key, { verdict, at });
-    if (verdicts.size > MAX_TOKENS) verdicts.delete(verdicts.keys().next().value as string);
-    return verdict;
+  }
+
+  /**
+   * An item's place in the list: newest failure first, ties by an opaque
+   * digest of its identity. Stable whatever else joins or leaves the list,
+   * so a page cursor never skips or repeats a file.
+   */
+  function placeOf(item: ExtractionUnreadableItem): { at: string; id: string } {
+    return { at: item.failedAt, id: createHash('sha256').update(keyOf(item.ref)).digest('base64url').slice(0, 22) };
+  }
+
+  function cursorOf(item: ExtractionUnreadableItem): string {
+    const place = placeOf(item);
+    return `${place.at}~${place.id}`;
+  }
+
+  /**
+   * Whether `place` comes after the cursor's place in the list order.
+   */
+  function isAfter(place: { at: string; id: string }, cursor: string): boolean {
+    const split = cursor.lastIndexOf('~');
+    const at = cursor.slice(0, split);
+    const id = cursor.slice(split + 1);
+    return place.at < at || (place.at === at && place.id > id);
   }
 
   function listed(corpusId: string): readonly ExtractionUnreadableItem[] {
@@ -241,8 +272,8 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
   /**
    * The counted items across these corpora still unreadable now, newest failure first.
    */
-  function current(corpusIds: readonly string[], at: number): ExtractionUnreadableItem[] {
-    return merged(corpusIds).filter((item) => verdictOf(item, at) === 'unreadable');
+  function current(corpusIds: readonly string[]): ExtractionUnreadableItem[] {
+    return merged(corpusIds).filter((item) => verdictOf(item) === 'unreadable');
   }
 
   function merged(corpusIds: readonly string[]): ExtractionUnreadableItem[] {
@@ -256,7 +287,13 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
         out.push(item);
       }
     }
-    return out.sort((a, b) => (a.failedAt === b.failedAt ? 0 : a.failedAt < b.failedAt ? 1 : -1));
+    const places = new Map(out.map((item) => [item, placeOf(item)]));
+    return out.sort((a, b) => {
+      const pa = places.get(a)!;
+      const pb = places.get(b)!;
+      if (pa.at !== pb.at) return pa.at < pb.at ? 1 : -1;
+      return pa.id === pb.id ? 0 : pa.id < pb.id ? -1 : 1;
+    });
   }
 
   function locator(item: ExtractionUnreadableItem): string | undefined {
@@ -335,11 +372,10 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
 
   return {
     recheck(corpusId) {
-      const at = now();
       let unreadable = 0;
       let blocked = 0;
       for (const item of listed(corpusId)) {
-        const verdict = verdictOf(item, at);
+        const verdict = verdictOf(item);
         if (verdict === 'unreadable') unreadable += 1;
         else if (verdict === 'blocked_policy') blocked += 1;
       }
@@ -347,21 +383,31 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     },
 
     names(corpusIds, limit) {
-      return current(corpusIds, now()).slice(0, Math.max(0, limit)).map(displayName);
+      return current(corpusIds).slice(0, Math.max(0, limit)).map(displayName);
     },
 
     computerList(corpusIds, limit, list = {}) {
       const at = now();
       sweep(at);
-      const all = current(corpusIds, at);
-      const offset = Math.max(0, Math.trunc(list.offset ?? 0));
-      const shown = all.slice(offset, offset + Math.max(0, limit));
+      // Keyset paging over the list as it is now (Secrets checked again per
+      // page): a file judged Secrets since the last page leaves the list
+      // without moving any other file past the cursor.
+      const cursor = list.after;
+      const all = merged(corpusIds).filter((item) => !cursor || isAfter(placeOf(item), cursor));
+      const shown: ExtractionUnreadableItem[] = [];
+      let more = 0;
+      for (const item of all) {
+        if (verdictOf(item) !== 'unreadable') continue;
+        if (shown.length < Math.max(0, limit)) shown.push(item);
+        else more += 1;
+      }
       const opener = list.opener;
       const files = shown.map((item): UnreadableFileEntry => {
         const name = displayName(item);
         return opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
       });
-      return { files, more: Math.max(0, all.length - offset - shown.length) };
+      const last = shown.at(-1);
+      return { files, more, ...(last ? { after: cursorOf(last) } : {}) };
     },
 
     async open(token, opener) {
@@ -375,10 +421,9 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
       // Spent now, before anything waits: a token opens once, and a second
       // call racing this one finds nothing.
       drop(token, entry);
-      // Checked again now (never a reused verdict): a file that became
-      // Secrets, or that no store serves any more, never opens from an older list.
-      verdicts.delete(keyOf(entry.item.ref));
-      if (verdictOf(entry.item, at) !== 'unreadable') return { status: 'gone' };
+      // Checked again now: a file that became Secrets, or that no store
+      // serves any more, never opens from an older list.
+      if (verdictOf(entry.item) !== 'unreadable') return { status: 'gone' };
       const resolved = target(entry.item);
       if (!resolved) return { status: 'gone' };
       if (resolved.localPath && options.openFile) {

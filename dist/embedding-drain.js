@@ -23621,6 +23621,14 @@ var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
 // src/workers/dashboard/answer-ready-coverage.ts
 var init_answer_ready_coverage = () => {};
 
+// src/workers/file-extraction/unreadable-files.ts
+var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
+var init_unreadable_files = __esm(() => {
+  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+});
+
 // src/workers/remote-oauth/consent-page.ts
 var init_consent_page = () => {};
 
@@ -25822,8 +25830,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       if (name === H.unreadablePageTool) {
         const page = result && result.structuredContent;
         if (page && page.status === "listed" && typeof page.source_id === "string" && Array.isArray(page.files)) {
-          const prior = state.unreadablePages[page.source_id] || { files: [], more: 0 };
-          state.unreadablePages[page.source_id] = { files: prior.files.concat(unreadableEntries(page.files)), more: moreCount(page.more) };
+          const prior = state.unreadablePages[page.source_id];
+          state.unreadablePages[page.source_id] = {
+            files: (prior ? prior.files : []).concat(unreadableEntries(page.files)),
+            more: moreCount(page.more),
+            after: cursorOf(page.after)
+          };
         }
         redraw();
         return;
@@ -26416,8 +26428,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         add(list, item);
       });
       if (own.more > 0) {
-        const more = { label: fill2(P.unreadableMore, { count: count(own.more) }), tool: H.unreadablePageTool, args: { source_id: id, offset: own.files.length } };
-        add(list, add(el("li"), fixControl(more, "why-page:" + id, "plain", false)));
+        const label = fill2(P.unreadableMore, { count: count(own.more) });
+        add(list, own.after ? add(el("li"), fixControl({ label, tool: H.unreadablePageTool, args: { source_id: id, after: own.after } }, "why-page:" + id, "plain", false)) : el("li", "muted", label));
       }
       return list.childNodes.length ? list : null;
     }
@@ -26438,7 +26450,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const pages = state.unreadablePages[id];
     const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
     const more = pages ? pages.more : moreCount(entry.more);
-    return files.length || more ? { files, more } : null;
+    const after = pages ? pages.after : cursorOf(entry.after);
+    return files.length || more ? { files, more, after } : null;
+  }
+  function cursorOf(value) {
+    return typeof value === "string" && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : "";
   }
   function unreadableEntries(input) {
     return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
@@ -31294,9 +31310,8 @@ init_tiered_store_set();
 // src/workers/file-extraction/readiness-ledger.ts
 init_answer_ready_coverage();
 
-// src/workers/file-extraction/unreadable-files.ts
-var TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
-var DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+// src/workers/email-source/server.ts
+init_unreadable_files();
 
 // src/core/analyst-openai.ts
 init_operation_error();

@@ -70,7 +70,7 @@ export interface ChatGptDashboardClientConfig {
     unpairTool: string;
     /** Opens one unreadable file (`{token}` from the computer meta), on the computer only. */
     unreadableOpenTool: string;
-    /** The next page of one source's unreadable files (`{source_id, offset}`), on the computer only. */
+    /** The next page of one source's unreadable files (`{source_id, after}`), on the computer only. */
     unreadablePageTool: string;
     /** How long the place an open link landed on stays outlined (`.landed`). */
     landedMs: number;
@@ -133,7 +133,7 @@ export function chatgptDashboardClient(
     /** The computer-only facts from the last dashboard result (`_meta[computerMetaKey]`). */
     computerMeta: Any;
     /** Computer only: further pages of a source's unreadable files read since the last dashboard result. */
-    unreadablePages: Record<string, { files: Array<{ name: string; token?: string }>; more: number }>;
+    unreadablePages: Record<string, { files: Array<{ name: string; token?: string }>; more: number; after: string }>;
     /** Computer only: the source an open link asked to land on, until the panel has landed there. */
     landing: string;
     /** The source row outlined after landing, until `until` (ms). */
@@ -378,8 +378,12 @@ export function chatgptDashboardClient(
         // The next page of the list: appended under the files already shown.
         const page = result && result.structuredContent;
         if (page && page.status === 'listed' && typeof page.source_id === 'string' && Array.isArray(page.files)) {
-          const prior = state.unreadablePages[page.source_id] || { files: [], more: 0 };
-          state.unreadablePages[page.source_id] = { files: prior.files.concat(unreadableEntries(page.files)), more: moreCount(page.more) };
+          const prior = state.unreadablePages[page.source_id];
+          state.unreadablePages[page.source_id] = {
+            files: (prior ? prior.files : []).concat(unreadableEntries(page.files)),
+            more: moreCount(page.more),
+            after: cursorOf(page.after),
+          };
         }
         redraw();
         return;
@@ -1034,9 +1038,11 @@ export function chatgptDashboardClient(
         add(list, item);
       });
       if (own.more > 0) {
-        // The next page, so every file is reachable however many there are.
-        const more = { label: fill(P.unreadableMore, { count: count(own.more) }), tool: H.unreadablePageTool, args: { source_id: id, offset: own.files.length } };
-        add(list, add(el('li'), fixControl(more, 'why-page:' + id, 'plain', false)));
+        // The next page from where this one ended, so every file is reachable however many there are.
+        const label = fill(P.unreadableMore, { count: count(own.more) });
+        add(list, own.after
+          ? add(el('li'), fixControl({ label, tool: H.unreadablePageTool, args: { source_id: id, after: own.after } }, 'why-page:' + id, 'plain', false))
+          : el('li', 'muted', label));
       }
       return list.childNodes.length ? list : null;
     }
@@ -1049,7 +1055,7 @@ export function chatgptDashboardClient(
   }
 
   /** Computer only: this source's unreadable files from the computer meta (names, open tokens), or null. */
-  function computerUnreadable(id: string): { files: Array<{ name: string; token?: string }>; more: number } | null {
+  function computerUnreadable(id: string): { files: Array<{ name: string; token?: string }>; more: number; after: string } | null {
     const meta = state.computerMeta;
     if (!onComputer() || !meta || !Array.isArray(meta.unreadable)) return null;
     const entry = meta.unreadable.filter((item: Any) => item && item.sourceId === id)[0];
@@ -1057,7 +1063,13 @@ export function chatgptDashboardClient(
     const pages = state.unreadablePages[id];
     const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
     const more = pages ? pages.more : moreCount(entry.more);
-    return files.length || more ? { files, more } : null;
+    const after = pages ? pages.after : cursorOf(entry.after);
+    return files.length || more ? { files, more, after } : null;
+  }
+
+  /** A page cursor exactly as the engine gave it, or ''. */
+  function cursorOf(value: Any): string {
+    return typeof value === 'string' && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : '';
   }
 
   function unreadableEntries(input: Any[]): Array<{ name: string; token?: string }> {

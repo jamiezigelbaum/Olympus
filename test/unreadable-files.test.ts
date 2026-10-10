@@ -43,6 +43,7 @@ import { createExtractionReadinessLedger } from '../src/workers/file-extraction/
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
 import {
   isUnreadableOpenToken,
+  isUnreadablePageCursor,
   createUnreadableFiles,
   createUnreadableVerdict,
   type UnreadableFiles,
@@ -503,6 +504,13 @@ describe('every file is reachable (P2c)', () => {
       unreadableFiles: () => files,
     });
   }
+  const firstPage = (files: UnreadableFiles, count: number) => computerUnreadableEntries(
+    { sources: [{ source_id: 'dropbox.files', coverage: { unreadable_items: count }, unreadable_files: { names: [], corpus_ids: [LANE.corpusId] } }] } as never,
+    files,
+    OPENER,
+  )[0]!;
+  type Page = { status: string; files: Array<{ name: string; token?: string }>; more: number; after?: string };
+  const CONTEXT = { origin: 'http://127.0.0.1:8787', opener: OPENER };
 
   test('past the first 200, the computer pages the rest: 450 files, each named once, each with a token', async () => {
     const { files } = filesOver(itemsOf(450));
@@ -510,45 +518,92 @@ describe('every file is reachable (P2c)', () => {
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(UNREADABLE_FILES_PAGE_TOOL_NAME);
     expect(CHATGPT_TOOLS.map((tool) => tool.name)).not.toContain(UNREADABLE_FILES_PAGE_TOOL_NAME);
     expect(OLYMPUS_TAB_TOOL_NAMES as readonly string[]).not.toContain(UNREADABLE_FILES_PAGE_TOOL_NAME);
-    const first = computerUnreadableEntries(
-      { sources: [{ source_id: 'dropbox.files', coverage: { unreadable_items: 450 }, unreadable_files: { names: [], corpus_ids: [LANE.corpusId] } }] } as never,
-      files,
-      OPENER,
-    )[0]!;
+    const first = firstPage(files, 450);
     expect(first.files).toHaveLength(200);
     expect(first.more).toBe(250);
+    expect(isUnreadablePageCursor(first.after)).toBe(true);
+    // The cursor names no file: a time and an opaque digest.
+    expect(first.after).not.toContain('file-');
     const tools = pagingTools(files, 450);
-    const context = { origin: 'http://127.0.0.1:8787', opener: OPENER };
     // A source the dashboard does not list now has nothing to page.
-    expect((await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'gmail.email', offset: 200 }, context)).structuredContent).toEqual({ error: 'gone' });
+    expect((await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'gmail.email', after: first.after }, CONTEXT)).structuredContent).toEqual({ error: 'gone' });
     const names = first.files.map((file) => file.name);
-    let offset = first.files.length;
+    let after = first.after;
     let more = first.more;
+    let lastToken = '';
     while (more > 0) {
-      const page = await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'dropbox.files', offset }, context);
-      const listed = page.structuredContent as { status: string; files: Array<{ name: string; token?: string }>; more: number };
+      const listed = (await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'dropbox.files', after }, CONTEXT)).structuredContent as Page;
       expect(listed.status).toBe('listed');
       expect(listed.files.length).toBeLessThanOrEqual(COMPUTER_UNREADABLE_FILES_LIMIT);
       expect(listed.files.every((file) => isUnreadableOpenToken(file.token))).toBe(true);
       names.push(...listed.files.map((file) => file.name));
-      offset += listed.files.length;
+      lastToken = listed.files.at(-1)!.token!;
+      after = listed.after;
       more = listed.more;
     }
+    expect(after).toBeUndefined();
     expect(names).toHaveLength(450);
     expect(new Set(names).size).toBe(450);
     expect(names.at(-1)).toBe('file-000.pdf');
     // The last file opens like the first.
-    const last = await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'dropbox.files', offset: 449 }, context);
-    const token = (last.structuredContent as { files: Array<{ token: string }> }).files[0]!.token;
-    expect((await tools.call(OPEN_UNREADABLE_FILE_TOOL_NAME, { token }, context)).structuredContent).toEqual({ status: 'open_link', url: 'https://www.dropbox.com/preview/Work/file-000.pdf' });
+    expect((await tools.call(OPEN_UNREADABLE_FILE_TOOL_NAME, { token: lastToken }, CONTEXT)).structuredContent).toEqual({ status: 'open_link', url: 'https://www.dropbox.com/preview/Work/file-000.pdf' });
   });
 
-  test('takes a source and an offset only, and never for a locked reader', async () => {
-    const tools = pagingTools(filesOver(itemsOf(3)).files, 3);
-    for (const args of [{}, { source_id: 'dropbox.files' }, { source_id: 'dropbox.files', offset: -1 }, { source_id: 'dropbox.files', offset: 1.5 }, { source_id: 'dropbox.files', offset: 0, path: '/etc' }]) {
-      expect((await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, args as Record<string, unknown>, { origin: 'http://127.0.0.1:8787', opener: OPENER })).structuredContent).toEqual({ error: 'invalid_params' });
+  // Second-round review: with an offset, a file judged Secrets on page one
+  // shifted file 201 to offset 199, and offset 200 came back empty.
+  test('201 files; a page-one file judged Secrets before page two: the 201st is still listed, the Secrets one never', async () => {
+    const items = itemsOf(201);
+    const secret = new Set<string>();
+    const { files } = filesOver(items, { verdict: (item) => (secret.has(item.ref.providerItemId) ? 'blocked_policy' : 'unreadable') });
+    const first = firstPage(files, 201);
+    expect(first.files).toHaveLength(200);
+    expect(first.more).toBe(1);
+    secret.add('file-199');
+    const second = (await pagingTools(files, 201).call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'dropbox.files', after: first.after }, CONTEXT)).structuredContent as Page;
+    expect(second.files.map((file) => file.name)).toEqual(['file-000.pdf']);
+    expect(second.more).toBe(0);
+    // And the same change on the page still to come leaves the rest in place.
+    secret.clear();
+    secret.add('file-000');
+    const empty = (await pagingTools(files, 201).call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'dropbox.files', after: first.after }, CONTEXT)).structuredContent as Page;
+    expect(empty.files).toEqual([]);
+    expect(empty.more).toBe(0);
+  });
+
+  test('takes a source and a cursor only, and never for a locked reader', async () => {
+    const { files } = filesOver(itemsOf(3));
+    const tools = pagingTools(files, 3);
+    const after = files.computerList([LANE.corpusId], 1, AS_OPENER).after;
+    for (const args of [{}, { source_id: 'dropbox.files' }, { source_id: 'dropbox.files', after: 5 }, { source_id: 'dropbox.files', after: 'file-000.pdf' }, { source_id: 'dropbox.files', after, offset: 0 }]) {
+      expect((await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, args as Record<string, unknown>, CONTEXT)).structuredContent).toEqual({ error: 'invalid_params' });
     }
-    expect((await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'dropbox.files', offset: 0 }, { origin: 'http://127.0.0.1:8787' })).structuredContent).toEqual({ error: 'unavailable' });
+    expect((await tools.call(UNREADABLE_FILES_PAGE_TOOL_NAME, { source_id: 'dropbox.files', after }, { origin: 'http://127.0.0.1:8787' })).structuredContent).toEqual({ error: 'unavailable' });
+  });
+});
+
+describe('no verdict is reused (second-round review)', () => {
+  test('a listed file marked Secrets, by the secret index or by an override, is gone on the very next read', async () => {
+    const lane = secretsLane();
+    const items: ExtractionUnreadableItem[] = [
+      { ref: ref('ordinary-new'), failedAt: '2026-10-05T00:00:00.000Z' },
+      { ref: ref('ordinary-old'), failedAt: '2026-10-01T00:00:00.000Z' },
+    ];
+    // A clock that never moves: nothing may be reused within any window.
+    const files = createUnreadableFiles({
+      items: () => items,
+      verdict: verdictFor(lane),
+      locate: (item) => ({ locatorUri: `dropbox://id:${item.providerItemId}` }),
+      openTarget: () => ({ url: 'https://www.dropbox.com/preview/Work/x.pdf' }),
+      now: () => Date.UTC(2026, 9, 10),
+    });
+    expect(files.names([LANE.corpusId], 5)).toEqual(['ordinary-new.pdf', 'ordinary-old.pdf']);
+    lane.secrets.record({ identity: identity('ordinary-new'), findingKinds: ['aws_access_key_id'] });
+    expect(files.names([LANE.corpusId], 5)).toEqual(['ordinary-old.pdf']);
+    expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 1, blocked: 1 });
+    lane.ledger.setOverride(identity('ordinary-old'), { kind: 'tier', tier: 'secrets' });
+    expect(files.names([LANE.corpusId], 5)).toEqual([]);
+    expect(files.computerList([LANE.corpusId], 10, AS_OPENER).files).toEqual([]);
+    expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 0, blocked: 2 });
   });
 });
 

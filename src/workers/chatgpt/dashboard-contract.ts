@@ -437,6 +437,8 @@ export interface ComputerUnreadableEntry {
   sourceId: string;
   files: Array<{ name: string; token?: string }>;
   more: number;
+  /** Present when `more` is: the cursor UNREADABLE_FILES_PAGE_TOOL_NAME reads the next page from. */
+  after?: string;
 }
 
 /**
@@ -462,9 +464,9 @@ export const OPEN_UNREADABLE_FILE_TOOL_NAME = 'olympus_open_unreadable_file';
 
 /**
  * Computer only, never listed to ChatGPT: the next page of one source's
- * unreadable files (`{source_id, offset}`), past the first
- * COMPUTER_UNREADABLE_FILES_LIMIT, with open tokens. Answers
- * `{status: 'listed', files, more}`.
+ * unreadable files (`{source_id, after}`: the `after` cursor the last page
+ * gave), past the first COMPUTER_UNREADABLE_FILES_LIMIT, with open tokens.
+ * Answers `{status: 'listed', files, more, after?}`.
  */
 export const UNREADABLE_FILES_PAGE_TOOL_NAME = 'olympus_unreadable_files';
 
