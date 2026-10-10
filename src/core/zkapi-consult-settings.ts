@@ -65,17 +65,21 @@ export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
  * no longer says Olympus removes names at every level, since Standard sends
  * a question the way the owner chooses (PR #209). The version moves when the wording or the
  * set changes, which voids every earlier acknowledgement; the transport sends
- * nothing until the current set is accepted (zkapiMoneyStatus).
+ * nothing until the current set is accepted (zkapiMoneyStatus). Version 7
+ * (2026-10-10, owner decision): `automatic` became `only_when_asked`, since
+ * the automatic escalation was retired (PR #225) and a question now goes out
+ * only when the owner asks through their agent; the same day the card's
+ * on/off switch began to gate the agent tools (askAnonymously).
  *
  * `expiry` says the estimated date is shown on this page when Olympus knows
  * it (from the confirmed funding date; otherwise unknown or past). Olympus
  * sends no reminder of its own, so the statement does not promise one.
  */
-export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 6;
+export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 7;
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   {
-    id: 'automatic',
-    statement: 'Questions go out automatically when the answer from your Mac is missing something. You can turn this off at any time.',
+    id: 'only_when_asked',
+    statement: 'A question goes out only when you ask your agent to use Olympus zkAPI. Nothing is sent on its own, and you can turn anonymous answers off at any time.',
   },
   {
     id: 'provider_reads',

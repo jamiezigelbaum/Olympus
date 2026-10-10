@@ -1607,7 +1607,7 @@ function parseAcknowledgements(value, label) {
   }
   return { version: record.version, accepted: [...new Set(record.accepted)] };
 }
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 6, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, ZKAPI_NOTE_TTL_DAYS = 30, ZKAPI_EXPIRY_NOTICE_DAYS, ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD = 50, DEFAULTS, ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 7, ZKAPI_RISK_ACKNOWLEDGEMENTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
 var init_zkapi_consult_settings = __esm(() => {
   init_operation_error();
   ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
@@ -1624,8 +1624,8 @@ var init_zkapi_consult_settings = __esm(() => {
   };
   ZKAPI_RISK_ACKNOWLEDGEMENTS = [
     {
-      id: "automatic",
-      statement: "Questions go out automatically when the answer from your Mac is missing something. You can turn this off at any time."
+      id: "only_when_asked",
+      statement: "A question goes out only when you ask your agent to use Olympus zkAPI. Nothing is sent on its own, and you can turn anonymous answers off at any time."
     },
     {
       id: "provider_reads",
@@ -118946,6 +118946,8 @@ async function askAnonymously(input, deps) {
   }
   if (read.state === "invalid")
     return { ok: false, code: "settings_invalid", message: CONSULT_ASK_MESSAGES.settingsInvalid };
+  if (read.state !== "valid" || !read.settings.enabled)
+    return { ok: false, code: "anonymous_answers_off", message: CONSULT_ASK_MESSAGES.off };
   let settings = read.state === "valid" ? read.settings : undefined;
   let stored = consultStandardBinding(settings ?? DEFAULT_CONSULT_SETTINGS);
   const storedLevel = settings ? consultAskLevelFromSettings(settings.level) : "standard";
@@ -119116,6 +119118,7 @@ var init_consult_ask = __esm(() => {
     empty: "Type a question first.",
     tooLong: `Keep the question under ${CONSULT_ASK_MAX_CHARS.toLocaleString("en-US")} characters.`,
     settingsInvalid: "The anonymous answers settings file could not be read, so nothing was sent.",
+    off: "Not sent: anonymous answers are off on your dashboard. Turn them on under Private answers, then ask again.",
     declined: "Your model chose not to send anything.",
     writerFailed: "Your model could not prepare the question, so nothing was sent.",
     secret: "Not sent: the question looks like it contains a password, key or token.",
