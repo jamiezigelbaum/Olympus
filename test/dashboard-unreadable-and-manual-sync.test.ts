@@ -211,9 +211,10 @@ describe('Sync now says what it found', () => {
       schedulerSourceId: 'dropbox.files',
       at: NOW,
     });
-    expect(failed).toEqual({ at: NOW.toISOString(), outcome: 'failed' });
+    // An error kind Olympus does not know, with no reference: it says where the details are.
+    expect(failed).toEqual({ at: NOW.toISOString(), outcome: 'failed', failure_kind: 'unknown' });
     expect(dashboardManualSyncLine({ ...card(), last_manual_sync: failed }, NOW))
-      .toBe("Couldn't check Dropbox just now — Olympus will try again on its own");
+      .toBe("Couldn't check Dropbox just now: Olympus hit an error it doesn't recognise. Olympus's log on the computer has the details. Olympus will try again on its own.");
   });
 
   test('the line survives the refresh, then expires', () => {

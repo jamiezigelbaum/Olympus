@@ -7217,6 +7217,28 @@ var init_scheduler_markers = __esm(() => {
   ]);
 });
 
+// src/workers/dashboard/source-failure.ts
+var SOURCE_FAILURE_KINDS, KIND_SET;
+var init_source_failure = __esm(() => {
+  init_scheduler_markers();
+  SOURCE_FAILURE_KINDS = [
+    "sign_in",
+    "network",
+    "timeout",
+    "rate_limited",
+    "provider_busy",
+    "provider_refused",
+    "daily_limit",
+    "search_model_unavailable",
+    "reader_unavailable",
+    "busy_here",
+    "setup",
+    "not_started",
+    "unknown"
+  ];
+  KIND_SET = new Set(SOURCE_FAILURE_KINDS);
+});
+
 // src/workers/dashboard/answer-ready-coverage.ts
 function metadataOnlyByPolicyFromCounts(counts) {
   const policyVocabularyPresent = POLICY_NOT_READ_COUNT_KEYS.some((key) => {
@@ -7277,7 +7299,7 @@ var init_answer_ready_coverage = __esm(() => {
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${label}…`;
 }
-var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -7303,6 +7325,21 @@ var init_vocabulary = __esm(() => {
       one: "{count} file is damaged or in a format Olympus can't read",
       other: "{count} files are damaged or in a format Olympus can't read"
     }
+  };
+  DASHBOARD_SOURCE_FAILURE_WORDS = {
+    sign_in: "{source} needs you to sign in again.",
+    network: "Olympus couldn't reach {source} over the network.",
+    timeout: "{source} took too long to answer.",
+    rate_limited: "{source} asked Olympus to slow down for a while.",
+    provider_busy: "{source} was busy and asked Olympus to try later.",
+    provider_refused: "{source} refused Olympus's request.",
+    daily_limit: "Olympus reached its daily limit for {source}.",
+    search_model_unavailable: "The search model wasn't running.",
+    reader_unavailable: "The file reader wasn't running.",
+    busy_here: "Olympus was busy with other work.",
+    setup: "{source}'s setup isn't finished.",
+    not_started: "The check didn't start.",
+    unknown: "Olympus hit an error it doesn't recognise."
   };
   DASHBOARD_CHATGPT_VOCABULARY = {
     installingNoSource: "Connect a source to begin",
@@ -7375,6 +7412,15 @@ var init_vocabulary = __esm(() => {
     modelNotDownloaded: "Not downloaded",
     modelDownloadInterrupted: "Download stopped before it finished",
     modelCouldNotStart: "Couldn't start {model}",
+    modelCouldNotStartBecause: "Couldn't start {model}: {reason}",
+    modelLoadFailedReasons: {
+      not_installed: "its files are missing or incomplete; Download now fetches them again",
+      stopped_while_starting: "it stopped while starting",
+      too_slow: "it took too long to start",
+      port_taken: "another program was using the port it needs",
+      unknown: "Olympus's log on the computer has the details"
+    },
+    modelNotWorkingBecause: "Not working: {reason}",
     modelInstallDownloading: "Downloading {model}",
     modelInstallVerifying: "Checking {model}…",
     modelInstallFailed: "Couldn't download {model}: {reason}",
@@ -7413,6 +7459,22 @@ var init_vocabulary = __esm(() => {
     sourceStages: { listing: "Finding items", reading: "Reading", indexing: "Indexing" },
     findingItems: "Finding items",
     sourceProgress: "{stage} — {percent}%, {done} of {total} {unit}",
+    stalledSources: "{sources} paused",
+    stalledAnd: "{first} and {last}",
+    stalledMore: "{count} more",
+    sourceFailures: DASHBOARD_SOURCE_FAILURE_WORDS,
+    failureRef: DASHBOARD_FAILURE_REF,
+    failureLog: DASHBOARD_FAILURE_LOG,
+    stallWhy: {
+      failedOnce: "The last try failed.",
+      failedMany: "The last {count} tries failed.",
+      switchedOff: "{stage} is turned off in Olympus's settings.",
+      stillFor: "{stage} hasn't moved for {duration}.",
+      still: "{stage} hasn't moved for a while.",
+      lastWorked: "Last worked {when}.",
+      nextTry: "Olympus tries again in {duration}.",
+      watchLog: "Olympus's log on the computer shows what it is doing."
+    },
     stalledReasons: {
       waiting_for_credentials: "Paused: Olympus needs you to sign in to {source} again",
       scope_pending: "Paused until you choose folders",
@@ -11367,6 +11429,7 @@ var init_source_dashboard = __esm(() => {
   init_source_corpus_registry();
   init_types();
   init_scheduler_markers();
+  init_source_failure();
   init_answer_ready_coverage();
   init_vocabulary();
   init_phases();

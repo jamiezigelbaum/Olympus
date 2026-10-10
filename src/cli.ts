@@ -134,20 +134,6 @@ import {
 } from './core/remote-access.ts';
 
 const PUBLIC_CLI_COMMAND_NAMES = new Set<string>(V0_4_PUBLIC_CLI_COMMANDS);
-const PUBLIC_CLI_HELP_GROUPS = new Set([
-  'argus',
-  'source',
-  'source index',
-  'sovereignty',
-  'worker',
-  'engine',
-  'connect',
-  'connections',
-  'data',
-  'tier',
-  'zkapi',
-  'open-handler',
-]);
 
 const ZKAPI_TEST_WRITER_USAGE = 'olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]';
 
@@ -882,7 +868,9 @@ export function isV04PublicCliInvocation(args: readonly string[]): boolean {
   }
   if ((V0_4_PACKAGE_INTERNAL_CLI_HELPERS as readonly string[]).includes(args[0] ?? '')) return true;
   const commandArgs = args.filter((arg) => !isHelpFlag(arg));
-  if (isHelpRequest(args) && PUBLIC_CLI_HELP_GROUPS.has(commandArgs.join(' '))) return true;
+  // A bare group with --help ("olympus server-mode --help") prints its usage:
+  // every group with usage lines is one, so a new group cannot be missed.
+  if (isHelpRequest(args) && Object.prototype.hasOwnProperty.call(COMMAND_GROUP_HELP, commandArgs.join(' '))) return true;
   const commandName = v04PublicCliCommandName(args);
   return commandName !== undefined && PUBLIC_CLI_COMMAND_NAMES.has(commandName);
 }
@@ -1464,6 +1452,16 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
     '  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)',
+  ],
+  'server-mode': [
+    'Usage: olympus server-mode <command>',
+    'Commands:',
+    '  olympus server-mode status   Say whether Olympus runs on a server, and how your computer reaches it',
+    '  olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]',
+    '                               Olympus runs on a server: "Do this on your computer" opens through an SSH tunnel',
+    '  olympus server-mode off      Olympus runs on this computer',
+    '  olympus server-mode auto [--ssh-target <user@host>] [--agent-route on|off]',
+    '                               The default: decide from the machine Olympus runs on',
   ],
   'open-handler': [
     'Usage: olympus open-handler <command>',
