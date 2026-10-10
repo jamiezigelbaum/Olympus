@@ -57306,7 +57306,7 @@ function embeddingModelEstimate(modelId, prices) {
 }
 function estimatedEmbeddingCostUsd(tokens, modelId, prices) {
   const { estimate } = embeddingModelEstimate(modelId, prices);
-  return Math.round(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
+  return Math.ceil(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
 }
 var DEFAULT_EMBEDDING_MODEL_ESTIMATES, FALLBACK_EMBEDDING_MODEL_ESTIMATE;
 var init_embedding_cost_estimates = __esm(() => {
@@ -134768,9 +134768,6 @@ function settleWorkerServiceState(options, expected) {
     waitForActivationSettle(pollMs);
     service = inspectWorkerService(serviceActionOptions(options));
   }
-  if (!expected.includes(service.state) && expected.includes("active") && workerAnswersReadiness(options)) {
-    return { ...service, state: "active" };
-  }
   return service;
 }
 function validateSettleWindow(value, label, max) {
@@ -134778,14 +134775,6 @@ function validateSettleWindow(value, label, max) {
     throw new OperationError("invalid_params", `${label} must be between 0 and ${max} milliseconds.`);
   }
   return value;
-}
-function workerAnswersReadiness(options) {
-  try {
-    const url = `http://127.0.0.1:${workerReadinessPort(options)}/v1/health`;
-    return options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
-  } catch {
-    return false;
-  }
 }
 function lifecycleActionFailure(action, state, options) {
   const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });

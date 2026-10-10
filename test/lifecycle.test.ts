@@ -217,7 +217,7 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   });
 
-  test('start accepts a worker already answering its own health route while the manager lags', () => {
+  test('start refuses an inactive unit even when an unrelated process answers health', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-start-readiness-'));
     const manager = slowDarwinManager(Number.POSITIVE_INFINITY);
     const probed: string[] = [];
@@ -228,7 +228,7 @@ describe('versioned Olympus worker lifecycle', () => {
         workingDirectory: process.cwd(),
         bunBin: process.execPath,
       });
-      const started = runWorkerLifecycle('start', {
+      expect(() => runWorkerLifecycle('start', {
         platform: 'darwin',
         homeDir: home,
         exec: manager.exec,
@@ -238,9 +238,8 @@ describe('versioned Olympus worker lifecycle', () => {
           probed.push(url);
           return true;
         },
-      });
-      expect(started).toMatchObject({ action: 'start', ok: true, service: { state: 'active' } });
-      expect(probed).toEqual(['http://127.0.0.1:8010/v1/health']);
+      })).toThrow(/olympus worker start completed but status is inactive/);
+      expect(probed).toEqual([]);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
