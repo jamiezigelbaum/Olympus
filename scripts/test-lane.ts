@@ -62,7 +62,9 @@ export function parseTestLaneArgs(args: string[]): TestLaneOptions {
 }
 
 export function buildTestLaneCommand(selected: string[], junitPath?: string): string[] {
-  const command = ['bun', 'test', ...selected.map((name) => join('test', name))];
+  // --parallel runs files across one worker per core (each file isolated);
+  // the lane was CPU-bound on a single process before this.
+  const command = ['bun', 'test', '--parallel', ...selected.map((name) => join('test', name))];
   if (junitPath) command.push('--reporter=junit', `--reporter-outfile=${junitPath}`);
   return command;
 }
