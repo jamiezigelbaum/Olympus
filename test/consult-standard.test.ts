@@ -43,6 +43,13 @@ describe('the writer for a direct ask at Strict', () => {
     expect(messages[0]!.content).toBe(CONSULT_WRITER_SYSTEM_DIRECT);
     expect(messages[0]!.content).toContain('The user asked to send this question');
     expect(messages[0]!.content).toContain('Always write the questions.');
+    // Shapes that generalise a question about the user's own situation, and pass a general one through (the built-in writer declined both before).
+    expect(messages[0]!.content).toContain('is the normal case, not a reason to stop');
+    expect(messages[0]!.content).toContain('already general (a fact, a definition, how something works) is asked as it is');
+    expect(messages[0]!.content).toContain('Asked: what to do about the landlord');
+    expect(messages[0]!.content).toContain('Asked: which city is the capital of a named country');
+    expect(messages[0]!.content).not.toContain('Missing: the booking reference');
+    expect(messages[0]!.content).toContain('Reply null: only their own records hold it.');
     expect(messages[0]!.content).not.toContain('Decide first');
     expect(messages[0]!.content).not.toContain('Propose nothing when the material');
     expect(messages[0]!.content).toContain('Strict: ask only general questions');
@@ -51,6 +58,9 @@ describe('the writer for a direct ask at Strict', () => {
     // Without the flag (the private-answer escalation) the escalation prompt is unchanged.
     const escalation = buildConsultWriterPrompt({ question: 'q', answer: 'a', gaps: ['g'] }, 'general');
     expect(escalation[0]!.content).toBe(CONSULT_WRITER_SYSTEM);
+    expect(CONSULT_WRITER_SYSTEM).toContain('Decide first');
+    expect(CONSULT_WRITER_SYSTEM).toContain('Missing: the booking reference itself. Propose nothing');
+    expect(CONSULT_WRITER_SYSTEM).toContain('Form: each question is one plain sentence');
     expect(escalation[1]!.content).toContain('Could not find:');
     // Standard's instruction wins over the flag.
     expect(buildConsultWriterPrompt({ question: 'q', answer: '', gaps: [], instruction: 'In Dutch.', direct: true }, 'unnamed')[0]!.content).toContain('In Dutch.');
