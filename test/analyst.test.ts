@@ -1027,7 +1027,8 @@ describe('Analyst capability', () => {
 
     expect(calls).toHaveLength(2);
     expect(calls.map((call) => call.maxOutputChars)).toEqual([20, 20]);
-    expect(result.answer).toHaveLength(20);
+    // Cut at its last whole word, never mid-word.
+    expect(result.answer).toBe('The bounded answer…');
   });
 
   test('keeps the audit headroom over a configured default answer budget', async () => {
@@ -1378,6 +1379,22 @@ describe('Analyst capability', () => {
 
     expect(result.answer.length).toBe(20);
     expect(calls[0]!.maxOutputChars).toBe(20);
+  });
+
+  // 2026-10-10 live: the bounded schema stopped a private answer at its
+  // 550-character bound on "the BUY", and the panel's version note ran on.
+  test('an answer stopped at the bounded schema\'s bound ends at its last whole sentence; the model is told the bound', async () => {
+    const answer = `The letter says all expenses until registration are borne by the Buyer. ${'Fees are listed in clause four of the agreement. '.repeat(10)}`.slice(0, 550);
+    expect(answer).toMatch(/[a-z]$/);
+    const { model, calls } = fakeModel(JSON.stringify({ answer, citations: [{ evidence: 1, claim: 'expenses' }], unanswered: [], sufficient: true }));
+    const analyst = createAnalyst(model, { boundedResponseSchema: true });
+    const result = await analyst.analyze(pack('Who pays?', [candidate('loi', ['expenses'])]), { localOnly: false, maxAnswerChars: 1_000 });
+    expect(calls[0]!.prompt).toContain('Write "answer" in at most 550 characters, ending with a complete sentence.');
+    expect(result.answer.endsWith('agreement.')).toBe(true);
+    expect(result.answer.length).toBeLessThan(550);
+    // An answer that ends on its own, under the bound, is untouched.
+    const short = createAnalyst(fakeModel(JSON.stringify({ answer: 'The Buyer pays', citations: [{ evidence: 1, claim: 'c' }], unanswered: [], sufficient: true })).model, { boundedResponseSchema: true });
+    expect((await short.analyze(pack('Who pays?', [candidate('loi', ['expenses'])]), { localOnly: false, maxAnswerChars: 1_000 })).answer).toBe('The Buyer pays');
   });
 
   test('drops citations that reference evidence out of range', async () => {

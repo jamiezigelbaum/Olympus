@@ -177,7 +177,7 @@ const ANALYST_AUDIT_SYSTEM = [
   '{"answer": string, "citations": [{"evidence": number, "claim": string}], "unanswered": string[], "sufficient": boolean}',
 ].join('\n');
 
-const DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1_600;
+export const DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1_600;
 // The audit carries a full replacement JSON object (answer, citations, and
 // unanswered gaps), so it needs modest headroom beyond the user-facing answer
 // budget. It remains bounded, while the system prompt keeps every field terse.
@@ -240,13 +240,13 @@ export type AnalystEvidenceFormat = 'full' | 'compact';
  * gaps share the rest.
  */
 export function analystResponseSchema(maxOutputChars: number): Record<string, unknown> {
-  const budget = Math.max(400, Math.floor(maxOutputChars));
+  const budget = analystSchemaBudget(maxOutputChars);
   const citations = 6;
   const gaps = ANALYST_SCHEMA_MAX_GAPS;
   return {
     type: 'object',
     properties: {
-      answer: { type: 'string', maxLength: Math.floor(budget * 0.55) },
+      answer: { type: 'string', maxLength: analystSchemaAnswerChars(maxOutputChars) },
       citations: {
         type: 'array',
         maxItems: citations,
@@ -266,6 +266,15 @@ export function analystResponseSchema(maxOutputChars: number): Record<string, un
     },
     required: ['answer', 'citations', 'unanswered', 'sufficient'],
   };
+}
+
+function analystSchemaBudget(maxOutputChars: number): number {
+  return Math.max(400, Math.floor(maxOutputChars));
+}
+
+// The answer field's bound in the bounded schema: over half the budget.
+export function analystSchemaAnswerChars(maxOutputChars: number): number {
+  return Math.floor(analystSchemaBudget(maxOutputChars) * 0.55);
 }
 
 // The most unanswered entries the bounded schema allows.
@@ -326,7 +335,10 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
       const compact = createOptions.evidenceFormat === 'compact';
       const request: AnalystModelRequest = {
         system: compact ? ANALYST_COMPACT_SYSTEM : ANALYST_SYSTEM,
-        prompt: compact ? buildCompactAnalystPrompt(pack) : buildAnalystPrompt(pack, localOnly),
+        // The bounded schema stops the answer at its bound mid-word; told
+        // the bound, the model finishes its last sentence inside it.
+        prompt: `${compact ? buildCompactAnalystPrompt(pack) : buildAnalystPrompt(pack, localOnly)}${
+          createOptions.boundedResponseSchema ? answerLengthLine(analystSchemaAnswerChars(maxOutputChars)) : ''}`,
         localOnly,
         maxOutputChars,
         ...(createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(maxOutputChars) } : {}),
@@ -381,7 +393,10 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
         };
       }
 
-      const answer = clampAnswer(parsed?.answer ?? completion.text.trim(), options.maxAnswerChars);
+      const answerLimit = createOptions.boundedResponseSchema
+        ? Math.min(options.maxAnswerChars ?? Number.POSITIVE_INFINITY, analystSchemaAnswerChars(maxOutputChars))
+        : options.maxAnswerChars;
+      const answer = clampAnswer(parsed?.answer ?? completion.text.trim(), answerLimit);
       return { answer, citations, unanswered };
     },
   };
@@ -394,17 +409,21 @@ const promptEncoder = new TextEncoder();
  * sends it (system rules, a blank line, then the evidence prompt), for the
  * same localOnly decision analyze() makes. Lanes with a byte ceiling fit the
  * pack against this, so every per-candidate field counts, not only passages.
+ * `boundedOutputChars`: the call's output budget, for an analyst with the
+ * bounded response schema (its prompt also states the answer's bound).
  */
 export function analystPromptBytes(
   pack: EvidencePack,
   options: AnalystOptions,
   evidenceFormat: AnalystEvidenceFormat = 'full',
+  boundedOutputChars?: number,
 ): number {
+  const bound = boundedOutputChars !== undefined ? answerLengthLine(analystSchemaAnswerChars(boundedOutputChars)) : '';
   if (evidenceFormat === 'compact') {
-    return promptEncoder.encode(`${ANALYST_COMPACT_SYSTEM}\n\n${buildCompactAnalystPrompt(pack)}`).length;
+    return promptEncoder.encode(`${ANALYST_COMPACT_SYSTEM}\n\n${buildCompactAnalystPrompt(pack)}${bound}`).length;
   }
   const localOnly = options.localOnly || evidencePackRequiresLocalOnly(pack);
-  return promptEncoder.encode(`${ANALYST_SYSTEM}\n\n${buildAnalystPrompt(pack, localOnly)}`).length;
+  return promptEncoder.encode(`${ANALYST_SYSTEM}\n\n${buildAnalystPrompt(pack, localOnly)}${bound}`).length;
 }
 
 function evidencePackRequiresLocalOnly(pack: EvidencePack): boolean {
@@ -1255,11 +1274,23 @@ function stripSecureMatchCounts(pack: EvidencePack): EvidencePack['coverage'] {
   return coverage;
 }
 
+function answerLengthLine(chars: number): string {
+  return `\n\nWrite "answer" in at most ${chars} characters, ending with a complete sentence.`;
+}
+
+// An answer that reaches its limit (cut here, or stopped there by the bounded
+// schema) ends at its last whole sentence, or else its last whole word, never
+// mid-word: 2026-10-10 live, a 550-character answer stopped at "the BUY" and
+// the panel's version note ran on from it.
 function clampAnswer(answer: string, maxAnswerChars?: number): string {
-  if (maxAnswerChars !== undefined && answer.length > maxAnswerChars) {
-    return answer.slice(0, maxAnswerChars);
-  }
-  return answer;
+  if (maxAnswerChars === undefined || !Number.isFinite(maxAnswerChars)) return answer;
+  const limit = Math.max(1, Math.floor(maxAnswerChars));
+  const cut = answer.length > limit ? answer.slice(0, limit) : answer;
+  if (cut.length < limit || /[.!?…]["'”’)\]]*\s*$/u.test(cut)) return cut;
+  const sentenceEnd = Math.max(...[...cut.matchAll(/[.!?…]["'”’)\]]*\s/gu)].map((match) => match.index! + match[0].trimEnd().length));
+  if (sentenceEnd >= limit / 2) return cut.slice(0, sentenceEnd);
+  const space = cut.lastIndexOf(' ');
+  return space > 0 ? `${cut.slice(0, space).replace(/[\s,;:]+$/u, '')}…` : cut;
 }
 
 function parseAnalystModelOutput(text: string): ParsedModelOutput | null {
