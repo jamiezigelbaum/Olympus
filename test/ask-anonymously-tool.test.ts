@@ -83,7 +83,9 @@ describe('ask_anonymously: operation → worker route → core', () => {
     expect(ask.openWorld).toBe(true);
     expect(ask.nativeExposure).toBe('always');
     expect(ask.cliHints).toEqual({ name: 'ask', positional: ['question'], stdin: 'question' });
-    expect(Object.keys(ask.params)).toEqual(['question', 'level', 'cleanup', 'remember', 'model']);
+    expect(Object.keys(ask.params)).toEqual(['question', 'level', 'cleanup', 'remember', 'model', 'timeoutMs']);
+    // The collector is exposed wherever the ask can hand off, source index on or off.
+    expect(operations.find((operation) => operation.name === 'source_answer_result')?.nativeExposure).toBe('always');
   });
 });
 

@@ -65695,7 +65695,8 @@ var init_operations = __esm(() => {
     },
     cleanup: { type: "string", description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
     remember: { type: "boolean", description: "Save this level (and cleanup) as the default for later questions, so the user is not asked again." },
-    model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model." }
+    model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model." },
+    timeoutMs: { type: "number", description: "How long to wait for the answer, in milliseconds (default 720000; a zkAPI route can take minutes)." }
   };
   operations = [
     {
@@ -65845,13 +65846,13 @@ var init_operations = __esm(() => {
     {
       name: "source_answer_result",
       description: [
-        'Get the answer to a source_answer call that returned {"status": "working", "job_id": ...}.',
-        'Returns the finished answer exactly as source_answer would have (same release rules, citations and coverage), the same error it would have raised, or {"status": "working"} again after waiting up to about a minute; then call it again.',
+        'Get the answer to a source_answer or ask_anonymously call that returned {"status": "working", "job_id": ...}.',
+        'Returns the finished answer exactly as that call would have (same release rules, citations and coverage), the same error it would have raised, or {"status": "working"} again after waiting up to about a minute; then call it again.',
         "A job_id works only for the connection that asked, and expires about 15 minutes after the answer is ready."
       ].join(" "),
       params: SOURCE_ANSWER_RESULT_PARAMS,
       mutating: false,
-      nativeExposure: "sourceIndexEnabledOnly",
+      nativeExposure: "always",
       cliHints: { name: "source answer result", positional: ["job_id"] },
       handler: async (ctx, params) => {
         assertNoUndeclaredParams(SOURCE_ANSWER_RESULT_PARAMS, params, "Source answer result");
@@ -66107,12 +66108,14 @@ var init_operations = __esm(() => {
         const cleanup = optionalAskCleanup(params.cleanup);
         const remember = optionalBoolean2(params.remember, "remember");
         const model = optionalString9(params.model);
+        const timeoutMs = optionalNumber4(params.timeoutMs, "timeoutMs");
         const ask = (signal) => ctx.email.askAnonymously({
           question,
           ...level !== undefined ? { level } : {},
           ...cleanup !== undefined ? { cleanup } : {},
           ...remember !== undefined ? { remember } : {},
           ...model !== undefined ? { model } : {},
+          ...timeoutMs !== undefined ? { timeoutMs } : {},
           ...signal ? { signal } : {}
         });
         const jobs = ctx.sourceAnswerJobs;
@@ -120332,7 +120335,7 @@ var init_mcp_surface = __esm(() => {
     name: "source_answer_result",
     title: "Get an Olympus answer",
     description: [
-      'Collect the answer to a source_answer call that returned {status: "working", job_id}.',
+      'Collect the answer to a source_answer or ask_anonymously call that returned {status: "working", job_id}.',
       'Returns the finished answer with citations, or {status: "working"} again after waiting up to about a minute;',
       "then call it again. A job_id expires about 15 minutes after its answer is ready."
     ].join(" "),

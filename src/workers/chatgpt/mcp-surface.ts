@@ -208,7 +208,7 @@ export const SOURCE_ANSWER_RESULT_TOOL: ChatGptToolDefinition = {
   name: 'source_answer_result',
   title: 'Get an Olympus answer',
   description: [
-    'Collect the answer to a source_answer call that returned {status: "working", job_id}.',
+    'Collect the answer to a source_answer or ask_anonymously call that returned {status: "working", job_id}.',
     'Returns the finished answer with citations, or {status: "working"} again after waiting up to about a minute;',
     'then call it again. A job_id expires about 15 minutes after its answer is ready.',
   ].join(' '),
