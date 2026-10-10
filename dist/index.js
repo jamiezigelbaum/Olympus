@@ -250,7 +250,8 @@ var init_public_surface = __esm(() => {
     "source_watches",
     "source_watch_cancel",
     "olympus_doctor",
-    "ask_anonymously"
+    "ask_anonymously",
+    "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
     "argus_ping",
@@ -7421,6 +7422,19 @@ var init_vocabulary = __esm(() => {
     linkExpires: "link expires in {n} min",
     linkExpired: "link expired",
     howOnMac: "Fix this on your computer",
+    remote: {
+      title: "Olympus runs on a server, so this opens on your computer through a secure tunnel.",
+      askLine: "Ask your assistant:",
+      askPhrase: "Open Olympus on my computer",
+      askPhraseFor: "Open Olympus on my computer to connect {source}",
+      byHandAfterAsk: "Or do it yourself:",
+      onComputer: "On your computer, run:",
+      onServer: "Then on the server, run this and open the link it prints in your computer's browser:",
+      portNote: "Keep {port} on both sides of the tunnel: the link only works on that port.",
+      copy: "Copy",
+      copied: "Copied",
+      copySelected: "Selected: press Ctrl+C or ⌘C to copy"
+    },
     sourcePaused: "Paused",
     syncChecking: "Checking…",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
@@ -14617,6 +14631,9 @@ function shouldExposeOperation(operation, context) {
   if (operation.requiresOpenClawSessionRoute && context.surface !== "native") {
     return false;
   }
+  if (operation.requiresOwnerAgentSession && context.surface !== "native") {
+    return false;
+  }
   if (operation.nativeExposure === "sourceIndexEnabledOnly") {
     return isSourceIndexReadSurfaceEnabled(context.config);
   }
@@ -15734,6 +15751,18 @@ function allOpenTargets() {
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section }))
   ];
+}
+function openTargetPath(target) {
+  if (target.kind === "connect")
+    return `connect/${target.source}`;
+  if (target.kind === "fix")
+    return `fix/${target.section}`;
+  return "dashboard";
+}
+function openTargetFromPath(path) {
+  if (typeof path !== "string")
+    return;
+  return allOpenTargets().find((target) => openTargetPath(target) === path);
 }
 function openTargetToken(target) {
   if (target.kind === "connect")
@@ -20305,6 +20334,208 @@ function normalizeSelectedItemField(key) {
 init_source_corpus_registry();
 init_venice_models();
 init_public_surface();
+
+// src/core/dashboard-opening.ts
+init_operation_error();
+var OLYMPUS_PLUGIN_BIN_HINT = "<rootDir>/bin/olympus";
+var DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 1e4;
+function workerRootBaseUrl(baseUrl) {
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new OperationError("config_error", "The configured worker URL is not a valid URL.", "Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.");
+  }
+  if (url.username || url.password) {
+    throw new OperationError("config_error", "The configured worker URL must not carry embedded credentials.");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new OperationError("config_error", "The configured worker URL must use HTTP or HTTPS.", "Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.");
+  }
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (path !== "/" && path !== "/v1") {
+    throw new OperationError("config_error", "The configured worker URL path must be /v1 or the origin root.", "Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.");
+  }
+  return url.origin;
+}
+async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
+  if (!token) {
+    throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
+  }
+  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  let response;
+  try {
+    response = await fetchImpl(`${base}/dashboard/control/launch`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, Origin: base },
+      redirect: "error",
+      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
+    });
+  } catch {
+    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`);
+  }
+  if (!response.ok) {
+    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`);
+  }
+  let ticket;
+  try {
+    ticket = (await response.json()).ticket;
+  } catch {
+    ticket = undefined;
+  }
+  if (typeof ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
+    throw new OperationError("email_unreachable", "The configured Olympus worker answered the opening request without a ticket.", "This worker predates the standalone opening handoff; upgrade it, then run this again.");
+  }
+  const openToken = dependencies.target ? openTargetToken(dependencies.target) : undefined;
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}` + (openToken ? `&${DASHBOARD_LAUNCH_OPEN_KEY}=${openToken}` : "");
+}
+
+// src/core/remote-open-tool.ts
+init_operation_error();
+
+// src/core/remote-open.ts
+var SERVER_MODE_ENV = "OLYMPUS_SERVER_MODE";
+var SERVER_SSH_TARGET_ENV = "OLYMPUS_SERVER_SSH_TARGET";
+var SERVER_MODE_SETTINGS = ["on", "off", "auto"];
+function parseServerModeSetting(value) {
+  if (typeof value !== "string")
+    return;
+  const normalized = value.trim().toLowerCase();
+  return SERVER_MODE_SETTINGS.includes(normalized) ? normalized : undefined;
+}
+function resolveServerMode(input) {
+  const setting = parseServerModeSetting(input.fileEnv?.[SERVER_MODE_ENV]) ?? parseServerModeSetting(input.env[SERVER_MODE_ENV]) ?? "auto";
+  const rawTarget = input.fileEnv?.[SERVER_SSH_TARGET_ENV] ?? input.env[SERVER_SSH_TARGET_ENV];
+  const sshTarget = isValidSshTarget(rawTarget) ? rawTarget.trim() : undefined;
+  const withTarget = (mode) => sshTarget ? { ...mode, sshTarget } : mode;
+  if (setting === "on")
+    return withTarget({ remote: true, setting, basis: "declared" });
+  if (setting === "off")
+    return withTarget({ remote: false, setting, basis: "declared" });
+  const platform2 = input.platform ?? process.platform;
+  if (platform2 === "darwin" || platform2 === "win32")
+    return withTarget({ remote: false, setting, basis: "desktop_platform" });
+  if (input.env.DISPLAY?.trim() || input.env.WAYLAND_DISPLAY?.trim()) {
+    return withTarget({ remote: false, setting, basis: "desktop_session" });
+  }
+  return withTarget({ remote: true, setting, basis: "no_desktop_session" });
+}
+function isValidSshTarget(value) {
+  if (typeof value !== "string")
+    return false;
+  const trimmed = value.trim();
+  return trimmed.length <= 255 && /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/.test(trimmed);
+}
+var SSH_TARGET_PLACEHOLDER = "you@your-server";
+var DEFAULT_ENGINE_PORT = 8010;
+function isValidPort(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+function remoteOpenInstructions(input) {
+  const port = isValidPort(input.port) ? input.port : DEFAULT_ENGINE_PORT;
+  const sshTarget = isValidSshTarget(input.sshTarget) ? input.sshTarget.trim() : SSH_TARGET_PLACEHOLDER;
+  const path = input.target ? openTargetPath(input.target) : "dashboard";
+  return {
+    onComputer: `ssh -N -L ${port}:127.0.0.1:${port} ${sshTarget}`,
+    onServer: `olympus dashboard --no-open${path === "dashboard" ? "" : ` --target ${path}`}`
+  };
+}
+var REMOTE_TUNNEL_SECONDS = 1800;
+var OPENING_LINK_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}\/dashboard\/launch#olympus_launch_ticket=[A-Za-z0-9_-]{43}(?:&olympus_open=[a-z]+\.[a-z]+)?$/;
+function isOpeningLinkForCommandLine(value) {
+  return typeof value === "string" && OPENING_LINK_PATTERN.test(value);
+}
+function remoteOpenNodeCommands(input) {
+  if (!isValidPort(input.port))
+    throw new Error("remote open: invalid port");
+  if (!isValidSshTarget(input.sshTarget))
+    throw new Error("remote open: invalid ssh target");
+  if (!isOpeningLinkForCommandLine(input.link))
+    throw new Error("remote open: invalid link");
+  const port = input.port;
+  const target = input.sshTarget.trim();
+  const forward = `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:127.0.0.1:${port} ${target} sleep ${REMOTE_TUNNEL_SECONDS}`;
+  return {
+    macos: { tunnel: `ssh -f ${forward}`, open: `open '${input.link}'`, tunnelInBackground: false },
+    linux: { tunnel: `ssh -f ${forward}`, open: `xdg-open '${input.link}'`, tunnelInBackground: false },
+    windows: { tunnel: `ssh ${forward}`, open: `cmd /c start "" "${input.link}"`, tunnelInBackground: true }
+  };
+}
+
+// src/core/remote-open-tool.ts
+init_worker_auth();
+var OPEN_REMOTE_TOOL_NAME = "olympus_open_remote";
+var OPEN_REMOTE_PARAMS = {
+  target: {
+    type: "string",
+    required: true,
+    enum: allOpenTargets().map(openTargetPath),
+    description: "Where Olympus opens: dashboard, connect/<x|readwise|telegram|whatsapp>, or fix/<connect|reconnect|answers|search|models>."
+  }
+};
+var OPEN_REMOTE_DESCRIPTION = [
+  `Open Olympus on the owner's own computer when Olympus runs on a server (for example when they say "open Olympus on my computer", or to connect X, Readwise, Telegram or WhatsApp).`,
+  "Returns a one-time link (single use, 15 minutes), the engine port and two commands per platform.",
+  "Run them on the owner's computer with exec host=node, in order: first the tunnel (it asks the owner to approve it), then open. Do not run them anywhere else, do not show or repeat the link, and do not call this unless the owner asked.",
+  "If ssh_target is null, replace you@your-server with the user@host the computer uses to reach this server (ask the owner).",
+  "If there is no node that can run commands, give the owner the by_hand lines instead."
+].join(" ");
+async function openRemote(ctx, params, deps = {}) {
+  if (ctx.ownerAgentSession !== true) {
+    throw new OperationError("invalid_request", "Only the owner's own assistant can open Olympus on their computer.", "Ask from your own chat with your assistant.");
+  }
+  const extra = Object.keys(params).filter((key) => key !== "target");
+  if (extra.length > 0) {
+    throw new OperationError("invalid_request", `Open remote takes only "target"; remove ${extra.map((key) => `"${key}"`).join(", ")}.`);
+  }
+  const target = openTargetFromPath(params.target);
+  if (!target) {
+    throw new OperationError("invalid_params", `target must be one of: ${allOpenTargets().map(openTargetPath).join(", ")}.`);
+  }
+  const env = deps.env ?? process.env;
+  const mode = resolveServerMode({
+    env,
+    fileEnv: deps.fileEnv ? deps.fileEnv() : readWorkerSetupEnv({ env }),
+    ...deps.platform ? { platform: deps.platform } : {}
+  });
+  if (!mode.remote) {
+    throw new OperationError("config_error", "Olympus runs on a computer with a screen, not on a server, so there is nothing to open remotely.", "Open it on that computer with olympus dashboard. If Olympus does run on a server, run olympus server-mode on.");
+  }
+  const base = workerRootBaseUrl(ctx.config.email.baseUrl);
+  const baseUrl = new URL(base);
+  const port = Number(baseUrl.port || (baseUrl.protocol === "https:" ? 443 : 80));
+  if (baseUrl.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(baseUrl.hostname) || !isValidPort(port)) {
+    throw new OperationError("config_error", "The Olympus engine is not on this server's own loopback address, so a tunnel cannot reach it.", "Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1.");
+  }
+  const token = (deps.token ?? workerAuthTokenProvider(ctx.config))();
+  const link = await mintDashboardOpeningUrl(base, token, { target, ...deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {} });
+  if (!isOpeningLinkForCommandLine(link)) {
+    throw new OperationError("email_error", "The Olympus engine returned an opening link in an unexpected shape.", "Update Olympus, then try again.");
+  }
+  const sshTarget = mode.sshTarget ?? null;
+  const byHand = remoteOpenInstructions({ port, ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {}, target });
+  return {
+    ok: true,
+    target: openTargetPath(target),
+    lands_on: isKeysOpenTarget(target) ? "/dashboard?keys" : "/dashboard",
+    link,
+    link_single_use: true,
+    link_expires_in_seconds: DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
+    engine_port: port,
+    ssh_target: sshTarget,
+    node_commands: remoteOpenNodeCommands({ port, sshTarget: sshTarget ?? SSH_TARGET_PLACEHOLDER, link }),
+    tunnel_closes_after_seconds: REMOTE_TUNNEL_SECONDS,
+    steps: [
+      "Run node_commands.<platform>.tunnel on the owner's computer with exec host=node (on Windows as a background exec). The owner approves it once.",
+      `It must listen on port ${port}, the engine's own number: the link only works there. If ssh says the port is in use, something on the computer already uses ${port}; ask the owner to close it.`,
+      "Then run node_commands.<platform>.open. Olympus opens in the computer's browser, unlocked. The owner does the typing there (keys, sign-ins).",
+      "Tell the owner it is open. Do not repeat the link."
+    ],
+    by_hand: byHand
+  };
+}
+
+// src/core/operations.ts
 var ARGUS_PROFILE_ENUM = [
   "default_chat",
   "source_answer",
@@ -20804,6 +21035,16 @@ var operations = [
       const jobs = ctx.sourceAnswerJobs;
       return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
     }
+  },
+  {
+    name: OPEN_REMOTE_TOOL_NAME,
+    description: OPEN_REMOTE_DESCRIPTION,
+    params: OPEN_REMOTE_PARAMS,
+    mutating: true,
+    nativeExposure: "always",
+    requiresOwnerAgentSession: true,
+    cliHints: { name: "open remote" },
+    handler: async (ctx, params) => openRemote(ctx, params)
   }
 ];
 function runUnderCaller(jobs, caller, work) {
@@ -21944,6 +22185,11 @@ var plugin = {
             ...sourceWatchRoute ? { sourceWatchRoute } : {}
           });
         });
+      } else if (operation.requiresOwnerAgentSession) {
+        api.registerTool((toolContext) => nativeToolFromOperation(operation, {
+          ...ctx,
+          ownerAgentSession: toolContext?.senderIsOwner === true
+        }));
       } else {
         api.registerTool(nativeToolFromOperation(operation, ctx));
       }

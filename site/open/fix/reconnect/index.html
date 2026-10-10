@@ -31,6 +31,14 @@
         <li>On the computer running Olympus, open Terminal and run <code>olympus dashboard</code>. Olympus opens in your browser.</li>
         <li>Under <strong>Sources</strong>, choose <strong>Reconnect</strong> next to the source.</li>
       </ol>
+
+      <h2 id="on-a-server">If Olympus runs on a server</h2>
+      <p>Open it on your computer through a secure tunnel. On your computer, run:</p>
+      <pre><code>ssh -N -L 8010:127.0.0.1:8010 you@your-server</code></pre>
+      <p>Then on the server, run this and open the link it prints in your computer's browser:</p>
+      <pre><code>olympus dashboard --no-open --target fix/reconnect</code></pre>
+      <p>8010 is the usual port. If the printed link shows another number, use that number on both sides of the tunnel: the link only works on that port. Replace <code>you@your-server</code> with how you sign in to the server.</p>
+      <p>If your assistant runs on the server and your computer is paired with it (OpenClaw), you can ask it instead: <strong>Open Olympus on my computer</strong>.</p>
       <p class="meta">More help: <a href="/help/on-your-computer/#reconnect">Fix it on your computer</a>.</p>
     </div>
   </main>
