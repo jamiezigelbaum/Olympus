@@ -15,6 +15,13 @@
  * - Every other worker route stays behind `withWorkerBearerAuth`, which
  *   accepts only the worker bearer, so a connection token reaches nothing else.
  *
+ * `/openai/mcp` is the ChatGPT plugin directory's endpoint
+ * (connect-relay/shared/directory-tools.ts): its own protected resource, so
+ * only an OAuth access token issued for `<origin>/openai/mcp` opens it (a
+ * bearer connection token names no resource and is refused), and only the
+ * ChatGPT surface is served there, narrowed to the directory's tool allowlist
+ * (chatgpt/directory-surface.ts). `/mcp` is unchanged.
+ *
  * The tool list is the `remote` operation surface (the Hermes list:
  * source_answer, source_answer_result and source_index_status). Each request is served statelessly:
  * one MCP server and transport per HTTP request, JSON responses, no session.
@@ -36,14 +43,18 @@ import {
 } from '../core/remote-connections.ts';
 import { isRelayedRequest } from '../core/remote-access.ts';
 import { isWellFormedOAuthAccessToken } from '../core/remote-oauth-store.ts';
-import { currentRemotePublicUrls, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
+import { currentRemotePublicUrls, remoteMcpResource, type RemotePublicUrls, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { sourceAnswerJobOwner, type SourceAnswerJobRegistry } from '../core/source-answer-jobs.ts';
 import { createOlympusMcpServer } from '../mcp/server.ts';
 import { createChatGptMcpServer, type ChatGptSurfaceOptions } from './chatgpt/mcp-surface.ts';
+import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts';
+import { DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 import { AUTHENTICATED_RESPONSE_HEADER } from '../../connect-relay/shared/tokens.ts';
 
 export const REMOTE_MCP_PATH = '/mcp';
+/** The ChatGPT plugin directory's endpoint. */
+export const REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
 
 export interface RemoteMcpHandlerOptions {
@@ -76,14 +87,23 @@ export interface RemoteMcpHandlerOptions {
     /** Whether this connection gets only the surface's read-only tools (a demo grant). */
     readOnlyFor?: (connection: RemoteMcpConnection) => boolean;
   };
+  /** Builds the directory endpoint's server (default createChatGptDirectoryMcpServer; tests narrow its allowlist). */
+  directoryServer?: typeof createChatGptDirectoryMcpServer;
 }
 
 /** The verified connection behind a remote request; `clientId` for OAuth grants. */
 export type RemoteMcpConnection = Pick<RemoteConnectionRecord, 'id' | 'displayName'> & { clientId?: string | null };
 
 export function isRemoteMcpRequest(request: Request): boolean {
+  return remoteMcpSurface(request) !== undefined;
+}
+
+/** Which MCP endpoint a request names, or undefined for any other path. */
+export function remoteMcpSurface(request: Request): McpSurface | undefined {
   const { pathname } = new URL(request.url);
-  return pathname === REMOTE_MCP_PATH;
+  if (pathname === REMOTE_MCP_PATH) return 'default';
+  if (pathname === REMOTE_DIRECTORY_MCP_PATH) return 'directory';
+  return undefined;
 }
 
 /**
@@ -100,9 +120,10 @@ export function withRemoteMcpRoute(
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
   const isRelayed = options.isRelayed ?? isRelayedRequest;
   return async (request: Request): Promise<Response> => {
-    const verification = authenticateRemoteRequest(request, options);
+    const surface = remoteMcpSurface(request) ?? 'default';
+    const verification = authenticateRemoteRequest(request, options, surface);
     if (!verification.ok) return verification.response;
-    const response = await serveAuthenticated(request, verification);
+    const response = await serveAuthenticated(request, verification, surface);
     // Only the relay reads the mark; a direct caller never sees it.
     return isRelayed(request) ? markAuthenticated(response) : response;
   };
@@ -110,6 +131,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
   async function serveAuthenticated(
     request: Request,
     verification: { connection: RemoteMcpConnection },
+    surface: McpSurface,
   ): Promise<Response> {
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
@@ -134,8 +156,13 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     const chatgpt = options.chatgpt?.servesRequest(request, verification.connection)
       ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true }
       : undefined;
+    // The directory endpoint serves the ChatGPT surface only.
+    if (surface === 'directory' && !chatgpt) return jsonResponse(404, { error: 'not_found' });
+    const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const server = chatgpt
-      ? createChatGptMcpServer(() => ctx, chatgpt, () => options.makeOperationContext(caller, new AbortController().signal))
+      ? surface === 'directory'
+        ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
+        : createChatGptMcpServer(() => ctx, chatgpt, detached)
       : createOlympusMcpServer('remote', () => ctx);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
@@ -170,21 +197,24 @@ function markAuthenticated(response: Response): Response {
  * then every token is refused without touching the disk.
  */
 /**
- * The one credential check every remote agent route uses (`/mcp` and the
- * OpenAPI tool paths): a bearer connection token, or an OAuth access token
- * bound to this install's configured resource. Refusals are 401s carrying the
- * RFC 9728 pointer when OAuth is on.
+ * The one credential check every remote agent route uses (`/mcp`, the
+ * directory's `/openai/mcp` and the OpenAPI tool paths): a bearer connection
+ * token, or an OAuth access token bound to the configured resource of the
+ * endpoint it reached. The directory endpoint takes OAuth access tokens only.
+ * Refusals are 401s carrying that endpoint's RFC 9728 pointer when OAuth is on.
  */
 export function authenticateRemoteRequest(
   request: Request,
   options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
+  surface: McpSurface = 'default',
 ): { ok: true; connection: RemoteMcpConnection } | { ok: false; response: Response } {
   const urls = currentRemotePublicUrls(options.publicUrls);
-  const refuse = (error?: 'invalid_token') => ({ ok: false as const, response: unauthorized(error, urls) });
+  const endpoint = urls ? remoteMcpResource(urls, surface) : undefined;
+  const refuse = (error?: 'invalid_token') => ({ ok: false as const, response: unauthorized(error, urls, endpoint?.protectedResourceMetadataUrl) });
   const token = bearerToken(request.headers.get('Authorization'));
   if (token === undefined) return refuse();
   const oauthToken = urls !== undefined && isWellFormedOAuthAccessToken(token);
-  if (!oauthToken && !isWellFormedRemoteConnectionToken(token)) return refuse('invalid_token');
+  if (!oauthToken && (surface === 'directory' || !isWellFormedRemoteConnectionToken(token))) return refuse('invalid_token');
   let store: RemoteConnectionStore | undefined;
   try {
     store = options.connections();
@@ -194,7 +224,7 @@ export function authenticateRemoteRequest(
   if (!store) return refuse('invalid_token');
   if (oauthToken) {
     // Audience binding: only a token issued for this resource opens it.
-    const verification = store.oauth.verifyAccessToken(token, urls!.resource);
+    const verification = store.oauth.verifyAccessToken(token, endpoint!.resource);
     return verification.ok ? { ok: true, connection: verification.connection } : refuse('invalid_token');
   }
   const verification = store.verifyToken(token);
@@ -311,11 +341,11 @@ export function bearerToken(header: string | null): string | undefined {
   return match?.[1];
 }
 
-export function unauthorized(error?: 'invalid_token', urls?: RemotePublicUrls): Response {
+export function unauthorized(error?: 'invalid_token', urls?: RemotePublicUrls, protectedResourceMetadataUrl = urls?.protectedResourceMetadataUrl): Response {
   // RFC 6750 challenge; with OAuth on, the RFC 9728 resource_metadata pointer
   // is what starts a hosted agent's authorization flow.
   const parts = ['realm="olympus"'];
-  if (urls) parts.push(`resource_metadata="${urls.protectedResourceMetadataUrl}"`);
+  if (urls) parts.push(`resource_metadata="${protectedResourceMetadataUrl}"`);
   if (error) {
     parts.push(`error="${error}"`, 'error_description="The connection token is not valid or has been revoked."');
   }

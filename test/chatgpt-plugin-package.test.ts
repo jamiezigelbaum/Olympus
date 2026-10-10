@@ -94,7 +94,44 @@ describe('chatgpt-plugin/mcp.json', () => {
     expect(mcp.$schema).toBe('https://agent-plugins.org/schemas/1.0.0/mcp.schema.json');
     const servers = Object.entries(mcp.mcpServers as Record<string, Record<string, unknown>>);
     expect(servers).toHaveLength(1);
-    expect(servers[0]![1]).toEqual({ type: 'streamable-http', url: 'https://mcp.olympusplugin.ai/mcp' });
+    // The directory endpoint is permanent once published; /mcp stays for developer-mode connectors.
+    expect(servers[0]![1]).toEqual({
+      type: 'streamable-http',
+      url: 'https://mcp.olympusplugin.ai/openai/mcp',
+      extensions: { 'com.openai': { auth: { type: 'oauth', client: { mode: 'cimd' } } } },
+    });
+  });
+});
+
+describe('chatgpt-plugin review metadata', () => {
+  const openai = readJson(join(root, 'plugin.json')).extensions['com.openai'];
+
+  test('exactly 5 positive and 3 negative test cases, with release notes', () => {
+    const { positive, negative } = openai.review.test_cases;
+    expect(positive).toHaveLength(5);
+    expect(negative).toHaveLength(3);
+    for (const item of positive) {
+      expect(Object.keys(item).sort()).toEqual(['description', 'expected_behavior', 'prompt', 'tools_triggered']);
+    }
+    for (const item of negative) expect(Object.keys(item).sort()).toEqual(['description', 'prompt']);
+    expect(openai.review.commerce).toBe(false);
+    expect(openai.publication.release_notes.length).toBeGreaterThan(20);
+  });
+
+  test('listing and review text keep money out of ChatGPT-facing copy', () => {
+    const text = JSON.stringify([openai.interface, openai.review.test_cases, openai.publication]);
+    expect(text).not.toMatch(/\b(beta|ETH|crypto|wallet|deposit|top.?up|add money|paid|price)\b/i);
+  });
+});
+
+describe('chatgpt-plugin skill dependencies', () => {
+  test('each skill depends on the same MCP endpoint as mcp.json', () => {
+    const url = Object.values(readJson(join(root, 'mcp.json')).mcpServers as Record<string, { url: string }>)[0]!.url;
+    for (const dir of readdirSync(join(root, 'skills'))) {
+      const yaml = readFileSync(join(root, 'skills', dir, 'agents', 'openai.yaml'), 'utf8');
+      expect(yaml).toContain('value: "olympus"');
+      expect(yaml).toContain(`url: "${url}"`);
+    }
   });
 });
 

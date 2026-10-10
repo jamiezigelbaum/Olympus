@@ -11,10 +11,12 @@
  *   (authorize-bridge.ts);
  * - `/connect/demo/authorize`: reviewer sign-in, routed only to the one demo
  *   install the relay is configured with (none by default);
- * - `POST /connect/token`, `POST /connect/revoke` and `/mcp`: routed per
- *   request to the install their credential names (shared/tokens.ts). ChatGPT
- *   may reuse one connection for many users, so routing never sticks to a
- *   connection;
+ * - `POST /connect/token`, `POST /connect/revoke`, `/mcp` and `/openai/mcp`
+ *   (the plugin directory's endpoint: the same tools narrowed to its
+ *   allowlist, its own protected resource; shared/directory-tools.ts): routed
+ *   per request to the install their credential names (shared/tokens.ts).
+ *   ChatGPT may reuse one connection for many users, so routing never sticks
+ *   to a connection;
  * - `GET /.well-known/openai-apps-challenge`: the domain verification token,
  *   when one is configured;
  * - `POST /private/<job id>` (and its CORS preflight): the private answer
@@ -60,6 +62,7 @@ import {
   type RelayErrorCode,
 } from '../shared/protocol.ts';
 import { INSTALL_URL } from '../shared/dashboard-contract.ts';
+import type { McpSurface } from '../shared/directory-tools.ts';
 import { KeyedCounter, KeyedTokenBuckets, addressKey, prefixKey } from '../shared/rate-limit.ts';
 import { HANDOFF_PATH_PREFIX, OAUTH_HANDBACK_PATHS, credentialInstallId, oauthHandbackInstallId } from '../shared/tokens.ts';
 import {
@@ -89,12 +92,20 @@ import {
   metadataResponse,
   protectedResourceMetadata,
   relayOrigin,
+  surfaceResource,
   unauthorized,
 } from './oauth-metadata.ts';
 import { isDashboardCall, relayMcpResponse } from './relay-mcp.ts';
 import { publicKeyOf, type MemoryInstallRegistry, type RegistryCounts } from './registry.ts';
 import { createResponsePolicies, type RouteKind } from './response-policy.ts';
 import { InstallSession } from './session.ts';
+
+/** An OpenAI-hosted origin's host name, or a fixed class: callers can put anything in Origin. */
+export function panelOriginClass(origin: string | null | undefined): string {
+  if (!origin) return 'none';
+  const match = /^https:\/\/([a-z0-9.-]+\.(?:oaiusercontent\.com|chatgpt\.com|openai\.com))$/i.exec(origin);
+  return match ? match[1]!.toLowerCase().slice(0, 120) : 'other';
+}
 
 export interface RelayConfig {
   /** The relay's one public name, e.g. `mcp.olympusplugin.ai`. Issuer and resource derive from it. */
@@ -500,7 +511,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     }
   };
 
-  const mcp = async (request: Request, path: string, ip: string): Promise<Response> => {
+  /**
+   * `/mcp` and `/openai/mcp`. The path goes to the install unchanged: the
+   * engine checks the token was issued for that endpoint's resource and
+   * narrows the directory's tools itself; the relay's own answers narrow them
+   * here.
+   */
+  const mcp = async (request: Request, path: string, ip: string, surface: McpSurface): Promise<Response> => {
+    const refuse = () => unauthorized(origin, 'invalid_token', surface);
     const authorization = request.headers.get('authorization');
     // No credential at all: the relay's own not-connected surface. A caller
     // without a token never reaches an engine.
@@ -514,7 +532,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           now: now(),
           state: 'not_connected',
           installUrl: bridge.installUrl,
-          protectedResourceMetadataUrl: origin.protectedResourceMetadataUrl,
+          protectedResourceMetadataUrl: surfaceResource(origin, surface).protectedResourceMetadataUrl,
+          surface,
         });
       } finally {
         anonymous.release();
@@ -522,14 +541,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     }
     const token = /^Bearer\s+(\S+)$/i.exec(authorization.trim())?.[1];
     const installId = credentialInstallId('access', token);
-    if (!installId) return unauthorized(origin, 'invalid_token');
+    if (!installId) return refuse();
     // Everything decided from the headers, before any body byte is read: an
     // id that routes nowhere is refused, and a credential the install's engine
     // has not confirmed is paid for by the caller's address, not the install.
     if (unroutable(installId)) {
       if (!publicRequests.take(ip)) return tooMany();
       log('request_refused', { install: installTag(installId), reason: 'unknown_install' });
-      return unauthorized(origin, 'invalid_token');
+      return refuse();
     }
     const key = credentialKey(installId, token!);
     const lane: AdmissionLane = confirmed.has(key) ? 'owner' : 'unverified';
@@ -556,8 +575,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         now: now(),
         state: 'mac_offline',
         lastSeenAt: registry.get(installId)?.lastSeenAt,
+        surface,
       }),
-      unknown: () => unauthorized(origin, 'invalid_token'),
+      unknown: refuse,
     });
   };
 
@@ -695,9 +715,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
   const privateAnswer = async (request: Request, url: URL, ip: string): Promise<Response> => {
     const requestOrigin = request.headers.get('origin');
     const allowed = isPanelOrigin(requestOrigin, panelOrigins);
-    // The widget host's origin is not private; logging refusals shows which
-    // ChatGPT surfaces (web, desktop) serve the panel from where.
-    if (!allowed) log('panel_origin_refused', { origin: (requestOrigin ?? 'none').slice(0, 120) });
+    // Refusals log only which kind of origin was refused: an OpenAI widget
+    // host by name (not private), anything else as 'other', never verbatim.
+    if (!allowed) log('panel_origin_refused', { origin: panelOriginClass(requestOrigin) });
     const cors = allowed ? privateAnswerCorsHeaders(requestOrigin) : {};
     const reply = (status: number, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
       json(status, body, { ...cors, ...headers });
@@ -886,7 +906,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       // Everything reachable without a routable credential is limited per
       // address here; `/mcp` with one decides its own limit (mcp()). Request
       // bodies on every route are admitted and timed by readBody.
-      const routableMcp = path === OAUTH_PATHS.mcp && credentialInstallId('access', /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1]);
+      const routableMcp = (path === OAUTH_PATHS.mcp || path === OAUTH_PATHS.directoryMcp) && credentialInstallId('access', /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1]);
       if (!routableMcp && !publicRequests.take(ip)) return tooMany();
 
       if (path.startsWith(HANDOFF_PATH_PREFIX)) return handoff(request, path, ip);
@@ -898,6 +918,10 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           if (request.method === 'OPTIONS') return metadataPreflight();
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, OPTIONS' });
           return metadataResponse(protectedResourceMetadata(origin));
+        case OAUTH_PATHS.protectedResourceDirectoryMcp:
+          if (request.method === 'OPTIONS') return metadataPreflight();
+          if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, OPTIONS' });
+          return metadataResponse(protectedResourceMetadata(origin, 'directory'));
         case OAUTH_PATHS.authorizationServer:
           if (request.method === 'OPTIONS') return metadataPreflight();
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET, OPTIONS' });
@@ -912,7 +936,9 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         case OAUTH_PATHS.revoke:
           return oauthForm(request, OAUTH_PATHS.revoke, 'revoke', ip);
         case OAUTH_PATHS.mcp:
-          return mcp(request, OAUTH_PATHS.mcp, ip);
+          return mcp(request, OAUTH_PATHS.mcp, ip, 'default');
+        case OAUTH_PATHS.directoryMcp:
+          return mcp(request, OAUTH_PATHS.directoryMcp, ip, 'directory');
         case APPS_CHALLENGE_PATH: {
           if (request.method !== 'GET') return json(405, { error: 'method_not_allowed' }, { Allow: 'GET' });
           const token = config.appsChallenge?.()?.trim();

@@ -20,7 +20,12 @@
  * (developers.openai.com/plugins/build/auth): listing the protected tools to a
  * caller with no token is what lets ChatGPT's model pick one, and that tool's
  * `mcp/www_authenticate` error is the documented trigger for linking.
+ *
+ * The plugin directory's endpoint (`/openai/mcp`, shared/directory-tools.ts)
+ * gets the same answers with the tool list narrowed to the directory
+ * allowlist; a call to any other tool there is answered as an unknown tool.
  */
+import { toolCallableOn, toolsForSurface, type McpSurface } from '../shared/directory-tools.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notConnectedDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
 import DASHBOARD_RESOURCE_READ from './generated/chatgpt-dashboard.json';
 import PRIVATE_ANSWER_RESOURCE_READ from './generated/chatgpt-private-answer.json';
@@ -70,7 +75,8 @@ function json(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 }
 
-export function relayMcpResponse(input: { method: string; body: string; now: number } & RelayMcpState): Response {
+export function relayMcpResponse(input: { method: string; body: string; now: number; surface?: McpSurface } & RelayMcpState): Response {
+  const surface = input.surface ?? 'default';
   if (input.method !== 'POST') {
     // No standalone SSE stream or session to end without an engine.
     return new Response(null, { status: 405, headers: { Allow: 'POST' } });
@@ -104,7 +110,7 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
     case 'ping':
       return rpcResult(id, {});
     case 'tools/list':
-      return rpcResult(id, { tools: CHATGPT_TOOLS });
+      return rpcResult(id, { tools: toolsForSurface(CHATGPT_TOOLS, surface) });
     case 'resources/list':
       return rpcResult(id, { resources: CHATGPT_RESOURCES });
     case 'resources/templates/list':
@@ -119,7 +125,8 @@ export function relayMcpResponse(input: { method: string; body: string; now: num
       return rpcResult(id, { contents: DASHBOARD_RESOURCE_CONTENTS });
     }
     case 'tools/call': {
-      if (args.name === DASHBOARD_TOOL_NAME) {
+      // A tool off this surface's list is answered like any unknown name.
+      if (args.name === DASHBOARD_TOOL_NAME && toolCallableOn(args.name, surface)) {
         // The page renders only from structuredContent, so the dashboard
         // result always carries it, with the tool's own UI metadata. Without
         // a token it also carries the linking challenge, so ChatGPT offers

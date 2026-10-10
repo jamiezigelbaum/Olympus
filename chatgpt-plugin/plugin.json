@@ -8,17 +8,31 @@
     "url": "https://olympusplugin.ai"
   },
   "homepage": "https://olympusplugin.ai",
+  "repository": "https://github.com/jamiezigelbaum/Olympus",
   "license": "MIT",
-  "keywords": ["knowledge", "search", "mail", "files", "notes", "private", "mac"],
+  "keywords": [
+    "knowledge",
+    "search",
+    "mail",
+    "files",
+    "notes",
+    "private",
+    "mac"
+  ],
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "Olympus",
         "shortDescription": "Ask your own mail and files",
-        "longDescription": "Olympus is a private knowledge engine that runs on your Mac. It indexes the sources you choose: Dropbox, Gmail and Google Drive, connected with accounts you already have, and sources such as X bookmarks, Readwise, Telegram and WhatsApp, set up on your Mac. It answers your questions in ChatGPT with citations. Your index stays on your Mac; ChatGPT reaches it through one secure connection you approve on the Mac. The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far indexing has got and anything that needs you.",
+        "longDescription": "Olympus is a private knowledge engine that runs on your Mac. It indexes the sources you choose, such as your files in Dropbox and Google Drive and your Gmail, connected with accounts you already have, and sources such as X bookmarks, Readwise, Telegram and WhatsApp, set up on your Mac. It answers your questions in ChatGPT with citations to your own items.\n\nYour index stays on your Mac. Olympus sorts every item, one by one, into Personal, Private or Secret, and you can tell it in your own words what is private for you. ChatGPT receives excerpts only from Personal items. Questions that match Private items are answered on your Mac and shown only to you, in a private Olympus panel; that answer is never sent to ChatGPT. Secrets such as passwords are never read by any model.\n\nChatGPT reaches your Mac through one secure connection that you approve with a click on the Mac itself: no Olympus account, no password and no API keys. The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far indexing has got and anything that needs you.\n\nOptionally, with your own zkAPI account set up in Olympus on your Mac, you can ask a frontier AI model a question anonymously. Type it in a private Olympus panel that ChatGPT never sees, and the answer appears there.\n\nOlympus never sends mail, edits files or changes anything in your accounts. Requires a Mac that is awake and online when you ask.",
         "developerName": "OCU Inc.",
         "category": "Productivity",
-        "capabilities": ["Read"],
+        "capabilities": [
+          "Answers from your own mail and files",
+          "Private answers panel",
+          "Sources dashboard",
+          "Anonymous questions"
+        ],
         "websiteURL": "https://olympusplugin.ai",
         "supportURL": "https://olympusplugin.ai/support",
         "privacyPolicyURL": "https://olympusplugin.ai/privacy",
@@ -28,8 +42,65 @@
           "Use Olympus to find what Sam sent me about the lease.",
           "Show my Olympus dashboard."
         ],
+        "brandColor": "#2f5d50",
+        "brandColorDark": "#7fbfa9",
         "composerIcon": "./assets/icon.png",
         "logo": "./assets/icon.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "A question answered from the user's own mail and documents, with citations.",
+              "prompt": "What did Sam say about renewing my lease?",
+              "tools_triggered": "olympus_search (or source_answer with source_answer_result, when an answer model is set up on the Mac)",
+              "expected_behavior": "ChatGPT answers from the returned evidence: Sam offers a 12-month renewal from 1 December 2026; rent rises from $2,150 to $2,215 a month (3%); he needs an answer by 15 October; he will replace the dishwasher before the new term. Each claim cites the emails from Sam Okafor (and may cite the lease summary)."
+            },
+            {
+              "description": "A decision recorded across a note and an email.",
+              "prompt": "Ask Olympus what I decided about the budget last month.",
+              "tools_triggered": "olympus_search (or source_answer with source_answer_result, when an answer model is set up on the Mac)",
+              "expected_behavior": "ChatGPT says that on 2 September Robin and Priya capped the kitchen renovation at $18,000 and accepted the Hollis & Daughters quote of $16,400, raised monthly savings from $600 to $750 from October, set the Lisbon trip budget at $3,200 and decided on no new car this year, citing the budget note and Priya's email."
+            },
+            {
+              "description": "A question that matches Private items is answered only in the private panel.",
+              "prompt": "What did my blood test results say?",
+              "tools_triggered": "olympus_search",
+              "expected_behavior": "ChatGPT's reply is short and says Olympus is answering privately on the Mac, in the panel. It contains no result values, no clinic or doctor name and no content from the Private items, and it does not ask the user to upload or paste anything. An Olympus panel titled \"Private answer from your Mac\", marked \"Not sent to ChatGPT\", appears under the reply and shows the answer from the lab results and clinic note. This can take up to a minute."
+            },
+            {
+              "description": "The Olympus dashboard.",
+              "prompt": "Show my Olympus dashboard.",
+              "tools_triggered": "olympus_dashboard",
+              "expected_behavior": "The Olympus dashboard renders, showing the demo's connected sources as ready, indexing complete and nothing needing attention. No Private or Secret item or folder name appears on it."
+            },
+            {
+              "description": "An anonymous question typed in a private panel that ChatGPT never sees.",
+              "prompt": "Use Olympus to ask a private question anonymously.",
+              "tools_triggered": "open_private_question",
+              "expected_behavior": "ChatGPT opens the Olympus private question panel at once and does not ask what the question is. In the panel, type a general question (for example \"What are good ways to keep a kitchen renovation within budget?\") and choose Ask anonymously. The answer, and the model that gave it, appear in the panel only; ChatGPT's reply does not contain the question or the answer. This can take up to three minutes."
+            }
+          ],
+          "negative": [
+            {
+              "description": "General knowledge; ChatGPT answers itself without calling Olympus, which is only for the user's own information.",
+              "prompt": "What is the capital of Portugal?"
+            },
+            {
+              "description": "A creative writing request with nothing to do with the user's own sources.",
+              "prompt": "Write a short poem about autumn in the mountains."
+            },
+            {
+              "description": "Current news, not the user's own information; ChatGPT uses its own search and does not call Olympus.",
+              "prompt": "What are the top technology news stories this week?"
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "Nothing is sold, bought or paid in ChatGPT. The optional anonymous questions use the user's own zkAPI account, set up outside ChatGPT in Olympus on their Mac; each question uses a little of that account's balance. The plugin never offers, links to or starts a purchase or payment."
+      },
+      "publication": {
+        "release_notes": "First release. Ask ChatGPT about your own mail, files and notes, with citations; answers from Private items appear only in a private Olympus panel; the Olympus dashboard shows your sources and indexing; and, with your own zkAPI account, ask a frontier model a question anonymously in a panel ChatGPT never sees."
       }
     }
   }

@@ -875,6 +875,30 @@ var init_source_corpus_registry = __esm(() => {
   PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
 });
 
+// connect-relay/shared/directory-tools.ts
+var DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
+var init_directory_tools = __esm(() => {
+  DIRECTORY_TOOL_NAMES = Object.freeze([
+    "olympus_dashboard",
+    "olympus_search",
+    "source_index_status",
+    "source_answer",
+    "source_answer_result",
+    "ask_anonymously",
+    "open_private_question",
+    "olympus_connect_source",
+    "olympus_scope_list",
+    "olympus_scope_set",
+    "olympus_disconnect_source",
+    "olympus_model_set",
+    "olympus_model_retry",
+    "olympus_privacy_get",
+    "olympus_privacy_set",
+    "olympus_sync_source"
+  ]);
+  DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
+});
+
 // src/core/remote-public-url.ts
 function parseRemotePublicBaseUrl(value, installId) {
   const raw = value?.trim();
@@ -915,6 +939,7 @@ function parseRemotePublicBaseUrl(value, installId) {
 }
 var REMOTE_PUBLIC_BASE_URL_ENV = "OLYMPUS_PUBLIC_BASE_URL", REMOTE_MCP_RESOURCE_PATH = "/mcp", LOOPBACK_HOSTNAMES;
 var init_remote_public_url = __esm(() => {
+  init_directory_tools();
   LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 

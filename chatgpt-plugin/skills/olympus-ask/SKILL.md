@@ -50,6 +50,20 @@ privately in the panel:
   question (name the item, its date or subject); the panel answers it the
   same way.
 
+## Anonymous questions
+
+Only when the user asks for a private or anonymous question (for example
+"use Olympus to ask a private question"):
+
+- If they have not written the question yet, call `open_private_question`
+  at once and tell them to type it in the panel. Never ask them what the
+  question is: anything written in this conversation is no longer private.
+- If they already wrote the question here and want it sent anonymously, call
+  `ask_anonymously` with it. If it returns `needs_choice`, ask once whether
+  they want Strict or Standard, then call again with their choice.
+- If a result says anonymous questions are not set up or not available, tell
+  the user in those words; it is set up in Olympus on their Mac.
+
 ## Status and setup
 
 - "Is my Dropbox connected?", "how far is indexing?" → `source_index_status`,
