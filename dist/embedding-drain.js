@@ -985,7 +985,8 @@ var init_public_surface = __esm(() => {
     "source_watch_create",
     "source_watches",
     "source_watch_cancel",
-    "olympus_doctor"
+    "olympus_doctor",
+    "ask_anonymously"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
     "argus_ping",
@@ -995,7 +996,8 @@ var init_public_surface = __esm(() => {
     "source_answer_result",
     "source_index_status",
     "source_index_search",
-    "olympus_doctor"
+    "olympus_doctor",
+    "ask_anonymously"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
     "argus_ping",
@@ -1004,12 +1006,14 @@ var init_public_surface = __esm(() => {
     "source_answer",
     "source_index_status",
     "source_index_search",
-    "olympus_doctor"
+    "olympus_doctor",
+    "ask_anonymously"
   ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
     "source_answer_result",
-    "source_index_status"
+    "source_index_status",
+    "ask_anonymously"
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
   V0_4_PUBLIC_SOURCE_IDS = [

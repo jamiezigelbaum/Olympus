@@ -1255,15 +1255,15 @@ describe('Standard is open, and Ask anonymously (owner decision 2026-10-10)', ()
     expect((await none.backend.status()).ask).toBeUndefined();
     let finish!: () => void;
     const gate = new Promise<void>((resolve) => { finish = resolve; });
-    const asked: string[] = [];
-    const { backend } = adapter({ home: tempHome(), ask: async (question) => { asked.push(question); await gate; return { ok: true, sent: 'How long do deposits take to return?', reply: 'Usually two weeks.', route: 'zkAPI via Tor' }; } });
+    const asked: unknown[] = [];
+    const { backend } = adapter({ home: tempHome(), ask: async (input) => { asked.push(input); await gate; return { ok: true, sent: 'How long do deposits take to return?', reply: 'Usually two weeks.', route: 'zkAPI via Tor', level: 'standard', rewritten: true, remembered: false }; } });
     expect(await backend.ask({ question: '   ' })).toMatchObject({ ok: false, code: 'question_empty' });
     expect(await backend.ask({ question: ' When will Jo return my deposit? ' })).toMatchObject({ ok: true });
     expect(await backend.ask({ question: 'again' })).toMatchObject({ ok: false, code: 'ask_running' });
     expect((await backend.status()).ask?.state).toEqual({ state: 'running', question: 'When will Jo return my deposit?' });
     finish();
     await Bun.sleep(5);
-    expect(asked).toEqual(['When will Jo return my deposit?']);
+    expect(asked).toEqual([{ question: 'When will Jo return my deposit?', level: 'standard', origin: 'dashboard' }]);
     const done = (await backend.status()).ask!;
     expect(done.state).toMatchObject({ state: 'done', sent: 'How long do deposits take to return?', reply: 'Usually two weeks.' });
     const html = page({ ...status(), ask: done, standard: (await backend.status()).standard! });

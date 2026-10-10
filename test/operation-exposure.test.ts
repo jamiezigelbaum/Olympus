@@ -24,6 +24,7 @@ describe('operation exposure policy', () => {
       'source_watches',
       'source_watch_cancel',
       'olympus_doctor',
+      'ask_anonymously',
     ]);
   });
 
@@ -62,6 +63,7 @@ describe('operation exposure policy', () => {
       'argus_list_models',
       'argus_complete',
       'olympus_doctor',
+      'ask_anonymously',
     ]);
   });
 

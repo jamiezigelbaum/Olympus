@@ -83,8 +83,8 @@ entry ("Grok asked…"), so the owner can see what each connection asked.
 | Grok and Grok Bot | Remote MCP. It is a custom connector (Business/Enterprise), or through the xAI API, which uses header auth. | Paste the URL and approve, or paste the URL and a token. |
 | Muse | OpenAPI plus a static bearer token (Muse has no OAuth or native MCP yet). | Paste the URL and token from `olympus connections add muse`. |
 
-Remote tool list: `source_answer`, `source_answer_result` and
-`source_index_status`, the same narrowed
+Remote tool list: `source_answer`, `source_answer_result`,
+`source_index_status` and `ask_anonymously`, the same narrowed
 list Hermes gets (`V0_4_HERMES_MCP_TOOLS`). Source watches remain native-only
 because their delivery depends on OpenClaw's session routing.
 

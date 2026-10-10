@@ -155,6 +155,13 @@ export interface ConsultSettings {
   readonly standardMode?: ConsultStandardMode;
   /** The user's own instruction; present exactly when `standardMode` is `custom`. */
   readonly standardInstruction?: string;
+  /**
+   * Set once the user has chosen a level in conversation (the
+   * ask_anonymously tool, `remember`). Until then the tool asks Strict or
+   * Standard once instead of sending at the file's default (owner decision
+   * 2026-10-10: ask the first time, remember, override by phrasing).
+   */
+  readonly levelChosen?: true;
 }
 
 /**
@@ -212,7 +219,7 @@ export const DEFAULT_CONSULT_SETTINGS: ConsultSettings = Object.freeze({
 });
 
 const REQUIRED_TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'strict'] as const;
-const OPTIONAL_TOP_LEVEL_KEYS = ['level', 'writer', 'chatgptFrontierModel', 'standardMode', 'standardInstruction'] as const;
+const OPTIONAL_TOP_LEVEL_KEYS = ['level', 'writer', 'chatgptFrontierModel', 'standardMode', 'standardInstruction', 'levelChosen'] as const;
 const WRITER_REQUIRED_KEYS = ['baseUrl', 'model'] as const;
 const WRITER_OPTIONAL_KEYS = ['secretRef', 'timeoutMs'] as const;
 const DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS) as Array<keyof ConsultDomainPacks>;
@@ -300,6 +307,7 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
   }
   // A custom instruction exists exactly when the mode is custom.
   if ((standardMode === 'custom') !== (standardInstruction !== undefined)) return undefined;
+  if (Object.hasOwn(value, 'levelChosen') && value.levelChosen !== true) return undefined;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
@@ -312,6 +320,7 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
     ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}),
     ...(standardMode ? { standardMode } : {}),
     ...(standardInstruction !== undefined ? { standardInstruction } : {}),
+    ...(value.levelChosen === true ? { levelChosen: true as const } : {}),
   });
 }
 

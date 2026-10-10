@@ -39,6 +39,19 @@ export type SourceIndexStatusCorpusId = string;
 export type SourceIndexSearchCorpusId = string;
 export type SourceIndexSearchAttachmentType = 'image' | 'video' | 'audio' | 'file' | 'link' | 'other';
 
+export interface ConsultAskClientOptions {
+  question: string;
+  level?: 'strict' | 'standard';
+  cleanup?: 'as_written' | 'light_cleanup' | 'custom';
+  remember?: boolean;
+  model?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/** A zkAPI session may take several minutes (Tor, then the model, then settlement); the transport's own timeout is 6 minutes. */
+export const CONSULT_ASK_CLIENT_TIMEOUT_MS = 12 * 60_000;
+
 export interface SourceIndexAnswerOptions {
   question: string;
   query?: string;
@@ -377,6 +390,33 @@ export class EmailClient {
   ) {
     this.config = config;
     this.transport = transport;
+  }
+
+  /**
+   * "Ask anonymously": one typed question prepared at the chosen level and
+   * sent through zkAPI by the worker (core/consult-ask.ts). The worker's
+   * outcome, refusals included, comes back as a result, never as an error.
+   */
+  async askAnonymously(options: ConsultAskClientOptions): Promise<unknown> {
+    if (!this.config.email.enabled) {
+      throw new OperationError(
+        'email_not_configured',
+        'Private source worker is disabled.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before asking anonymously.',
+      );
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/consult/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      ...(options.signal ? { signal: options.signal } : {}),
+      body: JSON.stringify({
+        question: options.question,
+        ...(options.level ? { level: options.level } : {}),
+        ...(options.cleanup ? { cleanup: options.cleanup } : {}),
+        ...(options.remember !== undefined ? { remember: options.remember } : {}),
+        ...(options.model ? { model: options.model } : {}),
+      }),
+    }, { timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS });
   }
 
   async sourceAnswer(options: SourceIndexAnswerOptions): Promise<SourceIndexAnswerResult> {

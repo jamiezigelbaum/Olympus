@@ -249,7 +249,8 @@ var init_public_surface = __esm(() => {
     "source_watch_create",
     "source_watches",
     "source_watch_cancel",
-    "olympus_doctor"
+    "olympus_doctor",
+    "ask_anonymously"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
     "argus_ping",
@@ -259,7 +260,8 @@ var init_public_surface = __esm(() => {
     "source_answer_result",
     "source_index_status",
     "source_index_search",
-    "olympus_doctor"
+    "olympus_doctor",
+    "ask_anonymously"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
     "argus_ping",
@@ -268,12 +270,14 @@ var init_public_surface = __esm(() => {
     "source_answer",
     "source_index_status",
     "source_index_search",
-    "olympus_doctor"
+    "olympus_doctor",
+    "ask_anonymously"
   ];
   V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
     "source_answer_result",
-    "source_index_status"
+    "source_index_status",
+    "ask_anonymously"
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
   V0_4_PUBLIC_SOURCE_IDS = [
@@ -13630,6 +13634,7 @@ var PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
   ["invalid_request", "invalid_request"],
   ["source_index_policy_violation", "source_index_policy_violation"]
 ]);
+var CONSULT_ASK_CLIENT_TIMEOUT_MS = 12 * 60000;
 
 class EmailClient {
   config;
@@ -13637,6 +13642,23 @@ class EmailClient {
   constructor(config, transport = createEmailTransport(config)) {
     this.config = config;
     this.transport = transport;
+  }
+  async askAnonymously(options) {
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before asking anonymously.");
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/consult/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...options.signal ? { signal: options.signal } : {},
+      body: JSON.stringify({
+        question: options.question,
+        ...options.level ? { level: options.level } : {},
+        ...options.cleanup ? { cleanup: options.cleanup } : {},
+        ...options.remember !== undefined ? { remember: options.remember } : {},
+        ...options.model ? { model: options.model } : {}
+      })
+    }, { timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS });
   }
   async sourceAnswer(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
@@ -18598,7 +18620,7 @@ var DEFAULT_CONSULT_SETTINGS = Object.freeze({
   level: CONSULT_LEVEL_FOR_NEW_SETUP
 });
 var REQUIRED_TOP_LEVEL_KEYS = ["v", "revision", "enabled", "languages", "domains", "strict"];
-var OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel", "standardMode", "standardInstruction"];
+var OPTIONAL_TOP_LEVEL_KEYS = ["level", "writer", "chatgptFrontierModel", "standardMode", "standardInstruction", "levelChosen"];
 var WRITER_REQUIRED_KEYS = ["baseUrl", "model"];
 var WRITER_OPTIONAL_KEYS = ["secretRef", "timeoutMs"];
 var DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS);
@@ -18663,6 +18685,8 @@ function parseConsultSettings(value) {
   }
   if (standardMode === "custom" !== (standardInstruction !== undefined))
     return;
+  if (Object.hasOwn(value, "levelChosen") && value.levelChosen !== true)
+    return;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
@@ -18674,7 +18698,8 @@ function parseConsultSettings(value) {
     ...writer ? { writer } : {},
     ...chatgptFrontierModel ? { chatgptFrontierModel } : {},
     ...standardMode ? { standardMode } : {},
-    ...standardInstruction !== undefined ? { standardInstruction } : {}
+    ...standardInstruction !== undefined ? { standardInstruction } : {},
+    ...value.levelChosen === true ? { levelChosen: true } : {}
   });
 }
 function parseModelId(value) {
@@ -20329,6 +20354,16 @@ var SOURCE_ANSWER_PARAMS = {
 var SOURCE_ANSWER_RESULT_PARAMS = {
   job_id: { type: "string", required: true, description: 'The job_id a source_answer call returned with status "working".' }
 };
+var ASK_ANONYMOUSLY_PARAMS = {
+  question: { type: "string", required: true, description: "The question, in the user's words. Nothing else is sent: no documents, no history, no account." },
+  level: {
+    type: "string",
+    description: `How the question is prepared before it leaves: "strict" (the user's own model rewrites it into general questions first; nothing identifying can be sent) or "standard" (their words, prepared as they chose). Omit to use the level the user chose before; the first call without one returns needs_choice.`
+  },
+  cleanup: { type: "string", description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
+  remember: { type: "boolean", description: "Save this level (and cleanup) as the default for later questions, so the user is not asked again." },
+  model: { type: "string", description: "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model." }
+};
 var operations = [
   {
     name: "argus_ping",
@@ -20716,8 +20751,53 @@ var operations = [
     nativeExposure: "always",
     cliHints: { name: "doctor" },
     handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === "native" })) })
+  },
+  {
+    name: "ask_anonymously",
+    description: [
+      "Ask a frontier model one question anonymously through zkAPI, paid per question from the user's own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.",
+      "Use it only when the user asks to ask anonymously, privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.",
+      'Returns {ok: true, reply, sent, level, rewritten}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent".',
+      'Returns {ok: false, code: "needs_choice", message, options} the first time: ask the user once (Strict or Standard), then call again with level, and remember=true to keep it.',
+      "Any other {ok: false, message} is a refusal to tell the user in those words (a secret in the question, no route set up, the daily spend limit).",
+      'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.'
+    ].join(" "),
+    params: ASK_ANONYMOUSLY_PARAMS,
+    mutating: false,
+    nativeExposure: "always",
+    cliHints: { name: "ask", positional: ["question"], stdin: "question" },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(ASK_ANONYMOUSLY_PARAMS, params, "Ask anonymously");
+      const question = asString(params.question, "question");
+      const level = optionalAskLevel(params.level);
+      const cleanup = optionalAskCleanup(params.cleanup);
+      const remember = optionalBoolean(params.remember, "remember");
+      const model = optionalString4(params.model);
+      const ask = (signal) => ctx.email.askAnonymously({
+        question,
+        ...level !== undefined ? { level } : {},
+        ...cleanup !== undefined ? { cleanup } : {},
+        ...remember !== undefined ? { remember } : {},
+        ...model !== undefined ? { model } : {},
+        ...signal ? { signal } : {}
+      });
+      const jobs = ctx.sourceAnswerJobs;
+      return jobs ? jobs.registry.run(jobs, ask) : ask();
+    }
   }
 ];
+function optionalAskLevel(value) {
+  const level = optionalString4(value);
+  if (level === undefined || level === "strict" || level === "standard")
+    return level;
+  throw new OperationError("invalid_params", 'level must be "strict" or "standard".');
+}
+function optionalAskCleanup(value) {
+  const cleanup = optionalString4(value);
+  if (cleanup === undefined || cleanup === "as_written" || cleanup === "light_cleanup" || cleanup === "custom")
+    return cleanup;
+  throw new OperationError("invalid_params", 'cleanup must be "as_written", "light_cleanup" or "custom".');
+}
 function optionalSourceIndexAnswerCorpusId(value, config) {
   const corpusId = optionalString4(value);
   if (corpusId === undefined)
@@ -21636,7 +21716,33 @@ function contentTextForOperation(operation, payload) {
     if (summary)
       return summary;
   }
+  if (operation.name === "ask_anonymously") {
+    const summary = askAnonymouslyContentText(payload);
+    if (summary)
+      return summary;
+  }
   return JSON.stringify(payload, null, 2);
+}
+function askAnonymouslyContentText(payload) {
+  const result = asRecord17(payload);
+  if (!result || typeof result.ok !== "boolean")
+    return;
+  if (result.ok) {
+    if (typeof result.reply !== "string")
+      return;
+    const level = result.level === "strict" ? "Strict" : "Standard";
+    const how = result.rewritten ? "the question was rewritten by your model before it left" : "sent as written";
+    const lines = ["Anonymous answer (zkAPI, " + level + "; " + how + "):", result.reply];
+    if (result.rewritten && typeof result.sent === "string")
+      lines.push("", "Sent:", result.sent);
+    return lines.join(`
+`);
+  }
+  if (typeof result.message !== "string")
+    return;
+  if (result.code === "needs_choice")
+    return "Choice needed before asking anonymously: " + result.message;
+  return "Not answered: " + result.message;
 }
 function sourceAnswerContentText(payload) {
   const result = asRecord17(payload);

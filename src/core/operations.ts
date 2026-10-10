@@ -150,6 +150,17 @@ const SOURCE_ANSWER_RESULT_PARAMS = {
   job_id: { type: 'string', required: true, description: 'The job_id a source_answer call returned with status "working".' },
 } satisfies Record<string, ParamDef>;
 
+const ASK_ANONYMOUSLY_PARAMS = {
+  question: { type: 'string', required: true, description: 'The question, in the user\'s words. Nothing else is sent: no documents, no history, no account.' },
+  level: {
+    type: 'string',
+    description: 'How the question is prepared before it leaves: "strict" (the user\'s own model rewrites it into general questions first; nothing identifying can be sent) or "standard" (their words, prepared as they chose). Omit to use the level the user chose before; the first call without one returns needs_choice.',
+  },
+  cleanup: { type: 'string', description: 'Standard only: "as_written", "light_cleanup" or "custom" (the instruction saved on the Olympus dashboard). Omit to use the saved one.' },
+  remember: { type: 'boolean', description: 'Save this level (and cleanup) as the default for later questions, so the user is not asked again.' },
+  model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one. Omit to use the configured model.' },
+} satisfies Record<string, ParamDef>;
+
 export const operations: Operation[] = [
   {
     name: 'argus_ping',
@@ -556,7 +567,52 @@ export const operations: Operation[] = [
     cliHints: { name: 'doctor' },
     handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === 'native' })) }),
   },
+  {
+    name: 'ask_anonymously',
+    description: [
+      'Ask a frontier model one question anonymously through zkAPI, paid per question from the user\'s own zkAPI balance; nothing identifies them and the provider cannot tie it to an account.',
+      'Use it only when the user asks to ask anonymously, privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.',
+      'Returns {ok: true, reply, sent, level, rewritten}: give the reply; when rewritten is true, say the question was rewritten first and offer to show "sent".',
+      'Returns {ok: false, code: "needs_choice", message, options} the first time: ask the user once (Strict or Standard), then call again with level, and remember=true to keep it.',
+      'Any other {ok: false, message} is a refusal to tell the user in those words (a secret in the question, no route set up, the daily spend limit).',
+      'A zkAPI answer can take minutes: pass timeoutMs 600000 where you can. If the result is {"status": "working", "job_id": ...}, the answer is still coming: call source_answer_result with that job_id (again while it says working) rather than asking again.',
+    ].join(' '),
+    params: ASK_ANONYMOUSLY_PARAMS,
+    mutating: false,
+    nativeExposure: 'always',
+    cliHints: { name: 'ask', positional: ['question'], stdin: 'question' },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(ASK_ANONYMOUSLY_PARAMS, params, 'Ask anonymously');
+      const question = asString(params.question, 'question');
+      const level = optionalAskLevel(params.level);
+      const cleanup = optionalAskCleanup(params.cleanup);
+      const remember = optionalBoolean(params.remember, 'remember');
+      const model = optionalString(params.model);
+      const ask = (signal?: AbortSignal) => ctx.email.askAnonymously({
+        question,
+        ...(level !== undefined ? { level } : {}),
+        ...(cleanup !== undefined ? { cleanup } : {}),
+        ...(remember !== undefined ? { remember } : {}),
+        ...(model !== undefined ? { model } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      const jobs = ctx.sourceAnswerJobs;
+      return jobs ? jobs.registry.run(jobs, ask) : ask();
+    },
+  },
 ];
+
+function optionalAskLevel(value: unknown): 'strict' | 'standard' | undefined {
+  const level = optionalString(value);
+  if (level === undefined || level === 'strict' || level === 'standard') return level;
+  throw new OperationError('invalid_params', 'level must be "strict" or "standard".');
+}
+
+function optionalAskCleanup(value: unknown): 'as_written' | 'light_cleanup' | 'custom' | undefined {
+  const cleanup = optionalString(value);
+  if (cleanup === undefined || cleanup === 'as_written' || cleanup === 'light_cleanup' || cleanup === 'custom') return cleanup;
+  throw new OperationError('invalid_params', 'cleanup must be "as_written", "light_cleanup" or "custom".');
+}
 
 function optionalSourceIndexAnswerCorpusId(value: unknown, config: OlympusConfig): SourceIndexAnswerCorpusId | undefined {
   const corpusId = optionalString(value);

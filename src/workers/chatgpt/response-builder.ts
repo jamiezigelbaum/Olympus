@@ -455,6 +455,84 @@ export function privateMatchNote(
  * Private context is withheld. Either way, or when the probe saw a Private
  * match, the reply carries one fixed sentence and nothing else about it.
  */
+/** An ask_anonymously outcome (core/consult-ask.ts ConsultAskResult), or a handed-off job's. */
+export function isAskAnonymouslyResult(raw: unknown): boolean {
+  const record = asRecord(raw);
+  return record !== undefined && typeof record.ok === 'boolean' && typeof record.answer !== 'string'
+    && (record.ok ? typeof record.reply === 'string' : typeof record.message === 'string');
+}
+
+const ASK_PENDING_TEXT = 'Olympus is still waiting for the anonymous answer. Call source_answer_result with this job_id '
+  + '(repeat while it says working). Do not ask the question again.';
+
+/**
+ * The anonymous answer as ChatGPT sees it. A refusal is a result, not an
+ * error: its message is for the user in those words. `needs_choice` asks the
+ * model to put the Strict/Standard question to the user once.
+ */
+export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
+  const record = asRecord(raw);
+  if (record?.status === 'working' && typeof record.job_id === 'string' && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record.job_id)) {
+    return {
+      content: [{ type: 'text', text: ASK_PENDING_TEXT }],
+      structuredContent: { status: 'working', job_id: record.job_id, next_tool: 'source_answer_result' },
+    };
+  }
+  if (!record || typeof record.ok !== 'boolean') {
+    return errorToolResult(new OperationError('email_error', 'unexpected anonymous answer shape'));
+  }
+  const clean = (value: unknown, max: number): string | undefined => (typeof value === 'string' ? value.replace(UNSAFE_CHARS, '').slice(0, max) : undefined);
+  if (record.ok) {
+    const reply = clean(record.reply, MAX_ANSWER);
+    if (reply === undefined) return errorToolResult(new OperationError('email_error', 'unexpected anonymous answer shape'));
+    const level = record.level === 'strict' ? 'strict' : 'standard';
+    const rewritten = record.rewritten === true;
+    const sent = clean(record.sent, MAX_ANSWER);
+    const note = rewritten
+      ? `Asked anonymously through zkAPI at ${level === 'strict' ? 'Strict' : 'Standard'}: the user's model rewrote the question before it left. Say so briefly and offer to show what was sent.`
+      : 'Asked anonymously through zkAPI at Standard, as written.';
+    return {
+      content: [{ type: 'text', text: [reply, '', note].join('\n') }],
+      structuredContent: {
+        status: 'answered',
+        answer: reply,
+        anonymous: true,
+        level,
+        rewritten,
+        ...(sent !== undefined ? { sent } : {}),
+        ...(typeof record.cleanup === 'string' ? { cleanup: record.cleanup } : {}),
+        ...(record.remembered === true ? { remembered: true } : {}),
+      },
+    };
+  }
+  const message = clean(record.message, 2_000) ?? 'Olympus could not ask anonymously.';
+  if (record.code === 'needs_choice') {
+    const options = asRecord(record.options);
+    return {
+      content: [{ type: 'text', text: message }],
+      structuredContent: {
+        status: 'needs_choice',
+        message,
+        ...(options ? {
+          options: {
+            suggested_level: options.suggestedLevel === 'strict' ? 'strict' : 'standard',
+            suggested_cleanup: typeof options.suggestedCleanup === 'string' ? options.suggestedCleanup : 'as_written',
+            custom_instruction: options.customInstruction === true,
+          },
+        } : {}),
+      },
+    };
+  }
+  return {
+    content: [{ type: 'text', text: `Not answered: ${message}` }],
+    structuredContent: {
+      status: 'refused',
+      code: typeof record.code === 'string' ? record.code.replace(UNSAFE_CHARS, '').slice(0, 64) : 'refused',
+      message,
+    },
+  };
+}
+
 export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}): ChatGptToolResult {
   const record = asRecord(raw);
   if (record?.status === 'working' && typeof record.job_id === 'string' && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record.job_id)) {

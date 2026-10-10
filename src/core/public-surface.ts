@@ -18,6 +18,7 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'source_watches',
   'source_watch_cancel',
   'olympus_doctor',
+  'ask_anonymously',
 ] as const;
 
 // `source_answer_result` collects a slow source_answer that handed off to a
@@ -36,6 +37,7 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'source_index_status',
   'source_index_search',
   'olympus_doctor',
+  'ask_anonymously',
 ] as const;
 
 // Operation names, not typed command lines. `olympus_doctor` is exposed to the
@@ -49,12 +51,18 @@ export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'source_index_status',
   'source_index_search',
   'olympus_doctor',
+  'ask_anonymously',
 ] as const;
 
+// `ask_anonymously` (one typed question through zkAPI, owner decision
+// 2026-10-10) is on every agent surface, so a user can ask from whichever
+// agent they already use; a slow route hands off like source_answer and is
+// collected with source_answer_result.
 export const V0_4_HERMES_MCP_TOOLS = [
   'source_answer',
   'source_answer_result',
   'source_index_status',
+  'ask_anonymously',
 ] as const;
 
 // Remote MCP (`/mcp` on the worker, reached by agents outside this machine

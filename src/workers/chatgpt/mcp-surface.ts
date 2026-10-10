@@ -39,6 +39,8 @@ import { PRIVATE_ANSWER_RESOURCE, privateAnswerResourceHtml, privateAnswerResour
 import {
   answerToolMeta,
   answerToolResult,
+  askAnonymouslyToolResult,
+  isAskAnonymouslyResult,
   ChatGptSurfaceError,
   dashboardToolMeta,
   dashboardToolResult,
@@ -266,6 +268,38 @@ export const SEARCH_TOOL: ChatGptToolDefinition = {
   _meta: answerToolMeta(),
 };
 
+export const ASK_ANONYMOUSLY_TOOL: ChatGptToolDefinition = {
+  name: 'ask_anonymously',
+  title: 'Ask anonymously',
+  description: [
+    'Ask a frontier model one question anonymously through zkAPI, paid per question from the user\'s own zkAPI balance;',
+    'nothing identifies them and the provider cannot tie it to an account. Use it only when the user asks to ask anonymously,',
+    'privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.',
+    'The first time it returns {status: "needs_choice"}: ask the user once whether they want Strict (their own model rewrites',
+    'the question into general questions before it leaves, so nothing identifying can be sent) or Standard (their words,',
+    'prepared as written, lightly cleaned up, or by the instruction they saved); then call again with level, and remember: true to keep it.',
+    'Returns {status: "answered", answer, level, rewritten, sent}: give the answer; when rewritten is true, say the question',
+    'was rewritten first and offer to show what was sent. {status: "refused", message}: tell the user the message in those words.',
+    'If it returns {status: "working", job_id}, the answer is still coming: call source_answer_result with that job_id',
+    '(again while it says working) instead of asking again. Ask one question at a time.',
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      question: { type: 'string', description: 'The question in the user\'s words, standing on its own (replace "it" or "that" with what they refer to).' },
+      level: { type: 'string', enum: ['strict', 'standard'], description: 'Strict or Standard. Omit to use the level the user chose before.' },
+      cleanup: { type: 'string', enum: ['as_written', 'light_cleanup', 'custom'], description: 'Standard only: how the words are prepared. Omit to use the saved one.' },
+      remember: { type: 'boolean', description: 'Save this level (and cleanup) as the default so the user is not asked again.' },
+      model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one.' },
+    },
+    required: ['question'],
+    additionalProperties: false,
+  },
+  // A paid question leaves the computer: neither read-only nor closed-world.
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  securitySchemes: OAUTH2_REQUIRED,
+};
+
 const ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL] as const;
 
 /**
@@ -278,12 +312,14 @@ export const CHATGPT_TOOLS: readonly ChatGptToolDefinition[] = [
   SEARCH_TOOL,
   SOURCE_STATUS_TOOL,
   ...ANSWER_TOOLS,
+  ASK_ANONYMOUSLY_TOOL,
   ...SETUP_TOOLS,
 ];
 
 export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable' | 'readOnly'> = {}): ChatGptToolDefinition[] {
   const tools: ChatGptToolDefinition[] = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
   if (answerToolsListed(ctx, options)) tools.push(...ANSWER_TOOLS);
+  if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL);
   tools.push(...SETUP_TOOLS);
   return options.readOnly ? tools.filter((tool) => tool.annotations.readOnlyHint) : tools;
 }
@@ -295,6 +331,12 @@ function answerToolsListed(ctx: OperationContext, options: Pick<ChatGptSurfaceOp
     const operation = findOperationByName(tool.name);
     return operation !== undefined && shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' });
   });
+}
+
+/** ask_anonymously is listed whenever the operation is exposed remotely; an unset route answers with a refusal to set it up. */
+function askToolListed(ctx: OperationContext): boolean {
+  const operation = findOperationByName(ASK_ANONYMOUSLY_TOOL.name);
+  return operation !== undefined && shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' });
 }
 
 export async function callChatGptTool(
@@ -387,11 +429,29 @@ export async function callChatGptTool(
         const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : '';
         if (!jobId) throw new ChatGptSurfaceError('invalid_params');
         const raw = await runOperation(SOURCE_ANSWER_RESULT_TOOL.name, ctx, { job_id: jobId });
+        // A handed-off anonymous question: its own result shape, no private match.
+        if (isAskAnonymouslyResult(raw)) return askAnonymouslyToolResult(raw);
         const done = pendingJobId(raw) === undefined;
         // Only this connection's own handed-off question, and only once it is answered.
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done);
         const privateMatch = done && isAnswered(raw) && pending ? beginPrivateAnswer(pending, options) : undefined;
         return answerToolResult(raw, privateMatch ? { privateMatch } : {});
+      }
+      case ASK_ANONYMOUSLY_TOOL.name: {
+        if (!askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
+        const question = typeof args.question === 'string' ? args.question.trim() : '';
+        if (!question) throw new ChatGptSurfaceError('invalid_params');
+        const params: Record<string, unknown> = { question };
+        for (const key of ['level', 'cleanup', 'model'] as const) {
+          if (args[key] === undefined) continue;
+          if (typeof args[key] !== 'string') throw new ChatGptSurfaceError('invalid_params');
+          params[key] = args[key];
+        }
+        if (args.remember !== undefined) {
+          if (typeof args.remember !== 'boolean') throw new ChatGptSurfaceError('invalid_params');
+          params.remember = args.remember;
+        }
+        return askAnonymouslyToolResult(await runOperation(ASK_ANONYMOUSLY_TOOL.name, ctx, params));
       }
       default:
         if (isSetupTool(name)) return await callSetupTool(name, args, options.setup);

@@ -654,6 +654,7 @@ describe('native OpenClaw plugin adapter', () => {
       'source_watches',
       'source_watch_cancel',
       'olympus_doctor',
+      'ask_anonymously',
     ]);
   });
 
@@ -675,6 +676,7 @@ describe('native OpenClaw plugin adapter', () => {
       'argus_list_models',
       'argus_complete',
       'olympus_doctor',
+      'ask_anonymously',
     ]);
   });
 
