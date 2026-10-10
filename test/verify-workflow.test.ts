@@ -51,8 +51,8 @@ describe('verification contract', () => {
     const deploySection = workflow.slice(workflow.indexOf('\n  deploy:\n'), workflow.indexOf('\n  go:\n'));
     expect(deploySection).not.toContain('actions/setup-go@');
     expect(workflow).toContain('bun scripts/test-lane.ts go');
-    expect(workflow).toContain('shard: [1, 2, 3]');
-    expect(workflow).toContain('bun scripts/test-lane.ts deploy --shard=${{ matrix.shard }}/3');
+    expect(workflow).toContain('shard: [1, 2, 3, 4]');
+    expect(workflow).toContain('bun scripts/test-lane.ts deploy --shard=${{ matrix.shard }}/4');
     expect(workflow).not.toMatch(/\n  verify:\n/);
     expect(workflow).not.toContain('needs: [static, fast, deploy, go]');
     expect(workflow).not.toContain('Require every lane');
