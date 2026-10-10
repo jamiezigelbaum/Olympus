@@ -343,7 +343,9 @@ const ANSWER_TOOLS = [SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL] as const;
  * Tools a read-only (demo) grant may list and call although they are not
  * read-only. Demo grants run directory review case P5 ("ask a private
  * question anonymously"): the question is typed in the sealed panel and its
- * cost comes from the demo install's own zkAPI balance. ask_anonymously,
+ * cost comes from the demo install's own zkAPI balance, which the panel uses
+ * only while an owner-set daily limit is set and not reached
+ * (private-question-jobs.ts). ask_anonymously,
  * privacy and every other write tool stay hidden and refused.
  */
 const READ_ONLY_GRANT_EXCEPTIONS: readonly string[] = [OPEN_PRIVATE_QUESTION_TOOL.name];
@@ -511,7 +513,9 @@ export async function callChatGptTool(
         if (!askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
         if (Object.keys(args).length > 0) throw new ChatGptSurfaceError('invalid_params');
         // The job is opened here; the question itself never passes through this surface.
-        return openPrivateQuestionToolResult(options.privateQuestions ? await options.privateQuestions.begin() : undefined);
+        // The job is bound to this connection (revoking it stops new questions); a demo grant also needs a daily limit.
+        const origin = { ...(ctx.caller?.connectionId ? { connectionId: ctx.caller.connectionId } : {}), readOnly: options.readOnly === true };
+        return openPrivateQuestionToolResult(options.privateQuestions ? await options.privateQuestions.begin(origin) : undefined);
       }
       default:
         if (isSetupTool(name)) return await callSetupTool(name, args, options.setup);

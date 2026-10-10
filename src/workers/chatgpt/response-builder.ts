@@ -1332,6 +1332,11 @@ export function privateQuestionToolMeta(): Record<string, unknown> {
 export const PRIVATE_QUESTION_OPENED_TEXT = 'A private question panel is open below. The user types their question in it; it is sent anonymously through zkAPI from their own computer, and the answer is shown there. Neither the question nor the answer is shared with you, so do not ask what they typed; tell the user to type their question in the panel.';
 /** When no job could be opened: Olympus is not linked to the relay. */
 export const PRIVATE_QUESTION_UNAVAILABLE_TEXT = 'The private question panel cannot open: Olympus on the user\'s computer is not connected through the relay. Tell the user to open the Olympus dashboard and connect ChatGPT, then try again. They can also use ask_anonymously, where the question goes through this conversation.';
+/** A demo sign-in (read-only grant) opens the panel only while a daily zkAPI limit is set and not reached. */
+export const PRIVATE_QUESTION_DAILY_LIMIT_TEXT = {
+  daily_limit_unset: 'The private question panel cannot open: questions from this demo sign-in need a daily zkAPI limit set in Olympus, and none is set. Tell the user that in those words.',
+  daily_limit_reached: 'The private question panel cannot open: the daily zkAPI limit set in Olympus is reached. Tell the user that in those words.',
+} as const;
 
 /**
  * open_private_question: the panel's job, widget-only. `structuredContent`
@@ -1339,11 +1344,20 @@ export const PRIVATE_QUESTION_UNAVAILABLE_TEXT = 'The private question panel can
  * sit in `_meta[PRIVATE_QUESTION_META_KEY]` (hosts pass `_meta` to the widget
  * and not to the model).
  */
-export function openPrivateQuestionToolResult(meta: PrivateQuestionMetaV1 | undefined): ChatGptToolResult {
+export function openPrivateQuestionToolResult(
+  meta: PrivateQuestionMetaV1 | { refused: keyof typeof PRIVATE_QUESTION_DAILY_LIMIT_TEXT } | undefined,
+): ChatGptToolResult {
   if (!meta) {
     return {
       content: [{ type: 'text', text: PRIVATE_QUESTION_UNAVAILABLE_TEXT }],
       structuredContent: { status: 'unavailable', reason: 'not_connected' },
+    };
+  }
+  if ('refused' in meta) {
+    const reason = meta.refused === 'daily_limit_reached' ? 'daily_limit_reached' : 'daily_limit_unset';
+    return {
+      content: [{ type: 'text', text: PRIVATE_QUESTION_DAILY_LIMIT_TEXT[reason] }],
+      structuredContent: { status: 'unavailable', reason },
     };
   }
   return {

@@ -11,8 +11,8 @@ import { join } from 'node:path';
 import { CONSULT_ASK_MESSAGES } from '../src/core/consult-ask.ts';
 import { ZKAPI_CONSULT_ERROR_MESSAGES, type ZkapiConsultErrorCode } from '../src/core/consult-transport-zkapi.ts';
 import { ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL } from '../src/workers/chatgpt/mcp-surface.ts';
-import { resultOf } from '../src/workers/chatgpt/private-question-jobs.ts';
-import { askAnonymouslyToolResult, PRIVATE_QUESTION_OPENED_TEXT, PRIVATE_QUESTION_UNAVAILABLE_TEXT } from '../src/workers/chatgpt/response-builder.ts';
+import { PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS, resultOf } from '../src/workers/chatgpt/private-question-jobs.ts';
+import { askAnonymouslyToolResult, PRIVATE_QUESTION_DAILY_LIMIT_TEXT, PRIVATE_QUESTION_OPENED_TEXT, PRIVATE_QUESTION_UNAVAILABLE_TEXT } from '../src/workers/chatgpt/response-builder.ts';
 import {
   CHATGPT_ZKAPI_BALANCE_RUN_OUT,
   CHATGPT_ZKAPI_FORBIDDEN_TERMS,
@@ -67,6 +67,8 @@ describe('ChatGPT tool definitions', () => {
   test('the open_private_question results are clean too', () => {
     expectClean(PRIVATE_QUESTION_OPENED_TEXT, 'opened');
     expectClean(PRIVATE_QUESTION_UNAVAILABLE_TEXT, 'unavailable');
+    for (const [reason, text] of Object.entries(PRIVATE_QUESTION_DAILY_LIMIT_TEXT)) expectClean(text, `unavailable ${reason}`);
+    for (const [reason, refusal] of Object.entries(PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS)) expectClean(refusal.message, `panel refusal ${reason}`);
   });
 });
 

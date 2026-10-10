@@ -919,6 +919,29 @@ function ownerLimits(settings: ZkapiConsultSettings): { requestCap?: number; spe
   };
 }
 
+/** Whether an owner-set daily limit is enforced on a route, and whether today's use has reached it. */
+export type ZkapiDailyLimitState = 'unset' | 'available' | 'reached';
+
+/**
+ * The route's daily limit by the readiness check's rule: `unset` with neither
+ * cap, `reached` once either is used up (or the record is unreadable: fails
+ * closed). A read-only (demo) ChatGPT grant may ask only while it is
+ * `available`; reserveZkapiRequest still enforces the cap at every send.
+ */
+export function zkapiDailyLimitState(settings: ZkapiConsultSettings, statePath: string, now: Date): ZkapiDailyLimitState {
+  const limit = ownerLimits(settings);
+  if (limit.requestCap === undefined && limit.spendCapMicroUsd === undefined) return 'unset';
+  let usage: { count: number; reservedMicroUsd: number };
+  try {
+    usage = zkapiUsageToday(statePath, now);
+  } catch {
+    return 'reached';
+  }
+  if (limit.requestCap !== undefined && usage.count >= limit.requestCap) return 'reached';
+  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) return 'reached';
+  return 'available';
+}
+
 /**
  * Record one request at its model's listed allowance (the daemon's hold for
  * it; $6, the ceiling, when unknown) under a cross-process lease before the

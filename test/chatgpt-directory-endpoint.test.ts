@@ -35,9 +35,11 @@ import generatedSurface from '../connect-relay/server/generated/chatgpt-tools.js
 import { createChatGptDirectoryMcpServer } from '../src/workers/chatgpt/directory-surface.ts';
 import { CHATGPT_TOOLS, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PRIVATE_ANSWER_META_KEY, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
-import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
+import { generatePanelKeyPair, importPanelPublicKey, openPrivateAnswer, sealPrivateQuestion, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs, createPrivateAnswerHandler } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { createBuiltInPrivateAnswerModel } from '../src/workers/chatgpt/private-answer-model.ts';
+import { PRIVATE_QUESTION_META_KEY, type PrivateQuestionMetaV1 } from '../src/workers/chatgpt/private-question-contract.ts';
+import { PrivateQuestionJobs } from '../src/workers/chatgpt/private-question-jobs.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler, withRemoteMcpRoute } from '../src/workers/remote-mcp.ts';
 import { isDemoGrant, type DemoConsentSettings } from '../src/workers/remote-oauth/demo-consent.ts';
@@ -68,6 +70,8 @@ let base: string;
 let urls: RemotePublicUrls;
 let answerModel: boolean;
 let jobs: PrivateAnswerJobs;
+let questions: PrivateQuestionJobs;
+let questionsAsked: number;
 let demoSettings: DemoConsentSettings | undefined;
 /** The directory allowlist the engine uses; a test narrows it to prove default-deny. */
 let directoryAllows: ((name: string) => boolean) | undefined;
@@ -102,10 +106,22 @@ beforeEach(async () => {
   urls = resolved.urls;
   const worker = createEmailSourceWorker({});
   const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
+  questionsAsked = 0;
+  questions = new PrivateQuestionJobs({
+    installId: () => INSTALL_ID,
+    ask: async () => {
+      questionsAsked += 1;
+      return { ok: false, code: 'unused', message: 'unused' };
+    },
+    choice: () => ({ level: 'standard', cleanup: 'light_cleanup', customInstruction: false }),
+    connectionActive: (id) => store.list().some((connection) => connection.id === id && connection.revokedAt === null),
+    dailyLimit: () => 'available',
+  });
   const surface: ChatGptSurfaceOptions = {
     async dashboardView() { throw new Error('unused'); },
     answerModelAvailable: () => answerModel,
     privateAnswers: jobs,
+    privateQuestions: questions,
     async privateMatchProbe() { return { count: 1, evidence: PRIVATE_HITS }; },
     async evidenceSearch() {
       return {
@@ -316,8 +332,20 @@ describe('/openai/mcp serves the same surface, narrowed', () => {
         expect(refused.structuredContent).toEqual({ error: 'unknown_tool' });
       }
       const opened = await result(await rpc(path, token, 'tools/call', { name: 'open_private_question', arguments: {} }));
-      expect(opened.structuredContent).not.toEqual({ error: 'unknown_tool' });
+      expect(opened.structuredContent).toEqual({ status: 'opened' });
+      expect(opened._meta[PRIVATE_QUESTION_META_KEY].jobId).toStartWith(`oly2p.${INSTALL_ID}.`);
     }
+  });
+
+  test('a demo grant\'s panel job is bound to its grant: once revoked, its question is not sent', async () => {
+    const demo = await grant(DIRECTORY_RESOURCE, 'demo');
+    const opened = await result(await rpc(DIRECTORY_MCP_PATH, demo.access_token, 'tools/call', { name: 'open_private_question', arguments: {} }));
+    const meta = opened._meta[PRIVATE_QUESTION_META_KEY] as PrivateQuestionMetaV1;
+    for (const connection of store.list()) if (connection.displayName === 'ChatGPT (demo sign-in)') store.revoke(connection.id);
+    const panel = await generatePanelKeyPair();
+    const sealed = await sealPrivateQuestion(meta.jobId, panel.privateKey, (await importPanelPublicKey(meta.askKey))!.key, JSON.stringify({ v: 1, question: 'q', level: 'standard' }));
+    expect(await questions.ask(meta.jobId, { v: 1, publicKey: panel.publicKey, ...sealed })).toEqual({ status: 410, body: { status: 'gone' } });
+    expect(questionsAsked).toBe(0);
   });
 
   test('a tool off the allowlist is not listed there, and calling it is an unknown tool', async () => {

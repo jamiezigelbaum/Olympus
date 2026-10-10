@@ -719,6 +719,7 @@ let privateContextUsed: boolean;
 let privateProbe: boolean;
 let servesChatGpt: boolean;
 let readOnlySurface: boolean;
+let questionLimit: 'unset' | 'available' | 'reached';
 let answerRequests: Array<Record<string, unknown>>;
 
 beforeEach(() => {
@@ -730,6 +731,7 @@ beforeEach(() => {
   privateProbe = true;
   servesChatGpt = true;
   readOnlySurface = false;
+  questionLimit = 'unset';
   answerRequests = [];
   const worker = createEmailSourceWorker({
     sourceAnswer: {
@@ -758,6 +760,8 @@ beforeEach(() => {
         installId: () => (questionInstall ? 'a'.repeat(32) : undefined),
         ask: async () => ({ ok: false, code: 'unused', message: 'unused' }),
         choice: () => ({ level: 'standard', cleanup: 'light_cleanup', customInstruction: false }),
+        connectionActive: (id) => store.list().some((connection) => connection.id === id && connection.revokedAt === null),
+        dailyLimit: () => questionLimit,
       }),
       async privateMatchProbe() { return privateProbe; },
       async dashboardView() {
@@ -1057,6 +1061,15 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         expect(result.structuredContent).toEqual({ error: 'unknown_tool' });
       }
       expect((await client.callTool({ name: DASHBOARD_TOOL_NAME, arguments: {} })).isError).toBeFalsy();
+      // A demo grant opens the panel only while a daily zkAPI limit is set and not reached.
+      for (const [limit, reason] of [['unset', 'daily_limit_unset'], ['reached', 'daily_limit_reached']] as const) {
+        questionLimit = limit;
+        const refused = await client.callTool({ name: 'open_private_question', arguments: {} }) as Record<string, any>;
+        expect(refused.isError).toBeFalsy();
+        expect(refused.structuredContent).toEqual({ status: 'unavailable', reason });
+        expect(refused._meta).toBeUndefined();
+      }
+      questionLimit = 'available';
       const opened = await client.callTool({ name: 'open_private_question', arguments: {} }) as Record<string, any>;
       expect(opened.isError).toBeFalsy();
       expect(opened.structuredContent).toEqual({ status: 'opened' });
