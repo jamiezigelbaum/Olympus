@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConsultAskResult } from '../src/core/consult-ask.ts';
-import { reserveZkapiRequest, zkapiDailyLimitState, type ZkapiDailyLimitState } from '../src/core/consult-transport-zkapi.ts';
+import { reserveZkapiRequest, ZKAPI_CONSULT_ERROR_MESSAGES, zkapiDailyLimitState, type ZkapiDailyLimitState } from '../src/core/consult-transport-zkapi.ts';
 import type { ZkapiConsultSettings } from '../src/core/zkapi-consult-settings.ts';
 import {
   generateEngineKeyPair,
@@ -45,6 +45,8 @@ interface Harness {
   /** Resolves the running ask with the given outcome. */
   answer: (outcome: ConsultAskResult | Error) => void;
   aborted: () => boolean;
+  /** The last ask's final check, as the transport calls it just before dispatch. */
+  stillAuthorized: () => boolean;
 }
 
 function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs>[0]> = {}, auto?: ConsultAskResult): Harness {
@@ -53,11 +55,13 @@ function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs
   let resolve: ((outcome: ConsultAskResult) => void) | undefined;
   let reject: ((error: Error) => void) | undefined;
   let signal: AbortSignal | undefined;
+  let stillAuthorized: (() => boolean) | undefined;
   const jobs = new PrivateQuestionJobs({
     installId: () => INSTALL,
     ask: (input) => {
       asked.push({ question: input.question, level: input.level, ...(input.cleanup ? { cleanup: input.cleanup } : {}) });
       signal = input.signal;
+      stillAuthorized = input.stillAuthorized;
       if (auto) return Promise.resolve(auto);
       return new Promise<ConsultAskResult>((res, rej) => { resolve = res; reject = rej; });
     },
@@ -71,6 +75,7 @@ function harness(extra: Partial<ConstructorParameters<typeof PrivateQuestionJobs
     asked,
     answer: (outcome) => (outcome instanceof Error ? reject!(outcome) : resolve!(outcome)),
     aborted: () => signal?.aborted === true,
+    stillAuthorized: () => stillAuthorized!(),
   };
 }
 
@@ -327,6 +332,31 @@ describe('a job\'s origin: the connection that opened it, and a demo grant\'s da
     const lone = (await unchecked.jobs.begin({ connectionId: 'conn-1' })) as PrivateQuestionMetaV1;
     expect((await unchecked.jobs.ask(lone.jobId, (await panelAsk(lone, { v: 1, question: 'q', level: 'strict' })).body)).status).toBe(410);
     expect(unchecked.asked).toEqual([]);
+  });
+
+  test('revoked while the question is prepared: the final check before dispatch refuses; revoked after dispatch: the outcome is still collected', async () => {
+    let active = true;
+    const h = harness({ connectionActive: () => active });
+    // Paused in preparation (the ask lane has the question, nothing dispatched yet), then revoked.
+    const meta = (await h.jobs.begin({ connectionId: 'conn-1' })) as PrivateQuestionMetaV1;
+    const { panel, body } = await panelAsk(meta, { v: 1, question: 'q', level: 'strict' });
+    expect((await h.jobs.ask(meta.jobId, body)).status).toBe(202);
+    active = false;
+    expect(h.stillAuthorized()).toBe(false);
+    // What the transport answers when its final authorization says no.
+    h.answer({ ok: false, code: 'authorization_refused', message: ZKAPI_CONSULT_ERROR_MESSAGES.authorization_refused, outcome: 'not_sent' } as ConsultAskResult);
+    await settle();
+    expect(await opened(h.jobs, meta.jobId, panel)).toMatchObject({ state: 'refused', code: 'authorization_refused' });
+    // Dispatched while approved, revoked before the answer: the answer is still collected.
+    active = true;
+    const next = (await h.jobs.begin({ connectionId: 'conn-1' })) as PrivateQuestionMetaV1;
+    const second = await panelAsk(next, { v: 1, question: 'q2', level: 'strict' });
+    expect((await h.jobs.ask(next.jobId, second.body)).status).toBe(202);
+    expect(h.stillAuthorized()).toBe(true);
+    active = false;
+    h.answer(ANSWERED);
+    await settle();
+    expect((await opened(h.jobs, next.jobId, second.panel)).state).toBe('answered');
   });
 
   test('a read-only grant opens a panel only while a daily limit is set and not reached; the owner is unaffected', async () => {

@@ -44,6 +44,8 @@ export interface PrivateQuestionAskInput {
   readonly level: PrivateQuestionLevel;
   readonly cleanup?: PrivateQuestionCleanup;
   readonly signal: AbortSignal;
+  /** The transport's final check before it reserves and dispatches (ConsultAskInput.stillAuthorized): the opening connection is not revoked. */
+  readonly stillAuthorized: () => boolean;
 }
 
 /**
@@ -278,6 +280,8 @@ export class PrivateQuestionJobs {
           level: plaintext.level,
           ...(plaintext.cleanup !== undefined ? { cleanup: plaintext.cleanup } : {}),
           signal: job.abort.signal,
+          // Revoked while the question was being prepared or the session started: nothing is sent.
+          stillAuthorized: () => this.originActive(job),
         });
         result = resultOf(outcome);
       } catch {

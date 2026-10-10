@@ -73,6 +73,12 @@ export interface ConsultAskInput {
    * waited for by the session, not by this call (Codex review of PR #215).
    */
   readonly signal?: AbortSignal;
+  /**
+   * The caller's own last check (a private question job: the connection that
+   * opened it is still approved), run inside the final authorization just
+   * before reserving and dispatching; false, or a throw, sends nothing.
+   */
+  readonly stillAuthorized?: () => boolean;
 }
 
 export interface ConsultAskSendOptions {
@@ -384,6 +390,11 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
   const authorize = (): boolean => {
     // Cancelled before dispatch: refused with nothing reserved.
     if (input.signal?.aborted) return false;
+    try {
+      if (input.stillAuthorized && !input.stillAuthorized()) return false;
+    } catch {
+      return false;
+    }
     let current: ConsultSettingsRead;
     try {
       current = deps.settings();

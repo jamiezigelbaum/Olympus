@@ -4572,6 +4572,7 @@ export async function main(): Promise<void> {
         ...(input.cleanup !== undefined ? { cleanup: input.cleanup } : {}),
         callerProvider: 'openai',
         signal: input.signal,
+        stillAuthorized: input.stillAuthorized,
       })
       : Promise.resolve({ ok: false as const, code: 'transport_unavailable', message: 'Anonymous answers are not set up on this computer.' })),
     // The panel's default choice: the dashboard's saved level and Standard preparation (consult.json, read at every open).

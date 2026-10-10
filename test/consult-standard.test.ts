@@ -406,6 +406,22 @@ describe('Ask anonymously', () => {
     expect(atSend.calls.send).toEqual([]);
   });
 
+  test('the caller\'s own last check runs inside the final authorization: revoked while the question is prepared, nothing is sent', async () => {
+    let revoked = false;
+    const d = deps(settings({ levelChosen: true }));
+    const value: ConsultAskDependencies = {
+      ...d.value,
+      // Revoked while the writer prepares the question (before the session dispatches).
+      prepare: async (input, writer, level, signal) => { revoked = true; return d.value.prepare(input, writer, level, signal); },
+    };
+    expect(await askAnonymously({ question: 'What is a deposit?', level: 'standard', stillAuthorized: () => !revoked }, value)).toMatchObject({ ok: false, code: 'authorization_refused' });
+    expect(d.calls.send).toEqual([]);
+    expect(await askAnonymously({ question: 'What is a deposit?', level: 'standard', stillAuthorized: () => { throw new Error('store closed'); } }, d.value)).toMatchObject({ ok: false, code: 'authorization_refused' });
+    expect(d.calls.send).toEqual([]);
+    expect(await askAnonymously({ question: 'What is a deposit?', level: 'standard', stillAuthorized: () => true }, d.value)).toMatchObject({ ok: true });
+    expect(d.calls.send).toHaveLength(1);
+  });
+
   test('a question within the character bound but over the transport\'s 8 KiB is refused as too long, not as a secret (Codex review of PR #215)', async () => {
     const d = deps(settings({ standardMode: 'as_written', levelChosen: true }));
     const cjk = '預'.repeat(3_000);

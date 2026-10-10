@@ -120327,6 +120327,12 @@ async function askAnonymously(input, deps) {
   const authorize = () => {
     if (input.signal?.aborted)
       return false;
+    try {
+      if (input.stillAuthorized && !input.stillAuthorized())
+        return false;
+    } catch {
+      return false;
+    }
     let current;
     try {
       current = deps.settings();
@@ -126229,7 +126235,8 @@ class PrivateQuestionJobs {
           question: plaintext.question,
           level: plaintext.level,
           ...plaintext.cleanup !== undefined ? { cleanup: plaintext.cleanup } : {},
-          signal: job.abort.signal
+          signal: job.abort.signal,
+          stillAuthorized: () => this.originActive(job)
         });
         result = resultOf(outcome);
       } catch {
@@ -131139,7 +131146,8 @@ async function main() {
       level: input.level,
       ...input.cleanup !== undefined ? { cleanup: input.cleanup } : {},
       callerProvider: "openai",
-      signal: input.signal
+      signal: input.signal,
+      stillAuthorized: input.stillAuthorized
     }) : Promise.resolve({ ok: false, code: "transport_unavailable", message: "Anonymous answers are not set up on this computer." }),
     choice: () => {
       const read = readConsultSettings2();
