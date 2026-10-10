@@ -569,13 +569,16 @@ sequence follows the reference wrapper scripts in `ethereum/zkapi` pull
 request #16.
 
 **The money, plainly.** Turning this on requires accepting six statements
-(acknowledgement version 5, the owner's calmer rewrite of 2026-10-08; any
+(acknowledgement version 6: the owner's calmer rewrite of 2026-10-08, with
+the provider statement corrected on 2026-10-10; any
 earlier acknowledgement must be given again, and nothing is sent until it is):
 
 - Questions go out automatically when the answer from your Mac is missing
   something. You can turn this off at any time.
-- The AI provider reads each question. Olympus removes names and identifying
-  details first, but an unusual situation could still hint at who you are.
+- The AI provider reads each question but cannot tell who sent it. At
+  Standard, a question goes out the way you choose; at Strict, your model
+  removes identifying details first. An unusual situation could still hint at
+  who you are.
 - Each question usually costs a few cents. While it runs, up to $6 is held
   from your balance; the rest comes back.
 - Adding money and taking it out are Ethereum transactions, each with its own

@@ -140,7 +140,7 @@ different zkAPI provider it exposes at most single Personal-tier words,
 never Private ones.
 
 Both are always selectable. Sending needs the six cost-and-risk statements
-(acknowledgement version 5) accepted, so while they are not, choosing Standard
+(acknowledgement version 6) accepted, so while they are not, choosing Standard
 shows them inline with one "Accept and save", and outside help stays paused.
 
 Status: approved, not built. It needs a writer prompt for the new level, a
@@ -247,7 +247,7 @@ https or a private network.
    1. *Install the parts:* Tor and zkAPI, one click (built in this change,
       below).
    2. *Add money:* one transfer, fee included.
-   3. *Confirm:* the six cost and risk statements (version 5), then turn it on:
+   3. *Confirm:* the six cost and risk statements (version 6), then turn it on:
       questions go out automatically; the provider reads each question; a
       question usually costs a few cents with up to $6 held while it runs;
       adding and taking out money each have a network fee; unused money can

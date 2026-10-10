@@ -61,7 +61,9 @@ export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
  * version 4). The substance of the dropped ones is folded in here and in the
  * card's fuller "Everything to know first" list: there is no daily limit
  * unless one is set, there is no top-up, the expiry date is an estimate,
- * one party ran the proof setup. The version moves when the wording or the
+ * one party ran the proof setup. Version 6 (2026-10-10): `provider_reads`
+ * no longer says Olympus removes names at every level, since Standard sends
+ * a question the way the owner chooses (PR #209). The version moves when the wording or the
  * set changes, which voids every earlier acknowledgement; the transport sends
  * nothing until the current set is accepted (zkapiMoneyStatus).
  *
@@ -69,7 +71,7 @@ export const ZKAPI_SETTING_DEFAULTS: Readonly<typeof DEFAULTS> = DEFAULTS;
  * it (from the confirmed funding date; otherwise unknown or past). Olympus
  * sends no reminder of its own, so the statement does not promise one.
  */
-export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 5;
+export const ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION = 6;
 export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   {
     id: 'automatic',
@@ -77,7 +79,7 @@ export const ZKAPI_RISK_ACKNOWLEDGEMENTS = [
   },
   {
     id: 'provider_reads',
-    statement: 'The AI provider reads each question. Olympus removes names and identifying details first, but an unusual situation could still hint at who you are.',
+    statement: 'The AI provider reads each question but cannot tell who sent it. At Standard, a question goes out the way you choose; at Strict, your model removes identifying details first. An unusual situation could still hint at who you are.',
   },
   {
     id: 'cost',

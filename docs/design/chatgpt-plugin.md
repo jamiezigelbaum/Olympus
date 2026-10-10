@@ -911,7 +911,7 @@ for the snapshot metadata); no product path writes that file until C5.
 Design `docs/design/frontier-consult-lane.md` §A.9, §A.10, §A.14 and the
 owner rulings of §10: automatic by default (no approval step; strict mode is
 C6), enabled only from the Mac, fence recovery a button and never automatic,
-the six risk acknowledgements (version 5), one "send" in total including the fee
+the six risk acknowledgements (version 6), one "send" in total including the fee
 buffer. The code is `src/core/consult-settings-writer.ts` (the writer),
 `src/workers/email-source/dashboard-consult.ts` (the Mac dashboard adapter,
 the writer's one caller), `src/workers/dashboard/outside-help.ts` and
@@ -962,7 +962,7 @@ the writer's one caller), `src/workers/dashboard/outside-help.ts` and
   `strict` is kept as saved (C6 adds its approval step); domains keep the
   gate defaults.
 - **Turning on** requires a configured zkAPI route whose profile records
-  every one of the six acknowledgements at version 5, and languages whose
+  every one of the six acknowledgements at version 6, and languages whose
   vocabulary packs are installed (shipped packs verified by hash; German and
   Italian are optional user packs). Turning off never requires anything,
   and neither does choosing a level (Standard or Strict) while outside help
