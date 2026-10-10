@@ -78,6 +78,8 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   let cleanup = '';
   let sentOpen = false;
   let pair: { jobId: string; privateKey: CryptoKey; publicKey: string } | null = null;
+  /** Job ids this panel followed from (Ask another): the host re-delivers the original tool result on every event, which must not restart the view. */
+  const followed: Record<string, true> = {};
   let run = 0;
   let theme = '';
   let focusAfter = '';
@@ -151,8 +153,9 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     const value = meta && typeof meta === 'object' ? meta[config.metaKey] : undefined;
     if (value === undefined && info) return;
     const next = readMeta(value);
-    if (info && next && info.jobId === next.jobId) return;
+    if (info && next && (info.jobId === next.jobId || followed[next.jobId])) return;
     if (!info && !next) return;
+    for (const id of Object.keys(followed)) delete followed[id];
     start(next, !quiet || !!next);
     // A re-mount after the question went: collect instead of asking again. After Ask another, follow to the newest job.
     if (next) void resume(next.jobId, 0);
@@ -182,6 +185,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       const following = await keptKey(kept.next.jobId);
       if (mine !== run) return;
       if (following || depth === 0) {
+        followed[jobId] = true;
         start(kept.next, true);
         void resume(kept.next.jobId, depth + 1);
         return;
@@ -221,6 +225,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       }
       await keepKey(jobId, keys.privateKey, keys.publicKey, true, next);
       if (mine !== run) return;
+      followed[jobId] = true;
       start(next, true);
       focusAfter = 'question';
       render();
