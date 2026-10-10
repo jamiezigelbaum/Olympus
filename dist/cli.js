@@ -121880,8 +121880,10 @@ var init_mcp_surface = __esm(() => {
     title: "Ask anonymously",
     description: [
       "Ask a frontier model one question anonymously through zkAPI, paid per question from the user's own zkAPI balance;",
-      "nothing identifies them and the provider cannot tie it to an account. Use it only when the user asks to ask anonymously,",
-      "privately or through Olympus zkAPI, or to use a named model without being tracked. Only the question goes out: no documents, no history.",
+      "nothing identifies them and the provider cannot tie it to an account. Use it only when the user has already written the question",
+      "in this conversation and asks for it to go anonymously, privately or through Olympus zkAPI, or to a named model without being tracked.",
+      "When they ask for a private or anonymous question without writing it, call open_private_question instead and never ask them to",
+      "type the question here (you would see it). Only the question goes out: no documents, no history.",
       'The first time it returns {status: "needs_choice"}: ask the user once whether they want Strict (their own model rewrites',
       "the question into general questions before it leaves, so nothing identifying can be sent) or Standard (their words,",
       "prepared as written, lightly cleaned up, or by the instruction they saved); then call again with level, and remember: true to keep it.",
@@ -121910,10 +121912,12 @@ var init_mcp_surface = __esm(() => {
     title: "Open a private question",
     description: [
       "Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer,",
-      "paid from their zkAPI balance, and answered inside the panel. Use it when the user wants to ask a private or anonymous question",
-      'without telling ChatGPT what it is (for example "use Olympus zkAPI to ask a private question"). When they have already typed',
-      'the question in this conversation, use ask_anonymously instead. Takes no arguments. Returns {status: "opened"}: tell the user',
-      'to type their question in the panel, and never ask what it is or what it answered. {status: "unavailable"}: tell the user why in those words.'
+      "paid from their zkAPI balance, and answered inside the panel. Call it at once, with no question in hand, whenever the user asks",
+      'for a private, anonymous or zkAPI question and has not written the question itself: "use Olympus zkAPI to ask a private question",',
+      '"ask something privately", "zkapi private q" and the like. Never reply by asking what the question is: anything typed into this',
+      "conversation is no longer private. Only when the user has already written the question here and wants it sent anonymously, use",
+      'ask_anonymously. Takes no arguments. Returns {status: "opened"}: tell the user to type their question in the panel, and never ask',
+      'what it is or what it answered. {status: "unavailable"}: tell the user why in those words.'
     ].join(" "),
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     _meta: privateQuestionToolMeta(),
