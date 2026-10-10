@@ -2072,8 +2072,8 @@ export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   notSeen: 'ChatGPT does not see this question or its answer. It goes out anonymously through zkAPI from your computer.',
   /** The muted line when the ask was refused before anything left the computer. */
   notSent: 'Nothing was sent.',
-  /** The send was attempted and failed afterwards: it may have reached the provider and been charged. */
-  mayHaveLeft: 'The question left your computer but no answer came back. It may have been charged; check before asking again.',
+  /** The send was attempted and failed afterwards: it may have reached the provider and used some of the balance. */
+  mayHaveLeft: 'The question left your computer but no answer came back. It may have used some of your zkAPI balance; check before asking again.',
   questionLabel: 'Your question',
   strict: 'Strict',
   strictHint: 'Your own model rewrites it into general questions first, so nothing identifying can leave.',
@@ -2084,7 +2084,8 @@ export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   lightCleanup: 'lightly cleaned up',
   custom: 'by your saved instruction',
   send: 'Ask anonymously',
-  cost: 'Paid from your zkAPI balance.',
+  /** The one side-effect line (owner decision 2026-10-10: no money words inside ChatGPT; zkapi-copy.ts). */
+  cost: 'Uses your zkAPI balance.',
   sending: 'Sealing your question for your computer…',
   waiting: 'Asking from your computer… this can take a few minutes.',
   empty: 'Type a question first.',
@@ -2104,7 +2105,7 @@ export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   howAsWritten: 'sent as written',
   howLightCleanup: 'lightly cleaned up before it left',
   howCustom: 'prepared by your saved instruction before it left',
-  networkVisible: 'Tor was off or bypassed, so the network address was visible: payment was private, the question was not anonymous.',
+  networkVisible: 'Tor was off or bypassed, so the network address was visible and the question was not anonymous.',
   networkUnverified: 'The network route could not be verified on this computer.',
   showSent: 'Show what was sent',
   hideSent: 'Hide what was sent',

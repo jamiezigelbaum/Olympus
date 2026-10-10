@@ -462,7 +462,8 @@ export interface ZkapiConsultReadiness {
 // ---------------------------------------------------------------------------
 // Fixed, content-free messages
 
-const MESSAGES: Record<ZkapiConsultErrorCode, string> = {
+/** Exported so a surface outside Olympus (ChatGPT) can word a few of these its own way (src/workers/chatgpt/zkapi-copy.ts). */
+export const ZKAPI_CONSULT_ERROR_MESSAGES: Readonly<Record<ZkapiConsultErrorCode, string>> = {
   invalid_question: 'The consult question is empty, too long, or contains control characters.',
   busy: 'Another zkAPI consult is in flight; consults are sent one at a time.',
   acknowledgements_incomplete: 'The zkAPI risk acknowledgements are not all accepted for the current version.',
@@ -506,6 +507,7 @@ const MESSAGES: Record<ZkapiConsultErrorCode, string> = {
   session_spent: 'This zkAPI session has already sent, was cancelled, or has ended; each session sends at most once.',
   internal_error: 'The zkAPI session failed inside Olympus.',
 };
+const MESSAGES = ZKAPI_CONSULT_ERROR_MESSAGES;
 
 function failure(
   code: ZkapiConsultErrorCode,

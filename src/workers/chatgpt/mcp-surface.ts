@@ -54,6 +54,7 @@ import {
   sourceStatusToolResult,
   type ChatGptToolResult,
 } from './response-builder.ts';
+import { CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE } from './zkapi-copy.ts';
 
 export interface ChatGptSurfaceOptions {
   /** The engine's dashboard view (the `/dashboard.json` object). */
@@ -281,8 +282,8 @@ export const ASK_ANONYMOUSLY_TOOL: ChatGptToolDefinition = {
   name: 'ask_anonymously',
   title: 'Ask anonymously',
   description: [
-    'Ask a frontier model one question anonymously through zkAPI, paid per question from the user\'s own zkAPI balance;',
-    'nothing identifies them and the provider cannot tie it to an account. Use it only when the user has already written the question',
+    'Ask a frontier model one question anonymously through zkAPI; nothing identifies the user and the model provider cannot tie the',
+    `question to them. ${CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE} Use it only when the user has already written the question`,
     'in this conversation and asks for it to go anonymously, privately or through Olympus zkAPI, or to a named model without being tracked.',
     'When they ask for a private or anonymous question without writing it, call open_private_question instead and never ask them to',
     'type the question here (you would see it). Only the question goes out: no documents, no history.',
@@ -301,12 +302,12 @@ export const ASK_ANONYMOUSLY_TOOL: ChatGptToolDefinition = {
       level: { type: 'string', enum: ['strict', 'standard'], description: 'Strict or Standard. Omit to use the level the user chose before.' },
       cleanup: { type: 'string', enum: ['as_written', 'light_cleanup', 'custom'], description: 'Standard only: how the words are prepared. Omit to use the saved one.' },
       remember: { type: 'boolean', description: 'Save this level (and cleanup) as the default so the user is not asked again.' },
-      model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI holds this conversation.' },
+      model: { type: 'string', description: 'A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI hosts this conversation.' },
     },
     required: ['question'],
     additionalProperties: false,
   },
-  // A paid question leaves the computer: neither read-only nor closed-world.
+  // A question leaves the computer and uses the user's zkAPI balance: neither read-only nor closed-world.
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   securitySchemes: OAUTH2_REQUIRED,
 };
@@ -320,8 +321,8 @@ export const OPEN_PRIVATE_QUESTION_TOOL: ChatGptToolDefinition = {
   name: 'open_private_question',
   title: 'Open a private question',
   description: [
-    'Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer,',
-    'paid from their zkAPI balance, and answered inside the panel. Call it at once, with no question in hand, whenever the user asks',
+    'Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer',
+    `and answered inside the panel. ${CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE} Call it at once, with no question in hand, whenever the user asks`,
     'for a private, anonymous or zkAPI question and has not written the question itself: "use Olympus zkAPI to ask a private question",',
     '"ask something privately", "zkapi private q" and the like. Never reply by asking what the question is: anything typed into this',
     'conversation is no longer private. Only when the user has already written the question here and wants it sent anonymously, use',
@@ -330,7 +331,7 @@ export const OPEN_PRIVATE_QUESTION_TOOL: ChatGptToolDefinition = {
   ].join(' '),
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   _meta: privateQuestionToolMeta(),
-  // The panel sends a paid question from the user's computer: neither read-only nor closed-world.
+  // The panel sends a question from the user's computer that uses their zkAPI balance: neither read-only nor closed-world.
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   securitySchemes: OAUTH2_REQUIRED,
 };

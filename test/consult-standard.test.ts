@@ -160,6 +160,12 @@ describe('Ask anonymously', () => {
       send: async () => ({ ok: false, error: { code: 'model_unavailable', message: 'not listed', outcome: 'not_sent', networkIdentity: 'not_verified' } }),
     };
     expect(await askAnonymously(q('What is a deposit?'), missing)).toEqual({ ok: false, code: 'model_unavailable', message: 'not listed', sent: 'What is a deposit?', outcome: 'not_sent' });
+    // The daemon's own code rides along, so a surface can tell an empty balance (402 funding_required) from other daemon errors.
+    const empty: ConsultAskDependencies = {
+      ...deps(settings({ standardMode: 'as_written' })).value,
+      send: async () => ({ ok: false, error: { code: 'daemon_error', message: 'The zkAPI daemon returned an error.', outcome: 'sent_failed', networkIdentity: 'hidden', daemonCode: 'funding_required', httpStatus: 402 } }),
+    };
+    expect(await askAnonymously(q('What is a deposit?'), empty)).toEqual({ ok: false, code: 'daemon_error', message: 'The zkAPI daemon returned an error.', sent: 'What is a deposit?', outcome: 'sent_failed', daemonCode: 'funding_required' });
   });
 
   test('Strict, built-in writer: a draft that kept an exact figure gets one more draft with the finding as feedback (live test 2026-10-10)', async () => {

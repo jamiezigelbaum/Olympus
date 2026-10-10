@@ -188,7 +188,7 @@
     {
       "name": "ask_anonymously",
       "title": "Ask anonymously",
-      "description": "Ask a frontier model one question anonymously through zkAPI, paid per question from the user's own zkAPI balance; nothing identifies them and the provider cannot tie it to an account. Use it only when the user has already written the question in this conversation and asks for it to go anonymously, privately or through Olympus zkAPI, or to a named model without being tracked. When they ask for a private or anonymous question without writing it, call open_private_question instead and never ask them to type the question here (you would see it). Only the question goes out: no documents, no history. The first time it returns {status: \"needs_choice\"}: ask the user once whether they want Strict (their own model rewrites the question into general questions before it leaves, so nothing identifying can be sent) or Standard (their words, prepared as written, lightly cleaned up, or by the instruction they saved); then call again with level, and remember: true to keep it. Returns {status: \"answered\", answer, level, rewritten, sent, model}: give the answer; when rewritten is true, say the question was rewritten first and offer to show what was sent. {status: \"refused\", message}: tell the user the message in those words. If it returns {status: \"working\", job_id}, the answer is still coming: call source_answer_result with that job_id (again while it says working) instead of asking again. Ask one question at a time.",
+      "description": "Ask a frontier model one question anonymously through zkAPI; nothing identifies the user and the model provider cannot tie the question to them. Uses the user's own zkAPI account, set up outside ChatGPT in Olympus on their computer; each question uses a little of its balance. Use it only when the user has already written the question in this conversation and asks for it to go anonymously, privately or through Olympus zkAPI, or to a named model without being tracked. When they ask for a private or anonymous question without writing it, call open_private_question instead and never ask them to type the question here (you would see it). Only the question goes out: no documents, no history. The first time it returns {status: \"needs_choice\"}: ask the user once whether they want Strict (their own model rewrites the question into general questions before it leaves, so nothing identifying can be sent) or Standard (their words, prepared as written, lightly cleaned up, or by the instruction they saved); then call again with level, and remember: true to keep it. Returns {status: \"answered\", answer, level, rewritten, sent, model}: give the answer; when rewritten is true, say the question was rewritten first and offer to show what was sent. {status: \"refused\", message}: tell the user the message in those words. If it returns {status: \"working\", job_id}, the answer is still coming: call source_answer_result with that job_id (again while it says working) instead of asking again. Ask one question at a time.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -219,7 +219,7 @@
           },
           "model": {
             "type": "string",
-            "description": "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI holds this conversation."
+            "description": "A one-off zkAPI model id (for example anthropic/claude-sonnet-5.5) when the user named one; an OpenAI model is refused here, since OpenAI hosts this conversation."
           }
         },
         "required": [
@@ -242,7 +242,7 @@
     {
       "name": "open_private_question",
       "title": "Open a private question",
-      "description": "Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer, paid from their zkAPI balance, and answered inside the panel. Call it at once, with no question in hand, whenever the user asks for a private, anonymous or zkAPI question and has not written the question itself: \"use Olympus zkAPI to ask a private question\", \"ask something privately\", \"zkapi private q\" and the like. Never reply by asking what the question is: anything typed into this conversation is no longer private. Only when the user has already written the question here and wants it sent anonymously, use ask_anonymously. Takes no arguments. Returns {status: \"opened\"}: tell the user to type their question in the panel, and never ask what it is or what it answered. {status: \"unavailable\"}: tell the user why in those words.",
+      "description": "Open a panel where the user types a question that you never see. It is asked anonymously through zkAPI from their own computer and answered inside the panel. Uses the user's own zkAPI account, set up outside ChatGPT in Olympus on their computer; each question uses a little of its balance. Call it at once, with no question in hand, whenever the user asks for a private, anonymous or zkAPI question and has not written the question itself: \"use Olympus zkAPI to ask a private question\", \"ask something privately\", \"zkapi private q\" and the like. Never reply by asking what the question is: anything typed into this conversation is no longer private. Only when the user has already written the question here and wants it sent anonymously, use ask_anonymously. Takes no arguments. Returns {status: \"opened\"}: tell the user to type their question in the panel, and never ask what it is or what it answered. {status: \"unavailable\"}: tell the user why in those words.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -250,9 +250,9 @@
       },
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-question?v=11b69c3e3911"
+          "resourceUri": "ui://olympus/private-question?v=6a9d8c18b516"
         },
-        "openai/outputTemplate": "ui://olympus/private-question?v=11b69c3e3911"
+        "openai/outputTemplate": "ui://olympus/private-question?v=6a9d8c18b516"
       },
       "annotations": {
         "readOnlyHint": false,
@@ -905,7 +905,7 @@
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-question?v=11b69c3e3911",
+      "uri": "ui://olympus/private-question?v=6a9d8c18b516",
       "name": "Olympus private question",
       "mimeType": "text/html;profile=mcp-app"
     }
