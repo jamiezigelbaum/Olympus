@@ -32,6 +32,8 @@ import { defaultConfig } from '../src/core/config.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import {
   daemonEnvironment,
+  defaultZkapiConfinement,
+  darwinSandboxProfile,
   formatZkapiStageTable,
   inspectLoopbackListener,
   reserveZkapiRequest,
@@ -169,6 +171,37 @@ describe('zkAPI consult transport: a supervised session', () => {
       error: { code: 'confinement_self_test_failed', outcome: 'not_sent', receipt: { confinementSelfTest: 'failed' } },
     });
     expect(completions()).toHaveLength(1);
+  }, SLOW);
+
+  test.each([
+    { companion: 'external' },
+    { wallet_custody: 'not_verified' },
+    { relay_endpoint: '127.0.0.1:1' },
+    { connect_proxy: '127.0.0.1:1' },
+    { wallet_api: '127.0.0.1:1' },
+    { kind: 'direct' },
+  ])('mismatched supervised topology refuses before dispatch: %j', async (transportStatus) => {
+    writePlan({ transportStatus });
+    const result = await sendZkapiConsult(QUESTION, transport({ confinement: filteredConfinement }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'relay_mismatch', outcome: 'not_sent' } });
+    expect(completions()).toHaveLength(0);
+    await expectProcessesGone();
+  }, SLOW);
+
+  test('an older daemon refuses before starting Tor or sending a question', async () => {
+    writePlan({ noSupervisor: true });
+    const result = await sendZkapiConsult(QUESTION, transport({ confinement: filteredConfinement }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'daemon_supervisor_unsupported', outcome: 'not_sent' } });
+    expect(torRuns()).toHaveLength(0);
+    expect(completions()).toHaveLength(0);
+  });
+
+  test('a companion listener outside the owned daemon group refuses before dispatch', async () => {
+    const inspect = async (port: number) => port === daemonPort || port === torPort
+      ? inspectLoopbackListener(port) : { kind: 'found' as const, pid: 1, pgid: 1 };
+    const result = await sendZkapiConsult(QUESTION, transport({ confinement: filteredConfinement, inspectListener: inspect }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'daemon_identity_failed', outcome: 'not_sent' } });
+    expect(completions()).toHaveLength(0);
   }, SLOW);
 
   test('every consult gets a brand-new Tor client', async () => {
@@ -381,26 +414,48 @@ describe('zkAPI consult transport: stage timings', () => {
 });
 
 describe('zkAPI consult transport: macOS confinement', () => {
-  test.skipIf(process.platform !== 'darwin')('the real sandbox denies the daemon direct TCP, UDP and DNS, but not other loopback ports', async () => {
+  test('filtered profiles reject missing, aliased and invalid ports', () => {
+    const policy = { nonLoopback: 'denied', unixSockets: 'denied', loopbackOutbound: 'session_ports_only' } as const;
+    for (const ports of [
+      { tor: 1, daemon: 2 },
+      { tor: 1, daemon: 2, companionProxy: 3, walletApi: 1 },
+      { tor: 1, daemon: 2, companionProxy: 3, walletApi: 0 },
+    ]) expect(() => darwinSandboxProfile(policy, ports)).toThrow('Invalid confinement ports');
+  });
+
+  test.skipIf(process.platform !== 'darwin')('a busy self-test positive control refuses without starting Tor or sending', async () => {
+    const sandbox = defaultZkapiConfinement();
+    const result = await sendZkapiConsult(QUESTION, transport({ confinement: {
+      ...sandbox,
+      selfTest: async (dir, env, ports) => {
+        const busy = Bun.listen({ hostname: '127.0.0.1', port: ports.walletApi!, socket: { data() {} } });
+        try { return await sandbox.selfTest(dir, env, ports); } finally { busy.stop(true); }
+      },
+    } }));
+    expect(result).toMatchObject({ ok: false, error: { code: 'confinement_self_test_failed', outcome: 'not_sent' } });
+    expect(torRuns()).toHaveLength(0);
+    expect(completions()).toHaveLength(0);
+  }, SLOW);
+
+  test.skipIf(process.platform !== 'darwin')('the real sandbox denies direct TCP, UDP, DNS and unrelated loopback before producing the strong label', async () => {
     const otherLoopback = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
     try {
       writePlan({ egressProbe: otherLoopback.port });
       const { confinement: _injected, ...withDefault } = transport();
       const result = await sendZkapiConsult(QUESTION, withDefault);
+      expect(result.ok).toBe(true);
       const egress = JSON.parse(events().find((line) => line.startsWith('egress '))!.slice('egress '.length));
       expect(egress.direct).not.toBe('connected');
       expect(egress.direct).not.toBe('timeout');
       expect(egress.udp).toBe('denied');
       expect(egress.resolver).toBe('denied');
-      // The stated limit: loopback is not port-filtered.
-      expect(egress.loopbackOther).toBe('connected');
+      expect(egress.loopbackOther).toBe('refused_fast');
       expect(result).toMatchObject({
         ok: true,
-        networkIdentity: 'not_verified',
-        receipt: { confinement: 'non_loopback_blocked', confinementSelfTest: 'passed' },
+        networkIdentity: 'hidden',
+        receipt: { confinement: 'loopback_filtered', confinementSelfTest: 'passed' },
       });
-      if (result.ok) expect(result.routeLabel).toContain('failed at once inside the sandbox but not outside it');
-      if (result.ok) expect(result.routeLabel).toContain('loopback is not port-filtered');
+      if (result.ok) expect(result.routeLabel).toBe('anonymous route (payment, key and network identity hidden)');
     } finally {
       otherLoopback.stop(true);
     }

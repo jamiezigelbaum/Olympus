@@ -220,7 +220,7 @@ const CAP_BLOCKERS: ReadonlySet<string> = new Set(['daily_cap_reached', 'spend_c
 /** Blockers fixed under Balance and limits (the funding date). */
 const FUNDING_BLOCKERS: ReadonlySet<string> = new Set(['funding_date_missing', 'funding_date_invalid']);
 /** Blockers the setup steps fix. */
-const SETUP_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'daemon_version_unsupported', 'tor_not_found', 'daemon_api_key_missing', 'key_reuse_on', 'note_expired']);
+const SETUP_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'daemon_version_unsupported', 'daemon_supervisor_unsupported', 'tor_not_found', 'daemon_api_key_missing', 'key_reuse_on', 'note_expired']);
 
 /**
  * The card body. `csrfToken` present means the reader holds the controls;

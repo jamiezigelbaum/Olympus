@@ -89,12 +89,17 @@ function reworded(message: string, original: string, replacement: string): strin
  * carries a money word falls back to what the network identity says.
  */
 export function chatgptZkapiRouteLabel(route: string, networkIdentity?: unknown): string {
+  // Only translate the transport's exact completed-session claim. Never
+  // promote a missing/unknown receipt label from networkIdentity alone.
+  if (route.startsWith('anonymous route')) {
+    return route === 'anonymous route (payment, key and network identity hidden)' && networkIdentity === 'hidden'
+      ? 'anonymous route (key and network identity hidden)' : 'network route not verified';
+  }
   const label = route
-    .replace('anonymous route (payment, key and network identity hidden)', 'anonymous route (key and network identity hidden)')
     .replace(/payment privacy only \(network address visible\)/, 'network address visible')
     .replace(/payment privacy only: /, 'network address visible: ')
     .replace(/payment privacy; /, '')
     .replace(/; lease settlement (?:not confirmed|pending)$/, '');
   if (!CHATGPT_ZKAPI_FORBIDDEN_TERMS.test(label)) return label;
-  return networkIdentity === 'hidden' ? 'anonymous route' : networkIdentity === 'visible' ? 'network address visible' : 'network route not verified';
+  return networkIdentity === 'visible' ? 'network address visible' : 'network route not verified';
 }

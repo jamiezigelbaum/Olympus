@@ -51895,7 +51895,7 @@ __export(exports_consult_transport_zkapi, {
 import { spawn as spawn4, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash36, randomUUID as randomUUID17 } from "node:crypto";
 import { accessSync as accessSync5, chmodSync as chmodSync14, constants as constants4, existsSync as existsSync30, mkdirSync as mkdirSync24, mkdtempSync, readdirSync as readdirSync6, readFileSync as readFileSync29, readlinkSync, realpathSync as realpathSync4, rmSync as rmSync12, statSync as statSync17, writeFileSync as writeFileSync10 } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, createServer as createServer2 } from "node:net";
 import { homedir as homedir36, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter4, dirname as dirname33, isAbsolute as isAbsolute11, join as join48, resolve as resolvePath } from "node:path";
 function zkapiStageRows(timings) {
@@ -51999,6 +51999,20 @@ function versionSupported(version) {
   const normalized = version?.replace(/^v/, "");
   return ZKAPI_SUPPORTED_DAEMON_VERSIONS.includes(normalized ?? "");
 }
+function supportsManagedConfinement(executable, env) {
+  try {
+    const help = execFileSync2(executable, ["serve", "--help"], {
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 64 * 1024,
+      env,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    return ["--relay-url", "--companion-proxy-listen", "--wallet-api-listen", "--require-managed-companion", "--require-companion-custody"].every((flag) => help.includes(flag));
+  } catch {
+    return false;
+  }
+}
 function confinementLevel(policy) {
   if (policy.nonLoopback !== "denied" || policy.unixSockets !== "denied")
     return "none";
@@ -52006,24 +52020,35 @@ function confinementLevel(policy) {
 }
 function confinementStatement(level) {
   if (level === "loopback_filtered") {
-    return "network confinement allowed only this session's Tor and daemon ports";
+    return "network confinement allowed only this session's Tor and managed daemon/companion TCP ports";
   }
   if (level === "non_loopback_blocked") {
     return "in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered";
   }
   return "no network confinement";
 }
+function sessionPorts(ports) {
+  const values = [ports.tor, ports.daemon, ports.companionProxy, ports.walletApi];
+  if (values.some((port) => !Number.isInteger(port) || port < 1 || port > 65535) || new Set(values).size !== values.length)
+    throw new Error("Invalid confinement ports");
+  return values;
+}
 function darwinSandboxProfile(policy, ports) {
   const rules = ["(version 1)", "(allow default)"];
   if (policy.nonLoopback === "denied" || policy.unixSockets === "denied") {
     rules.push("(deny network*)");
-    rules.push('(allow network-bind (local ip "localhost:*"))');
-    rules.push('(allow network-inbound (local ip "localhost:*"))');
     if (policy.loopbackOutbound === "any") {
+      rules.push('(allow network-bind (local ip "localhost:*"))');
+      rules.push('(allow network-inbound (local ip "localhost:*"))');
       rules.push('(allow network-outbound (remote ip "localhost:*"))');
     } else {
-      rules.push(`(allow network-outbound (remote ip "localhost:${ports.tor}"))`);
-      rules.push(`(allow network-outbound (remote ip "localhost:${ports.daemon}"))`);
+      for (const port of sessionPorts(ports)) {
+        rules.push(`(allow network-outbound (remote tcp4 "localhost:${port}"))`);
+        if (port !== ports.tor) {
+          rules.push(`(allow network-bind (local tcp4 "localhost:${port}"))`);
+          rules.push(`(allow network-inbound (local tcp4 "localhost:${port}"))`);
+        }
+      }
     }
   }
   return rules.join("");
@@ -52032,12 +52057,40 @@ function runSelfTestProbe(argv, env) {
   try {
     return JSON.parse(execFileSync2(argv[0], argv.slice(1), {
       encoding: "utf8",
-      timeout: 1e4,
+      timeout: 25000,
       env,
       stdio: ["ignore", "pipe", "ignore"]
     }));
   } catch {
     return;
+  }
+}
+async function listenProbe(port = 0, host = "127.0.0.1") {
+  const server = createServer2((socket) => socket.end());
+  await new Promise((resolve9, reject) => {
+    server.once("error", reject);
+    server.listen({ port, host, exclusive: true }, () => {
+      server.removeListener("error", reject);
+      resolve9();
+    });
+  });
+  return server;
+}
+async function companionPorts(excluded) {
+  const servers = [];
+  try {
+    const ports = [];
+    while (ports.length < 2) {
+      const server = await listenProbe();
+      servers.push(server);
+      const port = server.address().port;
+      if (!excluded.includes(port))
+        ports.push(port);
+    }
+    return { companionProxy: ports[0], walletApi: ports[1] };
+  } finally {
+    for (const server of servers)
+      server.close();
   }
 }
 function defaultZkapiConfinement() {
@@ -52047,12 +52100,28 @@ function defaultZkapiConfinement() {
       level,
       limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
       wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
-      selfTest: async (workDir, env) => {
-        const script = join48(workDir, "confinement-self-test.cjs");
-        writeFileSync10(script, SELF_TEST_SCRIPT, { mode: 384 });
-        const outside = runSelfTestProbe([process.execPath, script], env);
-        const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
-        return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
+      selfTest: async (workDir, env, ports) => {
+        const servers = [];
+        try {
+          const allowed = sessionPorts(ports);
+          for (const port of allowed)
+            servers.push(await listenProbe(port));
+          servers.push(await listenProbe(ports.tor, "::1"));
+          const other = await listenProbe();
+          servers.push(other);
+          const targets = JSON.stringify({ allowed, other: other.address().port });
+          const script = join48(workDir, "confinement-self-test.cjs");
+          writeFileSync10(script, SELF_TEST_SCRIPT, { mode: 384 });
+          const outside = runSelfTestProbe([process.execPath, script, targets], env);
+          const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env);
+          const matches = (out, confined) => Boolean(out && confined) && allowed.every((port) => out["allowed" + port] === "connected" && confined["allowed" + port] === "connected") && ["other", "ipv6", "mapped", "resolver"].every((key) => out[key] === "connected" && confined[key] === "failed_fast") && ["udp", "loopbackUdp"].every((key) => out[key] === "sent" && confined[key] === "failed") && (out.tcp === "timeout" || out.tcp === "failed_slow") && confined.tcp === "failed_fast";
+          return matches(outside, inside) && matches(outside?.child, inside?.child);
+        } catch {
+          return false;
+        } finally {
+          for (const server of servers)
+            server.close();
+        }
       }
     };
   }
@@ -52727,6 +52796,8 @@ async function zkapiConsultReadiness(options) {
     }
     if (!versionSupported(daemonVersion))
       blockers.push("daemon_version_unsupported");
+    if (settings.tor === "per_consult" && confinement.level === "loopback_filtered" && !supportsManagedConfinement(daemonExecutable, childEnvironment(env)))
+      blockers.push("daemon_supervisor_unsupported");
   }
   const torExecutable = settings.tor === "per_consult" ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
   if (settings.tor === "per_consult" && !torExecutable)
@@ -52958,6 +53029,8 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   const origin = new URL(options.baseUrl).origin;
   const daemonPort = Number(new URL(options.baseUrl).port || 80);
   const perConsultTor = settings.tor === "per_consult";
+  const filtered = perConsultTor && confinement.level === "loopback_filtered";
+  const ports = { tor: settings.torSocksPort, daemon: daemonPort };
   const receipt = {
     recovery,
     keyReuse: "not_verified",
@@ -53027,6 +53100,8 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   const daemonExecutable = resolveZkapiExecutable("zkapi-clientd", settings.daemonExecutable, env);
   if (!daemonExecutable)
     return refuse2("daemon_not_found");
+  if (filtered && !supportsManagedConfinement(daemonExecutable, childEnvironment(env)))
+    return refuse2("daemon_supervisor_unsupported");
   const torExecutable = perConsultTor ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
   if (perConsultTor && !torExecutable)
     return refuse2("tor_not_found");
@@ -53107,7 +53182,9 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
       const anyExited = unexpectedExit;
       if (perConsultTor) {
         stage("confinementSelfTestMs");
-        if (await confinement.selfTest(workDir, childEnv)) {
+        if (filtered)
+          Object.assign(ports, await companionPorts([ports.tor, ports.daemon]));
+        if (await confinement.selfTest(workDir, childEnv, ports)) {
           receipt.confinementSelfTest = "passed";
         } else if (confinement.level !== "none") {
           receipt.confinementSelfTest = "failed";
@@ -53145,8 +53222,10 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
       }
       const facts = { requests: new Map, settled: new Map };
       const daemonArgv = [daemonExecutable, "serve"];
+      if (filtered)
+        daemonArgv.push("--relay-url", `socks5://127.0.0.1:${ports.tor}`, "--companion-proxy-listen", `127.0.0.1:${ports.companionProxy}`, "--wallet-api-listen", `127.0.0.1:${ports.walletApi}`, "--require-managed-companion", "--require-companion-custody");
       stage("daemonReadyMs");
-      daemon = supervise("daemon", watchdog, perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv, daemonEnvironment(childEnv, daemonExecutable), (line) => parseDaemonLine(facts, line), onChildExit);
+      daemon = supervise("daemon", watchdog, perConsultTor ? confinement.wrap(daemonArgv, ports) : daemonArgv, daemonEnvironment(childEnv, daemonExecutable), (line) => parseDaemonLine(facts, line), onChildExit);
       recordAndStart(daemon);
       const daemonGone = () => daemon.leaderExited || daemon.childExited;
       const owned = async (includeTor = true) => {
@@ -53155,6 +53234,13 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
         const listener = await inspect(daemonPort);
         if (listener.kind !== "found" || listener.pgid !== daemon.pgid)
           return false;
+        if (filtered) {
+          for (const port of [ports.companionProxy, ports.walletApi]) {
+            const companion = await inspect(port);
+            if (companion.kind !== "found" || companion.pgid !== daemon.pgid)
+              return false;
+          }
+        }
         if (tor && includeTor) {
           const socks = await inspect(settings.torSocksPort);
           if (socks.kind !== "found" || socks.pgid !== tor.pgid)
@@ -53210,6 +53296,8 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
       const network = adminStatusNetwork(status);
       if (!network)
         return result = fail("daemon_identity_failed");
+      if (filtered && !managedTransportMatches(status, ports))
+        return result = fail("relay_mismatch");
       receipt.inferenceAuth = "verified";
       receipt.network = network;
       let listing = { listed: false };
@@ -53498,6 +53586,14 @@ function elapsedMs(clock, since) {
 function withTiming(timings, key, ms) {
   return ms === undefined ? timings : { ...timings, [key]: ms };
 }
+function managedTransportMatches(response, ports) {
+  try {
+    const transport = JSON.parse(response.body).transport;
+    return response.status === 200 && transport?.kind === "socks5" && transport.relay_endpoint === `127.0.0.1:${ports.tor}` && transport.companion === "managed" && transport.wallet_custody === "connection_owner_verified" && transport.connect_proxy === `127.0.0.1:${ports.companionProxy}` && transport.wallet_api === `127.0.0.1:${ports.walletApi}`;
+  } catch {
+    return false;
+  }
+}
 function adminStatusNetwork(response) {
   if (response.status !== 200)
     return;
@@ -53670,34 +53766,34 @@ async function readBounded(response, maxBytes) {
 var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, ZKAPI_CONSULT_ERROR_MESSAGES, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
-const loopback = () => new Promise((resolve) => {
-  const server = net.createServer((c) => c.end());
-  server.listen(0, '127.0.0.1', () => {
-    const s = net.createConnection({ host: '127.0.0.1', port: server.address().port });
-    s.once('connect', () => { s.destroy(); server.close(); resolve('connected'); });
-    s.once('error', () => { server.close(); resolve('failed'); });
-  });
-});
-const tcp = () => new Promise((resolve) => {
+const { execFileSync } = require('node:child_process');
+const targets = JSON.parse(process.argv[2]);
+const tcp = (host, port, path) => new Promise((resolve) => {
   const started = Date.now();
-  const s = net.createConnection({ host: '192.0.2.1', port: 9 });
+  const s = net.createConnection(path ? { path } : { host, port });
   s.setTimeout(3000, () => { s.destroy(); resolve('timeout'); });
   s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'));
+  s.once('error', () => { s.destroy(); resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'); });
 });
-const udp = () => new Promise((resolve) => {
+const udp = (host, port) => new Promise((resolve) => {
   const s = dgram.createSocket('udp4');
-  s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'failed' : 'sent'); });
-});
-const resolver = () => new Promise((resolve) => {
-  const s = net.createConnection({ path: '/private/var/run/mDNSResponder' });
-  s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve('failed'));
+  const done = (result) => { try { s.close(); } catch {} resolve(result); };
+  s.once('error', () => done('failed'));
+  s.send(Buffer.from([0]), port, host, (e) => done(e ? 'failed' : 'sent'));
 });
 (async () => {
-  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
+  const result = {};
+  for (const port of targets.allowed) result['allowed' + port] = await tcp('127.0.0.1', port);
+  result.other = await tcp('127.0.0.1', targets.other);
+  result.ipv6 = await tcp('::1', targets.allowed[0]);
+  result.mapped = await tcp('::ffff:127.0.0.1', targets.other);
+  result.udp = await udp('192.0.2.1', 53);
+  result.loopbackUdp = await udp('127.0.0.1', targets.allowed[0]);
+  result.resolver = await tcp(null, null, '/private/var/run/mDNSResponder');
+  result.tcp = await tcp('192.0.2.1', 9);
+  if (process.argv[3] !== 'child') result.child = JSON.parse(execFileSync(process.execPath, [__filename, process.argv[2], 'child'], { timeout: 10000 }));
   process.stdout.write(JSON.stringify(result));
-})();
+})().catch(() => process.exit(1));
 `, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, activeSessionId, DEFAULT_EXECUTABLE_TRUST, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES, EXIT_STAGE_NAMES;
 var init_consult_transport_zkapi = __esm(() => {
   init_atomic_file();
@@ -53707,7 +53803,7 @@ var init_consult_transport_zkapi = __esm(() => {
   DAY_MS = 24 * 60 * 60 * 1000;
   PROBE_MAX_BYTES = 64 * 1024;
   MAX_QUESTION_BYTES = 8 * 1024;
-  ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6"];
+  ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6", "0.1.6-olympus2"];
   CHILD_ENV_KEYS = [
     "HOME",
     "PATH",
@@ -53775,7 +53871,8 @@ var init_consult_transport_zkapi = __esm(() => {
     tor_port_busy: "Something already listens on the zkAPI Tor port; Olympus needs it free to start a fresh Tor client.",
     tor_bootstrap_failed: "The per-consult Tor client did not finish bootstrapping.",
     daemon_start_failed: "zkapi-clientd serve did not become ready.",
-    daemon_version_unsupported: "This zkapi-clientd version is not a reviewed version (0.1.5 or 0.1.6).",
+    daemon_version_unsupported: "This zkapi-clientd version is not a reviewed version (0.1.5, 0.1.6 or 0.1.6-olympus2).",
+    daemon_supervisor_unsupported: "This zkAPI app cannot enforce the managed anonymous route. Use the Olympus zkapi-clientd fork with companion custody support (0.1.6-olympus2); nothing was sent.",
     relay_mismatch: "The daemon is not configured for the expected route (SOCKS5 when Tor is on, direct when Tor is off).",
     key_reuse_on: "The daemon key-reuse window is on, so requests would be linkable; Olympus refuses to send.",
     key_reuse_unverified: "The daemon did not confirm a fresh key for every request.",
@@ -53802,7 +53899,7 @@ var init_consult_transport_zkapi = __esm(() => {
     internal_error: "The zkAPI session failed inside Olympus."
   };
   MESSAGES = ZKAPI_CONSULT_ERROR_MESSAGES;
-  DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "any" };
+  DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "session_ports_only" };
   WATCHDOG_SCRIPT = `
 const { spawn, execFileSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -56599,7 +56696,7 @@ var init_vocabulary = __esm(() => {
       needs_acceptance: "Anonymous answers: paused · accept the updated statements",
       blocked: "Anonymous answers: paused · needs a fix"
     },
-    experimental: "Experimental: on macOS, Olympus can't yet confirm the connection is anonymous (network route not verified).",
+    experimental: "Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.",
     intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
     levelTitle: "What may zkAPI send?",
     writer: {
@@ -56705,7 +56802,7 @@ var init_vocabulary = __esm(() => {
       "When you add money, send one transfer with the deposit plus the fee buffer zkapi-clientd shows. Network fees move, so the buffer can fall short and need a second transfer.",
       "Set zkapi-clientd to require an API key, so only Olympus on this computer can spend the balance. Olympus refuses to send while key reuse is on, so separate questions are not linked by a shared payment key.",
       "One operator account can pause deposits and withdrawals while the 30-day clock keeps running, and one party ran zkAPI's proof setup. Your balance lives in files on this computer; losing them loses the money.",
-      "The provider reads the question; zkAPI hides who paid. On macOS, Olympus cannot yet confirm the network route is anonymous."
+      "The provider reads the question; zkAPI hides who paid. On macOS, a compatible zkAPI app lets Olympus confirm the Tor route for each completed session. “Anonymous route” appears only when every check passes; it does not hide identifying details in your question."
     ],
     routeMissing: "zkAPI is not set up. Add it, then follow Set up zkAPI below.",
     policyNotFile: "Your privacy policy is not kept in a file on this computer, so the route must be added where that policy lives.",
@@ -56732,7 +56829,8 @@ var init_vocabulary = __esm(() => {
     lastSession: "Last consult: {at}, {result}.",
     blockers: {
       daemon_not_found: "The zkAPI app is not installed on this computer.",
-      daemon_version_unsupported: "This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6.",
+      daemon_version_unsupported: "This version of the zkAPI app has not been checked by Olympus. Use a reviewed version: 0.1.5, 0.1.6 or the Olympus fork 0.1.6-olympus2.",
+      daemon_supervisor_unsupported: "This zkAPI app needs the Olympus fork (0.1.6-olympus2) to confirm the anonymous route on macOS. Nothing was sent.",
       tor_not_found: "The program that hides your network address is not installed.",
       daemon_api_key_missing: "Olympus does not have your zkAPI access key yet.",
       acknowledgements_incomplete: "The statements on this page are not accepted yet. Nothing is sent until they are.",
@@ -56753,7 +56851,7 @@ var init_vocabulary = __esm(() => {
     stepsTitle: "Set up zkAPI",
     stepsIntro: "Install the parts above with one click, then run the rest in Terminal, in this order. This is the order that worked live.",
     steps: [
-      "Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). If you installed them yourself, zkapi-clientd must be version 0.1.5 or 0.1.6.",
+      "Install Tor and zkAPI with the button above (or run olympus zkapi install-tools). On macOS, the confined route requires the Olympus zkapi-clientd fork 0.1.6-olympus2; the upstream 0.1.5/0.1.6 build cannot confirm it.",
       "Run: zkapi-clientd config --usd N. Send one transfer: the deposit plus the fee buffer the tool shows. Network fees move, so the buffer can fall short and need a second transfer.",
       'Wait until the tool prints "Private inference balance activated".',
       "Run: zkapi-clientd config --relay-url socks5://127.0.0.1:19050",
@@ -72002,7 +72100,7 @@ var init_engine_host = __esm(() => {
 import { spawn as spawn6 } from "node:child_process";
 import { randomBytes as randomBytes10 } from "node:crypto";
 import { mkdtempSync as mkdtempSync3, rmSync as rmSync15, writeFileSync as writeFileSync15 } from "node:fs";
-import { createServer as createServer2 } from "node:net";
+import { createServer as createServer3 } from "node:net";
 import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir5 } from "node:os";
 import { join as join68 } from "node:path";
 function llamaServerEnvironment(parent, alias) {
@@ -72429,7 +72527,7 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
 }
 function freeLoopbackPort() {
   return new Promise((resolve9, reject) => {
-    const server = createServer2();
+    const server = createServer3();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
@@ -101780,7 +101878,7 @@ var init_outside_help = __esm(() => {
   MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
   FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
-  SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
+  SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "daemon_supervisor_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
   TOOL_BLOCKERS = new Map([["daemon_not_found", "zkapi-clientd"], ["tor_not_found", "tor"]]);
 });
 
@@ -121434,10 +121532,13 @@ function reworded(message, original, replacement) {
   return message.startsWith(original) ? `${replacement}${message.slice(original.length)}` : replacement;
 }
 function chatgptZkapiRouteLabel(route, networkIdentity) {
-  const label = route.replace("anonymous route (payment, key and network identity hidden)", "anonymous route (key and network identity hidden)").replace(/payment privacy only \(network address visible\)/, "network address visible").replace(/payment privacy only: /, "network address visible: ").replace(/payment privacy; /, "").replace(/; lease settlement (?:not confirmed|pending)$/, "");
+  if (route.startsWith("anonymous route")) {
+    return route === "anonymous route (payment, key and network identity hidden)" && networkIdentity === "hidden" ? "anonymous route (key and network identity hidden)" : "network route not verified";
+  }
+  const label = route.replace(/payment privacy only \(network address visible\)/, "network address visible").replace(/payment privacy only: /, "network address visible: ").replace(/payment privacy; /, "").replace(/; lease settlement (?:not confirmed|pending)$/, "");
   if (!CHATGPT_ZKAPI_FORBIDDEN_TERMS.test(label))
     return label;
-  return networkIdentity === "hidden" ? "anonymous route" : networkIdentity === "visible" ? "network address visible" : "network route not verified";
+  return networkIdentity === "visible" ? "network address visible" : "network route not verified";
 }
 var CHATGPT_ZKAPI_FORBIDDEN_TERMS, CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE = "Uses the user's own zkAPI account, set up outside ChatGPT in Olympus on their computer; each question uses a little of its balance.", DETAILS = "Olympus on your computer has the details.", CHATGPT_ZKAPI_BALANCE_RUN_OUT, TRANSPORT_REFUSALS, ASK_REFUSALS;
 var init_zkapi_copy = __esm(() => {
