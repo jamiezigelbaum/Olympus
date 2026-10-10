@@ -41,6 +41,7 @@ import {
   standardExecutableDirectories,
   trustedFallbackExecutable,
   type ExecutableTrustProbe,
+  zkapiConsultInFlightOnDisk,
   zkapiConsultReadiness,
   zkapiFenceScope,
   zkapiUsageToday,
@@ -1127,5 +1128,30 @@ describe('the zkAPI route from the sovereignty profiles', () => {
     const profiles = { z: { provider: 'zkapi', baseUrl: 'http://127.0.0.1:8787/v1', model: 'openai/gpt-5-mini', zkapi: {} as never } };
     expect(resolveZkapiConsultTransport(profiles, () => undefined)?.model).toBe('openai/gpt-5-mini');
     expect(resolveZkapiConsultTransport(profiles, () => undefined, { model: 'other/model' })?.model).toBe('other/model');
+  });
+});
+
+describe('a session record left behind: readiness and the engine\'s in-flight check', () => {
+  const base = { version: 1, day: '2026-10-10', count: 0, reservedMicroUsd: 0 };
+  // Pids near the limit that no process holds: the supervisor and both groups are gone.
+  const dead = { sessionId: 'left-behind', supervisor: { pid: 2_147_483_646 }, groups: [{ role: 'tor', pgid: 2_147_483_645 }, { role: 'daemon', pgid: 2_147_483_644 }] };
+
+  test('a dead session\'s record is checked and cleared by readiness, so nothing stale is reported (owner report 2026-10-10)', async () => {
+    writeFileSync(statePath, JSON.stringify({ ...base, running: dead }));
+    expect(zkapiConsultInFlightOnDisk(statePath)).toBeUndefined();
+    const ready = await zkapiConsultReadiness(transport());
+    expect(ready.stranded).toBeUndefined();
+    expect(ready.blockers).not.toContain('stranded_processes');
+    expect(ledger().running).toBeUndefined();
+  });
+
+  test('a live supervisor is a question in flight: the engine waits for it, and readiness does not call it stranded', async () => {
+    // This test runner's parent is alive and is not this process.
+    writeFileSync(statePath, JSON.stringify({ ...base, running: { ...dead, supervisor: { pid: process.ppid } } }));
+    expect(zkapiConsultInFlightOnDisk(statePath)).toMatchObject({ since: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
+    const ready = await zkapiConsultReadiness(transport());
+    expect(ready.blockers).not.toContain('stranded_processes');
+    expect(ready.stranded).toMatchObject({ supervisorRunning: true, groups: [{ role: 'tor', state: 'gone' }, { role: 'daemon', state: 'gone' }] });
+    expect(ledger().running).toBeDefined();
   });
 });
