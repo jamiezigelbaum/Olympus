@@ -15,7 +15,7 @@ import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { Window } from 'happy-dom';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
-import { readConsultSettings } from '../src/core/consult-settings.ts';
+import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, CONSULT_LIGHT_CLEANUP_INSTRUCTION, consultChatgptModelUnavailableMessage, readConsultSettings } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultReadiness, ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
 import { zkapiFenceScope } from '../src/core/consult-transport-zkapi.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
@@ -426,8 +426,8 @@ describe('the Outside help page: states and copy', () => {
     const html = page(status());
     const text = visibleText(html);
     expect(text).toContain('What may zkAPI send?');
-    for (const line of ['Standard (recommended)', 'Sends your actual question with names, places, exact dates, amounts and account numbers removed. Gets real answers.',
-      'Strict', 'Sends only general questions; nothing about your situation leaves. Safest, but rarely helpful.']) expect(text).toContain(line);
+    for (const line of ['Standard (recommended)', 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can\'t tell who sent it.',
+      'Strict', 'Your model rewrites it into general questions first (Vitalik Buterin\'s approach).']) expect(text).toContain(line);
     expect(text).not.toContain('without names (recommended)');
     expect(html).toContain('<input type="radio" name="level" value="unnamed" checked>');
     // Accepted: a plain Save, no statements in the form.
@@ -571,6 +571,8 @@ function fakeBackend(calls: string[]): DashboardConsultBackend {
     installTools: async () => { calls.push('install'); return { ok: true, status_message: 'installing' }; },
     saveWriter: async () => { calls.push('writer'); return { ok: true, status_message: 'saved', revision: 2 }; },
     testWriter: async () => { calls.push('writer-test'); return { ok: true, status_message: 'testing' }; },
+    saveStandard: async () => { calls.push('standard'); return { ok: true, status_message: 'saved', revision: 2 }; },
+    ask: async () => { calls.push('ask'); return { ok: true, status_message: 'asking' }; },
   };
 }
 
@@ -736,6 +738,8 @@ function adapter(input: {
   reload?: boolean;
   source?: string;
   writerCheck?: Parameters<typeof createDashboardConsultAdapter>[0]['writerCheck'];
+  ask?: Parameters<typeof createDashboardConsultAdapter>[0]['ask'];
+  chatgptModelProblem?: Parameters<typeof createDashboardConsultAdapter>[0]['chatgptModelProblem'];
 }) {
   const path = join(input.home, '.olympus', 'sovereignty.json');
   mkdirSync(join(input.home, '.olympus'), { recursive: true, mode: 0o700 });
@@ -756,6 +760,8 @@ function adapter(input: {
     readiness: async (options) => { probes.push(options); return readiness(input.readiness); },
     recoverSession: async (route, secretRef) => { recoveries.push({ route, secretRef }); return input.recover ?? { ok: false, error: { code: 'transport_failed', message: 'x', outcome: 'not_sent', networkIdentity: 'not_verified' } }; },
     ...(input.writerCheck ? { writerCheck: input.writerCheck } : {}),
+    ...(input.ask ? { ask: input.ask } : {}),
+    ...(input.chatgptModelProblem ? { chatgptModelProblem: input.chatgptModelProblem } : {}),
   });
   return { backend, reloads, probes, recoveries, path, env };
 }
@@ -1205,7 +1211,8 @@ describe('who writes the question (owner decision 2026-10-10)', () => {
     });
     const text = visibleText(html);
     expect(text).toContain('For people running a strong local model at home: ask frontier models anonymously when your model needs help.');
-    expect(text).toContain('paid and sent anonymously, with identifiers removed');
+    expect(text).toContain('paid and sent anonymously.');
+    expect(text).not.toContain('identifiers removed');
     expect(text).not.toMatch(/unlinkable/i);
     expect(text).toContain('Who writes the question');
     expect(text).toContain('works best with a substantial model');
@@ -1219,5 +1226,59 @@ describe('who writes the question (owner decision 2026-10-10)', () => {
     // Not an OpenAI model: no note.
     const other = page({ ...status(), writer: { routeModel: 'openai/gpt-5-mini', chatgptFrontierModel: 'anthropic/some-model', testAvailable: true, check: { state: 'idle' } } });
     expect(other).not.toContain('data-outside-writer-openai');
+  });
+});
+
+describe('Standard is open, and Ask anonymously (owner decision 2026-10-10)', () => {
+  test('saving the mode: light cleanup by default, custom keeps its instruction verbatim, a preset drops it; the other forms carry it', async () => {
+    const home = tempHome();
+    const { backend, env } = adapter({ home });
+    expect((await backend.status()).standard).toMatchObject({ mode: 'light_cleanup', preset: CONSULT_LIGHT_CLEANUP_INSTRUCTION });
+    expect(await backend.saveStandard({ revision: 0, standard_mode: 'custom' })).toMatchObject({ ok: false, code: 'standard_invalid' });
+    expect(await backend.saveStandard({ revision: 0, standard_mode: 'loud' })).toMatchObject({ ok: false, code: 'standard_invalid' });
+    expect(await backend.saveStandard({ revision: 0, standard_mode: 'custom', standard_instruction: 'Ask it in French.\r\nKeep my name out.' })).toMatchObject({ ok: true, revision: 1 });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { standardMode: 'custom', standardInstruction: 'Ask it in French.\nKeep my name out.' } });
+    // Turning on and saving the writer keep the choice.
+    expect(await backend.setEnabled({ enabled: true, revision: 1, languages: ['en'] })).toMatchObject({ ok: true, revision: 2 });
+    expect(await backend.saveWriter({ revision: 2, chatgpt_frontier_model: 'anthropic/other' })).toMatchObject({ ok: true, revision: 3 });
+    expect(readConsultSettings({ env })).toMatchObject({ state: 'valid', settings: { enabled: true, standardMode: 'custom', standardInstruction: 'Ask it in French.\nKeep my name out.' } });
+    expect(await backend.saveStandard({ revision: 3, standard_mode: 'as_written' })).toMatchObject({ ok: true, revision: 4 });
+    const plain = readConsultSettings({ env });
+    expect(plain).toMatchObject({ state: 'valid', settings: { standardMode: 'as_written', chatgptFrontierModel: 'anthropic/other' } });
+    expect(plain.state === 'valid' && plain.settings.standardInstruction).toBeUndefined();
+    expect(await backend.saveStandard({ revision: 1, standard_mode: 'light_cleanup' })).toMatchObject({ ok: false, code: 'conflict' });
+  });
+
+  test('the ask runs in the background and the card shows the reply and exactly what was sent; one at a time; unavailable without a runner', async () => {
+    const none = adapter({ home: tempHome() });
+    expect(await none.backend.ask({ question: 'x' })).toMatchObject({ ok: false, code: 'ask_unavailable' });
+    expect((await none.backend.status()).ask).toBeUndefined();
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const asked: string[] = [];
+    const { backend } = adapter({ home: tempHome(), ask: async (question) => { asked.push(question); await gate; return { ok: true, sent: 'How long do deposits take to return?', reply: 'Usually two weeks.', route: 'zkAPI via Tor' }; } });
+    expect(await backend.ask({ question: '   ' })).toMatchObject({ ok: false, code: 'question_empty' });
+    expect(await backend.ask({ question: ' When will Jo return my deposit? ' })).toMatchObject({ ok: true });
+    expect(await backend.ask({ question: 'again' })).toMatchObject({ ok: false, code: 'ask_running' });
+    expect((await backend.status()).ask?.state).toEqual({ state: 'running', question: 'When will Jo return my deposit?' });
+    finish();
+    await Bun.sleep(5);
+    expect(asked).toEqual(['When will Jo return my deposit?']);
+    const done = (await backend.status()).ask!;
+    expect(done.state).toMatchObject({ state: 'done', sent: 'How long do deposits take to return?', reply: 'Usually two weeks.' });
+    const html = page({ ...status(), ask: done, standard: (await backend.status()).standard! });
+    expect(html).toContain('data-outside-ask-sent>How long do deposits take to return?</pre>');
+    expect(html).toContain('Usually two weeks.');
+    expect(html).toContain('data-outside-form="ask"');
+    expect(html).toContain('data-outside-form="standard"');
+    expect(visibleText(html)).toContain('How should your model prepare a question before it leaves?');
+  });
+
+  test('the card names the ChatGPT model problem in plain words, and the effective model defaults to Claude Sonnet', async () => {
+    const { backend } = adapter({ home: tempHome(), chatgptModelProblem: () => ({ at: '2026-10-10T12:00:00.000Z', message: consultChatgptModelUnavailableMessage(CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT) }) });
+    const value = await backend.status();
+    expect(value.writer).toMatchObject({ effectiveChatgptModel: 'anthropic/claude-sonnet-5.5' });
+    const text = visibleText(page(value));
+    expect(text).toContain('Claude Sonnet isn\'t available through zkAPI right now; choose another model.');
   });
 });

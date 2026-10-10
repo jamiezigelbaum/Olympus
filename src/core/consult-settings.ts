@@ -93,6 +93,40 @@ export interface ConsultWriterChoice {
   readonly timeoutMs?: number;
 }
 
+/**
+ * How a question is prepared before it leaves at the Standard level (owner
+ * decision 2026-10-10: Standard is open and the user's choice; no built-in
+ * content rules). `as_written`: no model, the question goes out unchanged.
+ * `light_cleanup` (default): the writer follows CONSULT_LIGHT_CLEANUP_INSTRUCTION.
+ * `custom`: the writer follows the user's own instruction, verbatim.
+ */
+export type ConsultStandardMode = 'as_written' | 'light_cleanup' | 'custom';
+export const CONSULT_STANDARD_MODES: readonly ConsultStandardMode[] = Object.freeze(['as_written', 'light_cleanup', 'custom']);
+export const CONSULT_STANDARD_MODE_WHEN_UNSET: ConsultStandardMode = 'light_cleanup';
+export const CONSULT_STANDARD_INSTRUCTION_MAX_CHARS = 4_000;
+
+/**
+ * The light-cleanup preset, shown in full on the card. Editing it saves the
+ * edited text as a custom instruction.
+ */
+export const CONSULT_LIGHT_CLEANUP_INSTRUCTION = [
+  'Prepare the user\'s question to be sent to an outside model that knows nothing about them.',
+  'Remove names of people and organisations, contact details (addresses, phone numbers, email addresses, handles) and account, reference and ID numbers. Refer to people and organisations by their role instead ("the landlord", "the employer").',
+  'Keep everything else as the user wrote it. You may add details from the material that the outside model needs to answer, with the same removals.',
+].join(' ');
+
+/** The Standard mode a settings file selects (absent: light cleanup). */
+export function consultStandardMode(settings: ConsultSettings): ConsultStandardMode {
+  return settings.standardMode ?? CONSULT_STANDARD_MODE_WHEN_UNSET;
+}
+
+/** The writer instruction for a Standard mode, or undefined for `as_written` (no model). */
+export function consultStandardInstruction(settings: ConsultSettings): string | undefined {
+  const mode = consultStandardMode(settings);
+  if (mode === 'as_written') return undefined;
+  return mode === 'custom' ? settings.standardInstruction : CONSULT_LIGHT_CLEANUP_INSTRUCTION;
+}
+
 /** Bounds of the owner's writer deadline. */
 export const CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS = Object.freeze({ min: 10_000, max: 240_000 });
 export const CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS = 180_000;
@@ -115,8 +149,36 @@ export interface ConsultSettings {
   readonly level: ConsultLevel;
   /** The owner's own writer model; absent means the built-in model writes. */
   readonly writer?: ConsultWriterChoice;
-  /** The zkAPI model for questions that came through ChatGPT; absent means the route's model. */
+  /** The zkAPI model for questions that came through ChatGPT; absent means CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT. */
   readonly chatgptFrontierModel?: string;
+  /** How the Standard level prepares a question (absent: light cleanup). */
+  readonly standardMode?: ConsultStandardMode;
+  /** The user's own instruction; present exactly when `standardMode` is `custom`. */
+  readonly standardInstruction?: string;
+}
+
+/**
+ * The zkAPI model for questions that came through ChatGPT when the file names
+ * none (owner decision 2026-10-10): Anthropic Claude Sonnet, so the provider
+ * that holds the ChatGPT conversation is not the one that reads the question.
+ * Never replaced by an OpenAI model when the live listing lacks it.
+ */
+export const CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT = 'anthropic/claude-sonnet-5.5';
+
+/** The zkAPI model for a question that came through ChatGPT: the file's choice, else Claude Sonnet. */
+export function consultChatgptFrontierModel(settings: ConsultSettings): string {
+  return settings.chatgptFrontierModel ?? CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT;
+}
+
+/**
+ * What the card says when the live zkAPI model listing lacks the ChatGPT
+ * model (the transport's `model_unavailable`). Never a fallback to another
+ * model: the user chooses.
+ */
+export function consultChatgptModelUnavailableMessage(model: string): string {
+  return model === CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT
+    ? 'Claude Sonnet isn\'t available through zkAPI right now; choose another model.'
+    : 'The model chosen for ChatGPT questions isn\'t available through zkAPI right now; choose another model.';
 }
 
 export type ConsultSettingsInvalidReason =
@@ -150,7 +212,7 @@ export const DEFAULT_CONSULT_SETTINGS: ConsultSettings = Object.freeze({
 });
 
 const REQUIRED_TOP_LEVEL_KEYS = ['v', 'revision', 'enabled', 'languages', 'domains', 'strict'] as const;
-const OPTIONAL_TOP_LEVEL_KEYS = ['level', 'writer', 'chatgptFrontierModel'] as const;
+const OPTIONAL_TOP_LEVEL_KEYS = ['level', 'writer', 'chatgptFrontierModel', 'standardMode', 'standardInstruction'] as const;
 const WRITER_REQUIRED_KEYS = ['baseUrl', 'model'] as const;
 const WRITER_OPTIONAL_KEYS = ['secretRef', 'timeoutMs'] as const;
 const DOMAIN_KEYS = Object.keys(DEFAULT_CONSULT_DOMAIN_PACKS) as Array<keyof ConsultDomainPacks>;
@@ -225,6 +287,19 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
     chatgptFrontierModel = parseModelId(value.chatgptFrontierModel);
     if (!chatgptFrontierModel) return undefined;
   }
+  let standardMode: ConsultStandardMode | undefined;
+  if (Object.hasOwn(value, 'standardMode')) {
+    if (typeof value.standardMode !== 'string' || !(CONSULT_STANDARD_MODES as readonly string[]).includes(value.standardMode)) return undefined;
+    standardMode = value.standardMode as ConsultStandardMode;
+  }
+  let standardInstruction: string | undefined;
+  if (Object.hasOwn(value, 'standardInstruction')) {
+    const text = value.standardInstruction;
+    if (typeof text !== 'string' || text.trim().length === 0 || text.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS || /\u0000/.test(text)) return undefined;
+    standardInstruction = text;
+  }
+  // A custom instruction exists exactly when the mode is custom.
+  if ((standardMode === 'custom') !== (standardInstruction !== undefined)) return undefined;
   return Object.freeze({
     v: CONSULT_SETTINGS_VERSION,
     revision,
@@ -235,6 +310,8 @@ export function parseConsultSettings(value: unknown): ConsultSettings | undefine
     level: level as ConsultLevel,
     ...(writer ? { writer } : {}),
     ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}),
+    ...(standardMode ? { standardMode } : {}),
+    ...(standardInstruction !== undefined ? { standardInstruction } : {}),
   });
 }
 
@@ -380,6 +457,18 @@ export interface ConsultJobPolicy {
    * PR #209: the writer and the gate net must never disagree).
    */
   readonly writer: ConsultWriterChoice | null;
+  /**
+   * How the Standard level prepares the question, bound like the writer: the
+   * mode and, unless `as_written`, the exact instruction the writer follows.
+   */
+  readonly standard: { readonly mode: ConsultStandardMode; readonly instruction?: string };
+}
+
+/** The Standard preparation a settings file selects, as a job binds it. */
+export function consultStandardBinding(settings: ConsultSettings): ConsultJobPolicy['standard'] {
+  const mode = consultStandardMode(settings);
+  const instruction = consultStandardInstruction(settings);
+  return Object.freeze({ mode, ...(instruction !== undefined ? { instruction } : {}) });
 }
 
 /** A writer's identity for comparison: everything that selects where and how the question is written. */
@@ -398,6 +487,7 @@ export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolic
     strict: settings.strict,
     level: settings.level,
     writer: settings.writer ? Object.freeze({ ...settings.writer }) : null,
+    standard: consultStandardBinding(settings),
   });
 }
 
@@ -426,6 +516,8 @@ export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: Consu
   if (current.settings.level !== policy.level) return { ok: false, reason: 'settings_stale' };
   // The writer too: a bound job never sends under another writer's gate net.
   if (consultWriterIdentity(current.settings.writer) !== consultWriterIdentity(policy.writer ?? null)) return { ok: false, reason: 'settings_stale' };
+  // And how Standard prepares the question: a bound mode never sends under another.
+  if (JSON.stringify(consultStandardBinding(current.settings)) !== JSON.stringify(policy.standard ?? consultStandardBinding(DEFAULT_CONSULT_SETTINGS))) return { ok: false, reason: 'settings_stale' };
   if (!current.settings.enabled) return { ok: false, reason: 'settings_off' };
   return { ok: true };
 }

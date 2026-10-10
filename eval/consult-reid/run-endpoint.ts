@@ -13,7 +13,11 @@
 //   --mode after    the product's own writer (runOwnConsultWriter) with the
 //                   current rules and the evidence excerpts;
 //   --mode after-no-evidence   the same writer and rules without the
-//                   evidence (isolates the rules from the evidence).
+//                   evidence (isolates the rules from the evidence);
+//   --mode light-cleanup   Standard's light-cleanup instruction over the
+//                   question and the evidence, through the secrets-only net
+//                   (owner decision 2026-10-10: leaks of labelled
+//                   identifiers there are information, not failures).
 // Calls run one at a time (a home server is usually serial). Nothing is sent
 // to zkAPI: the only network call is to the given endpoint.
 //
@@ -46,6 +50,7 @@ import {
   type ConsultWriterOutcome,
 } from '../../src/core/consult-writer.ts';
 import { resolveSecretRefValueSync } from '../../src/core/secret-store.ts';
+import { CONSULT_LIGHT_CLEANUP_INSTRUCTION } from '../../src/core/consult-settings.ts';
 import { UNNAMED_CASES } from '../consult-leak/unnamed-questions.ts';
 import { REID_CASES } from './cases.ts';
 import { CONSULT_WRITER_SYSTEM_BEFORE_2026_10_10, CONSULT_WRITER_SYSTEM_UNNAMED_BEFORE_2026_10_10 } from './prompts-before-2026-10-10.ts';
@@ -116,9 +121,9 @@ if (import.meta.main) {
   const level = (arg('level') ?? 'unnamed') as ConsultLevel;
   const mode = arg('mode') ?? 'after';
   const deadlineMs = Number(arg('timeout-ms') ?? 240_000);
-  const net = (arg('net') ?? 'full') as ConsultGateNet;
-  if (!baseUrl || !model || (level !== 'unnamed' && level !== 'general') || !['before', 'after', 'after-no-evidence'].includes(mode) || (net !== 'full' && net !== 'thin')) {
-    console.error('Usage: bun eval/consult-reid/run-endpoint.ts --base-url <url> --model <name> --level unnamed|general --mode before|after|after-no-evidence [--net full|thin] [--secret-ref ref] [--out file] [--timeout-ms n]');
+  const net = (mode === 'light-cleanup' ? 'secrets' : arg('net') ?? 'full') as ConsultGateNet;
+  if (!baseUrl || !model || (level !== 'unnamed' && level !== 'general') || !['before', 'after', 'after-no-evidence', 'light-cleanup'].includes(mode) || !['full', 'thin', 'secrets'].includes(net)) {
+    console.error('Usage: bun eval/consult-reid/run-endpoint.ts --base-url <url> --model <name> --level unnamed|general --mode before|after|after-no-evidence|light-cleanup [--net full|thin] [--secret-ref ref] [--out file] [--timeout-ms n]');
     process.exit(2);
   }
   const secretRef = arg('secret-ref');
@@ -128,6 +133,13 @@ if (import.meta.main) {
   for (const entry of ENDPOINT_EVAL_CASES) {
     const outcome = mode === 'before'
       ? await beforeWriter(entry, level, endpoint, deadlineMs)
+      : mode === 'light-cleanup'
+      ? await runOwnConsultWriter({ question: entry.userQuestion, answer: '', gaps: [], instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION, evidence: consultWriterEvidence(consultWriterCheckPack(entry)) }, {
+        endpoint,
+        kill: new AbortController().signal,
+        deadlineMs,
+        level: 'unnamed',
+      })
       : await runOwnConsultWriter({ question: entry.userQuestion, answer: entry.answer, gaps: entry.gaps, ...(mode === 'after' ? { evidence: consultWriterEvidence(consultWriterCheckPack(entry)) } : {}) }, {
         endpoint,
         kill: new AbortController().signal,

@@ -21,6 +21,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import {
+  CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
+  CONSULT_LIGHT_CLEANUP_INSTRUCTION,
+  CONSULT_STANDARD_INSTRUCTION_MAX_CHARS,
+  consultChatgptFrontierModel,
+  consultChatgptModelUnavailableMessage,
+  consultStandardBinding,
   CONSULT_SETTINGS_MAX_BYTES,
   DEFAULT_CONSULT_SETTINGS,
   __consultSettingsTestHooks,
@@ -85,6 +91,30 @@ function placeSettings(home: string, settings: Record<string, unknown>): void {
 }
 
 describe('parseConsultSettings', () => {
+  test('Standard\'s mode (owner decision 2026-10-10): an old file reads as light cleanup; custom needs its own bounded instruction, and only custom has one', () => {
+    const old = parseConsultSettings(VALID)!;
+    expect(consultStandardBinding(old)).toEqual({ mode: 'light_cleanup', instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION });
+    expect(consultStandardBinding(parseConsultSettings({ ...VALID, standardMode: 'as_written' })!)).toEqual({ mode: 'as_written' });
+    const custom = parseConsultSettings({ ...VALID, standardMode: 'custom', standardInstruction: 'Write it in Dutch.' })!;
+    expect(consultStandardBinding(custom)).toEqual({ mode: 'custom', instruction: 'Write it in Dutch.' });
+    for (const bad of [
+      { standardMode: 'custom' },
+      { standardMode: 'custom', standardInstruction: '   ' },
+      { standardMode: 'custom', standardInstruction: 'x'.repeat(CONSULT_STANDARD_INSTRUCTION_MAX_CHARS + 1) },
+      { standardMode: 'custom', standardInstruction: 'a\u0000b' },
+      { standardMode: 'light_cleanup', standardInstruction: 'extra' },
+      { standardMode: 'loud' },
+    ]) expect({ bad, parsed: parseConsultSettings({ ...VALID, ...bad }) }).toEqual({ bad, parsed: undefined });
+  });
+
+  test('the ChatGPT model defaults to Claude Sonnet (owner decision 2026-10-10), the file may override it, and its unavailability reads plainly', () => {
+    expect(CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT).toBe('anthropic/claude-sonnet-5.5');
+    expect(consultChatgptFrontierModel(parseConsultSettings(VALID)!)).toBe('anthropic/claude-sonnet-5.5');
+    expect(consultChatgptFrontierModel(parseConsultSettings({ ...VALID, chatgptFrontierModel: 'google/some-model' })!)).toBe('google/some-model');
+    expect(consultChatgptModelUnavailableMessage(CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT)).toBe('Claude Sonnet isn\'t available through zkAPI right now; choose another model.');
+    expect(consultChatgptModelUnavailableMessage('google/some-model')).not.toContain('Claude');
+  });
+
   test('a file written before the places and technical keys stays valid, with both on; unknown keys still reject', () => {
     const { places: _places, technical: _technical, ...oldDomains } = VALID.domains;
     const old = parseConsultSettings({ ...VALID, domains: oldDomains });
@@ -313,12 +343,21 @@ describe('settings location honours the injected HOME', () => {
 });
 
 describe('per-job binding', () => {
+  test('Standard\'s mode and instruction are bound: a change refuses as stale, even at the same revision', () => {
+    const read = (extra: Record<string, unknown>) => ({ state: 'valid' as const, settings: parseConsultSettings({ ...VALID, ...extra })! });
+    const policy = bindConsultJobPolicy(read({ standardMode: 'custom', standardInstruction: 'One.' }));
+    expect(policy.standard).toEqual({ mode: 'custom', instruction: 'One.' });
+    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'custom', standardInstruction: 'One.' }))).toEqual({ ok: true });
+    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'custom', standardInstruction: 'Two.' }))).toEqual({ ok: false, reason: 'settings_stale' });
+    expect(recheckConsultJobPolicy(policy, read({ standardMode: 'as_written' }))).toEqual({ ok: false, reason: 'settings_stale' });
+  });
+
   test('a job keeps the policy it bound and authorizes only at that revision', () => {
     const home = tempHome();
     const location = { env: { HOME: home } };
     placeSettings(home, VALID);
     const policy = bindConsultJobPolicy(readConsultSettings(location));
-    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false, level: 'unnamed', writer: null });
+    expect(policy).toEqual({ settingsRevision: 3, outsideHelp: true, languages: ['en', 'pt-BR'], domains: VALID.domains, strict: false, level: 'unnamed', writer: null, standard: { mode: 'light_cleanup', instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION } });
     expect(Object.isFrozen(policy) && Object.isFrozen(policy.languages) && Object.isFrozen(policy.domains)).toBe(true);
     expect(recheckConsultJobPolicy(policy, readConsultSettings(location))).toEqual({ ok: true });
 
@@ -396,6 +435,9 @@ describe('the settings module stays off the hosted surfaces', () => {
   const SETTINGS_MODULE = 'src/core/consult-settings.ts';
   const SETTINGS_IMPORTERS: readonly string[] = [
     'src/core/doctor.ts',
+    // Ask anonymously (owner decision 2026-10-10) reads Standard's mode for
+    // the typed question; it only reads.
+    'src/core/consult-ask.ts',
     // The C4b orchestrator re-reads the settings at the gate and inside
     // final authorization (recheckConsultJobPolicy); it only reads.
     'src/workers/chatgpt/consult-orchestrator.ts',

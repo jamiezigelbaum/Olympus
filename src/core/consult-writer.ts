@@ -92,6 +92,13 @@ export const CONSULT_WRITER_LIMITS = Object.freeze({
   maxQuestionWords: 25,
   minQuestionWords: 3,
   maxQuestionChars: 200,
+  /**
+   * Standard's prepared questions (owner decision 2026-10-10: no built-in
+   * content or form rules there): each at most this many characters, and the
+   * built-in writer's reply room for them.
+   */
+  standardQuestionChars: 2_000,
+  standardMaxOutputTokens: 640,
   /** The writer's deadline; its process is killed at it (§A.3). */
   deadlineMs: 60_000,
   /** The writer server's physical footprint, for the memory rule (§A.7: about 0.6 GB). */
@@ -116,7 +123,18 @@ export interface ConsultWriterInput {
    * only to the owner's own writer; the built-in writer never sees them.
    */
   readonly evidence?: readonly string[];
+  /**
+   * Standard's instruction (light cleanup, or the user's own text), used
+   * verbatim as the writer's rules, wrapped only by the fixed reply format.
+   * Present: the writer prepares the question (with any evidence) for
+   * sending; the answer and gaps are not shown and the reply has no form
+   * rules beyond its shape. Absent: Strict's rules (consultWriterSystem).
+   */
+  readonly instruction?: string;
 }
+
+/** The fixed reply format that wraps Standard's instruction. */
+export const CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.';
 
 export interface ConsultWriterMessage {
   readonly role: 'system' | 'user';
@@ -206,6 +224,21 @@ export function consultWriterSystem(level: ConsultLevel): string {
   return level === 'unnamed' ? CONSULT_WRITER_SYSTEM_UNNAMED : CONSULT_WRITER_SYSTEM;
 }
 
+/** Standard's reply schema: the same shape, longer strings. */
+export const CONSULT_STANDARD_RESPONSE_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    questions: {
+      anyOf: [
+        { type: 'null' },
+        { type: 'array', minItems: 1, maxItems: CONSULT_WRITER_LIMITS.maxQuestions, items: { type: 'string', maxLength: CONSULT_WRITER_LIMITS.standardQuestionChars } },
+      ],
+    },
+  },
+  required: ['questions'],
+  additionalProperties: false,
+});
+
 /** The reply schema: one to three strings, or null (propose nothing). */
 export const CONSULT_WRITER_RESPONSE_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
@@ -250,6 +283,7 @@ export function boundConsultWriterInput(input: ConsultWriterInput): ConsultWrite
       .filter(Boolean)
       .slice(0, CONSULT_WRITER_LIMITS.gaps)),
     ...(evidence.length > 0 ? { evidence: Object.freeze(evidence) } : {}),
+    ...(typeof input.instruction === 'string' && input.instruction.trim() ? { instruction: input.instruction } : {}),
   });
 }
 
@@ -275,6 +309,19 @@ export function consultWriterEvidence(pack: EvidencePack | undefined): string[] 
 /** The writer's messages: the level's rules, then the bounded question, evidence (own writer only), answer and gaps. */
 export function buildConsultWriterPrompt(input: ConsultWriterInput, level: ConsultLevel = 'general'): readonly ConsultWriterMessage[] {
   const bounded = boundConsultWriterInput(input);
+  if (bounded.instruction !== undefined) {
+    // Standard: the user's instruction, verbatim, then the fixed reply format.
+    const standardUser = [
+      `Question: ${bounded.question}`,
+      ...(bounded.evidence && bounded.evidence.length > 0
+        ? [`Material the answer read (private; the outside model never sees it):\n${bounded.evidence.map((excerpt, index) => `[${index + 1}] ${excerpt}`).join('\n')}`]
+        : []),
+    ].join('\n\n');
+    return Object.freeze([
+      Object.freeze({ role: 'system' as const, content: `${bounded.instruction}\n\n${CONSULT_STANDARD_REPLY_FORMAT}` }),
+      Object.freeze({ role: 'user' as const, content: standardUser }),
+    ]);
+  }
   const user = [
     `Question: ${bounded.question}`,
     ...(bounded.evidence && bounded.evidence.length > 0
@@ -295,7 +342,7 @@ export type ConsultWriterReply =
   | { readonly kind: 'invalid'; readonly reason: 'not_json' | 'shape' | 'form' };
 
 /** Parses and checks the writer's reply against the form rules; a reply that breaks any rule is invalid as a whole. */
-export function parseConsultWriterReply(raw: string): ConsultWriterReply {
+export function parseConsultWriterReply(raw: string, options: { readonly standard?: boolean } = {}): ConsultWriterReply {
   // A model that reasons before it replies may wrap its reasoning in
   // <think>…</think>; only what follows is the reply.
   const text = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^[\s\S]*<\/think>/i, '');
@@ -314,6 +361,16 @@ export function parseConsultWriterReply(raw: string): ConsultWriterReply {
   if (!Array.isArray(questions) || questions.length < 1 || questions.length > CONSULT_WRITER_LIMITS.maxQuestions) return { kind: 'invalid', reason: 'shape' };
   if (!questions.every((question): question is string => typeof question === 'string')) return { kind: 'invalid', reason: 'shape' };
   const cleaned: string[] = [];
+  if (options.standard) {
+    // Standard: the shape only (owner decision 2026-10-10); the transport's own plain-text and size checks still apply.
+    for (const raw of questions) {
+      const question = raw.trim();
+      if (!question || question.length > CONSULT_WRITER_LIMITS.standardQuestionChars) return { kind: 'invalid', reason: 'form' };
+      if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(question)) return { kind: 'invalid', reason: 'form' };
+      cleaned.push(question);
+    }
+    return { kind: 'questions', questions: Object.freeze(cleaned) };
+  }
   for (const raw of questions) {
     const question = raw.trim();
     if (!question || question.length > CONSULT_WRITER_LIMITS.maxQuestionChars) return { kind: 'invalid', reason: 'form' };
@@ -497,6 +554,7 @@ export async function runConsultWriter(input: ConsultWriterInput, options: Consu
   const memory = consultWriterMemoryDecision(safeProbe(options.memory));
   if (!memory.ok) return { kind: 'skipped', reason: memory.reason };
   const messages = buildConsultWriterPrompt(input, options.level ?? 'general');
+  const standard = boundConsultWriterInput(input).instruction !== undefined;
   const deadline = AbortSignal.timeout(options.deadlineMs ?? CONSULT_WRITER_LIMITS.deadlineMs);
   const stop = AbortSignal.any([options.kill, deadline]);
   const killedReason = (): 'fresh_answer' | 'deadline' => (options.kill.aborted ? 'fresh_answer' : 'deadline');
@@ -532,7 +590,7 @@ export async function runConsultWriter(input: ConsultWriterInput, options: Consu
     }
     let text: string;
     try {
-      text = await writerCompletion(fetchImpl, endpoint, messages, stop);
+      text = await writerCompletion(fetchImpl, endpoint, messages, stop, standard);
     } catch {
       if (stop.aborted) return { kind: 'killed', reason: killedReason() };
       keep = true;
@@ -540,7 +598,7 @@ export async function runConsultWriter(input: ConsultWriterInput, options: Consu
     }
     if (stop.aborted) return { kind: 'killed', reason: killedReason() };
     keep = true;
-    const reply = parseConsultWriterReply(text);
+    const reply = parseConsultWriterReply(text, { standard });
     const ms = now() - startedAt;
     if (reply.kind === 'invalid') return { kind: 'failed', reason: reply.reason };
     if (reply.kind === 'declined') return { kind: 'declined', promptTokens, ms };
@@ -597,12 +655,13 @@ async function writerCompletion(
   endpoint: LlamaServerEndpoint,
   messages: readonly ConsultWriterMessage[],
   signal: AbortSignal,
+  standard = false,
 ): Promise<string> {
   const response = await post(fetchImpl, endpoint, '/v1/chat/completions', {
     messages,
     temperature: 0,
-    max_tokens: CONSULT_WRITER_LIMITS.maxOutputTokens,
-    response_format: { type: 'json_schema', json_schema: { name: 'consult', schema: CONSULT_WRITER_RESPONSE_SCHEMA } },
+    max_tokens: standard ? CONSULT_WRITER_LIMITS.standardMaxOutputTokens : CONSULT_WRITER_LIMITS.maxOutputTokens,
+    response_format: { type: 'json_schema', json_schema: { name: 'consult', schema: standard ? CONSULT_STANDARD_RESPONSE_SCHEMA : CONSULT_WRITER_RESPONSE_SCHEMA } },
   }, signal);
   if (!response.ok) throw new Error(`writer HTTP ${response.status}`);
   const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
@@ -649,6 +708,7 @@ export async function runOwnConsultWriter(input: ConsultWriterInput, options: Ow
   const startedAt = now();
   if (isCloudForwardingModelId(options.endpoint.model)) return { kind: 'skipped', reason: 'cloud_model' };
   const messages = buildConsultWriterPrompt(input, options.level ?? 'general');
+  const standard = boundConsultWriterInput(input).instruction !== undefined;
   const deadline = AbortSignal.timeout(options.deadlineMs);
   const stop = AbortSignal.any([options.kill, deadline]);
   const killedReason = (): 'fresh_answer' | 'deadline' => (options.kill.aborted ? 'fresh_answer' : 'deadline');
@@ -665,7 +725,7 @@ export async function runOwnConsultWriter(input: ConsultWriterInput, options: Ow
       temperature: 0,
       max_tokens: CONSULT_WRITER_LIMITS.ownWriterMaxOutputTokens,
       stream: false,
-      ...(structured ? { response_format: { type: 'json_schema', json_schema: { name: 'consult', schema: CONSULT_WRITER_RESPONSE_SCHEMA } } } : {}),
+      ...(structured ? { response_format: { type: 'json_schema', json_schema: { name: 'consult', schema: standard ? CONSULT_STANDARD_RESPONSE_SCHEMA : CONSULT_WRITER_RESPONSE_SCHEMA } } } : {}),
     }),
     signal: stop,
   });
@@ -689,7 +749,7 @@ export async function runOwnConsultWriter(input: ConsultWriterInput, options: Ow
     return { kind: 'failed', reason: 'request_failed' };
   }
   if (stop.aborted) return { kind: 'killed', reason: killedReason() };
-  const reply = parseConsultWriterReply(text);
+  const reply = parseConsultWriterReply(text, { standard });
   const ms = now() - startedAt;
   if (reply.kind === 'invalid') return { kind: 'failed', reason: reply.reason };
   // No tokenizer for the owner's server: promptTokens is 0 (not counted).

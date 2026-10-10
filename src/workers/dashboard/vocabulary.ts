@@ -2112,14 +2112,14 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** The honesty label: the network route is not verified on macOS, said plainly. */
   experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
   /** What outside help is, before anything technical (owner, 2026-10-07). */
-  intro: 'For people running a strong local model at home: ask frontier models anonymously when your model needs help. When the answer from your computer is missing something, Olympus can send a top AI model a short question through zkAPI, paid and sent anonymously, with identifiers removed. The provider reads the question, and an unusual situation could still hint at who you are.',
+  intro: 'For people running a strong local model at home: ask frontier models anonymously when your model needs help. When the answer from your computer is missing something, Olympus can send a top AI model a short question through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.',
   /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'). */
   levelTitle: 'What may zkAPI send?',
   /** Who writes the outside question (owner decision 2026-10-10): the built-in model, or the owner's own. No gate on the model. */
   writer: {
     title: 'Who writes the question',
     builtInShort: 'the model built into Olympus',
-    intro: 'By default the small model built into Olympus writes the outside question from the first answer. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it reads the private material the answer used, decides whether a frontier model would help, and writes the question in its own words. Olympus\'s privacy check still runs before anything is sent. This works best with a substantial model.',
+    intro: 'By default the small model built into Olympus writes the outside question from the first answer. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it reads the private material the answer used, decides whether a frontier model would help, and writes the question. At Strict, Olympus\'s privacy check still runs before anything is sent; at Standard, only passwords, keys and tokens are stopped. This works best with a substantial model.',
     currentBuiltIn: 'Now: the model built into Olympus.',
     currentOwn: 'Now: your model {model} at {address}.',
     baseUrl: 'Your model server\'s address (OpenAI-compatible, usually ending in /v1)',
@@ -2128,7 +2128,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     where: 'Your private material goes to this address, so use a server you control. A server on another computer is reached over your network; prefer https or a private network such as a tailnet.',
     keyMissing: 'The key reference {secretRef} is not set on this computer, so your model cannot be used until it is.',
     frontierModel: 'zkAPI model for questions from ChatGPT (optional)',
-    frontierHint: 'A model from a provider other than OpenAI is better here: OpenAI also holds your ChatGPT conversation and could link the two. Empty uses the zkAPI route\'s own model.',
+    frontierHint: 'A model from a provider other than OpenAI is better here: OpenAI also holds your ChatGPT conversation and could link the two. Empty uses Claude Sonnet.',
     openAiNote: 'Questions from ChatGPT now go to {model}, an OpenAI model. OpenAI also holds your ChatGPT conversation; a model from another provider is better here.',
     save: 'Save',
     useBuiltIn: 'Use the built-in model',
@@ -2153,12 +2153,34 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   levels: {
     unnamed: {
       title: 'Standard (recommended)',
-      body: 'Sends your actual question with names, places, exact dates, amounts and account numbers removed. Gets real answers.',
+      body: 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can\'t tell who sent it.',
     },
     general: {
       title: 'Strict',
-      body: 'Sends only general questions; nothing about your situation leaves. Safest, but rarely helpful.',
+      body: 'Your model rewrites it into general questions first (Vitalik Buterin\'s approach).',
     },
+  },
+  /** How Standard prepares a question (owner decision 2026-10-10: open, the user's choice). */
+  standard: {
+    title: 'How should your model prepare a question before it leaves?',
+    modes: {
+      as_written: { title: 'Exactly as written', body: 'No model step: the question goes out unchanged.' },
+      light_cleanup: { title: 'Lightly cleaned (default)', body: 'Your model follows this instruction. Edit it to make it your own.' },
+      custom: { title: 'By your own instruction', body: 'Your model follows exactly what you write here.' },
+    },
+    instructionLabel: 'Instruction for your model',
+    save: 'Save',
+  },
+  /** "Ask anonymously" (owner decision 2026-10-10): a typed question, prepared as Standard is set, sent through zkAPI; never ChatGPT. */
+  ask: {
+    title: 'Ask anonymously',
+    intro: 'Type a question. It is prepared the way you chose above, sent through zkAPI, and the answer shows here. It never goes to ChatGPT. Each question costs a little from your zkAPI balance.',
+    label: 'Your question',
+    send: 'Ask',
+    running: 'Asking anonymously… Starting a private route takes a minute or two.',
+    sentTitle: 'What was sent',
+    replyTitle: 'Answer',
+    notSent: 'Nothing was sent.',
   },
   levelSave: 'Save',
   /** Standard chosen while the statements are not accepted: they show inline with one action. */
@@ -2206,7 +2228,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   /** Two short lines at first view; the fuller detail sits behind disclosureMore. */
   disclosureShort: [
     'It asks on its own: when an answer from your computer is missing something, Olympus may send one short question. You can turn it off at any time.',
-    'The provider reads the question, with names and identifying details removed; zkAPI hides who paid.',
+    'The provider reads the question, prepared the way you choose; zkAPI hides who paid.',
   ],
   disclosureMore: 'Everything to know first',
   /**

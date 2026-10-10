@@ -60,7 +60,9 @@ import {
 } from '../../core/consult-gate.ts';
 import {
   CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS,
+  DEFAULT_CONSULT_SETTINGS,
   consultGateOptionsFromSettings,
+  consultStandardBinding,
   recheckConsultJobPolicy,
   type ConsultJobPolicy,
   type ConsultWriterChoice,
@@ -146,6 +148,10 @@ export interface ConsultOrchestratorOptions {
    * (consult-gate.ts ConsultGateOptions.net). The trigger is the same for both.
    */
   readonly writerDeadlineMs?: number | (() => number);
+  /** A transport failure's code (content-free), e.g. `model_unavailable` for the card. Called after the job is failed. */
+  readonly onTransportFailure?: (code: string) => void;
+  /** A reply was appended: earlier transport problems are over. */
+  readonly onAppended?: () => void;
 }
 
 export interface ConsultOrchestrator {
@@ -192,6 +198,13 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
   const writerDeadlineMs = (policy: ConsultJobPolicy): number => {
     const own = boundWriter(policy);
     return own ? own.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS : builtInDeadlineMs();
+  };
+  const notifyTransport = (code: string): void => {
+    try {
+      options.onTransportFailure?.(code);
+    } catch {
+      // A status hook never affects the consult.
+    }
   };
   const recent: string[] = [];
   const inFlight = new Map<string, Promise<void>>();
@@ -313,12 +326,25 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     // if the file now names another writer.
     const writerChoice = boundWriter(scheduled.policy);
     const own = writerChoice !== null;
-    const bounded = boundConsultWriterInput({
-      question: held.question,
-      answer: held.answer,
-      gaps: held.gaps,
-      ...(own ? { evidence: consultWriterEvidence(held.pack) } : {}),
-    });
+    // Standard (owner decision 2026-10-10): the question as ChatGPT sent it,
+    // prepared the way the user chose: unchanged (no model), or by the
+    // writer under the bound instruction, with the evidence for the own
+    // writer. Strict: the writer's general questions, as before.
+    const standard = scheduled.policy.level === 'unnamed' ? scheduled.policy.standard ?? consultStandardBinding(DEFAULT_CONSULT_SETTINGS) : undefined;
+    const bounded = boundConsultWriterInput(standard
+      ? {
+        question: held.question,
+        answer: '',
+        gaps: [],
+        ...(standard.instruction !== undefined ? { instruction: standard.instruction } : {}),
+        ...(own && standard.mode !== 'as_written' ? { evidence: consultWriterEvidence(held.pack) } : {}),
+      }
+      : {
+        question: held.question,
+        answer: held.answer,
+        gaps: held.gaps,
+        ...(own ? { evidence: consultWriterEvidence(held.pack) } : {}),
+      });
     // The writer and the transport warm-up overlap (§A.8, speed measure 2).
     // The session's own open deadline is the dispatch window's remainder.
     const sessionAbort = new AbortController();
@@ -332,7 +358,11 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     };
     let written: ConsultWriterOutcome;
     try {
-      written = await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs(scheduled.policy), level: scheduled.policy.level, writer: writerChoice });
+      written = standard?.mode === 'as_written'
+        // As written: no model; the question goes out as ChatGPT sent it
+        // (whole, not the writer's cut; the gate and the transport bound it).
+        ? { kind: 'questions', questions: Object.freeze([held.question.trim()]), promptTokens: 0, ms: 0 }
+        : await options.writer(bounded, { kill, deadlineMs: writerDeadlineMs(scheduled.policy), level: scheduled.policy.level, writer: writerChoice });
     } catch {
       written = { kind: 'failed', reason: 'request_failed' };
     }
@@ -384,9 +414,10 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
         level: scheduled.policy.level,
         askedQuestionTexts: [bounded.question],
         askedQuestionFullTexts: [current.question],
-        // The owner's own writer gets the thin net (hard identifiers only,
-        // owner decision 2026-10-10); the built-in writer the full gate.
-        net: own ? 'thin' : 'full',
+        // Owner decisions 2026-10-10: Standard refuses secrets only (its
+        // content privacy is the user's choice); at Strict the owner's own
+        // writer gets the thin net, the built-in writer the full gate.
+        net: standard ? 'secrets' : own ? 'thin' : 'full',
       },
     );
     if (verdict.decision !== 'pass') {
@@ -400,6 +431,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     if (!opened || !opened.ok) {
       fail(jobId);
       record(jobId, 'transport_unavailable', startedAt, opened?.ok === false ? opened.error.code : 'open_threw');
+      if (opened?.ok === false) notifyTransport(opened.error.code);
       return;
     }
     const session = opened.session;
@@ -455,6 +487,7 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
     if (!reply || reply.kind !== 'reply') {
       fail(jobId);
       record(jobId, 'reply_failed', startedAt, reply?.kind === 'failed' ? reply.error.code : 'no_reply');
+      if (reply?.kind === 'failed') notifyTransport(reply.error.code);
       return;
     }
     // Reply-time eligibility: an item the answer read that is no longer
@@ -473,6 +506,11 @@ export function createConsultOrchestrator(options: ConsultOrchestratorOptions): 
       return;
     }
     record(jobId, 'appended', startedAt, `reply_ms=${reply.elapsedMs}`);
+    try {
+      options.onAppended?.();
+    } catch {
+      // A status hook never affects the consult.
+    }
   };
 
   return {

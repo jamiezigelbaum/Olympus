@@ -41,14 +41,51 @@ asking."
 Two levels:
 
 - **Standard (recommended)** (`unnamed`, the default everywhere, including a
-  settings file with no `level`). "Sends your actual question with names,
-  places, exact dates, amounts and account numbers removed. Gets real
-  answers." The stated risk is re-identification from an unusual combination
-  of details.
-- **Strict** (`general`). "Sends only general questions; nothing about your
-  situation leaves. Safest, but rarely helpful." Today's consult writer
-  behaviour, optionally with ask-before-send; this merges with the planned
-  strict mode (stage C6).
+  settings file with no `level`). "Your question goes out as you choose:
+  exactly as written, lightly cleaned, or by your own instruction. The
+  provider can read it but can't tell who sent it."
+- **Strict** (`general`). "Your model rewrites it into general questions
+  first (Vitalik Buterin's approach)." The writer's general questions under
+  Vitalik's rules, with the full gate for the built-in writer and the thin
+  net for the owner's own (below).
+
+### Standard is open: the user's choice (owner decision, 2026-10-10)
+
+Standard's content privacy is the user's choice, not Olympus's. A setting on
+the card, "How should your model prepare a question before it leaves?",
+offers three modes (`standardMode` in consult.json; a file without it reads
+as light cleanup):
+
+- **Exactly as written** (`as_written`): no model step; the question goes
+  out unchanged (from ChatGPT, the question as ChatGPT sent it).
+- **Lightly cleaned** (`light_cleanup`, the default): the writer follows a
+  short preset instruction, shown in full on the card and editable
+  (`CONSULT_LIGHT_CLEANUP_INSTRUCTION`, text in
+  consult-writer-instructions.md). Editing it saves it as the user's own.
+- **By your own instruction** (`custom`, `standardInstruction`, at most
+  4,000 characters): the user's text is the writer's whole system prompt,
+  wrapped only by the fixed JSON reply format.
+
+At Standard the only outbound rule is secrets: the existing detectors
+(passwords, keys, tokens) and a labelled snapshot secret repeated in the
+request (`ConsultGateOptions.net = 'secrets'`). Names, places, figures and
+copied wording go out if the user's mode lets them; the size bound is the
+transport's own 8 KiB. The writer's reply is checked for shape only. The
+mode and instruction are bound to the job like the level and the writer: a
+change before the send refuses it. The owner's own writer also reads the
+bounded evidence at Standard (not as written); the built-in writer reads
+only the question, within its prompt-token bound. The full gate now runs only
+at Strict with the built-in writer.
+
+**Ask anonymously.** A box on the card: the typed question (at most 4,000
+characters) is prepared by Standard's mode, checked for secrets, and sent
+through the same zkAPI transport, with its caps, acknowledgements and model
+check. The answer and exactly what was sent show on the card. It never
+touches ChatGPT and involves no private evidence (`src/core/consult-ask.ts`).
+
+The rulings below (words of the question ChatGPT sent, copied document
+wording and their residuals) governed Standard's full gate and now apply
+only where that gate still runs; they are kept as the record.
 
 Words of the question ChatGPT sent (owner ruling, 2026-10-08). At Standard, a
 word from the question ChatGPT sent may go out even when the private
@@ -97,7 +134,6 @@ Private-tier content never reaches ChatGPT, and Personal-tier cloud use is by
 design. So exempting those words exposes nothing new to OpenAI; to a
 different zkAPI provider it exposes at most single Personal-tier words,
 never Private ones.
-situation, without names".
 
 Both are always selectable. Sending needs the six cost-and-risk statements
 (acknowledgement version 5) accepted, so while they are not, choosing Standard
@@ -145,8 +181,9 @@ Decisions:
    built-in writer keeps its inputs (question, answer, gaps) and token bound.
    Both use the same rewritten rules (consult-writer-instructions.md): Strict
    keeps Vitalik's rules (the skill file in ethereum/zkapi PR #16), Standard
-   is the more revealing option. Strict was measured with and without the
-   evidence and keeps it (it passed more often with it on Delphi).
+   is the user's own choice (above). Strict was measured with and without the
+   evidence on Delphi after the thin-net fix (12 of 16 either way) and keeps
+   it.
 4. **What escalation is for.** A question complex enough that a stronger
    model's reasoning or outside knowledge helps, on top of what the evidence
    shows. zkAPI never sees the documents, so it cannot fix retrieval or find
@@ -157,9 +194,13 @@ Decisions:
 5. **ChatGPT questions prefer another provider.** OpenAI also holds the
    ChatGPT conversation and could link it to the anonymous question.
    `chatgptFrontierModel` in consult.json names the zkAPI model for questions
-   that came through ChatGPT (today, all of them); empty uses the route's own
-   model. No new default is set: the anchor picks one after checking the live
-   zkAPI catalog. The card notes when ChatGPT questions go to an OpenAI model.
+   that came through ChatGPT (today, all of them). Default (owner decision,
+   2026-10-10): `anthropic/claude-sonnet-5.5`; the user may override it.
+   There is no fallback to an OpenAI model: if the live zkAPI listing lacks
+   the model, the consult is not sent and the card says "Claude Sonnet isn't
+   available through zkAPI right now; choose another model" (the transport's
+   `model_unavailable` check). The card notes when ChatGPT questions go to
+   an OpenAI model.
 6. **Capability test, on request only.** `olympus zkapi test-writer` and the
    card's "Test your model" run six invented cases (from the leak and
    re-identification evals, plus the LOI case with and without the letter)
@@ -172,7 +213,8 @@ Decisions:
    file: no detectors, no placeholders, no second check. Our full gate went
    further and, under a strong writer, refused most good questions (Strict 1
    of 16 on Delphi, mostly for sharing four words with the evidence). So when
-   `writer` is set, at both levels, the gate refuses only hard identifiers:
+   `writer` is set, at Strict (Standard is secrets-only, above), the gate
+   refuses only hard identifiers:
    names written in the private snapshot, exact dates and years, exact
    amounts, account, phone and ID numbers, addresses, mail addresses, handles,
    links and secrets, with the existing detectors
@@ -185,7 +227,8 @@ Decisions:
    evidence and selects the net, and a consult.json that names another writer
    (or none, or cannot be read) by the send refuses it. The built-in 4B
    writer keeps the full gate unchanged.
-8. **Wording.** "Paid and sent anonymously, with identifiers removed." Never
+8. **Wording.** "Paid and sent anonymously." ("with identifiers removed" was
+   dropped when Standard opened: at Standard that is the user's choice.) Never
    "unlinkable": the provider reads the question, and an unusual situation can
    still hint at who asked.
 

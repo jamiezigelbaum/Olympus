@@ -49,14 +49,22 @@ import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DO
 import {
   CONSULT_LEVEL_FOR_REPAIR,
   CONSULT_LEVELS,
+  CONSULT_LIGHT_CLEANUP_INSTRUCTION,
+  CONSULT_STANDARD_INSTRUCTION_MAX_CHARS,
+  CONSULT_STANDARD_MODES,
   DEFAULT_CONSULT_SETTINGS,
+  consultChatgptFrontierModel,
+  consultStandardMode,
   parseConsultWriterChoice,
   readConsultSettings,
   type ConsultLevel,
+  type ConsultSettings,
   type ConsultSettingsLocation,
+  type ConsultStandardMode,
   type ConsultWriterChoice,
 } from '../../core/consult-settings.ts';
 import type { ConsultWriterCheckReport, ConsultWriterCheckResult } from '../../core/consult-writer-check.ts';
+import { CONSULT_ASK_MAX_CHARS, type ConsultAskResult } from '../../core/consult-ask.ts';
 import { writeConsultSettings, type ConsultSettingsWriteRefusal } from '../../core/consult-settings-writer.ts';
 import {
   abandonZkapiFence,
@@ -107,6 +115,10 @@ export interface DashboardConsultBackend {
   installTools(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
   saveWriter(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
   testWriter(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
+  /** How Standard prepares a question: `standard_mode`, and `standard_instruction` for custom. */
+  saveStandard(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
+  /** "Ask anonymously": starts one typed question in the background; the card polls for the result. */
+  ask(update: Record<string, unknown>): Promise<DashboardConsultOutcome>;
 }
 
 /**
@@ -144,6 +156,10 @@ export interface DashboardConsultAdapterOptions {
   toolsState?: () => DashboardOutsideHelpTools['tools'];
   /** The writer capability check (absent: the card offers no test). */
   writerCheck?: DashboardWriterCheckRunner;
+  /** "Ask anonymously" (core/consult-ask.ts), bound by the composition root; absent: the card offers no box. */
+  ask?: (question: string) => Promise<ConsultAskResult>;
+  /** The ChatGPT model missing from the live zkAPI listing, when it last was. */
+  chatgptModelProblem?: () => { at: string; message: string } | undefined;
 }
 
 /** The id the adapter gives the one zkapi profile it adds. */
@@ -206,6 +222,12 @@ const MESSAGES = {
   writerInvalid: 'Enter the address of an OpenAI-compatible server (http:// or https://, usually ending in /v1) and a model name. A key reference is env:NAME or store:name.',
   frontierModelInvalid: 'Enter a zkAPI model name such as provider/model, or leave it empty.',
   writerTestStarted: 'Testing your model on invented cases. Nothing is sent to zkAPI. This can take several minutes.',
+  standardSaved: 'Saved how your questions are prepared.',
+  standardInvalid: 'Choose one of the three ways, and write an instruction for your own.',
+  askStarted: 'Asking anonymously. Starting a private route takes a minute or two.',
+  askRunning: 'A question is already on its way. Wait for its answer first.',
+  askUnavailable: 'Asking anonymously is not available here.',
+  askEmpty: 'Type a question first.',
   writerTestRunning: 'A test is already running.',
   writerTestNoWriter: 'Choose your model and save it first. The test runs on your own model.',
   writerTestUnavailable: 'This Olympus cannot run the test.',
@@ -260,6 +282,8 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
   let restartPending = false;
   // The writer check: started only by the owner's click; the last result is kept in memory for the card.
   let writerCheck: DashboardOutsideHelpWriter['check'] = { state: 'idle' };
+  // "Ask anonymously": one question at a time; the last result is kept in memory for the card.
+  let askState: NonNullable<DashboardOutsideHelpStatus['ask']>['state'] = { state: 'idle' };
 
   const zkapiProfile = (): { id: string; profile: SovereigntyModelProfile } | undefined => {
     const entries = Object.entries(policy.modelProfiles).filter(([, profile]) => profile.provider === 'zkapi');
@@ -313,9 +337,33 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
           }
         : {}),
       ...(settings?.chatgptFrontierModel ? { chatgptFrontierModel: settings.chatgptFrontierModel } : {}),
+      effectiveChatgptModel: consultChatgptFrontierModel(settings ?? DEFAULT_CONSULT_SETTINGS),
       ...(routeModel ? { routeModel } : {}),
+      ...(options.chatgptModelProblem?.() ? { modelProblem: options.chatgptModelProblem()! } : {}),
       testAvailable: options.writerCheck !== undefined,
       check: writerCheck,
+    };
+  };
+
+  // Choices other forms own, carried through every write unchanged.
+  const standardCarried = (base: ConsultSettings) => ({
+    ...(base.standardMode ? { standardMode: base.standardMode } : {}),
+    ...(base.standardInstruction !== undefined ? { standardInstruction: base.standardInstruction } : {}),
+  });
+  const writerCarried = (base: ConsultSettings) => ({
+    ...(base.writer ? { writer: base.writer } : {}),
+    ...(base.chatgptFrontierModel ? { chatgptFrontierModel: base.chatgptFrontierModel } : {}),
+  });
+  const carried = (base: ConsultSettings) => ({ ...writerCarried(base), ...standardCarried(base) });
+
+  const standardView = (): NonNullable<DashboardOutsideHelpStatus['standard']> => {
+    const read = readConsultSettings(location);
+    const settings = read.state === 'valid' ? read.settings : DEFAULT_CONSULT_SETTINGS;
+    return {
+      mode: consultStandardMode(settings),
+      preset: CONSULT_LIGHT_CLEANUP_INSTRUCTION,
+      ...(settings.standardInstruction !== undefined ? { instruction: settings.standardInstruction } : {}),
+      maxChars: CONSULT_STANDARD_INSTRUCTION_MAX_CHARS,
     };
   };
 
@@ -434,7 +482,61 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         restartPending,
         tools: { tools: toolsState(), install: dashboardInstallView(toolsJob.progress()) },
         writer: writerView(),
+        standard: standardView(),
+        ...(options.ask ? { ask: { state: askState, maxChars: CONSULT_ASK_MAX_CHARS } } : {}),
       };
+    },
+
+    async saveStandard(update) {
+      const revision = update.revision;
+      if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return invalid(MESSAGES.needsRevision, 'needs_revision');
+      const mode = update.standard_mode;
+      if (typeof mode !== 'string' || !(CONSULT_STANDARD_MODES as readonly string[]).includes(mode)) return invalid(MESSAGES.standardInvalid, 'standard_invalid');
+      let instruction: string | undefined;
+      if (mode === 'custom') {
+        const raw = update.standard_instruction;
+        if (typeof raw !== 'string' || !raw.trim() || raw.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS) return invalid(MESSAGES.standardInvalid, 'standard_invalid');
+        instruction = raw.replace(/\r\n?/g, '\n');
+      }
+      const current = readConsultSettings(location);
+      if (current.state === 'invalid') return writeRefusal('invalid_current', 0);
+      const base = current.state === 'valid' ? current.settings : DEFAULT_CONSULT_SETTINGS;
+      // The writer choices carry; the Standard pair is replaced whole (an
+      // instruction stays only with "custom").
+      const result = writeConsultSettings({
+        ...writerCarried(base),
+        enabled: base.enabled,
+        languages: [...base.languages],
+        domains: { ...base.domains },
+        strict: base.strict,
+        level: base.level,
+        standardMode: mode as ConsultStandardMode,
+        ...(instruction !== undefined ? { standardInstruction: instruction } : {}),
+        expectedRevision: revision,
+      }, location);
+      if (!result.ok) return writeRefusal(result.reason, result.current?.state === 'valid' ? result.current.settings.revision : 0);
+      return { ok: true, status_message: MESSAGES.standardSaved, revision: result.settings.revision };
+    },
+
+    async ask(update) {
+      if (!options.ask) return { ok: false, httpStatus: 501, code: 'ask_unavailable', message: MESSAGES.askUnavailable };
+      if (askState.state === 'running') return { ok: false, httpStatus: 409, code: 'ask_running', message: MESSAGES.askRunning };
+      const question = typeof update.question === 'string' ? update.question.trim() : '';
+      if (!question) return invalid(MESSAGES.askEmpty, 'question_empty');
+      const runner = options.ask;
+      askState = { state: 'running', question };
+      void (async () => {
+        let result: ConsultAskResult;
+        try {
+          result = await runner(question);
+        } catch {
+          result = { ok: false, code: 'internal_error', message: MESSAGES.askUnavailable };
+        }
+        askState = result.ok
+          ? { state: 'done', at: now().toISOString(), question, sent: result.sent, reply: result.reply, route: result.route }
+          : { state: 'failed', at: now().toISOString(), question, message: result.message, ...(result.sent !== undefined ? { sent: result.sent } : {}) };
+      })();
+      return { ok: true, status_message: MESSAGES.askStarted };
     },
 
     async saveWriter(update) {
@@ -483,6 +585,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         level: base.level,
         ...(writer ? { writer } : {}),
         ...(chatgptFrontierModel ? { chatgptFrontierModel } : {}),
+        ...standardCarried(base),
         expectedRevision: revision,
       }, location);
       if (!result.ok) return writeRefusal(result.reason, result.current?.state === 'valid' ? result.current.settings.revision : 0);
@@ -562,8 +665,7 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
         strict: base.strict,
         level,
         // The owner's writer choices are not this form's: carried through as they are.
-        ...(base.writer ? { writer: base.writer } : {}),
-        ...(base.chatgptFrontierModel ? { chatgptFrontierModel: base.chatgptFrontierModel } : {}),
+        ...carried(base),
         expectedRevision: revision,
         ...(replaceInvalid ? { replaceInvalid: true } : {}),
       }, location);

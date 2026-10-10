@@ -16,6 +16,44 @@
 > file; `zkapi-clientd/` is MIT and the Rust workspace is MIT OR Apache-2.0.
 > No licence is stated for this root-level file.
 
+## Standard is open: the user's own instruction (owner decision, 2026-10-10)
+
+Standard's content privacy is the user's choice (`docs/design/private-answers.md`,
+"Standard is open"). At Standard the writer no longer follows the rules on
+this page: it follows the instruction the user chose, and the only outbound
+rule is secrets.
+
+- **Exactly as written**: no writer runs.
+- **Lightly cleaned** (the default): the writer's system prompt is the preset
+  `CONSULT_LIGHT_CLEANUP_INSTRUCTION` (`src/core/consult-settings.ts`),
+  shown in full and editable on the card:
+
+  > Prepare the user's question to be sent to an outside model that knows
+  > nothing about them. Remove names of people and organisations, contact
+  > details (addresses, phone numbers, email addresses, handles) and account,
+  > reference and ID numbers. Refer to people and organisations by their role
+  > instead ("the landlord", "the employer"). Keep everything else as the
+  > user wrote it. You may add details from the material that the outside
+  > model needs to answer, with the same removals.
+
+- **By your own instruction**: the user's text, verbatim.
+
+In both writer modes the system prompt is the instruction followed by one
+fixed paragraph, `CONSULT_STANDARD_REPLY_FORMAT` in
+`src/core/consult-writer.ts`, so the reply can be read:
+
+> Reply with one JSON object and nothing else: {"questions": ["..."]} holding
+> the prepared question (one to three parts, each plain text), or
+> {"questions": null} to send nothing.
+
+The user message is the question (as ChatGPT sent it, or as typed in "Ask
+anonymously") and, for the owner's own writer, the bounded evidence. The reply
+is checked for shape only (at most three parts of 2,000 characters, plain
+text). `CONSULT_WRITER_SYSTEM_UNNAMED` and the section "Level: your situation,
+without names" below are no longer loaded at Standard; they stay as the
+record and as a starting point for a user's own instruction. Strict is
+unchanged.
+
 ## The loaded rules, rewritten (2026-10-10)
 
 Owner decision, 2026-10-10 (`docs/design/private-answers.md`, "Writer: your

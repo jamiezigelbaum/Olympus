@@ -37,6 +37,7 @@ import {
   type ConsultSettingsInvalidReason,
   type ConsultSettingsLocation,
   type ConsultSettingsRead,
+  type ConsultStandardMode,
   type ConsultWriterChoice,
 } from './consult-settings.ts';
 
@@ -56,6 +57,9 @@ export interface ConsultSettingsUpdate {
    */
   readonly writer?: ConsultWriterChoice;
   readonly chatgptFrontierModel?: string;
+  /** How Standard prepares a question; passed through like the writer. */
+  readonly standardMode?: ConsultStandardMode;
+  readonly standardInstruction?: string;
 }
 
 export interface ConsultSettingsWriteInput extends ConsultSettingsUpdate {
@@ -135,6 +139,8 @@ export function writeConsultSettings(input: ConsultSettingsWriteInput, location:
     level: input.level,
     ...(input.writer ? { writer: { ...input.writer } } : {}),
     ...(input.chatgptFrontierModel ? { chatgptFrontierModel: input.chatgptFrontierModel } : {}),
+    ...(input.standardMode ? { standardMode: input.standardMode } : {}),
+    ...(input.standardInstruction !== undefined ? { standardInstruction: input.standardInstruction } : {}),
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) return { ok: false, reason: 'invalid_input' };
   const custody = ensureSettingsDirectory(dirname(path));

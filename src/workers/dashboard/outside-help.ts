@@ -30,6 +30,9 @@ import {
   type DashboardOutsideHelpTools,
 } from './outside-help-tools.ts';
 
+/** How Standard prepares a question (consult-settings.ts ConsultStandardMode; not imported: the settings module stays off the page renderer). */
+export type DashboardOutsideHelpStandardMode = 'as_written' | 'light_cleanup' | 'custom';
+
 /** One word for the card's state line. */
 export interface DashboardOutsideHelpSummary {
   /** `needs_acceptance`: on, but paused until the current statements are accepted. */
@@ -89,8 +92,12 @@ export interface DashboardOutsideHelpWriter {
   /** The owner's own writer; absent: the built-in model writes. The key itself is never here. */
   readonly choice?: { readonly baseUrl: string; readonly model: string; readonly secretRef?: string; readonly keyPresent?: boolean };
   readonly chatgptFrontierModel?: string;
-  /** The zkAPI route's own model, used when no ChatGPT model is chosen. */
+  /** The model ChatGPT questions go to now (the choice, else Claude Sonnet). */
+  readonly effectiveChatgptModel?: string;
+  /** The zkAPI route's own model (the dashboard's own questions use it). */
   readonly routeModel?: string;
+  /** The ChatGPT model was missing from the live zkAPI listing at the last consult. */
+  readonly modelProblem?: { readonly at: string; readonly message: string };
   /** Whether this Olympus can run the check. */
   readonly testAvailable: boolean;
   readonly check:
@@ -120,6 +127,24 @@ export interface DashboardOutsideHelpStatus {
   readonly tools?: DashboardOutsideHelpTools;
   /** Who writes the outside question, and the writer check. */
   readonly writer?: DashboardOutsideHelpWriter;
+  /** How Standard prepares a question (owner decision 2026-10-10). */
+  readonly standard?: {
+    readonly mode: DashboardOutsideHelpStandardMode;
+    /** The light-cleanup instruction, shown in full. */
+    readonly preset: string;
+    /** The user's own instruction, when saved. */
+    readonly instruction?: string;
+    readonly maxChars: number;
+  };
+  /** "Ask anonymously": absent when this Olympus cannot ask. */
+  readonly ask?: {
+    readonly maxChars: number;
+    readonly state:
+      | { readonly state: 'idle' }
+      | { readonly state: 'running'; readonly question: string }
+      | { readonly state: 'done'; readonly at: string; readonly question: string; readonly sent: string; readonly reply: string; readonly route: string }
+      | { readonly state: 'failed'; readonly at: string; readonly question: string; readonly message: string; readonly sent?: string };
+  };
 }
 
 /** The query flag the page answers to; same /dashboard path and auth as every page. */
@@ -137,6 +162,10 @@ export const DASHBOARD_OUTSIDE_HELP_PATHS = {
   installTools: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH,
   /** The owner's own writer model and the zkAPI model for ChatGPT questions (consult.json). */
   writer: '/dashboard/consult/writer',
+  /** How Standard prepares a question (consult.json `standardMode`, `standardInstruction`). */
+  standard: '/dashboard/consult/standard',
+  /** "Ask anonymously": one typed question through Standard's preparation and zkAPI. */
+  ask: '/dashboard/consult/ask',
   /** The writer check: started only by the owner's click; sends nothing to zkAPI. */
   writerTest: '/dashboard/consult/writer/test',
 } as const;
@@ -227,8 +256,12 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   // 1. The status block: the switch, the route in one line, today's usage.
   parts.push(renderStatusBlock(status, summary, canEdit));
 
-  // 1b. What zkAPI may send: the two levels.
+  // 1b. What zkAPI may send: the two levels, and how Standard prepares a question.
   parts.push(renderLevel(status, canEdit));
+  if (status.standard) parts.push(renderStandard(status.standard, status.settings.state === 'invalid' ? false : canEdit));
+  if (status.writer?.modelProblem) parts.push(`<p class="pnote ohwarn" data-outside-model-problem>${escapeHtml(status.writer.modelProblem.message)}</p>`);
+  // 1c. Ask anonymously, from the card itself.
+  if (status.ask) parts.push(renderAsk(status.ask, canEdit && route.state === 'configured'));
 
   // 2. Problems, one list, each line with its fix.
   parts.push(renderProblems(status, canEdit));
@@ -528,7 +561,7 @@ function renderWriter(writer: DashboardOutsideHelpWriter, canEdit: boolean): str
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
   const C = W.writer;
   const choice = writer.choice;
-  const effectiveModel = writer.chatgptFrontierModel ?? writer.routeModel;
+  const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel ?? writer.routeModel;
   const parts: string[] = [`<p class="pnote">${escapeHtml(C.intro)}</p>`];
   parts.push(`<p class="pnote" data-outside-writer-current="${choice ? 'own' : 'built_in'}">${escapeHtml(choice ? fill(C.currentOwn, { model: choice.model, address: choice.baseUrl }) : C.currentBuiltIn)}</p>`);
   if (choice?.secretRef && choice.keyPresent === false) parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml(fill(C.keyMissing, { secretRef: choice.secretRef }))}</p>`);
@@ -541,7 +574,7 @@ function renderWriter(writer: DashboardOutsideHelpWriter, canEdit: boolean): str
     + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml(choice?.secretRef ?? '')}"${disabled}>`
     + `<p class="pnote ohsmall">${escapeHtml(C.where)}</p>`
     + `<label class="plabel" for="outside-frontier-model">${escapeHtml(C.frontierModel)}</label>`
-    + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.routeModel ?? '')}" value="${escapeHtml(writer.chatgptFrontierModel ?? '')}"${disabled}>`
+    + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.effectiveChatgptModel ?? writer.routeModel ?? '')}" value="${escapeHtml(writer.chatgptFrontierModel ?? '')}"${disabled}>`
     + `<p class="pnote ohsmall">${escapeHtml(C.frontierHint)}</p>`
     + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml(fill(C.openAiNote, { model: effectiveModel ?? '' }))}</p>` : '')
     + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml(C.save)}</button>`
@@ -550,6 +583,55 @@ function renderWriter(writer: DashboardOutsideHelpWriter, canEdit: boolean): str
   parts.push(renderWriterCheck(writer, canEdit));
   const summary = choice ? choice.model : C.builtInShort;
   return renderSection({ id: 'writer', title: C.title, summary, open: writer.check.state !== 'idle', body: `<div data-outside-writer>${parts.join('')}</div>` });
+}
+
+/**
+ * "How should your model prepare a question before it leaves?" (Standard,
+ * owner decision 2026-10-10): exactly as written, lightly cleaned (the preset
+ * shown in full and editable: an edited preset is saved as the user's own),
+ * or by the user's own instruction. No built-in content rules.
+ */
+function renderStandard(standard: NonNullable<DashboardOutsideHelpStatus['standard']>, canEdit: boolean): string {
+  const C = W.standard;
+  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+  const options = (['as_written', 'light_cleanup', 'custom'] as const).map((mode) => {
+    const copy = C.modes[mode];
+    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? ' checked' : ''}${disabled}>`
+      + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
+  }).join('');
+  const text = standard.mode === 'custom' && standard.instruction !== undefined ? standard.instruction : standard.preset;
+  return `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml(standard.mode)}" data-outside-preset="${escapeHtml(standard.preset)}">`
+    + `<div class="sect">${escapeHtml(C.title)}</div>${options}`
+    + `<label class="plabel" for="outside-standard-instruction">${escapeHtml(C.instructionLabel)}</label>`
+    + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml(text)}</textarea>`
+    + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(C.save)}</button></div>`
+    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+
+/** "Ask anonymously": the typed question, and the last answer with exactly what was sent. */
+function renderAsk(ask: NonNullable<DashboardOutsideHelpStatus['ask']>, canEdit: boolean): string {
+  const C = W.ask;
+  const state = ask.state;
+  const disabled = canEdit && state.state !== 'running' ? '' : ' disabled aria-disabled="true"';
+  const parts: string[] = [`<div class="sect">${escapeHtml(C.title)}</div>`, `<p class="pnote">${escapeHtml(C.intro)}</p>`];
+  parts.push(`<form class="ohform" data-outside-form="ask">`
+    + `<label class="plabel" for="outside-ask-question">${escapeHtml(C.label)}</label>`
+    + `<textarea class="keyfield" id="outside-ask-question" name="question" rows="3" maxlength="${ask.maxChars}"${disabled}>${escapeHtml(state.state === 'idle' ? '' : state.question)}</textarea>`
+    + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(C.send)}</button></div>`
+    + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  if (state.state === 'running') parts.push(`<p class="pnote" role="status">${escapeHtml(C.running)}</p>`);
+  if (state.state === 'done') {
+    parts.push(`<div class="sect">${escapeHtml(C.replyTitle)}</div><p class="pnote" data-outside-ask-reply>${escapeHtml(state.reply)}</p>`);
+    parts.push(`<div class="sect">${escapeHtml(C.sentTitle)}</div><pre class="pnote" data-outside-ask-sent>${escapeHtml(state.sent)}</pre>`);
+    parts.push(`<p class="pnote ohsmall">${escapeHtml(state.route)}</p>`);
+  }
+  if (state.state === 'failed') {
+    parts.push(`<p class="pnote ohwarn" role="status" data-outside-ask-failed>${escapeHtml(state.message)}</p>`);
+    parts.push(state.sent !== undefined
+      ? `<div class="sect">${escapeHtml(C.sentTitle)}</div><pre class="pnote" data-outside-ask-sent>${escapeHtml(state.sent)}</pre>`
+      : `<p class="pnote ohsmall">${escapeHtml(C.notSent)}</p>`);
+  }
+  return `<div class="ohpanel" data-outside-ask="${escapeHtml(state.state)}">${parts.join('')}</div>`;
 }
 
 function renderWriterCheck(writer: DashboardOutsideHelpWriter, canEdit: boolean): string {
@@ -760,6 +842,17 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
         chatgpt_frontier_model: frontier === '' ? null : frontier,
       };
     }
+    if (kind === 'standard') {
+      var mode = form.querySelector('input[name="standard_mode"]:checked');
+      var chosen = mode ? mode.value : form.getAttribute('data-outside-standard');
+      var instruction = String(field('standard_instruction') || '');
+      // An edited preset is saved as the user's own instruction.
+      if (chosen === 'light_cleanup' && instruction.trim() !== String(form.getAttribute('data-outside-preset') || '').trim()) chosen = 'custom';
+      var standardBody = { revision: Number(root.getAttribute('data-revision') || '0'), standard_mode: chosen };
+      if (chosen === 'custom') standardBody.standard_instruction = instruction;
+      return standardBody;
+    }
+    if (kind === 'ask') return { question: String(field('question') || '') };
     if (kind === 'abandon') return { confirm: true, scope: form.getAttribute('data-outside-scope') || '' };
     if (kind === 'unlock') return {};
     return { confirm: true };
@@ -775,9 +868,9 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     }
     setTimeout(poll, delay);
   }
-  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest };
+  var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard, ask: config.paths.ask };
   // While the writer check runs (only after the owner's click), the page re-reads itself.
-  if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
+  if ((root.querySelector('[data-outside-writer-check="running"]') || root.querySelector('[data-outside-ask="running"]')) && config.writerPollMs) {
     setTimeout(function () { window.location.reload(); }, config.writerPollMs);
   }
   // One post; a network failure (Olympus restarting, say) is its own answer, never a thrown error.

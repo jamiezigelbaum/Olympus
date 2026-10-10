@@ -128,6 +128,10 @@ export const CONSULT_GATE_CONTENT_RUN_TOKENS = 4;
 // Whole request, UTF-8 bytes. A few short sentences fit; a document does not.
 export const CONSULT_GATE_MAX_QUESTION_BYTES = 600;
 export const CONSULT_GATE_MAX_QUESTION_TOKENS = 80;
+// Standard (the "secrets" net, owner decision 2026-10-10): the question goes
+// out as the user chose, so its only size bound is the transport's own
+// (consult-transport-zkapi.ts, 8 KiB). Recent sends are held to the same bound.
+export const CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES = 8 * 1024;
 
 /**
  * Sub-questions per request. The reference practice allows several safe
@@ -754,22 +758,25 @@ function evaluateCheckedRequest(
   if (!writerContextShapeValid(context)) return refuse(['writer_context_malformed']);
   if (!writerContextWithinLimits(context, effective)) return refuse(['writer_context_too_large']);
   if (context.malformed) return refuse(['writer_context_malformed']);
-  const vocabulary = consultVocabulary(options ?? {});
-  if (!vocabulary) return refuse(['vocabulary_unavailable']);
   if (!Array.isArray(subQuestions)) return refuse(['not_plain_text']);
   if (
     !Array.isArray(recent)
     || recent.length > CONSULT_GATE_MAX_RECENT_CONSULTS
-    || recent.some((text) => typeof text !== 'string' || utf8Bytes(text) > CONSULT_GATE_MAX_QUESTION_BYTES)
+    || recent.some((text) => typeof text !== 'string' || utf8Bytes(text) > CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES)
   ) {
     return refuse(['recent_consults_too_large']);
   }
   if (subQuestions.length === 0) return refuse(['question_empty']);
   if (subQuestions.length > CONSULT_GATE_MAX_SUB_QUESTIONS) return refuse(['too_many_sub_questions']);
   if (subQuestions.some((question) => typeof question !== 'string')) return refuse(['not_plain_text']);
-  if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > effective.maxQuestionBytes) {
+  const maxQuestionBytes = options?.net === 'secrets' ? CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES : effective.maxQuestionBytes;
+  if (subQuestions.reduce((total, question) => total + utf8Bytes(question), 0) > maxQuestionBytes) {
     return refuse(['question_too_many_bytes']);
   }
+
+  if (options?.net === 'secrets') return secretsOnly(subQuestions, context);
+  const vocabulary = consultVocabulary(options ?? {});
+  if (!vocabulary) return refuse(['vocabulary_unavailable']);
 
   // 2. The request on its own. Any refusal here returns before snapshot work.
   const thin = options?.net === 'thin';
@@ -828,6 +835,23 @@ function evaluateCheckedRequest(
   for (const reason of compareWithSnapshot(model, context, unnamed, ordinaryWord, asked, thin)) reasons.add(reason);
   for (const reason of compareWithRecent(model, subQuestions, recent)) reasons.add(reason);
   return reasons.size > 0 ? refuse([...reasons]) : { decision: 'pass', reasons: [] };
+}
+
+// The secrets net of ConsultGateNet: secret patterns in the request, or a labelled snapshot secret repeated in it.
+function secretsOnly(subQuestions: readonly string[], context: ConsultWriterContext): ConsultGateVerdict {
+  for (const question of subQuestions) {
+    if (question.trim().length === 0) return refuse(['question_empty']);
+    if (secretLabelsInText(question).length > 0 || secretLabelsInText(question.normalize('NFKC')).length > 0) return refuse(['secret_detected']);
+  }
+  const requestCompact = compact(caseFold(foldText(subQuestions.join(' '))));
+  for (const entry of context.entries) {
+    if (entry.kind === 'metadata') continue;
+    for (const value of labelledSecretValues(caseFold(foldText(entry.text)))) {
+      const form = compact(value);
+      if (form.length >= 3 && requestCompact.includes(form)) return refuse(['secret_detected']);
+    }
+  }
+  return { decision: 'pass', reasons: [] };
 }
 
 function refuse(reasons: readonly ConsultGateReason[]): ConsultGateVerdict {
@@ -1219,7 +1243,15 @@ export interface ConsultGateOptions {
   readonly net?: ConsultGateNet;
 }
 
-export type ConsultGateNet = 'full' | 'thin';
+/**
+ * "secrets": the Standard level's only content rule (owner decision
+ * 2026-10-10: Standard is open and its content privacy is the user's choice).
+ * It refuses passwords, API keys, private keys and tokens, found by the
+ * shared secret patterns (opsec.ts) in the request and by a secret-labelled
+ * value of the snapshot ("password: ...") that the request repeats. Nothing
+ * else about the content is judged; the request's size bounds still apply.
+ */
+export type ConsultGateNet = 'full' | 'thin' | 'secrets';
 
 export const DEFAULT_CONSULT_LANGUAGES: readonly ConsultLanguage[] = Object.freeze(['en']);
 

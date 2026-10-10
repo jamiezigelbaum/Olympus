@@ -10,7 +10,7 @@
 import { describe, expect, test } from 'bun:test';
 import { privateEvidencePack } from '../src/core/analyst-built-in.ts';
 import { consultWriterContextFromPack, evaluateConsultRequest } from '../src/core/consult-gate.ts';
-import { DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, consultGateOptionsFromSettings, recheckConsultJobPolicy, type ConsultJobPolicy, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
+import { CONSULT_LIGHT_CLEANUP_INSTRUCTION, DEFAULT_CONSULT_SETTINGS, bindConsultJobPolicy, consultGateOptionsFromSettings, recheckConsultJobPolicy, type ConsultJobPolicy, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultReply, ZkapiConsultSession, ZkapiOpenControl, ZkapiOpenSessionResult, ZkapiSendControl } from '../src/core/consult-transport-zkapi.ts';
 import type { ConsultWriterInput, ConsultWriterOutcome } from '../src/core/consult-writer.ts';
 import {
@@ -43,6 +43,12 @@ const OWN_WRITER = Object.freeze({ baseUrl: 'http://192.168.1.20:8090/v1', model
 const withOwnWriter = (read: ConsultSettingsRead): ConsultSettingsRead => (read.state === 'valid' ? { ...read, settings: { ...read.settings, writer: OWN_WRITER } } : read);
 const ON: ConsultJobPolicy = bindConsultJobPolicy(SETTINGS_ON);
 const OFF: ConsultJobPolicy = bindConsultJobPolicy({ state: 'absent', settings: DEFAULT_CONSULT_SETTINGS });
+// Strict: the writer's general questions and the full gate (Standard is
+// secrets-only since the owner decision of 2026-10-10).
+const SETTINGS_STRICT: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true, level: 'general' } };
+const STRICT: ConsultJobPolicy = bindConsultJobPolicy(SETTINGS_STRICT);
+/** What the writer sees at Standard's default (light cleanup): the question as ChatGPT sent it and the preset instruction. */
+const LIGHT_INPUT = { question: QUESTION, answer: '', gaps: [], instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION };
 
 type Verdict = { sufficient: boolean | undefined; noAnswer: boolean };
 
@@ -80,7 +86,7 @@ interface Harness {
   route: { available: boolean };
   activity: { busy: boolean };
   writer: { calls: ConsultWriterInput[]; deadlines: number[]; levels: string[]; choices: Array<unknown>; kills: AbortSignal[]; outcome: ConsultWriterOutcome; hold?: () => Promise<void>; releases: Array<() => void>; holdAll: () => void; releaseAll: () => void };
-  transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy'; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; onReply?: () => void; reply: 'reply' | 'failed' };
+  transport: { opens: ZkapiOpenControl[]; result: 'ok' | 'busy' | 'model_unavailable'; failures: string[]; appended: number; sessions: FakeSession[]; beforeAuthorize?: () => Promise<void>; onReply?: () => void; reply: 'reply' | 'failed' };
   logs: string[];
   calls: { n: number; asked: boolean[] };
 }
@@ -124,7 +130,7 @@ function harness(options: {
       for (const release of writer.releases.splice(0)) release();
     },
   };
-  const transport: Harness['transport'] = { opens: [], result: 'ok', sessions: [], reply: 'reply' };
+  const transport: Harness['transport'] = { opens: [], result: 'ok', failures: [], appended: 0, sessions: [], reply: 'reply' };
   let orchestrator!: ConsultOrchestrator;
   const jobs = new PrivateAnswerJobs({
     eligible: async (items) => items.map(() => !eligible.refuse),
@@ -152,6 +158,8 @@ function harness(options: {
     log: (line) => logs.push(line),
     completionTimeoutMs: () => options.completionTimeoutMs ?? 6 * 60_000,
     ...(options.writerDeadlineMs ? { writerDeadlineMs: options.writerDeadlineMs } : {}),
+    onTransportFailure: (code) => transport.failures.push(code),
+    onAppended: () => { transport.appended += 1; },
     writer: async (input, control) => {
       writer.calls.push(input);
       writer.deadlines.push(control.deadlineMs);
@@ -166,6 +174,9 @@ function harness(options: {
       transport.opens.push(control);
       if (transport.result === 'busy') {
         return { ok: false, error: { code: 'busy', message: 'Another consult is running.', outcome: 'not_sent', networkIdentity: 'not_verified' } };
+      }
+      if (transport.result === 'model_unavailable') {
+        return { ok: false, error: { code: 'model_unavailable', message: 'The model is not listed.', outcome: 'not_sent', networkIdentity: 'not_verified' } };
       }
       const fake: FakeSession = { sends: [], cancelled: 0, authorizeResults: [], session: undefined as unknown as ZkapiConsultSession };
       let state: ZkapiConsultSession['state'] = 'ready';
@@ -306,8 +317,8 @@ describe('trigger and the full path', () => {
     const initial = await envelope(jobId, panel, first);
     expect(initial.outside).toEqual({ state: 'idle' });
     expect(initial.rev).toBe(1);
-    // The writer saw the question, the answer and the gaps only.
-    expect(h.writer.calls).toEqual([{ question: QUESTION, answer: ANSWER, gaps: GAPS }]);
+    // At Standard's default the writer saw the question as ChatGPT sent it and the light-cleanup instruction only.
+    expect(h.writer.calls).toEqual([LIGHT_INPUT]);
     // Under the level the job bound (a new setup's default).
     expect(h.writer.levels).toEqual(['unnamed']);
     // The session opened with a cancel signal and a deadline while the writer ran, and sent once with final authorization.
@@ -480,8 +491,9 @@ describe('the snapshot', () => {
 
 describe('writer outcomes and the gate', () => {
   test('a gate refusal is silent: the session is cancelled, nothing is sent, the block reads idle and the log carries no text', async () => {
-    const h = harness({ writerOutcome: { kind: 'questions', questions: [OWNER_COPY_QUESTION], promptTokens: 900, ms: 10 } });
+    const h = harness({ policy: STRICT, settings: SETTINGS_STRICT, writerOutcome: { kind: 'questions', questions: [OWNER_COPY_QUESTION], promptTokens: 900, ms: 10 } });
     const { jobId, panel } = await consult(h);
+    expect(h.writer.calls).toEqual([{ question: QUESTION, answer: ANSWER, gaps: GAPS }]);
     expect(h.transport.sessions[0]!.sends).toEqual([]);
     expect(h.transport.sessions[0]!.cancelled).toBe(1);
     expect(h.transport.opens[0]!.signal!.aborted).toBe(true);
@@ -491,27 +503,62 @@ describe('writer outcomes and the gate', () => {
     expect(h.orchestrator.recentQuestions).toEqual([]);
   });
 
-  test('the question ChatGPT sent reaches the gate apart from the snapshot: a place in it may go out at the unnamed level, one not in it (or past the writer\'s cut) may not', async () => {
+  test('Standard is secrets-only (owner decision 2026-10-10): a place from the snapshot goes out; a key in the prepared question does not', async () => {
     const evidence = [{ title: 'Letter of intent', trust_domain: 'secure_local', chunks: ['The buyer will sign the deed before the notary in Catalonia.'] }];
-    const asked = 'Who usually pays the notary fees in Catalonia?';
-    const run = async (ownerQuestion: string) => {
-      const h = harness({ writerOutcome: { kind: 'questions', questions: [asked], promptTokens: 900, ms: 10 } });
-      const jobId = h.jobs.begin({ question: ownerQuestion, count: 1, evidence, refresh: async () => evidence, caller: ownerQuestion }).jobId!;
+    const run = async (written: string) => {
+      const h = harness({ writerOutcome: { kind: 'questions', questions: [written], promptTokens: 900, ms: 10 } });
+      const question = 'How are notary fees usually split between buyer and seller?';
+      const jobId = h.jobs.begin({ question, count: 1, evidence, refresh: async () => evidence, caller: question }).jobId!;
       await deliver(h, jobId, await generatePanelKeyPair());
       await h.orchestrator.idle();
       return h;
     };
-    const typed = await run('How are notary fees usually split between buyer and seller in Catalonia?');
-    expect(typed.writer.levels).toEqual(['unnamed']);
-    expect(typed.transport.sessions[0]!.sends.map((send) => send.question)).toEqual([asked]);
-    const untyped = await run('How are notary fees usually split between buyer and seller?');
-    expect(untyped.transport.sessions[0]!.sends).toEqual([]);
-    expect(untyped.logs.some((line) => line.includes('outcome=gate_refused code=snapshot_name'))).toBe(true);
-    // Past the writer's 1,000-character cut, the place is not exempt; the copy check still reads it.
-    const long = await run(`${'Please answer carefully. '.repeat(45)}How are notary fees split in Catalonia?`);
-    expect(long.writer.calls[0]!.question).not.toContain('Catalonia');
-    expect(long.transport.sessions[0]!.sends).toEqual([]);
-    expect(long.logs.some((line) => line.includes('outcome=gate_refused code=snapshot_name'))).toBe(true);
+    const place = await run('Who usually pays the notary fees in Catalonia?');
+    expect(place.writer.levels).toEqual(['unnamed']);
+    expect(place.transport.sessions[0]!.sends.map((send) => send.question)).toEqual(['Who usually pays the notary fees in Catalonia?']);
+    const fakeKey = ['sk', '-', 'Zq8Rr7Tt6Yy5Uu4Ii3Oo2Pp1'].join('');
+    const keyed = await run(`Why would the key ${fakeKey} be rejected?`);
+    expect(keyed.transport.sessions[0]!.sends).toEqual([]);
+    expect(keyed.logs.some((line) => line.includes('outcome=gate_refused code=secret_detected'))).toBe(true);
+    for (const line of keyed.logs) expect(line).not.toContain(fakeKey);
+  });
+
+  test('Standard modes: as written skips the writer; a custom instruction reaches it verbatim; the own writer also gets evidence', async () => {
+    const asWritten: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true, standardMode: 'as_written' } };
+    const plain = harness({ policy: bindConsultJobPolicy(asWritten), settings: asWritten });
+    await consult(plain);
+    expect(plain.writer.calls).toEqual([]);
+    expect(plain.transport.sessions[0]!.sends.map((send) => send.question)).toEqual([QUESTION]);
+
+    const instruction = 'Translate the question into French and drop my name.';
+    const custom: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true, standardMode: 'custom', standardInstruction: instruction } };
+    const mine = harness({ policy: bindConsultJobPolicy(custom), settings: custom });
+    await consult(mine);
+    expect(mine.writer.calls).toEqual([{ question: QUESTION, answer: '', gaps: [], instruction }]);
+    expect(mine.transport.sessions[0]!.sends.map((send) => send.question)).toEqual([CLEAN_QUESTION]);
+
+    const own = harness({ ownWriter: true, policy: bindConsultJobPolicy(custom), settings: custom });
+    await consult(own);
+    expect(own.writer.calls[0]!.instruction).toBe(instruction);
+    expect(own.writer.calls[0]!.evidence!.join(' ')).toContain('The lease for the flat ends in May');
+  });
+
+  test('a model the zkAPI listing lacks is reported for the card (no fallback model); an appended reply clears it', async () => {
+    const h = harness();
+    h.transport.result = 'model_unavailable';
+    await consult(h);
+    expect(h.transport.failures).toEqual(['model_unavailable']);
+    expect(h.transport.appended).toBe(0);
+    const ok = harness();
+    await consult(ok);
+    expect(ok.transport.failures).toEqual([]);
+    expect(ok.transport.appended).toBe(1);
+  });
+
+  test('a changed Standard mode between job and send is stale: nothing goes out', async () => {
+    const custom: ConsultSettingsRead = { state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 7, enabled: true, standardMode: 'custom', standardInstruction: 'Keep it short.' } };
+    expect(recheckConsultJobPolicy(ON, custom)).toMatchObject({ ok: false });
+    expect(recheckConsultJobPolicy(ON, SETTINGS_ON)).toMatchObject({ ok: true });
   });
 
   test('a skipped, declined, killed or failed writer ends the consult without a send', async () => {
@@ -903,6 +950,7 @@ describe('the owner\'s own writer (owner decision 2026-10-10)', () => {
     expect(own.writer.calls.length).toBe(1);
     const input = own.writer.calls[0]!;
     expect(input.question).toBe(QUESTION);
+    expect(input.instruction).toBe(CONSULT_LIGHT_CLEANUP_INSTRUCTION);
     expect(input.evidence?.length).toBeGreaterThan(0);
     expect(input.evidence!.join(' ')).toContain('The lease for the flat ends in May');
     expect(own.writer.deadlines).toEqual([180_000]);
@@ -912,7 +960,7 @@ describe('the owner\'s own writer (owner decision 2026-10-10)', () => {
 
     const builtIn = harness({ ownWriter: false });
     await consult(builtIn);
-    expect(builtIn.writer.calls).toEqual([{ question: QUESTION, answer: ANSWER, gaps: GAPS }]);
+    expect(builtIn.writer.calls).toEqual([LIGHT_INPUT]);
     expect(builtIn.writer.deadlines).toEqual([60_000]);
     expect(builtIn.writer.choices).toEqual([null]);
   });

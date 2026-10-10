@@ -134,7 +134,17 @@ export function consultWriterCheckPack(entry: ConsultWriterCheckCase): EvidenceP
 }
 
 /** The writer's input for one case: with the evidence excerpts when the writer reads evidence. */
-export function consultWriterCheckInput(entry: ConsultWriterCheckCase, withEvidence: boolean): ConsultWriterInput {
+export function consultWriterCheckInput(entry: ConsultWriterCheckCase, withEvidence: boolean, instruction?: string): ConsultWriterInput {
+  // Standard (owner decision 2026-10-10): the question and evidence under the user's instruction; no answer or gaps.
+  if (instruction !== undefined) {
+    return {
+      question: entry.userQuestion,
+      answer: '',
+      gaps: [],
+      instruction,
+      ...(withEvidence ? { evidence: consultWriterEvidence(consultWriterCheckPack(entry)) } : {}),
+    };
+  }
   return {
     question: entry.userQuestion,
     answer: entry.answer,
@@ -210,8 +220,10 @@ export interface ConsultWriterCheckOptions {
   /** Whether the writer reads evidence excerpts (the owner's own writer does; the built-in one does not). */
   readonly withEvidence: boolean;
   readonly languages?: readonly ConsultLanguage[];
-  /** The gate net the product applies to this writer: thin for the owner's own writer. */
+  /** The gate net the product applies to this writer: thin for the owner's own writer at Strict, secrets at Standard. */
   readonly net?: ConsultGateNet;
+  /** Standard's instruction (light cleanup or the user's own); present at Standard. */
+  readonly instruction?: string;
   readonly cases?: readonly ConsultWriterCheckCase[];
   /** Called after each case, for progress. */
   readonly onCase?: (result: ConsultWriterCheckResult, index: number, total: number) => void;
@@ -226,7 +238,7 @@ export async function runConsultWriterCheck(options: ConsultWriterCheckOptions):
     if (options.signal?.aborted) break;
     let outcome: ConsultWriterOutcome;
     try {
-      outcome = await options.writer(consultWriterCheckInput(entry, options.withEvidence), options.level);
+      outcome = await options.writer(consultWriterCheckInput(entry, options.withEvidence, options.instruction), options.level);
     } catch {
       outcome = { kind: 'failed', reason: 'request_failed' };
     }
@@ -240,7 +252,7 @@ export async function runConsultWriterCheck(options: ConsultWriterCheckOptions):
         level: options.level,
         askedQuestionTexts: [entry.userQuestion],
         askedQuestionFullTexts: [entry.userQuestion],
-        net: options.net ?? 'full',
+        net: options.instruction !== undefined ? 'secrets' : options.net ?? 'full',
       });
       gate = verdict.decision;
       gateReasons = [...verdict.reasons];
@@ -278,6 +290,8 @@ export async function checkOwnConsultWriter(input: {
   readonly endpoint: { readonly baseUrl: string; readonly model: string; readonly apiKey?: string };
   readonly level: ConsultLevel;
   readonly languages?: readonly ConsultLanguage[];
+  /** Standard's instruction when the level is Standard (light cleanup or the user's own). */
+  readonly instruction?: string;
   readonly deadlineMs: number;
   readonly onCase?: ConsultWriterCheckOptions['onCase'];
   readonly signal?: AbortSignal;
@@ -287,8 +301,9 @@ export async function checkOwnConsultWriter(input: {
   return runConsultWriterCheck({
     level: input.level,
     withEvidence: true,
-    // The net the product applies to the owner's own writer.
+    // The net the product applies to the owner's own writer (thin at Strict; secrets at Standard, from the instruction).
     net: 'thin',
+    ...(input.instruction !== undefined ? { instruction: input.instruction } : {}),
     ...(input.languages ? { languages: input.languages } : {}),
     ...(input.onCase ? { onCase: input.onCase } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
