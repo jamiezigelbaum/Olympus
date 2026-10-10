@@ -1316,6 +1316,7 @@ export function createPrivateAnswerHandler(options: PrivateAnswerHandlerOptions)
     const record = typeof body === 'object' && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
     if (!record || record.v !== 1) return reply({ status: 400, body: { status: 'invalid' } });
     if (route.action === 'ask') return reply(options.questions ? await options.questions.ask(jobId, record) : { status: 410, body: { status: 'gone' } });
+    if (route.action === 'another') return reply(options.questions ? await options.questions.another(jobId, record.publicKey) : { status: 410, body: { status: 'gone' } });
     if (options.questions?.has(jobId)) {
       // A private question job: its outcome, never a private answer's.
       return reply(route.action === 'open' ? { status: 410, body: { status: 'gone' } } : await options.questions.collect(jobId, record.publicKey));

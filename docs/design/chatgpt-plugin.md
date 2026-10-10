@@ -1182,6 +1182,29 @@ charged), never as "nothing was sent": the transport's outcome travels
 inside the sealed result. Proof of both directions of the crypto:
 test/chatgpt-private-question.test.ts.
 
+### Rendered answers and Ask another (added 2026-10-10, owner's first live test)
+
+- **Rendered Markdown.** The answer (and the private answer panel's revealed
+  text) is rendered by `chatgptMarkdownRender` (dashboard/chatgpt/markdown.ts):
+  headings, lists, tables, code, quotes, bold, italics and http(s) links,
+  built as DOM nodes from text. No HTML in the answer survives (a `<b>` stays
+  the four characters), no attribute comes from the text, and a link gets
+  only its href plus `rel="noopener noreferrer"`. The renderer is serialized
+  into both pages as `window.olympusMarkdown`; without it the panels fall
+  back to plain text.
+- **Ask another, in place.** The button posts `{v:1, publicKey}` to
+  `<relay>/private/<jobId>/another`; the engine (`PrivateQuestionJobs
+  .another`) answers a new job's meta (`{status:'opened', v:1, meta}`) for the
+  key that asked, once the outcome is in (409 `claimed` for another key or
+  an unasked job, 409 `pending` while running, 410 for a job this install
+  never minted, the per-job rate limit as for collection). The panel keeps
+  the new meta beside the old job's key (`next`), so a re-mount with the
+  original tool result follows to the newest job instead of showing the
+  first answer again. The host sees no tools/call and no message: the new
+  job id travels in the panel's own fetch, which the relay sees on every
+  request anyway. When the relay cannot open one (gone, offline), the panel
+  says to ask ChatGPT for a new panel, as before.
+
 ## Live smoke (added 2026-10-02)
 
 `scripts/chatgpt-live-smoke.ts` checks what ChatGPT sees, end to end, on a

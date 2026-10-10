@@ -1975,7 +1975,9 @@ export const DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY = {
   showSent: 'Show what was sent',
   hideSent: 'Hide what was sent',
   askAnother: 'Ask another',
-  /** After Ask another: a new sealed question needs a new panel from ChatGPT. */
+  /** Ask another: the panel opens a new question in place (a new sealed job from this computer). */
+  opening: 'Opening a new question…',
+  /** Ask another could not open one here (the job is gone, or this computer is offline): a new panel from ChatGPT still works. */
   askAgain: 'To ask another private question, ask ChatGPT to open a new one.',
 } as const;
 

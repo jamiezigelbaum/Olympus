@@ -29,16 +29,18 @@ export const PRIVATE_ANSWER_PATH_PREFIX = '/private/';
  * (open one of its sources on the Mac, by a token from inside the sealed
  * answer: `{"v":1,"open":"<token>"}`).
  */
-export const PRIVATE_ANSWER_PATH_PATTERN = /^\/private\/oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}(?:\/open|\/ask)?$/;
+export const PRIVATE_ANSWER_PATH_PATTERN = /^\/private\/oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}(?:\/open|\/ask|\/another)?$/;
 /** The open request's path suffix. */
 export const PRIVATE_ANSWER_OPEN_SUFFIX = '/open';
 /** The ask request's path suffix (a private question sealed to the engine). */
 export const PRIVATE_ANSWER_ASK_SUFFIX = '/ask';
+/** The private question panel's Ask another: a new job for the same panel, in place (owner request 2026-10-10). */
+export const PRIVATE_ANSWER_ANOTHER_SUFFIX = '/another';
 /** `{"v":1,"publicKey":"<87 chars>"}` is about 110 bytes; anything far larger is not a panel. */
 export const PRIVATE_ANSWER_MAX_REQUEST_BYTES = 512;
 /** A sealed question: up to 8 KiB of text as base64url ciphertext with its key, iv and JSON around it. */
 export const PRIVATE_QUESTION_MAX_REQUEST_BYTES = 16_384;
-export type PrivateAnswerAction = 'collect' | 'open' | 'ask';
+export type PrivateAnswerAction = 'collect' | 'open' | 'ask' | 'another';
 /** The body cap for one private-answer action: only a sealed question is larger than a key. */
 export function privateAnswerMaxRequestBytes(action: PrivateAnswerAction): number {
   return action === 'ask' ? PRIVATE_QUESTION_MAX_REQUEST_BYTES : PRIVATE_ANSWER_MAX_REQUEST_BYTES;
@@ -75,8 +77,8 @@ export function privateAnswerJobId(path: string): string | undefined {
 /** A private-answer path's job id and action, or undefined for any other path. */
 export function privateAnswerRoute(path: string): { jobId: string; action: PrivateAnswerAction } | undefined {
   if (!PRIVATE_ANSWER_PATH_PATTERN.test(path)) return undefined;
-  const suffix = path.endsWith(PRIVATE_ANSWER_OPEN_SUFFIX) ? PRIVATE_ANSWER_OPEN_SUFFIX : path.endsWith(PRIVATE_ANSWER_ASK_SUFFIX) ? PRIVATE_ANSWER_ASK_SUFFIX : '';
-  const action: PrivateAnswerAction = suffix === PRIVATE_ANSWER_OPEN_SUFFIX ? 'open' : suffix === PRIVATE_ANSWER_ASK_SUFFIX ? 'ask' : 'collect';
+  const suffix = path.endsWith(PRIVATE_ANSWER_OPEN_SUFFIX) ? PRIVATE_ANSWER_OPEN_SUFFIX : path.endsWith(PRIVATE_ANSWER_ASK_SUFFIX) ? PRIVATE_ANSWER_ASK_SUFFIX : path.endsWith(PRIVATE_ANSWER_ANOTHER_SUFFIX) ? PRIVATE_ANSWER_ANOTHER_SUFFIX : '';
+  const action: PrivateAnswerAction = suffix === PRIVATE_ANSWER_OPEN_SUFFIX ? 'open' : suffix === PRIVATE_ANSWER_ASK_SUFFIX ? 'ask' : suffix === PRIVATE_ANSWER_ANOTHER_SUFFIX ? 'another' : 'collect';
   return { jobId: path.slice(PRIVATE_ANSWER_PATH_PREFIX.length, path.length - suffix.length), action };
 }
 
