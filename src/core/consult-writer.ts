@@ -131,6 +131,14 @@ export interface ConsultWriterInput {
    * rules beyond its shape. Absent: Strict's rules (consultWriterSystem).
    */
   readonly instruction?: string;
+  /**
+   * A direct ask (the ask_anonymously tool at Strict, owner decision
+   * 2026-10-10): the user asked to send this question, there is no first
+   * answer and no gaps. The writer always rewrites it into general
+   * questions; `null` is only for a question from which no general
+   * question can be made. Ignored with `instruction` (Standard).
+   */
+  readonly direct?: true;
 }
 
 /** The fixed reply format that wraps Standard's instruction. */
@@ -161,6 +169,20 @@ const CONSULT_WRITER_COMMON_HEAD = [
   '- Ask when the question needs deeper reasoning or outside knowledge on top of what the material shows: how a rule, requirement, process, term or practice works, how the facts you have fit together, or what usually happens in a situation like this one.',
   '- Never ask what the user\'s documents say, whether they mention or contain something, or for a document to be shared or uploaded: the outside model cannot see them. Never write "the document", "this letter" or "the contract" as if the reader had it; describe the kind of thing instead ("a signed letter of intent to buy a business").',
   '- Read the material to understand the situation, then write each question yourself, in plain words.',
+];
+
+/**
+ * The head for a direct ask: the question is to be sent, so the only
+ * decision is how to make it general, not whether to ask.
+ */
+const CONSULT_WRITER_DIRECT_HEAD = [
+  'You are the user\'s own local model. The user asked to send this question to a stronger outside model anonymously, and you write what leaves. Rewrite it into one to three short general questions that would get them the answer they need.',
+  'The outside model knows nothing about the user and sees only your questions. They are sent as written, unreviewed, and each one costs money.',
+  '',
+  'Always write the questions. Reply null only when nothing general can be asked: the question is empty, or it only asks what the user\'s own records say (a reference number, whether something was sent or paid).',
+  '- Ask for the rules, thresholds, usual practice or reasoning behind the user\'s situation, so they can apply the answer themselves.',
+  '- Never write "the document", "this letter" or "the contract" as if the reader had it; describe the kind of thing instead.',
+  '- Write each question yourself, in plain words.',
 ];
 
 const CONSULT_WRITER_COMMON_TAIL = [
@@ -219,9 +241,16 @@ export const CONSULT_WRITER_SYSTEM_UNNAMED = [
   ...CONSULT_WRITER_COMMON_TAIL,
 ].join('\n');
 
-/** The writer's rules for a level: Strict (`general`) or Standard (`unnamed`). */
-export function consultWriterSystem(level: ConsultLevel): string {
-  return level === 'unnamed' ? CONSULT_WRITER_SYSTEM_UNNAMED : CONSULT_WRITER_SYSTEM;
+/** Strict's rules for a direct ask: the same rules, shapes and form, under the direct head. */
+export const CONSULT_WRITER_SYSTEM_DIRECT = [
+  ...CONSULT_WRITER_DIRECT_HEAD,
+  ...CONSULT_WRITER_SYSTEM.split('\n').slice(CONSULT_WRITER_COMMON_HEAD.length),
+].join('\n');
+
+/** The writer's rules for a level: Strict (`general`, or its direct-ask form) or Standard (`unnamed`). */
+export function consultWriterSystem(level: ConsultLevel, options: { readonly direct?: boolean } = {}): string {
+  if (level === 'unnamed') return CONSULT_WRITER_SYSTEM_UNNAMED;
+  return options.direct ? CONSULT_WRITER_SYSTEM_DIRECT : CONSULT_WRITER_SYSTEM;
 }
 
 /** Standard's reply schema: the same shape, longer strings. */
@@ -284,6 +313,7 @@ export function boundConsultWriterInput(input: ConsultWriterInput): ConsultWrite
       .slice(0, CONSULT_WRITER_LIMITS.gaps)),
     ...(evidence.length > 0 ? { evidence: Object.freeze(evidence) } : {}),
     ...(typeof input.instruction === 'string' && input.instruction.trim() ? { instruction: input.instruction } : {}),
+    ...(input.direct === true ? { direct: true as const } : {}),
   });
 }
 
@@ -320,6 +350,13 @@ export function buildConsultWriterPrompt(input: ConsultWriterInput, level: Consu
     return Object.freeze([
       Object.freeze({ role: 'system' as const, content: `${bounded.instruction}\n\n${CONSULT_STANDARD_REPLY_FORMAT}` }),
       Object.freeze({ role: 'user' as const, content: standardUser }),
+    ]);
+  }
+  if (bounded.direct) {
+    // A direct ask at Strict: the question alone; no first answer, no gaps.
+    return Object.freeze([
+      Object.freeze({ role: 'system' as const, content: consultWriterSystem(level, { direct: true }) }),
+      Object.freeze({ role: 'user' as const, content: `Question: ${bounded.question}` }),
     ]);
   }
   const user = [

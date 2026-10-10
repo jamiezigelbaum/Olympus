@@ -71798,6 +71798,7 @@ __export(exports_consult_writer, {
   buildConsultWriterPrompt: () => buildConsultWriterPrompt,
   boundConsultWriterInput: () => boundConsultWriterInput,
   CONSULT_WRITER_SYSTEM_UNNAMED: () => CONSULT_WRITER_SYSTEM_UNNAMED,
+  CONSULT_WRITER_SYSTEM_DIRECT: () => CONSULT_WRITER_SYSTEM_DIRECT,
   CONSULT_WRITER_SYSTEM: () => CONSULT_WRITER_SYSTEM,
   CONSULT_WRITER_RESPONSE_SCHEMA: () => CONSULT_WRITER_RESPONSE_SCHEMA,
   CONSULT_WRITER_LIMITS: () => CONSULT_WRITER_LIMITS,
@@ -71806,8 +71807,10 @@ __export(exports_consult_writer, {
 });
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { freemem, platform as osPlatform5, totalmem } from "node:os";
-function consultWriterSystem(level) {
-  return level === "unnamed" ? CONSULT_WRITER_SYSTEM_UNNAMED : CONSULT_WRITER_SYSTEM;
+function consultWriterSystem(level, options = {}) {
+  if (level === "unnamed")
+    return CONSULT_WRITER_SYSTEM_UNNAMED;
+  return options.direct ? CONSULT_WRITER_SYSTEM_DIRECT : CONSULT_WRITER_SYSTEM;
 }
 function boundConsultWriterInput(input) {
   const clean = (text, max) => typeof text === "string" ? Array.from(text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim()).slice(0, max).join("") : "";
@@ -71827,7 +71830,8 @@ function boundConsultWriterInput(input) {
     answer: clean(input.answer, CONSULT_WRITER_LIMITS.answerChars),
     gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : []).map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars)).filter(Boolean).slice(0, CONSULT_WRITER_LIMITS.gaps)),
     ...evidence.length > 0 ? { evidence: Object.freeze(evidence) } : {},
-    ...typeof input.instruction === "string" && input.instruction.trim() ? { instruction: input.instruction } : {}
+    ...typeof input.instruction === "string" && input.instruction.trim() ? { instruction: input.instruction } : {},
+    ...input.direct === true ? { direct: true } : {}
   });
 }
 function consultWriterEvidence(pack) {
@@ -71860,6 +71864,12 @@ ${bounded.evidence.map((excerpt, index) => `[${index + 1}] ${excerpt}`).join(`
 
 ${CONSULT_STANDARD_REPLY_FORMAT}` }),
       Object.freeze({ role: "user", content: standardUser })
+    ]);
+  }
+  if (bounded.direct) {
+    return Object.freeze([
+      Object.freeze({ role: "system", content: consultWriterSystem(level, { direct: true }) }),
+      Object.freeze({ role: "user", content: `Question: ${bounded.question}` })
     ]);
   }
   const user = [
@@ -72174,7 +72184,7 @@ async function runOwnConsultWriter(input, options) {
     return { kind: "declined", promptTokens: 0, ms };
   return { kind: "questions", questions: reply.questions, promptTokens: 0, ms };
 }
-var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA;
+var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_DIRECT_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_SYSTEM_DIRECT, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA;
 var init_consult_writer = __esm(() => {
   init_model_transport();
   init_local_model_policy();
@@ -72213,6 +72223,15 @@ var init_consult_writer = __esm(() => {
     "- Ask when the question needs deeper reasoning or outside knowledge on top of what the material shows: how a rule, requirement, process, term or practice works, how the facts you have fit together, or what usually happens in a situation like this one.",
     `- Never ask what the user's documents say, whether they mention or contain something, or for a document to be shared or uploaded: the outside model cannot see them. Never write "the document", "this letter" or "the contract" as if the reader had it; describe the kind of thing instead ("a signed letter of intent to buy a business").`,
     "- Read the material to understand the situation, then write each question yourself, in plain words."
+  ];
+  CONSULT_WRITER_DIRECT_HEAD = [
+    "You are the user's own local model. The user asked to send this question to a stronger outside model anonymously, and you write what leaves. Rewrite it into one to three short general questions that would get them the answer they need.",
+    "The outside model knows nothing about the user and sees only your questions. They are sent as written, unreviewed, and each one costs money.",
+    "",
+    "Always write the questions. Reply null only when nothing general can be asked: the question is empty, or it only asks what the user's own records say (a reference number, whether something was sent or paid).",
+    "- Ask for the rules, thresholds, usual practice or reasoning behind the user's situation, so they can apply the answer themselves.",
+    '- Never write "the document", "this letter" or "the contract" as if the reader had it; describe the kind of thing instead.',
+    "- Write each question yourself, in plain words."
   ];
   CONSULT_WRITER_COMMON_TAIL = [
     'Reply with one JSON object and nothing else: {"questions": ["...", "..."]} with one to three questions, or {"questions": null} to propose nothing.'
@@ -72255,6 +72274,12 @@ var init_consult_writer = __esm(() => {
     "- Missing: the booking reference itself. Propose nothing: only the user's own records hold it.",
     "",
     ...CONSULT_WRITER_COMMON_TAIL
+  ].join(`
+`);
+  CONSULT_WRITER_SYSTEM_DIRECT = [
+    ...CONSULT_WRITER_DIRECT_HEAD,
+    ...CONSULT_WRITER_SYSTEM.split(`
+`).slice(CONSULT_WRITER_COMMON_HEAD.length)
   ].join(`
 `);
   CONSULT_STANDARD_RESPONSE_SCHEMA = Object.freeze({
@@ -124370,7 +124395,7 @@ async function askAnonymously(input, deps) {
     const instruction = strict ? undefined : cleanup === "custom" ? stored.instruction : CONSULT_LIGHT_CLEANUP_INSTRUCTION;
     let written;
     try {
-      written = await deps.prepare({ question: typed, answer: "", gaps: [], ...instruction !== undefined ? { instruction } : {} }, writer, strict ? "general" : "unnamed", input.signal);
+      written = await deps.prepare({ question: typed, answer: "", gaps: [], ...instruction !== undefined ? { instruction } : { direct: true } }, writer, strict ? "general" : "unnamed", input.signal);
     } catch {
       written = { kind: "failed", reason: "request_failed" };
     }

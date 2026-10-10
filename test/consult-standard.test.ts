@@ -8,7 +8,7 @@ import { askAnonymously, CONSULT_ASK_MAX_CHARS, CONSULT_ASK_MESSAGES, type Consu
 import { CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES, consultWriterContextFromPack, evaluateConsultRequest } from '../src/core/consult-gate.ts';
 import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, CONSULT_LIGHT_CLEANUP_INSTRUCTION, DEFAULT_CONSULT_SETTINGS, type ConsultSettingsRead } from '../src/core/consult-settings.ts';
 import type { ZkapiConsultResult } from '../src/core/consult-transport-zkapi.ts';
-import { CONSULT_STANDARD_REPLY_FORMAT, buildConsultWriterPrompt, parseConsultWriterReply, type ConsultWriterInput } from '../src/core/consult-writer.ts';
+import { CONSULT_STANDARD_REPLY_FORMAT, CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_DIRECT, buildConsultWriterPrompt, parseConsultWriterReply, type ConsultWriterInput } from '../src/core/consult-writer.ts';
 import { privateEvidencePack } from '../src/core/analyst-built-in.ts';
 
 const FAKE_KEY = ['sk', '-', 'Zq8Rr7Tt6Yy5Uu4Ii3Oo2Pp1'].join('');
@@ -34,6 +34,26 @@ describe('the secrets net', () => {
     expect(new TextEncoder().encode(long).byteLength).toBeGreaterThan(600);
     expect(secrets([long])).toEqual({ decision: 'pass', reasons: [] });
     expect(secrets(['x'.repeat(CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES + 1)])).toEqual({ decision: 'refuse', reasons: ['question_too_many_bytes'] });
+  });
+});
+
+describe('the writer for a direct ask at Strict', () => {
+  test('the question is to be sent: the prompt says to always write general questions, shows no first answer or gaps, and keeps Strict\'s rules and form', () => {
+    const messages = buildConsultWriterPrompt({ question: 'When will Jo at Heron Lettings return my deposit?', answer: '', gaps: [], direct: true }, 'general');
+    expect(messages[0]!.content).toBe(CONSULT_WRITER_SYSTEM_DIRECT);
+    expect(messages[0]!.content).toContain('The user asked to send this question');
+    expect(messages[0]!.content).toContain('Always write the questions.');
+    expect(messages[0]!.content).not.toContain('Decide first');
+    expect(messages[0]!.content).not.toContain('Propose nothing when the material');
+    expect(messages[0]!.content).toContain('Strict: ask only general questions');
+    expect(messages[0]!.content).toContain('Form: each question is one plain sentence');
+    expect(messages[1]!.content).toBe('Question: When will Jo at Heron Lettings return my deposit?');
+    // Without the flag (the private-answer escalation) the escalation prompt is unchanged.
+    const escalation = buildConsultWriterPrompt({ question: 'q', answer: 'a', gaps: ['g'] }, 'general');
+    expect(escalation[0]!.content).toBe(CONSULT_WRITER_SYSTEM);
+    expect(escalation[1]!.content).toContain('Could not find:');
+    // Standard's instruction wins over the flag.
+    expect(buildConsultWriterPrompt({ question: 'q', answer: '', gaps: [], instruction: 'In Dutch.', direct: true }, 'unnamed')[0]!.content).toContain('In Dutch.');
   });
 });
 
@@ -221,7 +241,7 @@ describe('Ask anonymously', () => {
   test('Strict: the writer rewrites with no instruction at the without-names level, the gate checks the rewrite, and the result says it was rewritten', async () => {
     const d = deps(settings({ standardMode: 'as_written' }), { kind: 'questions', questions: ['How long do landlords usually take to return a deposit?'], promptTokens: 1, ms: 1 });
     const result = await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', origin: 'agent', level: 'strict' }, d.value);
-    expect(d.calls.prepare).toEqual([{ question: 'When will Jo at Heron Lettings return my deposit?', answer: '', gaps: [] }]);
+    expect(d.calls.prepare).toEqual([{ question: 'When will Jo at Heron Lettings return my deposit?', answer: '', gaps: [], direct: true }]);
     expect(d.calls.levels).toEqual(['general']);
     expect(result).toMatchObject({ ok: true, level: 'strict', rewritten: true, sent: 'How long do landlords usually take to return a deposit?' });
     expect('cleanup' in result).toBe(false);
