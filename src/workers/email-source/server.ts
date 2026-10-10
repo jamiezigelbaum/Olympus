@@ -24,8 +24,7 @@ import {
   parseFileExtractionCorporaEnv,
 } from './file-extraction-runtime.ts';
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
-import { createUnreadableFiles } from '../file-extraction/unreadable-files.ts';
-import type { ExtractionUnreadableItem, ExtractionUnreadableVerdict } from '../file-extraction/job-store.ts';
+import { createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
 import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
 import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
@@ -3444,22 +3443,10 @@ export async function main(): Promise<void> {
   // unreadable, on any host; an item no store serves any more is left out of
   // both the count and the list. Source-neutral: every lane's ledger and
   // secret index, by corpus.
-  const unreadableVerdict = (item: ExtractionUnreadableItem): ExtractionUnreadableVerdict => {
-    const located = fileExtractionRuntime?.locateItem(item.ref);
-    const identity = {
-      provider: item.ref.provider,
-      accountScope: item.ref.accountScope,
-      providerItemId: item.ref.providerItemId,
-      ...(located?.providerConversationId ? { providerConversationId: located.providerConversationId } : {}),
-    };
-    for (const lane of tierLanes) {
-      if (!lane.corpusIds.has(item.ref.corpusId)) continue;
-      const record = lane.ledger.getCurrent(identity);
-      if (record && (record.metadataTier === 'secrets' || record.contentTier === 'secrets')) return 'blocked_policy';
-      if (lane.secrets?.get(identity)) return 'blocked_policy';
-    }
-    return located ? 'unreadable' : 'hidden';
-  };
+  const unreadableVerdict = createUnreadableVerdict({
+    locate: (ref) => fileExtractionRuntime?.locateItem(ref),
+    lanes: () => tierLanes,
+  });
   const extractionReadinessLedger = fileExtractionRuntime
     ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
         terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,

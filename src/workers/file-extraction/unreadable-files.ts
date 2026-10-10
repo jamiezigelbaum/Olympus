@@ -23,10 +23,52 @@
 import { randomBytes } from 'node:crypto';
 import type { ExtractionItemRef } from './types.ts';
 import type { ExtractionUnreadableItem, ExtractionUnreadableVerdict } from './job-store.ts';
+import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
 
 export interface UnreadableFileLocation {
   locatorUri?: string;
   providerConversationId?: string;
+}
+
+/** One tier lane's facts the verdict reads: which corpora it serves, its ledger and its secret index. */
+export interface UnreadableVerdictLane {
+  corpusIds: ReadonlySet<string>;
+  ledger: { getCurrent(identity: TierLedgerIdentity): { metadataTier: string; contentTier: string } | undefined };
+  secrets?: { get(identity: TierLedgerIdentity): unknown };
+}
+
+/**
+ * Whether an item extraction gave up on is really unreadable (the readiness
+ * counts' ExtractionUnreadableVerdict):
+ * - a Secrets item, by its tier ledger row (names or content judged Secrets,
+ *   an owner's `olympus tier` override included) or located as a secret by
+ *   its lane's secret index, counts with the policy exit: Secrets never
+ *   belong in Olympus, so they never show as unreadable, on any host;
+ * - an item no store serves any more (removed, or a copy nothing may show)
+ *   is left out of the count and the list alike;
+ * - anything else is unreadable.
+ * Source-neutral: every lane, by corpus.
+ */
+export function createUnreadableVerdict(input: {
+  locate(ref: ExtractionItemRef): UnreadableFileLocation | undefined;
+  lanes(): Iterable<UnreadableVerdictLane>;
+}): (item: ExtractionUnreadableItem) => ExtractionUnreadableVerdict {
+  return (item) => {
+    const located = input.locate(item.ref);
+    const identity: TierLedgerIdentity = {
+      provider: item.ref.provider,
+      accountScope: item.ref.accountScope,
+      providerItemId: item.ref.providerItemId,
+      ...(located?.providerConversationId ? { providerConversationId: located.providerConversationId } : {}),
+    };
+    for (const lane of input.lanes()) {
+      if (!lane.corpusIds.has(item.ref.corpusId)) continue;
+      const record = lane.ledger.getCurrent(identity);
+      if (record && (record.metadataTier === 'secrets' || record.contentTier === 'secrets')) return 'blocked_policy';
+      if (lane.secrets?.get(identity) !== undefined) return 'blocked_policy';
+    }
+    return located ? 'unreadable' : 'hidden';
+  };
 }
 
 export interface UnreadableFilesOptions {
