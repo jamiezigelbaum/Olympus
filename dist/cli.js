@@ -57271,7 +57271,7 @@ function embeddingModelEstimate(modelId, prices) {
 }
 function estimatedEmbeddingCostUsd(tokens, modelId, prices) {
   const { estimate } = embeddingModelEstimate(modelId, prices);
-  return Math.round(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
+  return Math.ceil(tokens / 1e6 * estimate.usdPerMillionTokens * 100) / 100;
 }
 var DEFAULT_EMBEDDING_MODEL_ESTIMATES, FALLBACK_EMBEDDING_MODEL_ESTIMATE;
 var init_embedding_cost_estimates = __esm(() => {

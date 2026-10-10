@@ -41,8 +41,8 @@ export function embeddingModelEstimate(
   return { estimate: fallback, source: 'default_unverified' };
 }
 
-/** Estimated USD for `tokens` input tokens on `modelId`, rounded to cents. */
+/** Estimated USD for `tokens` input tokens on `modelId`, rounded up to cents so a paid backlog never reads as free. */
 export function estimatedEmbeddingCostUsd(tokens: number, modelId: string, prices?: EmbeddingPriceTable): number {
   const { estimate } = embeddingModelEstimate(modelId, prices);
-  return Math.round((tokens / 1_000_000) * estimate.usdPerMillionTokens * 100) / 100;
+  return Math.ceil((tokens / 1_000_000) * estimate.usdPerMillionTokens * 100) / 100;
 }
