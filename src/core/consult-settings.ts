@@ -14,9 +14,8 @@
 // - The parser is strict: invalid UTF-8, a duplicated key, an unknown key, a
 //   missing key or a malformed value makes the whole file invalid. Absent,
 //   unreadable, insecure or invalid all mean outside help is OFF (fail closed).
-// - A job binds the settings current at its creation (`bindConsultJobPolicy`);
-//   final authorization re-reads the file and refuses unless it is still the
-//   same revision with outside help on (`recheckConsultJobPolicy`).
+// - An Ask binds the settings current when it starts; final authorization
+//   re-reads the file and refuses the send if they changed (consult-ask.ts).
 // - `level` says what the consult writer may send (owner decision
 //   2026-10-07): "unnamed" (the user's situation with names and other
 //   identifying details removed) or "general" (textbook questions only, the
@@ -494,45 +493,23 @@ export function readConsultSettings(location: ConsultSettingsLocation = {}): Con
   }
 }
 
-/** True only for a valid file that turns outside help on. */
-export function consultOutsideHelpEnabled(read: ConsultSettingsRead): boolean {
-  return read.state === 'valid' && read.settings.enabled;
-}
-
 /** The gate options the settings select (languages, domain packs and level). */
 export function consultGateOptionsFromSettings(settings: ConsultSettings): ConsultGateOptions {
   return { languages: [...settings.languages], domains: { ...settings.domains }, level: settings.level };
 }
 
 /**
- * The outside-help part of a job's policy, bound when the job is created.
- * Later changes to the settings never alter it (design "Job policy").
+ * How the Standard level prepares a question: the mode and, unless
+ * `as_written`, the exact instruction the writer follows. An Ask binds it
+ * when it starts; a change before the send refuses it (consult-ask.ts).
  */
-export interface ConsultJobPolicy {
-  readonly settingsRevision: number;
-  readonly outsideHelp: boolean;
-  readonly languages: readonly ConsultLanguage[];
-  readonly domains: ConsultDomainPacks;
-  readonly strict: boolean;
-  /** What the writer may send for this job; a change since binding refuses at final authorization. */
-  readonly level: ConsultLevel;
-  /**
-   * The owner's own writer as bound at job creation (consult.json `writer`),
-   * or null for the built-in writer. The consult runs this writer, gives it
-   * evidence and applies its gate net from this one value; a different writer
-   * in the file at final authorization refuses (independent review of
-   * PR #209: the writer and the gate net must never disagree).
-   */
-  readonly writer: ConsultWriterChoice | null;
-  /**
-   * How the Standard level prepares the question, bound like the writer: the
-   * mode and, unless `as_written`, the exact instruction the writer follows.
-   */
-  readonly standard: { readonly mode: ConsultStandardMode; readonly instruction?: string };
+export interface ConsultStandardBinding {
+  readonly mode: ConsultStandardMode;
+  readonly instruction?: string;
 }
 
-/** The Standard preparation a settings file selects, as a job binds it. */
-export function consultStandardBinding(settings: ConsultSettings): ConsultJobPolicy['standard'] {
+/** The Standard preparation a settings file selects, as an Ask binds it. */
+export function consultStandardBinding(settings: ConsultSettings): ConsultStandardBinding {
   const mode = consultStandardMode(settings);
   const instruction = consultStandardInstruction(settings);
   return Object.freeze({ mode, ...(instruction !== undefined ? { instruction } : {}) });
@@ -542,51 +519,6 @@ export function consultStandardBinding(settings: ConsultSettings): ConsultJobPol
 export function consultWriterIdentity(choice: ConsultWriterChoice | null | undefined): string {
   if (!choice) return 'built-in';
   return JSON.stringify([choice.baseUrl, choice.model, choice.secretRef ?? null, choice.timeoutMs ?? null]);
-}
-
-export function bindConsultJobPolicy(read: ConsultSettingsRead): ConsultJobPolicy {
-  const settings = read.state === 'valid' ? read.settings : DEFAULT_CONSULT_SETTINGS;
-  return Object.freeze({
-    settingsRevision: settings.revision,
-    outsideHelp: consultOutsideHelpEnabled(read),
-    languages: Object.freeze([...settings.languages]),
-    domains: Object.freeze({ ...settings.domains }),
-    strict: settings.strict,
-    level: settings.level,
-    writer: settings.writer ? Object.freeze({ ...settings.writer }) : null,
-    standard: consultStandardBinding(settings),
-  });
-}
-
-export type ConsultJobPolicyRecheck =
-  | { readonly ok: true }
-  | {
-    readonly ok: false;
-    readonly reason: 'bound_off' | 'settings_absent' | 'settings_invalid' | 'settings_off' | 'settings_stale';
-  };
-
-/**
- * Final authorization's settings check (design §A.8 step 2, test B5): the job
- * must have bound outside help on, and the file re-read now must be valid,
- * still on, and exactly the revision and level the job bound. Any change
- * since the job was created, even one that turned outside help off and on
- * again, refuses. A level change always moves the revision through the
- * writer; the level is compared as well so a file edited by hand without a
- * new revision cannot widen what a bound job sends, and so is the writer
- * (consultWriterIdentity), which selects the gate net.
- */
-export function recheckConsultJobPolicy(policy: ConsultJobPolicy, current: ConsultSettingsRead): ConsultJobPolicyRecheck {
-  if (!policy.outsideHelp) return { ok: false, reason: 'bound_off' };
-  if (current.state === 'absent') return { ok: false, reason: 'settings_absent' };
-  if (current.state === 'invalid') return { ok: false, reason: 'settings_invalid' };
-  if (current.settings.revision !== policy.settingsRevision) return { ok: false, reason: 'settings_stale' };
-  if (current.settings.level !== policy.level) return { ok: false, reason: 'settings_stale' };
-  // The writer too: a bound job never sends under another writer's gate net.
-  if (consultWriterIdentity(current.settings.writer) !== consultWriterIdentity(policy.writer ?? null)) return { ok: false, reason: 'settings_stale' };
-  // And how Standard prepares the question: a bound mode never sends under another.
-  if (JSON.stringify(consultStandardBinding(current.settings)) !== JSON.stringify(policy.standard ?? consultStandardBinding(DEFAULT_CONSULT_SETTINGS))) return { ok: false, reason: 'settings_stale' };
-  if (!current.settings.enabled) return { ok: false, reason: 'settings_off' };
-  return { ok: true };
 }
 
 function invalid(reason: ConsultSettingsInvalidReason): ConsultSettingsRead {

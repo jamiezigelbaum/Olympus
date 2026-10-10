@@ -1541,7 +1541,7 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   rows: {
     keys: { title: 'Keys', line: 'Venice, Readwise and X keys' },
     agents: { title: 'Agents', line: 'Remote access and connected agents' },
-    outsideHelp: { title: 'Outside help', line: 'Anonymous answers (zkAPI)' },
+    outsideHelp: { title: 'Anonymous answers', line: 'Ask top AI models without saying who you are' },
     connector: { title: 'Build a connector', line: 'For a source Olympus does not have yet' },
   },
   /**
@@ -1920,22 +1920,6 @@ export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
   openedOnMac: 'Opened on your computer',
   openFailed: 'Couldn\'t open it on your computer',
   unanswered: 'Not found in your private items: {list}',
-  /** The answer was withdrawn on the Mac after it was shown (an item is no longer Private-eligible). */
-  withdrawn: 'This private answer is no longer available from your computer.',
-  /**
-   * The outside block's own container (design docs/design/frontier-consult-lane.md
-   * §A.6): its application-owned attribution, pinned while the text scrolls.
-   */
-  outsideTitle: 'Anonymous answer · zkAPI',
-  outsideNote: 'General information from an outside model. It did not read your documents and has not been checked.',
-  /** The container shows while an outside reply is on its way, or paused. */
-  outsidePending: 'Looking up general background…',
-  outsidePaused: 'Anonymous answers are paused.',
-  /** The label over the exact question(s) sent, shown above the reply: the general level, then the unnamed level. */
-  outsideAsked: 'What Olympus asked:',
-  outsideSentUnnamed: 'Sent without names:',
-  /** The application-owned footer when the reply was shortened. */
-  outsideShortened: 'Shortened by Olympus.',
 } as const;
 
 /**
@@ -2098,28 +2082,28 @@ export const DASHBOARD_LOCAL_COPY = {
  */
 export const DASHBOARD_OUTSIDE_HELP_COPY = {
   crumb: 'Anonymous answers',
-  title: 'Anonymous answers · zkAPI',
+  title: 'Anonymous answers',
   /** Setup's section heading and its one row (owner naming, 2026-10-07). */
   sectionTitle: 'Private answers',
   row: {
-    off: 'Anonymous answers (zkAPI): off',
-    on: 'Anonymous answers (zkAPI): on',
-    invalid: 'Anonymous answers (zkAPI): off · settings file damaged',
-    route_not_configured: 'Anonymous answers (zkAPI): off · not set up',
-    fence_held: 'Anonymous answers (zkAPI): paused · unfinished payment',
-    needs_acceptance: 'Anonymous answers (zkAPI): paused · accept the updated statements',
+    off: 'Anonymous answers: off',
+    on: 'Anonymous answers: on',
+    invalid: 'Anonymous answers: off · settings file damaged',
+    route_not_configured: 'Anonymous answers: off · not set up',
+    fence_held: 'Anonymous answers: paused · unfinished payment',
+    needs_acceptance: 'Anonymous answers: paused · accept the updated statements',
   },
   /** The honesty label: the network route is not verified on macOS, said plainly. */
   experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
   /** What outside help is, before anything technical (owner, 2026-10-07). */
-  intro: 'For people running a strong local model at home: ask frontier models anonymously when your model needs help. When the answer from your computer is missing something, Olympus can send a top AI model a short question through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.',
+  intro: 'For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.',
   /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'). */
   levelTitle: 'What may zkAPI send?',
   /** Who writes the outside question (owner decision 2026-10-10): the built-in model, or the owner's own. No gate on the model. */
   writer: {
     title: 'Who writes the question',
     builtInShort: 'the model built into Olympus',
-    intro: 'By default the small model built into Olympus writes the outside question from the first answer. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it reads the private material the answer used, decides whether a frontier model would help, and writes the question. At Strict, Olympus\'s privacy check still runs before anything is sent; at Standard, only passwords, keys and tokens are stopped. This works best with a substantial model.',
+    intro: 'By default the small model built into Olympus prepares your question before it leaves. If you run a stronger model at home (Ollama, LM Studio, a llama.cpp server, or a home server), Olympus can use it instead: it rewrites the question into general ones at Strict, or prepares it the way you chose at Standard. At Strict, Olympus\'s privacy check still runs before anything is sent; at Standard, only passwords, keys and tokens are stopped. This works best with a substantial model.',
     currentBuiltIn: 'Now: the model built into Olympus.',
     currentOwn: 'Now: your model {model} at {address}.',
     baseUrl: 'Your model server\'s address (OpenAI-compatible, usually ending in /v1)',
@@ -2127,9 +2111,12 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     secretRef: 'Key reference, if your server needs one (optional: env:NAME or store:name)',
     where: 'Your private material goes to this address, so use a server you control. A server on another computer is reached over your network; prefer https or a private network such as a tailnet.',
     keyMissing: 'The key reference {secretRef} is not set on this computer, so your model cannot be used until it is.',
-    frontierModel: 'zkAPI model for questions from ChatGPT (optional)',
+    frontierModel: 'zkAPI model for questions from ChatGPT',
     frontierHint: 'A model from a provider other than OpenAI is better here: OpenAI also holds your ChatGPT conversation and could link the two. Empty uses Claude Sonnet.',
     openAiNote: 'Questions from ChatGPT now go to {model}, an OpenAI model. OpenAI also holds your ChatGPT conversation; a model from another provider is better here.',
+    claudeFrontierModel: 'zkAPI model for questions from Claude (Claude Code, Claude Desktop)',
+    claudeFrontierHint: 'A model from a provider other than Anthropic is better here: Anthropic also holds your Claude conversation and could link the two. Empty uses GPT-5.5.',
+    anthropicNote: 'Questions from Claude now go to {model}, an Anthropic model. Anthropic also holds your Claude conversation; a model from another provider is better here.',
     save: 'Save',
     useBuiltIn: 'Use the built-in model',
     testTitle: 'Test your model',
@@ -2170,17 +2157,6 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     },
     instructionLabel: 'Instruction for your model',
     save: 'Save',
-  },
-  /** "Ask anonymously" (owner decision 2026-10-10): a typed question, prepared as Standard is set, sent through zkAPI; never ChatGPT. */
-  ask: {
-    title: 'Ask anonymously',
-    intro: 'Type a question. It is prepared the way you chose above, sent through zkAPI, and the answer shows here. It never goes to ChatGPT. Each question costs a little from your zkAPI balance.',
-    label: 'Your question',
-    send: 'Ask',
-    running: 'Asking anonymously… Starting a private route takes a minute or two.',
-    sentTitle: 'What was sent',
-    replyTitle: 'Answer',
-    notSent: 'Nothing was sent.',
   },
   levelSave: 'Save',
   /** Standard chosen while the statements are not accepted: they show inline with one action. */
@@ -2227,19 +2203,19 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   disclosureTitle: 'Before you turn this on',
   /** Two short lines at first view; the fuller detail sits behind disclosureMore. */
   disclosureShort: [
-    'It asks on its own: when an answer from your computer is missing something, Olympus may send one short question. You can turn it off at any time.',
+    'It asks only when you do: tell your agent to use Olympus zkAPI, and Olympus sends one short question.',
     'The provider reads the question, prepared the way you choose; zkAPI hides who paid.',
   ],
   disclosureMore: 'Everything to know first',
   /**
    * The fuller detail, in calm words (owner, 2026-10-08). It keeps what the
-   * shorter statements leave out: the timing window, the hold counted against
+   * shorter statements leave out: when a question is sent, the hold counted against
    * limits, no default limit, deposit fees and no top-up, the estimated
    * expiry date, the fee buffer, the API key and key reuse, the operator
    * and the proof setup, and that the route is not verified on macOS.
    */
   disclosure: [
-    'Olympus sends a question only within about five minutes of a private answer appearing in ChatGPT, and only if the panel was recently active. Closing the panel does not guarantee nothing is sent in that window.',
+    'Olympus sends a question only when you ask your agent to use Olympus zkAPI. Nothing is sent on its own.',
     'A question usually costs a few cents. While it runs, up to $6 of your zkAPI balance is held, and the rest comes back when it settles. Olympus counts each question at the amount held for its model (between $1 and $6) when checking the daily limits you set.',
     'There is no daily limit unless you set one under Balance and limits. Your balance is the most that can be spent.',
     'Adding money and taking it out are each an Ethereum transaction with its own network fee (about $7 each when Olympus last checked). There is no top-up: each deposit starts a new balance with its own fee and its own 30-day clock.',

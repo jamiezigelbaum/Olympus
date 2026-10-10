@@ -1,7 +1,7 @@
 // The consult writer (src/core/consult-writer.ts; design
 // docs/design/frontier-consult-lane.md §A.3 and §A.7, stage C4b): its
 // prompt and bounds (with the rule against naming what the answer only
-// implies; the gate-level proof for "Portugal" is in consult-orchestrator.test.ts),
+// implies; the gate-level proof for "Portugal" is in consult-gate-snapshot.test.ts),
 // the reply form, the memory rule, and the lifecycle of its own server
 // process: started on demand, SIGKILLed (never SIGTERMed) on a fresh answer
 // or at the deadline at any stage (the tokenizer included), not started under

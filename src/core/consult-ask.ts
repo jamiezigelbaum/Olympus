@@ -1,6 +1,7 @@
 // "Ask anonymously" (owner decisions 2026-10-10): the user asks from their own
-// agent ("use Olympus zkAPI to ask ...") through the ask_anonymously tool, or
-// types a question on the dashboard card. The typed question is prepared at
+// agent ("use Olympus zkAPI to ask ...") through the ask_anonymously tool; it
+// is the only way a question goes to zkAPI (the dashboard's own box and the
+// automatic consult after a private answer were retired). The typed question is prepared at
 // the chosen level (Standard: as written, light cleanup, or the user's own
 // instruction; Strict: the writer's general questions under Vitalik's rules),
 // checked by the gate (Standard: secrets only; Strict: the thin net under the
@@ -66,12 +67,6 @@ export interface ConsultAskInput {
    */
   readonly callerProvider?: ConsultCallerProvider;
   /**
-   * Where the question came from. A question from an agent uses the model
-   * set for its hosting provider (never the provider that holds the
-   * conversation); the dashboard's own box uses the route's model.
-   */
-  readonly origin: 'agent' | 'dashboard';
-  /**
    * The caller's cancellation (a remote client disconnecting before hand-off,
    * a handed-off job's deadline). Before dispatch it stops the writer and
    * the session with nothing sent or reserved; after dispatch the reply is
@@ -81,8 +76,8 @@ export interface ConsultAskInput {
 }
 
 export interface ConsultAskSendOptions {
-  readonly origin: 'agent' | 'dashboard';
-  readonly model?: string;
+  /** The zkAPI model that answers: the one-off `model`, else the one set for the caller's hosting provider. */
+  readonly model: string;
   readonly signal?: AbortSignal;
 }
 
@@ -127,7 +122,7 @@ export type ConsultAskResult =
     /** True when the writer rewrote the question (Strict, or Standard light cleanup / custom). */
     readonly rewritten: boolean;
     readonly remembered: boolean;
-    /** The zkAPI model that answered an agent's question (the dashboard's box uses the route's own model, not named here). */
+    /** The zkAPI model that answered. */
     readonly model?: string;
     /** A requested save that failed (the question still went): the user should hear it, or they are asked again next time. */
     readonly note?: string;
@@ -320,12 +315,12 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     stale = askBinding(current) !== bound;
     return !stale;
   };
-  // An agent's question goes to the model set for its hosting provider
-  // unless it named one; the dashboard's box uses the route's own model.
-  const model = input.origin === 'agent' ? input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider) : input.model;
+  // The question goes to the model set for the caller's hosting provider
+  // unless it named one.
+  const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
   let result: ZkapiConsultResult | undefined;
   try {
-    result = await deps.send(sent, authorize, { origin: input.origin, ...(model !== undefined ? { model } : {}), ...(input.signal ? { signal: input.signal } : {}) });
+    result = await deps.send(sent, authorize, { model, ...(input.signal ? { signal: input.signal } : {}) });
   } catch {
     result = { ok: false, error: { code: 'internal_error', message: 'The zkAPI session failed inside Olympus.', outcome: 'unknown', networkIdentity: 'not_verified' } };
   }
@@ -343,7 +338,7 @@ export async function askAnonymously(input: ConsultAskInput, deps: ConsultAskDep
     ...(strict ? {} : { cleanup }),
     rewritten,
     remembered,
-    ...(model !== undefined ? { model } : {}),
+    model,
     ...(rememberNote ? { note: rememberNote } : {}),
   };
 }

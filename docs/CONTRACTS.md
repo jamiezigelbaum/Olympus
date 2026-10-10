@@ -316,6 +316,10 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-10 (no version change) — **AD-1 retired.** The panel's outside
+  block and its envelope were removed with the automatic escalation
+  (Anonymous answers redesign, step 3). The panel again carries only the
+  first answer from `Analyst.analyze`; nothing beside it.
 - 2026-10-07 (no version change) — **AD-1, the outside block is panel
   presentation, not an `Analyst` change** (design
   `docs/design/frontier-consult-lane.md` §A.11, owner-accepted 2026-10-07;

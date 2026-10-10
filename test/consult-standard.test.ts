@@ -1,7 +1,7 @@
 // Standard is open and the user's choice (owner decision 2026-10-10,
 // docs/design/private-answers.md): the question goes out as written, lightly
 // cleaned, or by the user's own instruction; the only outbound rule is
-// secrets. "Ask anonymously" on the dashboard follows the same mode.
+// secrets. The ask_anonymously agent tool follows the same mode.
 
 import { describe, expect, test } from 'bun:test';
 import { askAnonymously, CONSULT_ASK_MAX_CHARS, CONSULT_ASK_MESSAGES, type ConsultAskDependencies, type ConsultAskInput, type ConsultAskSendOptions } from '../src/core/consult-ask.ts';
@@ -82,8 +82,8 @@ describe('Ask anonymously', () => {
   const settings = (extra: Partial<typeof DEFAULT_CONSULT_SETTINGS> = {}): ConsultSettingsRead => ({ state: 'valid', settings: { ...DEFAULT_CONSULT_SETTINGS, revision: 2, ...extra } });
   const reply = (text: string): ZkapiConsultResult => ({ ok: true, text, routeLabel: 'zkAPI via Tor', networkIdentity: 'hidden', receipt: {} as never, elapsedMs: 5 });
 
-  /** The dashboard's call: Standard, chosen by the card. */
-  const q = (question: unknown): ConsultAskInput => ({ question, level: 'standard', origin: 'dashboard' });
+  /** A question at Standard, as an agent sends it once the level is chosen. */
+  const q = (question: unknown): ConsultAskInput => ({ question, level: 'standard' });
 
   function deps(read: ConsultSettingsRead, prepared: Awaited<ReturnType<ConsultAskDependencies['prepare']>> = { kind: 'questions', questions: ['How long do landlords usually take to return a deposit?'], promptTokens: 1, ms: 1 }) {
     const calls = { prepare: [] as ConsultWriterInput[], levels: [] as string[], send: [] as string[], sendOptions: [] as ConsultAskSendOptions[], remembered: [] as Array<{ level: string; cleanup?: string }> };
@@ -107,9 +107,9 @@ describe('Ask anonymously', () => {
     const result = await askAnonymously(q('  When will Jo return my deposit?  '), d.value);
     expect(d.calls.prepare).toEqual([{ question: 'When will Jo return my deposit?', answer: '', gaps: [], instruction: CONSULT_LIGHT_CLEANUP_INSTRUCTION }]);
     expect(d.calls.send).toEqual(['How long do landlords usually take to return a deposit?']);
-    expect(result).toEqual({ ok: true, sent: 'How long do landlords usually take to return a deposit?', reply: 'Usually within two weeks.', route: 'zkAPI via Tor', networkIdentity: 'hidden', level: 'standard', cleanup: 'light_cleanup', rewritten: true, remembered: false });
+    expect(result).toEqual({ ok: true, sent: 'How long do landlords usually take to return a deposit?', reply: 'Usually within two weeks.', route: 'zkAPI via Tor', networkIdentity: 'hidden', level: 'standard', cleanup: 'light_cleanup', rewritten: true, remembered: false, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
     expect(d.calls.levels).toEqual(['unnamed']);
-    expect(d.calls.sendOptions).toEqual([{ origin: 'dashboard' }]);
+    expect(d.calls.sendOptions).toEqual([{ model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT }]);
   });
 
   test('as written sends the typed question unchanged with no model; custom sends the user\'s instruction', async () => {
@@ -184,7 +184,7 @@ describe('Ask anonymously', () => {
 
   test('an agent\'s first question with no level is not sent: needs_choice offers the card\'s setting; a remembered level is used without asking', async () => {
     const fresh = deps(settings({ standardMode: 'as_written' }));
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, fresh.value)).toEqual({
+    expect(await askAnonymously({ question: 'What is a deposit?' }, fresh.value)).toEqual({
       ok: false,
       code: 'needs_choice',
       message: CONSULT_ASK_MESSAGES.needsChoice,
@@ -192,34 +192,30 @@ describe('Ask anonymously', () => {
     });
     expect(fresh.calls.send).toEqual([]);
     const strictCard = deps(settings({ level: 'general', standardMode: 'custom', standardInstruction: 'In Dutch.' }));
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, strictCard.value)).toMatchObject({ options: { suggestedLevel: 'strict', suggestedCleanup: 'custom', customInstruction: true } });
+    expect(await askAnonymously({ question: 'What is a deposit?' }, strictCard.value)).toMatchObject({ options: { suggestedLevel: 'strict', suggestedCleanup: 'custom', customInstruction: true } });
     const chosen = deps(settings({ standardMode: 'as_written', levelChosen: true }));
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, chosen.value)).toMatchObject({ ok: true, level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
-    expect(chosen.calls.sendOptions).toEqual([{ origin: 'agent', model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT }]);
+    expect(await askAnonymously({ question: 'What is a deposit?' }, chosen.value)).toMatchObject({ ok: true, level: 'standard', cleanup: 'as_written', rewritten: false, remembered: false });
+    expect(chosen.calls.sendOptions).toEqual([{ model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT }]);
   });
 
   test('the model follows who hosts the agent (owner decision 2026-10-10): never the provider that holds the conversation, for a one-off model too', async () => {
     const chosen = () => deps(settings({ standardMode: 'as_written', levelChosen: true, claudeFrontierModel: 'openai/some-model' }));
     const fromClaude = chosen();
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'anthropic' }, fromClaude.value)).toMatchObject({ ok: true, model: 'openai/some-model' });
-    expect(fromClaude.calls.sendOptions).toEqual([{ origin: 'agent', model: 'openai/some-model' }]);
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'anthropic' }, fromClaude.value)).toMatchObject({ ok: true, model: 'openai/some-model' });
+    expect(fromClaude.calls.sendOptions).toEqual([{ model: 'openai/some-model' }]);
     const fromChatGpt = chosen();
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'openai' }, fromChatGpt.value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'openai' }, fromChatGpt.value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
     const unknown = chosen();
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent' }, unknown.value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
+    expect(await askAnonymously({ question: 'What is a deposit?' }, unknown.value)).toMatchObject({ ok: true, model: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT });
     // A one-off model from the caller's own provider is refused before any work; from another, or from an unknown caller, it is used.
     const refused = chosen();
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'anthropic', model: 'anthropic/claude-opus-5.5' }, refused.value))
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'anthropic', model: 'anthropic/claude-opus-5.5' }, refused.value))
       .toEqual({ ok: false, code: 'model_same_provider', message: CONSULT_ASK_MESSAGES.modelSameProvider });
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'openai', model: 'OpenAI/gpt-5.5' }, refused.value)).toMatchObject({ code: 'model_same_provider' });
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'openai', model: 'OpenAI/gpt-5.5' }, refused.value)).toMatchObject({ code: 'model_same_provider' });
     expect(refused.calls.send).toEqual([]);
     const allowed = chosen();
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', callerProvider: 'anthropic', model: 'google/some-model' }, allowed.value)).toMatchObject({ ok: true, model: 'google/some-model' });
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', model: 'openai/gpt-5.5' }, allowed.value)).toMatchObject({ ok: true, model: 'openai/gpt-5.5' });
-    // The dashboard's box keeps the route's own model and names none.
-    const dashboard = deps(settings({ standardMode: 'as_written' }));
-    expect(await askAnonymously(q('What is a deposit?'), dashboard.value)).not.toHaveProperty('model');
-    expect(dashboard.calls.sendOptions).toEqual([{ origin: 'dashboard' }]);
+    expect(await askAnonymously({ question: 'What is a deposit?', callerProvider: 'anthropic', model: 'google/some-model' }, allowed.value)).toMatchObject({ ok: true, model: 'google/some-model' });
+    expect(await askAnonymously({ question: 'What is a deposit?', model: 'openai/gpt-5.5' }, allowed.value)).toMatchObject({ ok: true, model: 'openai/gpt-5.5' });
   });
 
   test('remember stores the choice through the writer before the send and reports it; without a writer the question still goes, once', async () => {
@@ -230,36 +226,36 @@ describe('Ask anonymously', () => {
       settings: () => current,
       remember: async (choice) => { d.calls.remembered.push(choice); current = settings({ standardMode: 'as_written', levelChosen: true }); return { ok: true }; },
     };
-    const result = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'as_written', remember: true }, value);
+    const result = await askAnonymously({ question: 'What is a deposit?', level: 'standard', cleanup: 'as_written', remember: true }, value);
     expect(d.calls.remembered).toEqual([{ level: 'unnamed', cleanup: 'as_written' }]);
     expect(result).toMatchObject({ ok: true, sent: 'What is a deposit?', remembered: true });
     const { remember: _unused, ...noWriter } = deps(settings({ standardMode: 'as_written' })).value;
-    const unsaved = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', remember: true }, noWriter);
+    const unsaved = await askAnonymously({ question: 'What is a deposit?', level: 'standard', remember: true }, noWriter);
     expect(unsaved).toMatchObject({ ok: true, remembered: false });
   });
 
   test('Strict: the writer rewrites with no instruction at the without-names level, the gate checks the rewrite, and the result says it was rewritten', async () => {
     const d = deps(settings({ standardMode: 'as_written' }), { kind: 'questions', questions: ['How long do landlords usually take to return a deposit?'], promptTokens: 1, ms: 1 });
-    const result = await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', origin: 'agent', level: 'strict' }, d.value);
+    const result = await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', level: 'strict' }, d.value);
     expect(d.calls.prepare).toEqual([{ question: 'When will Jo at Heron Lettings return my deposit?', answer: '', gaps: [], direct: true }]);
     expect(d.calls.levels).toEqual(['general']);
     expect(result).toMatchObject({ ok: true, level: 'strict', rewritten: true, sent: 'How long do landlords usually take to return a deposit?' });
     expect('cleanup' in result).toBe(false);
     // The rewrite still names the person: held back as gate_refused, nothing sent.
     const leaky = deps(settings({ standardMode: 'as_written' }), { kind: 'questions', questions: ['When will Jo at Heron Lettings return the deposit?'], promptTokens: 1, ms: 1 });
-    expect(await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', origin: 'agent', level: 'strict' }, leaky.value)).toMatchObject({ ok: false, code: 'gate_refused', message: CONSULT_ASK_MESSAGES.gateRefused });
+    expect(await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', level: 'strict' }, leaky.value)).toMatchObject({ ok: false, code: 'gate_refused', message: CONSULT_ASK_MESSAGES.gateRefused });
     expect(leaky.calls.send).toEqual([]);
   });
 
   test('a one-off model and a cleanup override apply to this question only; custom needs a saved instruction; bad values are refused unsent', async () => {
     const d = deps(settings({ standardMode: 'light_cleanup', levelChosen: true }));
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', cleanup: 'as_written', model: 'anthropic/claude-sonnet-5.5' }, d.value)).toMatchObject({ ok: true, cleanup: 'as_written', rewritten: false });
+    expect(await askAnonymously({ question: 'What is a deposit?', cleanup: 'as_written', model: 'anthropic/claude-sonnet-5.5' }, d.value)).toMatchObject({ ok: true, cleanup: 'as_written', rewritten: false });
     expect(d.calls.prepare).toEqual([]);
-    expect(d.calls.sendOptions).toEqual([{ origin: 'agent', model: 'anthropic/claude-sonnet-5.5' }]);
+    expect(d.calls.sendOptions).toEqual([{ model: 'anthropic/claude-sonnet-5.5' }]);
     expect(d.calls.remembered).toEqual([]);
-    expect(await askAnonymously({ question: 'x', origin: 'agent', level: 'standard', cleanup: 'custom' }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.cleanupCustomMissing });
-    expect(await askAnonymously({ question: 'x', origin: 'agent', level: 'loose' as never }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.levelInvalid });
-    expect(await askAnonymously({ question: 'x', origin: 'agent', level: 'standard', model: 'not a model' }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.modelInvalid });
+    expect(await askAnonymously({ question: 'x', level: 'standard', cleanup: 'custom' }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.cleanupCustomMissing });
+    expect(await askAnonymously({ question: 'x', level: 'loose' as never }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.levelInvalid });
+    expect(await askAnonymously({ question: 'x', level: 'standard', model: 'not a model' }, d.value)).toEqual({ ok: false, code: 'invalid_params', message: CONSULT_ASK_MESSAGES.modelInvalid });
     expect(d.calls.send).toHaveLength(1);
   });
 
@@ -277,7 +273,7 @@ describe('Ask anonymously', () => {
         settings: () => current,
         remember: async () => { current = settings({ standardMode: 'custom', standardInstruction: 'In Dutch.', ...race.after }); return { ok: true }; },
       };
-      const result = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'as_written', remember: true }, value);
+      const result = await askAnonymously({ question: 'What is a deposit?', level: 'standard', cleanup: 'as_written', remember: true }, value);
       expect({ note: race.note, result }).toEqual({ note: race.note, result: { ok: false, code: 'settings_stale', message: CONSULT_ASK_MESSAGES.stale } });
       expect(d.calls.send).toEqual([]);
     }
@@ -289,19 +285,19 @@ describe('Ask anonymously', () => {
       settings: () => current,
       remember: async () => { current = settings({ standardMode: 'light_cleanup', levelChosen: true, revision: 4 }); return { ok: true }; },
     };
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', cleanup: 'light_cleanup', remember: true }, value)).toMatchObject({ ok: true, cleanup: 'light_cleanup', remembered: true });
+    expect(await askAnonymously({ question: 'What is a deposit?', level: 'standard', cleanup: 'light_cleanup', remember: true }, value)).toMatchObject({ ok: true, cleanup: 'light_cleanup', remembered: true });
     expect(d.calls.prepare[0]!.instruction).toBe(CONSULT_LIGHT_CLEANUP_INSTRUCTION);
   });
 
   test('a save that fails while the answer succeeds is reported with the answer (Codex review of PR #215)', async () => {
     const d = deps(settings({ standardMode: 'as_written' }));
     const value: ConsultAskDependencies = { ...d.value, remember: async () => ({ ok: false, message: 'The settings changed under you; not saved.' }) };
-    const result = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', remember: true }, value);
+    const result = await askAnonymously({ question: 'What is a deposit?', level: 'standard', remember: true }, value);
     expect(result).toMatchObject({ ok: true, remembered: false, note: 'The settings changed under you; not saved.' });
     // The save that lands: no note.
     let current = settings({ standardMode: 'as_written' });
     const saved = deps(current);
-    const kept = await askAnonymously({ question: 'What is a deposit?', origin: 'agent', level: 'standard', remember: true }, {
+    const kept = await askAnonymously({ question: 'What is a deposit?', level: 'standard', remember: true }, {
       ...saved.value,
       settings: () => current,
       remember: async () => { current = settings({ standardMode: 'as_written', levelChosen: true, revision: 3 }); return { ok: true }; },
@@ -313,7 +309,7 @@ describe('Ask anonymously', () => {
   test('the caller\'s cancellation stops the ask before dispatch with nothing sent: before the writer, after it, and at authorization (Codex review of PR #215)', async () => {
     const gone = AbortSignal.abort();
     const before = deps(settings({ standardMode: 'as_written', levelChosen: true }));
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: gone }, before.value)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
+    expect(await askAnonymously({ question: 'What is a deposit?', signal: gone }, before.value)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
     expect(before.calls.prepare).toEqual([]);
     expect(before.calls.send).toEqual([]);
     // Cancelled while the writer runs: the writer sees the signal, nothing is sent.
@@ -324,7 +320,7 @@ describe('Ask anonymously', () => {
       ...during.value,
       prepare: async (_input, _writer, _level, signal) => { seen.push(signal); controller.abort(); return { kind: 'questions', questions: ['How long do deposits take?'], promptTokens: 1, ms: 1 }; },
     };
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: controller.signal }, value)).toMatchObject({ ok: false, code: 'cancelled' });
+    expect(await askAnonymously({ question: 'What is a deposit?', signal: controller.signal }, value)).toMatchObject({ ok: false, code: 'cancelled' });
     expect(seen).toEqual([controller.signal]);
     expect(during.calls.send).toEqual([]);
     // Cancelled between the gate and dispatch: authorization refuses, nothing reserved; the signal reaches the transport.
@@ -340,14 +336,14 @@ describe('Ask anonymously', () => {
         return reply('never');
       },
     };
-    expect(await askAnonymously({ question: 'What is a deposit?', origin: 'agent', signal: late.signal }, sendValue)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
+    expect(await askAnonymously({ question: 'What is a deposit?', signal: late.signal }, sendValue)).toEqual({ ok: false, code: 'cancelled', message: CONSULT_ASK_MESSAGES.cancelled });
     expect(atSend.calls.send).toEqual([]);
   });
 
   test('a question within the character bound but over the transport\'s 8 KiB is refused as too long, not as a secret (Codex review of PR #215)', async () => {
     const d = deps(settings({ standardMode: 'as_written', levelChosen: true }));
     const cjk = '預'.repeat(3_000);
-    expect(await askAnonymously({ question: cjk, origin: 'agent' }, d.value)).toMatchObject({ ok: false, code: 'question_too_long', message: CONSULT_ASK_MESSAGES.tooManyBytes });
+    expect(await askAnonymously({ question: cjk }, d.value)).toMatchObject({ ok: false, code: 'question_too_long', message: CONSULT_ASK_MESSAGES.tooManyBytes });
     expect(d.calls.send).toEqual([]);
   });
 });

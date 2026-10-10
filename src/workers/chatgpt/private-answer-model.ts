@@ -348,7 +348,6 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
           audit: limits.audit,
           evidenceFormat: 'compact',
-          ...(request?.consult ? { consultMetadata: true } : {}),
           ...(observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {}),
           ...(signal ? { signal } : {}),
         });
@@ -386,8 +385,6 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       }
       const unanswered = [...result.unanswered];
       if (unreadable > 0) unanswered.push(unreadableNote(unreadable));
-      // The consult snapshot (verdict and the fitted pack) rides along for
-      // the jobs engine; it is never part of what the panel decrypts.
       const answerText = withoutEvidenceMarkers(result.answer);
       // Versions are judged with the search-time text the selection grouped
       // them by, over the items read and their other versions that passed the
@@ -398,7 +395,6 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         answer: versionNote ? `${answerText} ${versionNote}` : answerText,
         citations,
         unanswered,
-        ...(result.consult ? { consult: { verdict: result.consult.verdict, pack: result.consult.pack } } : {}),
       };
     },
     async reset() {

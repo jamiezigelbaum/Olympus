@@ -361,6 +361,43 @@ export interface ZkapiConsultTransportOptions {
   clock?: () => number;
 }
 
+/**
+ * The transport options of the configured zkAPI consult route: exactly one
+ * sovereignty model profile with `provider: 'zkapi'` and its settings, with
+ * the daemon's inference key resolved from the profile's secret reference.
+ * Undefined when there is no such route (or more than one): no question is
+ * sent.
+ */
+export function resolveZkapiConsultTransport(
+  profiles: Readonly<Record<string, { provider: string; baseUrl?: string; secretRef?: string; model?: string; zkapi?: ZkapiConsultSettings }>>,
+  resolveSecret: (secretRef: string | undefined) => string | undefined,
+  extra: Pick<ZkapiConsultTransportOptions, 'env' | 'statePath'> & {
+    /**
+     * The zkAPI model for this question (consult-ask.ts: the one set for the
+     * caller's hosting provider, or a one-off). Unset: the route's own model.
+     */
+    readonly model?: string;
+  } = {},
+): ZkapiConsultTransportOptions | undefined {
+  const routes = Object.values(profiles).filter((profile) => profile.provider === 'zkapi' && profile.zkapi && profile.baseUrl);
+  if (routes.length !== 1) return undefined;
+  const route = routes[0]!;
+  let apiKey: string | undefined;
+  try {
+    apiKey = resolveSecret(route.secretRef);
+  } catch {
+    apiKey = undefined;
+  }
+  return {
+    baseUrl: route.baseUrl!,
+    model: extra.model ?? route.model ?? '',
+    ...(apiKey ? { apiKey } : {}),
+    settings: route.zkapi!,
+    ...(extra.env ? { env: extra.env } : {}),
+    ...(extra.statePath ? { statePath: extra.statePath } : {}),
+  };
+}
+
 export interface ZkapiMoneyStatus {
   acknowledgements: { complete: boolean; accepted: number; required: number };
   /** Estimated from the owner-confirmed funding date; the real expiry is on-chain. */

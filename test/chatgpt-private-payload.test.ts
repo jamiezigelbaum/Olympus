@@ -1,24 +1,17 @@
-// The panel payload contract (design docs/design/frontier-consult-lane.md
-// §A.5.1, eval B2): one set of limits, a total serializer and an exact-size
-// padder. Every field filled to its limit with multilingual text, quotes,
+// The panel payload contract: one set of limits and a total serializer.
+// Every field filled to its limit with multilingual text, quotes,
 // backslashes, lone surrogates and maximum URLs serializes inside its byte
-// budget and pads to exactly 36,864 bytes; anything larger is rejected,
-// never grown and never cut into invalid JSON.
+// budget, and malformed input never throws.
 
 import { describe, expect, test } from 'bun:test';
-import type { PrivateAnswerCitation, PrivateAnswerEnvelopeV1 } from '../src/workers/chatgpt/private-answer-contract.ts';
+import type { PrivateAnswerCitation, PrivateAnswerPlaintextV1 } from '../src/workers/chatgpt/private-answer-contract.ts';
 import {
   PRIVATE_ANSWER_BYTE_BUDGETS as BUDGETS,
-  PRIVATE_ANSWER_ENVELOPE_BYTES,
   PRIVATE_ANSWER_PAYLOAD_LIMITS as LIMITS,
-  PrivateAnswerEnvelopeOverflowError,
-  boundOutsideText,
   cleanTextField,
   fitJsonString,
   httpsUrl,
-  padPrivateAnswerEnvelope,
   preparePrivateAnswer,
-  serializePrivateAnswerEnvelope,
   serializePrivateAnswerPlaintext,
   utf8Bytes,
 } from '../src/workers/chatgpt/private-answer-payload.ts';
@@ -51,30 +44,21 @@ function maxCitations(): PrivateAnswerCitation[] {
   }));
 }
 
-function maxEnvelope(outsideState: PrivateAnswerEnvelopeV1['outside']['state'] = 'appended'): PrivateAnswerEnvelopeV1 {
+function maxPlaintext(): PrivateAnswerPlaintextV1 {
   return {
     v: 1,
-    rev: Number.MAX_SAFE_INTEGER,
-    state: 'answer',
     answer: heavy(LIMITS.answerUnits),
     citations: maxCitations(),
     unanswered: Array.from({ length: LIMITS.gaps }, (_, index) => heavy(LIMITS.gapUnits, index + 7)),
-    followSeconds: 1_200,
-    outside: {
-      state: outsideState,
-      text: Array.from({ length: 60 }, (_, index) => heavy(400, index)).join('\n'),
-      question: heavy(2_000, 2),
-      route: heavy(200, 1),
-    },
   };
 }
 
+/** The most a serialized plaintext can be: every part at its budget, plus 512 bytes of keys and punctuation. */
+const PLAINTEXT_MAX_BYTES = BUDGETS.answer + LIMITS.citations * BUDGETS.citation + LIMITS.gaps * BUDGETS.gap + 512;
+
 describe('the limits', () => {
-  test('the byte budgets sum to the design total, inside the envelope', () => {
-    expect(BUDGETS.answer + LIMITS.citations * BUDGETS.citation + LIMITS.gaps * BUDGETS.gap + BUDGETS.outside + BUDGETS.scalars).toBe(BUDGETS.total);
-    expect(BUDGETS.total).toBe(35_328);
-    expect(PRIVATE_ANSWER_ENVELOPE_BYTES).toBe(36_864);
-    expect(BUDGETS.total).toBeLessThan(PRIVATE_ANSWER_ENVELOPE_BYTES);
+  test('the limits and the byte budgets', () => {
+    expect(BUDGETS).toEqual({ answer: 8_192, citation: 4_096, gap: 1_024 });
     expect(LIMITS).toMatchObject({ answerUnits: 2_700, citations: 4, citationTextUnits: 300, dateUnits: 32, urlChars: 2_048, openTokenChars: 43, gaps: 4, gapUnits: 300 });
   });
 
@@ -153,121 +137,49 @@ describe('fitJsonString: a total cut inside a byte budget', () => {
   });
 });
 
-describe('the outside text policy', () => {
-  test('line endings, blank-line runs, 240-character lines, 40 lines, 4,096 bytes with the mark inside', () => {
-    const long = 'x'.repeat(300);
-    const bounded = boundOutsideText(`\r\n\r\nfirst\r\n\n\n\nsecond\u202e\u0000\r${long}\n${Array.from({ length: 60 }, (_, index) => `line ${index}`).join('\n')}\n\n`);
-    const lines = bounded.text.split('\n');
-    expect(lines[0]).toBe('first');
-    expect(lines[1]).toBe('');
-    expect(lines[2]).toBe('second');
-    expect(lines[3]).toBe(`${'x'.repeat(239)}…`);
-    expect(lines).toHaveLength(LIMITS.outsideLines);
-    expect(bounded.cut).toBe(true);
-    const tidy = boundOutsideText('one\n\ntwo');
-    expect(tidy).toEqual({ text: 'one\n\ntwo', cut: false });
-    const big = boundOutsideText(Array.from({ length: 40 }, () => '日本語'.repeat(80)).join('\n'));
-    expect(bytes(big.text)).toBeLessThanOrEqual(LIMITS.outsideTextBytes);
-    expect(big.text.endsWith('…')).toBe(true);
-    expect(big.cut).toBe(true);
-    expect(boundOutsideText(42)).toEqual({ text: '', cut: false });
-    expect(boundOutsideText('\n'.repeat(5_000))).toEqual({ text: '', cut: false });
-  });
-});
-
 describe('the serializer', () => {
-  test('every field at its limit stays inside its budget and the total', () => {
-    const json = serializePrivateAnswerEnvelope(maxEnvelope());
-    const parsed = JSON.parse(json) as Record<string, unknown> & { citations: PrivateAnswerCitation[]; unanswered: string[]; outside: Record<string, unknown> };
+  test('every field at its limit stays inside its budget, in the contract\'s key order', () => {
+    const json = serializePrivateAnswerPlaintext(maxPlaintext());
+    const parsed = JSON.parse(json) as Record<string, unknown> & { citations: PrivateAnswerCitation[]; unanswered: string[] };
+    expect(Object.keys(parsed)).toEqual(['v', 'answer', 'citations', 'unanswered']);
     expect(bytes(parsed.answer)).toBeLessThanOrEqual(BUDGETS.answer);
     expect(parsed.citations).toHaveLength(LIMITS.citations);
     for (const citation of parsed.citations) expect(bytes(citation)).toBeLessThanOrEqual(BUDGETS.citation);
     expect(parsed.unanswered).toHaveLength(LIMITS.gaps);
     for (const gap of parsed.unanswered) expect(bytes(gap)).toBeLessThanOrEqual(BUDGETS.gap);
-    expect(bytes(parsed.outside)).toBeLessThanOrEqual(BUDGETS.outside);
-    const scalars = bytes({ v: parsed.v, rev: parsed.rev, state: parsed.state, followSeconds: parsed.followSeconds }) + '"answer":,"citations":,"unanswered":,"outside":,'.length;
-    expect(scalars).toBeLessThanOrEqual(BUDGETS.scalars);
-    expect(utf8Bytes(json)).toBeLessThanOrEqual(BUDGETS.total);
-    expect(Object.keys(parsed)).toEqual(['v', 'rev', 'state', 'answer', 'citations', 'unanswered', 'followSeconds', 'outside']);
-    expect(parsed.outside).toMatchObject({ state: 'appended', cut: true });
-    // Heavy text meets the byte cap before the line cap.
-    expect(String(parsed.outside.text).split('\n').length).toBeLessThanOrEqual(LIMITS.outsideLines);
-    expect(bytes(parsed.outside.text)).toBeLessThanOrEqual(LIMITS.outsideTextBytes);
-    expect(bytes(parsed.outside.question)).toBeLessThanOrEqual(LIMITS.outsideQuestionBytes);
-    expect(bytes(parsed.outside.route)).toBeLessThanOrEqual(LIMITS.outsideRouteBytes);
+    expect(utf8Bytes(json)).toBeLessThanOrEqual(PLAINTEXT_MAX_BYTES);
     // The maximum URL and the token survive whole.
     expect((parsed.citations[0]!.open as { url: string }).url).toHaveLength(LIMITS.urlChars);
     expect(parsed.citations[1]!.open).toEqual({ kind: 'mac', token: TOKEN });
   });
 
-  test('the fill test: every field at its budget pads to exactly 36,864 bytes, for every outside state', () => {
-    for (const state of ['idle', 'pending', 'appended', 'paused'] as const) {
-      const padded = padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope(maxEnvelope(state)));
-      expect(utf8Bytes(padded)).toBe(PRIVATE_ANSWER_ENVELOPE_BYTES);
-      const parsed = JSON.parse(padded) as PrivateAnswerEnvelopeV1;
-      expect(parsed.outside.state).toBe(state);
-      if (state !== 'appended') expect(parsed.outside).toEqual({ state });
-    }
-    const withdrawn = padPrivateAnswerEnvelope(serializePrivateAnswerEnvelope({ v: 1, rev: 3, state: 'withdrawn', followSeconds: 0, outside: { state: 'idle' } }));
-    expect(utf8Bytes(withdrawn)).toBe(PRIVATE_ANSWER_ENVELOPE_BYTES);
-    expect(JSON.parse(withdrawn)).toEqual({ v: 1, rev: 3, state: 'withdrawn', followSeconds: 0, outside: { state: 'idle' } });
-  });
-
-  test('a withdrawn envelope carries no answer, no citations and no gaps whatever it is given', () => {
-    const json = serializePrivateAnswerEnvelope({ ...maxEnvelope(), state: 'withdrawn' });
-    const parsed = JSON.parse(json) as PrivateAnswerEnvelopeV1;
-    expect(Object.keys(parsed)).toEqual(['v', 'rev', 'state', 'followSeconds', 'outside']);
-    expect(parsed).toMatchObject({ v: 1, rev: Number.MAX_SAFE_INTEGER, state: 'withdrawn', followSeconds: 1_200, outside: { state: 'appended' } });
-    expect(json).not.toContain('"answer"');
-    expect(json).not.toContain('"citations"');
-  });
-
   test('the heaviest citation the limits allow fits its budget whole (3 bytes per unit is JSON\'s worst case after stripping)', () => {
-    const json = serializePrivateAnswerEnvelope({
-      v: 1, rev: 1, state: 'answer', answer: 'a', followSeconds: 1,
+    const json = serializePrivateAnswerPlaintext({
+      v: 1, answer: 'a',
       citations: [{ title: '日'.repeat(300), source: '本'.repeat(300), date: '語'.repeat(32), open: { kind: 'web', url: LONG_URL.slice(0, 2_048) } }],
-      outside: { state: 'idle' },
     });
-    const citation = (JSON.parse(json) as PrivateAnswerEnvelopeV1).citations![0]!;
+    const citation = (JSON.parse(json) as PrivateAnswerPlaintextV1).citations[0]!;
     expect(bytes(citation)).toBeLessThanOrEqual(BUDGETS.citation);
     expect(citation).toEqual({ title: '日'.repeat(300), source: '本'.repeat(300), date: '語'.repeat(32), open: { kind: 'web', url: LONG_URL.slice(0, 2_048) } });
   });
 
-  test('today\'s plaintext serializes under the same limits, with its key order', () => {
+  test('over-long lists and text are cut to the limits; a small plaintext is unchanged', () => {
     const json = serializePrivateAnswerPlaintext({ v: 1, answer: heavy(5_000), citations: maxCitations().concat(maxCitations()), unanswered: Array.from({ length: 9 }, () => heavy(500)) });
-    const parsed = JSON.parse(json) as PrivateAnswerEnvelopeV1;
+    const parsed = JSON.parse(json) as PrivateAnswerPlaintextV1;
     expect(Object.keys(parsed)).toEqual(['v', 'answer', 'citations', 'unanswered']);
-    expect(parsed.answer!.length).toBeLessThanOrEqual(LIMITS.answerUnits);
+    expect(parsed.answer.length).toBeLessThanOrEqual(LIMITS.answerUnits);
     expect(parsed.citations).toHaveLength(LIMITS.citations);
     expect(parsed.unanswered).toHaveLength(LIMITS.gaps);
-    expect(utf8Bytes(json)).toBeLessThanOrEqual(BUDGETS.total - BUDGETS.outside);
+    expect(utf8Bytes(json)).toBeLessThanOrEqual(PLAINTEXT_MAX_BYTES);
     expect(serializePrivateAnswerPlaintext({ v: 1, answer: 'x', citations: [] })).toBe('{"v":1,"answer":"x","citations":[]}');
   });
 
   test('malformed fields never throw: the serializer is total', () => {
-    const json = serializePrivateAnswerEnvelope({
-      v: 1, rev: -1, state: 'answer', answer: 42 as unknown as string, citations: [null, 7, { open: { kind: 'web', url: 'ftp://x' } }, { open: { kind: 'mac', token: 'short' } }] as unknown as PrivateAnswerCitation[],
-      unanswered: [null, '', 9] as unknown as string[], followSeconds: Number.NaN, outside: { state: 'bogus' as never, text: 7 as never },
+    const json = serializePrivateAnswerPlaintext({
+      v: 1, answer: 42 as unknown as string, citations: [null, 7, { open: { kind: 'web', url: 'ftp://x' } }, { open: { kind: 'mac', token: 'short' } }] as unknown as PrivateAnswerCitation[],
+      unanswered: [null, '', 9] as unknown as string[],
     });
-    expect(JSON.parse(json)).toEqual({ v: 1, rev: 0, state: 'answer', answer: '', citations: [], followSeconds: 0, outside: { state: 'idle' } });
+    expect(JSON.parse(json)).toEqual({ v: 1, answer: '', citations: [] });
   });
 });
 
-describe('the padder', () => {
-  test('pads with spaces to exactly 36,864 bytes; JSON reads the same value', () => {
-    const padded = padPrivateAnswerEnvelope('{"a":"é"}');
-    expect(utf8Bytes(padded)).toBe(PRIVATE_ANSWER_ENVELOPE_BYTES);
-    expect(padded.startsWith('{"a":"é"}')).toBe(true);
-    expect(JSON.parse(padded)).toEqual({ a: 'é' });
-    expect(utf8Bytes(padPrivateAnswerEnvelope('x'.repeat(PRIVATE_ANSWER_ENVELOPE_BYTES)))).toBe(PRIVATE_ANSWER_ENVELOPE_BYTES);
-  });
-
-  test('a plaintext over the envelope is rejected, never grown or cut', () => {
-    const over = `{"a":"${'x'.repeat(PRIVATE_ANSWER_ENVELOPE_BYTES)}"}`;
-    expect(() => padPrivateAnswerEnvelope(over)).toThrow(PrivateAnswerEnvelopeOverflowError);
-    expect(() => padPrivateAnswerEnvelope('x'.repeat(PRIVATE_ANSWER_ENVELOPE_BYTES + 1))).toThrow(/exceeds the 36864-byte envelope/);
-    // Bytes, not characters: 3-byte characters count three times.
-    expect(() => padPrivateAnswerEnvelope('日'.repeat(12_289))).toThrow(PrivateAnswerEnvelopeOverflowError);
-    expect(utf8Bytes(padPrivateAnswerEnvelope('日'.repeat(12_288)))).toBe(PRIVATE_ANSWER_ENVELOPE_BYTES);
-  });
-});
