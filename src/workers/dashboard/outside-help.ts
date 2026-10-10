@@ -35,8 +35,8 @@ export type DashboardOutsideHelpStandardMode = 'as_written' | 'light_cleanup' | 
 
 /** One word for the card's state line. */
 export interface DashboardOutsideHelpSummary {
-  /** `needs_acceptance`: on, but paused until the current statements are accepted. */
-  readonly state: 'off' | 'on' | 'invalid' | 'route_not_configured' | 'fence_held' | 'needs_acceptance';
+  /** `needs_acceptance`: on, but paused until the current statements are accepted. `blocked`: on, but another problem stops a question. */
+  readonly state: 'off' | 'on' | 'invalid' | 'route_not_configured' | 'fence_held' | 'needs_acceptance' | 'blocked';
 }
 
 export interface DashboardOutsideHelpLanguage {
@@ -173,8 +173,13 @@ export function outsideHelpStateLine(summary: DashboardOutsideHelpSummary): stri
 export function summaryOf(status: DashboardOutsideHelpStatus): DashboardOutsideHelpSummary {
   if (status.settings.state === 'invalid') return { state: 'invalid' };
   if (status.route.state === 'not_configured') return { state: 'route_not_configured' };
-  if (status.route.state === 'configured' && status.route.readiness && status.route.readiness.fences.length > 0) return { state: 'fence_held' };
-  if (status.settings.state === 'on' && status.route.state === 'configured' && !status.route.acknowledgements.complete) return { state: 'needs_acceptance' };
+  const readiness = status.route.readiness;
+  if (readiness && readiness.fences.length > 0) return { state: 'fence_held' };
+  if (status.settings.state === 'on' && !status.route.acknowledgements.complete) return { state: 'needs_acceptance' };
+  // On, but something else stops a question: said as paused, the fix below.
+  if (status.settings.state === 'on' && (status.route.readinessUnavailable || (readiness && readiness.blockers.some((code) => code !== 'acknowledgements_incomplete')))) {
+    return { state: 'blocked' };
+  }
   return { state: status.settings.state };
 }
 
@@ -203,87 +208,73 @@ function shortDate(iso: string): string {
   return match && month ? `${Number(match[3])} ${month}` : iso;
 }
 
+/** "2026-10-10T17:09:07Z" → "10 Oct 17:09". */
+function shortTime(iso: string): string {
+  return `${shortDate(iso.slice(0, 10))} ${iso.slice(11, 16)}`.trim();
+}
+
 type ConfiguredRoute = Extract<DashboardOutsideHelpRoute, { state: 'configured' }>;
 
-/** Blockers the Balance and limits section fixes: it opens when one is present. */
-const LIMIT_BLOCKERS: ReadonlySet<string> = new Set(['funding_date_missing', 'funding_date_invalid', 'note_expired', 'daily_cap_reached', 'spend_cap_reached']);
+/** Blockers whose fix is the daily limits: one line, one "No daily limit". */
+const CAP_BLOCKERS: ReadonlySet<string> = new Set(['daily_cap_reached', 'spend_cap_reached']);
+/** Blockers fixed under Balance and limits (the funding date). */
+const FUNDING_BLOCKERS: ReadonlySet<string> = new Set(['funding_date_missing', 'funding_date_invalid']);
 /** Blockers the setup steps fix. */
-const SETUP_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'daemon_version_unsupported', 'tor_not_found', 'daemon_api_key_missing', 'key_reuse_on']);
+const SETUP_BLOCKERS: ReadonlySet<string> = new Set(['daemon_not_found', 'daemon_version_unsupported', 'tor_not_found', 'daemon_api_key_missing', 'key_reuse_on', 'note_expired']);
 
 /**
  * The card body. `csrfToken` present means the reader holds the controls;
  * without it the card is read-only text (the worker also refuses every write
  * without the control session, so this is presentation, not the boundary).
  *
- * Layout (owner redesign, 2026-10-07): one status block (the switch, route
- * health in one line, today's usage), one list of problems each with its fix,
- * three short lines before turning on with the full statements behind a
- * disclosure, the acknowledgements collapsed once accepted, and the secondary
- * sections (languages, balance and limits, a held request, setup, details)
- * collapsed unless they need attention.
+ * Layout (owner, 2026-10-10: "way too complicated"): one status line with the
+ * switch and today's count; the problems, one line and one button each; the
+ * statements in full only until they are accepted; everything else one line
+ * each, collapsed, showing its current value. Nothing is asked from this page.
  */
 export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input: { csrfToken?: string; localSession?: boolean; basePath?: string }): string {
   const summary = summaryOf(status);
   // Controls only for a local-grade session: a bearer-grade session (the
   // launch flow, or a bearer mint) reads the card and is offered the local
   // unlock, which the worker's HTTP boundary grants to a loopback browser
-  // presenting no bearer.
+  // presenting no bearer. Until then the unlock is the card's only control.
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
-  const blockers = route.state === 'configured' && route.readiness ? route.readiness.blockers : [];
+  const on = status.settings.state === 'on';
   const parts: string[] = [];
   parts.push(`<h2 class="ptitle">${escapeHtml(W.title)}</h2>`);
-  parts.push(`<p class="ohlabel">${escapeHtml(W.experimental)}</p>`);
-  parts.push(`<p class="pintro">${escapeHtml(W.intro)}</p>`);
-  parts.push(`<p class="pnote" data-outside-privacy>${escapeHtml(W.privacy)}</p>`);
-  if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
   if (canUnlock) {
-    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml(W.unlockIntro)}</p>`
-      + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button></div>`
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>`
+      + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`
       + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
 
-  // 1. The status block: the switch, the route in one line, today's usage.
-  parts.push(renderStatusBlock(status, summary, canEdit));
+  // 1. One status line: the switch, and today's count.
+  const access: Access = canEdit ? 'edit' : canUnlock ? 'unlock' : 'read';
+  parts.push(renderStatusBlock(status, summary, access));
+  if (status.restartPending) parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(W.restartPending)}</p>`);
 
-  // 1b. What zkAPI may send: the two levels, and how Standard prepares a question.
-  parts.push(renderLevel(status, canEdit));
-  if (status.standard) parts.push(renderStandard(status.standard, status.settings.state === 'invalid' ? false : canEdit));
-  if (status.writer?.modelProblem) parts.push(`<p class="pnote ohwarn" data-outside-model-problem>${escapeHtml(status.writer.modelProblem.message)}</p>`);
+  // 2. Problems: one line each, one button each.
+  parts.push(renderProblems(status, access));
 
-  // 2. Problems, one list, each line with its fix.
-  parts.push(renderProblems(status, canEdit));
+  // 3. The statements, in full only until accepted.
+  if (route.state === 'configured' && !route.acknowledgements.complete) parts.push(renderStatementsToAccept(access));
 
-  // 3. The disclosure (design §A.10: up front) while outside help is off:
-  // two short lines, the rest one click away. Once it is on, the same
-  // content moves into its own collapsed section below.
-  const shortList = `<ul class="ohshort" data-outside-disclosure>${W.disclosureShort.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
-  const fullList = `<ul class="ohlist">${W.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
-  const on = status.settings.state === 'on';
-  if (!on) {
-    parts.push(`<div class="sect">${escapeHtml(W.disclosureTitle)}</div>${shortList}`
-      + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml(W.disclosureMore)}</summary>${fullList}</details>`);
-  }
-
-  // 4. The statements: one line once accepted; otherwise, while Strict is
-  // chosen, here with one Accept (with Standard chosen they sit inside
-  // What may zkAPI send?, beside the choice that needs them).
-  if (route.state === 'configured') parts.push(renderAcknowledgements(route, status.settings.level, canEdit));
-
-  // 5. Secondary sections, collapsed unless they need attention.
+  // 4. Everything else: one line each with its current value, collapsed.
   const more: string[] = [];
-  if (route.state === 'configured' && route.readiness && route.readiness.fences.length > 0) more.push(renderFence(route.readiness, canEdit));
+  if (!on) more.push(renderBeforeTurningOn());
+  more.push(renderLevel(status, canEdit));
+  if (status.standard) more.push(renderStandard(status.standard, status.settings.level, status.settings.state === 'invalid' ? false : canEdit));
   if (status.writer) more.push(renderWriter(status.writer, canEdit));
   more.push(renderLanguages(status, canEdit));
-  if (route.state === 'configured') more.push(renderLimits(route, blockers, canEdit));
+  if (route.state === 'configured') more.push(renderLimits(route, canEdit));
+  if (route.state === 'configured' && route.acknowledgements.complete) more.push(renderAccepted());
   more.push(renderSetupSteps(
     route.state === 'configured' ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`,
-    route.state === 'not_configured' || blockers.some((code) => SETUP_BLOCKERS.has(code)) || outsideHelpToolsNeedAttention(status.tools),
     renderOutsideHelpTools(status.tools, { canEdit }),
   ));
-  if (route.state === 'configured') more.push(renderDetails(route));
-  if (on) more.push(renderSection({ id: 'disclosure', title: W.disclosureMore, summary: '', open: false, body: `<div data-outside-disclosure-more>${shortList}${fullList}</div>` }));
+  more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join('')}</div>`);
 
   const config = {
@@ -297,8 +288,6 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
       restarting: W.restarting,
       on: W.state.on,
       off: W.state.off,
-      levelSave: W.levelSave,
-      levelAcceptSave: W.levelAcceptSave,
     },
     writerPollMs: OUTSIDE_HELP_WRITER_POLL_MS,
   };
@@ -307,8 +296,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
 }
 
-function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: DashboardOutsideHelpSummary, canEdit: boolean): string {
-  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
+function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: DashboardOutsideHelpSummary, access: Access): string {
   const route = status.route;
   const on = status.settings.state === 'on';
   const invalid = status.settings.state === 'invalid';
@@ -317,55 +305,174 @@ function renderStatusBlock(status: DashboardOutsideHelpStatus, summary: Dashboar
     : route.state === 'not_configured'
       ? W.enableBlockedRoute
       : !route.acknowledgements.complete ? W.enableBlockedAcks : undefined;
-  const button = invalid
-    ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml(W.replaceFile)}</button>`
-    : on
-      ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml(W.turnOff)}</button>`
-      : blockedReason
-        ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml(W.turnOn)}</button><span class="hint">${escapeHtml(blockedReason)}</span></span>`
-        : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml(W.turnOn)}</button>`;
+  // Locked: the switch's first click unlocks; read-only: no switch at all.
+  const button = access === 'read'
+    ? ''
+    : access === 'unlock'
+      ? unlockFirst(invalid ? W.replaceFile : on ? W.turnOff : W.turnOn, !on)
+      : invalid
+      ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml(W.replaceFile)}</button>`
+      : on
+        ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml(W.turnOff)}</button>`
+        : blockedReason
+          ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml(W.turnOn)}</button><span class="hint">${escapeHtml(blockedReason)}</span></span>`
+          : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml(W.turnOn)}</button>`;
   const tone = summary.state === 'on' ? 'on' : summary.state === 'off' ? 'off' : 'attn';
-  const head = `<div class="ohhead"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>`
+  const usage = route.state === 'configured' && route.readiness ? usageLine(route.readiness) : '';
+  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>`
     + `<span data-outside-state-text data-outside-state="${escapeHtml(summary.state)}">${escapeHtml(outsideHelpStateLine(summary))}</span></p>`
-    + `<div class="pbuttons">${button}</div></div>`;
-  const lines: string[] = [renderRouteLine(route)];
-  if (route.state === 'configured' && route.readiness) lines.push(`<p class="ohline" data-outside-usage>${escapeHtml(usageLine(route.readiness))}</p>`);
+    + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml(usage)}</p>` : '')
+    // Tor off is said where the reader looks first: the provider sees the address.
+    + (route.state === 'configured' && route.readiness?.torMode === 'off' ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml(W.addressVisible)}</p>` : '')
+    + `</div>${button ? `<div class="pbuttons">${button}</div>` : ''}</div>`;
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? 'on' : 'off'}" data-outside-invalid="${invalid ? 'yes' : 'no'}">`
-    + head + lines.join('')
-    + `<p class="ohsmall" data-outside-cost>${escapeHtml(W.costLine)}</p>`
-    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+    + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+
+/** "4 questions today, counted as up to $12 · balance until about 31 Oct". */
+function usageLine(ready: DashboardOutsideHelpReadiness): string {
+  const count = ready.requestsToday.count;
+  // The ledger records each question's hold (its model's allowance), never
+  // the settled price, so the day's figure is what counts against limits,
+  // never money spent.
+  const today = count === 0
+    ? W.usageNone
+    : `${count === 1 ? W.usageOne : fill(W.usageMany, { n: String(count) })} ${fill(W.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}`;
+  const expiry = ready.expiry.state === 'active' && ready.expiry.expiryDate
+    ? fill(W.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? '') })
+    : ready.expiry.state === 'expired' ? W.usageExpired : undefined;
+  return expiry ? `${today} · ${expiry}` : today;
 }
 
 /**
- * "What may zkAPI send?": Standard (recommended, the default) and Strict,
- * saved through the same local-grade, CSRF-protected settings route as the
- * switch (the worker re-checks every rule). Both are always selectable.
- * While the current statements are not accepted, choosing Standard shows
- * them right here with one "Accept and save": the level is saved, then the
- * statements are recorded. Saving a level alone is never refused for them;
- * nothing is sent until they are accepted, and the card says so.
+ * One problem line: the words, and the one button that fixes it. `kind`
+ * picks the button: a post (a form route), opening the section that holds the
+ * fix, or checking again (a reload: readiness runs on every read).
  */
-function renderLevel(status: DashboardOutsideHelpStatus, canEdit: boolean): string {
-  const invalid = status.settings.state === 'invalid';
-  const route = status.route;
-  const needsAcceptance = route.state === 'configured' && !route.acknowledgements.complete;
-  const current = status.settings.level;
-  const blocked = !canEdit || invalid ? ' disabled aria-disabled="true"' : '';
-  const options = (['unnamed', 'general'] as const).map((level) => {
-    const copy = W.levels[level];
-    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? ' checked' : ''}${blocked}>`
-      + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
-  }).join('');
-  const accepting = needsAcceptance && current === 'unnamed';
-  const acceptBlock = needsAcceptance
-    ? `<div class="ohaccept" data-outside-level-acks${accepting ? '' : ' hidden'}>`
-      + `<p class="pnote">${escapeHtml(W.levelAcceptIntro)}</p>${renderStatements(true)}</div>`
-    : '';
-  return `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml(current)}" data-outside-current="${status.settings.state === 'on' ? 'on' : 'off'}">`
-    + `<div class="sect">${escapeHtml(W.levelTitle)}</div>${options}${acceptBlock}`
-    + `<div class="pbuttons"><button type="submit" class="btn${accepting ? ' primary' : ''}" data-outside-level-save${blocked}>${escapeHtml(accepting ? W.levelAcceptSave : W.levelSave)}</button></div>`
-    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+type ProblemFix =
+  | { readonly kind: 'post'; readonly form: string; readonly label: string; readonly attrs?: string; readonly primary?: boolean }
+  | { readonly kind: 'open'; readonly section: string; readonly label: string; readonly focus?: string }
+  | { readonly kind: 'recheck' };
+
+/**
+ * Locked (a bearer-grade session): a fix that changes something is still
+ * shown, and its first click opens the local session (the card's only
+ * control until then); after the reload the same button does its work.
+ */
+function unlockFirst(label: string, primary = true): string {
+  return `<button type="button" class="btn${primary ? ' primary' : ''}" data-outside-needs-unlock>${escapeHtml(label)}</button>`;
 }
+
+function problemLine(words: string, fix: ProblemFix | undefined, access: Access, input: { attrs?: string; extra?: string } = {}): string {
+  const canEdit = access === 'edit';
+  let action = '';
+  if (fix?.kind === 'post' && access === 'unlock') {
+    action = unlockFirst(fix.label, fix.primary !== false);
+  } else if (fix?.kind === 'post' && canEdit) {
+    action = `<form class="ohform ohinline" data-outside-form="${escapeHtml(fix.form)}"${fix.attrs ?? ''}>`
+      + `<button type="submit" class="btn${fix.primary === false ? '' : ' primary'}">${escapeHtml(fix.label)}</button>`
+      + `${input.extra ?? ''}<span class="actmsg" data-action-message role="status"></span></form>`;
+  } else if (fix?.kind === 'open') {
+    action = `<button type="button" class="btn" data-outside-open="${escapeHtml(fix.section)}"${fix.focus ? ` data-outside-focus="${escapeHtml(fix.focus)}"` : ''}>${escapeHtml(fix.label)}</button>`;
+  } else if (fix?.kind === 'recheck') {
+    action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml(W.checkAgain)}</button>`;
+  }
+  return `<li${input.attrs ?? ''}><span>${escapeHtml(words)}</span>${action}</li>`;
+}
+
+/** What the reader may do: change things, unlock first, or only read. */
+type Access = 'edit' | 'unlock' | 'read';
+
+function renderProblems(status: DashboardOutsideHelpStatus, access: Access): string {
+  const canEdit = access === 'edit';
+  const route = status.route;
+  const items: string[] = [];
+  // Missing programs: one line with the install button (or its progress).
+  const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
+  if (tools) items.push(tools);
+  if (route.state === 'not_configured') {
+    items.push(route.policyWritable
+      ? problemLine(W.routeMissing, { kind: 'post', form: 'add-route', label: W.addRoute, attrs: ` data-outside-confirm="${escapeHtml(W.addRouteConfirm)}"` }, access, { attrs: ' data-outside-route-missing' })
+      : problemLine(W.policyNotFile, { kind: 'open', section: 'steps', label: W.showSteps }, access, { attrs: ' data-outside-route-missing' }));
+  } else if (route.readinessUnavailable || !route.readiness) {
+    items.push(problemLine(W.routeUnknown, { kind: 'recheck' }, access, { attrs: ' data-outside-blocker="readiness_unavailable"' }));
+  } else {
+    const ready = route.readiness;
+    const blockers = ready.blockers;
+    const caps = blockers.filter((code) => CAP_BLOCKERS.has(code));
+    for (const code of blockers) {
+      // The statements block below is its own fix; and both limits share one line.
+      if (code === 'acknowledgements_incomplete') continue;
+      if (CAP_BLOCKERS.has(code) && code !== caps[0]) continue;
+      const attrs = ` data-outside-blocker="${escapeHtml(code)}"`;
+      const tool = TOOL_BLOCKERS.get(code);
+      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
+      // Missing and installable: the parts' own line (above) says it, with its button.
+      if (entry?.source === 'missing') continue;
+      if (entry?.source === 'configured_missing') {
+        items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? '' }), { kind: 'open', section: 'steps', label: W.showSteps }, access, { attrs }));
+        continue;
+      }
+      if (code === 'unresolved_session') {
+        items.push(renderFenceLine(ready, access));
+        continue;
+      }
+      if (code === 'unresolved_session_other_wallet') {
+        items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(
+          fill(W.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }),
+          { kind: 'post', form: 'abandon', label: W.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml(fence.scope)}" data-outside-confirm="${escapeHtml(W.abandonConfirm)}"` },
+          access,
+          { attrs },
+        )));
+        continue;
+      }
+      const words = CAP_BLOCKERS.has(code) && caps.length > 1 ? W.capsReached : outsideHelpBlockerWords(code);
+      const fix: ProblemFix = CAP_BLOCKERS.has(code)
+        ? { kind: 'post', form: 'route', label: W.removeLimits, attrs: ' data-outside-nolimit' }
+        : FUNDING_BLOCKERS.has(code)
+          ? { kind: 'open', section: 'limits', label: W.enterFundingDate, focus: 'funding_date' }
+          : SETUP_BLOCKERS.has(code)
+            ? { kind: 'open', section: 'steps', label: W.showSteps }
+            : { kind: 'recheck' };
+      items.push(problemLine(words, fix, access, { attrs }));
+    }
+  }
+  if (status.writer?.modelProblem) {
+    items.push(problemLine(status.writer.modelProblem.message, { kind: 'open', section: 'writer', label: W.chooseModel, focus: 'chatgpt_frontier_model' }, access, { attrs: ' data-outside-model-problem' }));
+  }
+  if (items.length === 0) return '';
+  return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml(W.problemsTitle)}">${items.join('')}</ul>`;
+}
+
+/**
+ * The held payment of this wallet: one line, Recover. Abandon sits beside it
+ * as a quiet second choice, because a recovery can fail and the owner must
+ * never be left with a problem and no way out.
+ */
+function renderFenceLine(ready: DashboardOutsideHelpReadiness, access: Access): string {
+  const canEdit = access === 'edit';
+  const mine = ready.fences.find((fence) => fence.thisWallet);
+  const words = fill(W.blockers.unresolved_session, { at: mine ? shortTime(mine.at) : '' });
+  if (access === 'unlock') return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml(words)}</span>${unlockFirst(W.recover)}</li>`;
+  const abandon = mine && canEdit
+    ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml(mine.scope)}" data-outside-confirm="${escapeHtml(W.abandonConfirm)}">`
+      + `<button type="submit" class="btn quiet" title="${escapeHtml(W.abandonHint)}">${escapeHtml(W.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>`
+    : '';
+  const recover = canEdit
+    ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml(W.recoverConfirm)}">`
+      + `<button type="submit" class="btn primary" title="${escapeHtml(W.recoverHint)}">${escapeHtml(W.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>`
+    : '';
+  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml(words)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ''}</li>`;
+}
+
+function renderSection(input: { id: string; title: string; summary: string; open?: boolean; body: string }): string {
+  return `<details class="ohsect" id="outside-${escapeHtml(input.id)}" data-outside-section="${escapeHtml(input.id)}"${input.open ? ' open' : ''}>`
+    + `<summary><span class="ohsect-title">${escapeHtml(input.title)}</span><span class="ohsect-sum">${escapeHtml(input.summary)}</span></summary>`
+    + `<div class="ohsect-body">${input.body}</div></details>`;
+}
+
+/** The not-installed blockers the parts' own "To fix" line (outside-help-tools.ts) stands in for. */
+const TOOL_BLOCKERS: ReadonlyMap<string, 'zkapi-clientd' | 'tor'> = new Map([['daemon_not_found', 'zkapi-clientd'], ['tor_not_found', 'tor']]);
 
 /** The current statements as a plain list; with `inputs`, the ids an Accept posts. */
 function renderStatements(inputs: boolean): string {
@@ -373,117 +480,97 @@ function renderStatements(inputs: boolean): string {
     + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml(entry.id)}">`).join('') : '');
 }
 
-function renderRouteLine(route: DashboardOutsideHelpRoute): string {
-  if (route.state === 'not_configured') return `<p class="ohline attn" data-outside-route="not_configured">${escapeHtml(W.routeMissingShort)}</p>`;
-  if (route.readinessUnavailable || !route.readiness) return `<p class="ohline attn" data-outside-route="unknown">${escapeHtml(W.routeUnknown)}</p>`;
-  const ready = route.readiness;
-  if (ready.ready) {
-    // Tor off is said where the reader looks first: the provider sees the address.
-    return ready.torMode === 'off'
-      ? `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReadyNoTor)} <span class="attn">${escapeHtml(W.addressVisible)}</span></p>`
-      : `<p class="ohline good" data-outside-route="ready">${escapeHtml(W.routeReady)}</p>`;
-  }
-  // The statements are said once, where they are accepted (and by the state line), never again here.
-  const others = ready.blockers.filter((code) => code !== 'acknowledgements_incomplete');
-  if (others.length === 0) return `<p class="ohline" data-outside-route="ready_but_statements">${escapeHtml(W.routeReadyButStatements)}</p>`;
-  const first = others[0];
-  const reason = first ? outsideHelpBlockerWords(first) : W.routeUnknown;
-  const more = others.length > 1 ? ` ${fill(W.routeMore, { n: String(others.length - 1) })}` : '';
-  return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml(fill(W.routeNotReady, { reason }))}${escapeHtml(more)}</p>`
-    + (ready.torMode === 'off' ? `<p class="ohline attn">${escapeHtml(W.addressVisible)}</p>` : '');
+/** Not accepted at the current wording: the statements in full, one Accept. */
+function renderStatementsToAccept(access: Access): string {
+  return `<form class="ohform ohaccept" data-outside-form="route" data-outside-accept data-outside-acknowledged="no">`
+    + `<div class="sect">${escapeHtml(W.costTitle)}</div><p class="pnote">${escapeHtml(W.costIntro)}</p>${renderStatements(true)}`
+    + (access === 'edit'
+      ? `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(W.accept)}</button><span class="hint">${escapeHtml(W.saveRestarts)}</span></div>`
+      : access === 'unlock' ? `<div class="pbuttons">${unlockFirst(W.accept)}</div>` : '')
+    + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 
-function usageLine(ready: DashboardOutsideHelpReadiness): string {
-  const count = ready.requestsToday.count;
-  const pieces = [count === 0 ? W.usageNone : count === 1 ? W.usageOne : fill(W.usageMany, { n: String(count) })];
-  // The ledger records each question's hold (its model's allowance), never
-  // the settled price, so the day's figure is what counts against limits,
-  // never money spent.
-  const head = count > 0 ? `${pieces[0]} ${fill(W.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}` : pieces[0]!;
-  pieces.splice(0, 1, head);
-  pieces.push(ready.expiry.state === 'active' && ready.expiry.expiryDate
-    ? fill(W.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? '') })
-    : ready.expiry.state === 'expired' ? W.usageExpired : W.usageExpiryUnknown);
-  return pieces.join(' · ');
+/** Accepted at the current wording: one line, the statements inside. */
+function renderAccepted(): string {
+  return renderSection({
+    id: 'statements',
+    title: W.costTitle,
+    summary: fill(W.acknowledged, { n: String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length) }),
+    body: `<div data-outside-acknowledged="yes">${renderStatements(false)}</div>`,
+  });
 }
 
-function renderProblems(status: DashboardOutsideHelpStatus, canEdit: boolean): string {
+/** Shown only while off: what turning on means, in a few lines. */
+function renderBeforeTurningOn(): string {
+  return renderSection({
+    id: 'before',
+    title: W.disclosureTitle,
+    summary: '',
+    body: `<p class="pnote">${escapeHtml(W.intro)}</p>`
+      + `<ul class="ohshort" data-outside-disclosure>${W.disclosureShort.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`
+      + `<p class="pnote" data-outside-privacy>${escapeHtml(W.privacy)}</p>`
+      + `<p class="pnote" data-outside-cost>${escapeHtml(W.costLine)}</p>`,
+  });
+}
+
+/**
+ * "What may zkAPI send?": Standard (recommended, the default) and Strict,
+ * saved through the same local-grade, CSRF-protected settings route as the
+ * switch (the worker re-checks every rule). Saving a level is never refused
+ * for the statements: nothing is sent until they are accepted.
+ */
+function renderLevel(status: DashboardOutsideHelpStatus, canEdit: boolean): string {
+  const invalid = status.settings.state === 'invalid';
+  const current = status.settings.level;
+  const blocked = !canEdit || invalid ? ' disabled aria-disabled="true"' : '';
+  const options = (['unnamed', 'general'] as const).map((level) => {
+    const copy = W.levels[level];
+    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? ' checked' : ''}${blocked}>`
+      + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
+  }).join('');
+  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml(current)}" data-outside-current="${status.settings.state === 'on' ? 'on' : 'off'}">`
+    + options
+    + (canEdit && !invalid ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml(W.levelSave)}</button></div>` : '')
+    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return renderSection({ id: 'level', title: W.levelTitle, summary: W.levels[current].short, body });
+}
+
+/**
+ * "How your model prepares a question" (Standard, owner decision
+ * 2026-10-10): exactly as written, lightly cleaned (the preset shown in full
+ * and editable: an edited preset is saved as the user's own), or by the
+ * user's own instruction. No built-in content rules.
+ */
+function renderStandard(standard: NonNullable<DashboardOutsideHelpStatus['standard']>, level: ConsultLevel, canEdit: boolean): string {
+  const C = W.standard;
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
-  const route = status.route;
-  const items: string[] = [];
-  if (route.state === 'not_configured') {
-    const action = route.policyWritable
-      ? `<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml(W.addRouteConfirm)}">`
-        + `<button type="submit" class="btn"${disabled}>${escapeHtml(W.addRoute)}</button>`
-        + `<span class="actmsg" data-action-message role="status"></span></form>`
-      : '';
-    items.push(`<li data-outside-route-missing><span>${escapeHtml(route.policyWritable ? W.routeMissing : W.policyNotFile)}</span>${action}</li>`);
-  } else if (route.readinessUnavailable || !route.readiness) {
-    items.push(`<li><span>${escapeHtml(W.routeUnknown)}</span></li>`);
-  } else {
-    for (const code of route.readiness.blockers) {
-      // Said once, beside the statements themselves (inline under Standard, or Cost and risk).
-      if (code === 'acknowledgements_incomplete') continue;
-      const tool = TOOL_BLOCKERS.get(code);
-      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
-      // Missing and installable: the parts' own To fix line (below) says it, with its button.
-      if (entry?.source === 'missing') continue;
-      // A path set in the route: the button cannot fix it, so it is said plainly.
-      const words = entry?.source === 'configured_missing'
-        ? fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? '' })
-        : outsideHelpBlockerWords(code);
-      items.push(`<li${entry ? ` data-outside-blocker="${escapeHtml(code)}"` : ''}><span>${escapeHtml(words)}</span></li>`);
-    }
-  }
-  // Missing programs: one line with the install button (or its progress).
-  const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
-  if (tools) items.unshift(tools);
-  if (items.length === 0) return '';
-  return `<div class="sect attn">${escapeHtml(W.problemsTitle)}</div><ul class="ohfix" data-outside-blockers>${items.join('')}</ul>`;
+  const options = (['as_written', 'light_cleanup', 'custom'] as const).map((mode) => {
+    const copy = C.modes[mode];
+    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? ' checked' : ''}${disabled}>`
+      + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
+  }).join('');
+  const text = standard.mode === 'custom' && standard.instruction !== undefined ? standard.instruction : standard.preset;
+  const body = `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml(standard.mode)}" data-outside-preset="${escapeHtml(standard.preset)}">`
+    + `<p class="pnote">${escapeHtml(C.intro)}</p>${options}`
+    + `<label class="plabel" for="outside-standard-instruction">${escapeHtml(C.instructionLabel)}</label>`
+    + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml(text)}</textarea>`
+    + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml(C.save)}</button></div>` : '')
+    + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const summary = level === 'general' ? fill(C.unusedAtStrict, { mode: C.modes[standard.mode].short }) : C.modes[standard.mode].short;
+  return renderSection({ id: 'standard', title: C.title, summary, body });
 }
 
-function renderSection(input: { id: string; title: string; summary: string; open: boolean; body: string; attn?: boolean }): string {
-  return `<details class="ohsect" data-outside-section="${escapeHtml(input.id)}"${input.open ? ' open' : ''}>`
-    + `<summary><span class="ohsect-title${input.attn ? ' attn' : ''}">${escapeHtml(input.title)}</span><span class="ohsect-sum">${escapeHtml(input.summary)}</span></summary>`
-    + `<div class="ohsect-body">${input.body}</div></details>`;
-}
-
-/** The not-installed blockers the parts' own "To fix" line (outside-help-tools.ts) stands in for. */
-const TOOL_BLOCKERS: ReadonlyMap<string, 'zkapi-clientd' | 'tor'> = new Map([['daemon_not_found', 'zkapi-clientd'], ['tor_not_found', 'tor']]);
-
-function renderSetupSteps(secretRef: string, needed: boolean, tools = ''): string {
+function renderSetupSteps(secretRef: string, tools = ''): string {
   const steps = W.steps.map((step) => fill(step, { secretRef }));
   return renderSection({
     id: 'steps',
     title: W.stepsTitle,
     summary: '',
-    open: needed,
-    attn: needed,
     body: `${tools}<div data-outside-steps><p class="pnote">${escapeHtml(W.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>`,
   });
 }
 
-function renderAcknowledgements(route: ConfiguredRoute, level: ConsultLevel, canEdit: boolean): string {
-  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
-  const n = String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length);
-  if (route.acknowledgements.complete) {
-    // Accepted at the current wording: one line, the statements one click away.
-    return `<div class="sect">${escapeHtml(W.costTitle)}</div>`
-      + `<p class="pnote" data-outside-acknowledged="yes">${escapeHtml(fill(W.acknowledged, { n }))}</p>`
-      + `<details class="howto" data-outside-ack-review><summary>${escapeHtml(W.acknowledgedReview)}</summary>${renderStatements(false)}</details>`;
-  }
-  // Not accepted: with Standard chosen the statements sit in What may zkAPI
-  // send? (one Accept and save); with Strict, here, with one Accept.
-  return `<div data-outside-ack-standalone${level === 'unnamed' ? ' hidden' : ''}>`
-    + `<div class="sect attn">${escapeHtml(W.costTitle)}</div>`
-    + `<p class="pnote" data-outside-acknowledged="no">${escapeHtml(W.costIntro)}</p>`
-    + `<form class="ohform" data-outside-form="route" data-outside-accept>${renderStatements(true)}`
-    + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(W.accept)}</button>`
-    + `<span class="hint">${escapeHtml(W.saveRestarts)}</span></div>`
-    + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
-}
-
-function renderLimits(route: ConfiguredRoute, blockers: readonly string[], canEdit: boolean): string {
+function renderLimits(route: ConfiguredRoute, canEdit: boolean): string {
   const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
   const capped = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
   const limit = capped
@@ -493,18 +580,17 @@ function renderLimits(route: ConfiguredRoute, blockers: readonly string[], canEd
     ].join(', ')
     : W.limitsNone;
   const funded = route.fundingDate ? fill(W.fundedOn, { date: shortDate(route.fundingDate) }) : W.notFunded;
-  const needed = blockers.some((code) => LIMIT_BLOCKERS.has(code));
   // The one-click "no daily limit": clears both caps through the same
   // transactional policy write as Save.
-  const noLimit = capped
+  const noLimit = capped && canEdit
     ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>`
-      + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml(W.removeLimits)}</button><span class="hint">${escapeHtml(W.removeLimitsHint)}</span></div>`
+      + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml(W.removeLimits)}</button><span class="hint">${escapeHtml(W.removeLimitsHint)}</span></div>`
       + `<span class="actmsg" data-action-message role="status"></span></form>`
-    : `<p class="pnote">${escapeHtml(W.noLimitIntro)}</p>`;
+    : '';
   const today = route.readiness && route.readiness.requestsToday.count > 0
     ? `<p class="pnote" data-outside-limits-today>${escapeHtml(fill(W.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>`
     : '';
-  const body = today + noLimit
+  const body = `<p class="pnote" data-outside-cost-line>${escapeHtml(W.costLine)} ${escapeHtml(W.noLimitIntro)}</p>` + today + noLimit
     + `<form class="ohform" data-outside-form="route">`
     + `<label class="plabel" for="outside-funding-date">${escapeHtml(W.fundingDate)}</label>`
     + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml(route.fundingDate ?? '')}"${disabled}>`
@@ -512,25 +598,9 @@ function renderLimits(route: ConfiguredRoute, blockers: readonly string[], canEd
     + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml(String(route.dailyRequestCap)) : ''}"${disabled}>`
     + `<label class="plabel" for="outside-cap-usd">${escapeHtml(W.capUsd)}</label>`
     + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml(String(route.dailySpendCapUsd)) : ''}"${disabled}>`
-    + `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits${disabled}>${escapeHtml(W.saveRoute)}</button><span class="hint">${escapeHtml(W.saveRestarts)}</span></div>`
+    + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml(W.saveRoute)}</button><span class="hint">${escapeHtml(W.saveRestarts)}</span></div>` : '')
     + `<span class="actmsg" data-action-message role="status"></span></form>`;
-  return renderSection({ id: 'limits', title: W.limitsTitle, summary: `${limit} · ${funded}`, open: needed, attn: needed, body });
-}
-
-function renderFence(ready: DashboardOutsideHelpReadiness, canEdit: boolean): string {
-  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
-  const mine = ready.fences.some((fence) => fence.thisWallet);
-  const rows = ready.fences.map((fence) => `<li>${escapeHtml(fill(fence.thisWallet ? W.fenceThis : W.fenceOther, { at: fence.at.slice(0, 16).replace('T', ' ') }))}</li>`).join('');
-  const body = `<p class="pnote ohwarn" data-outside-fence>${escapeHtml(W.fenceIntro)}</p><ul class="ohlist">${rows}</ul>`
-    + `<div class="ohfence">`
-    + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml(W.recoverConfirm)}">`
-    + `<button type="submit" class="btn primary"${mine ? '' : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml(W.recover)}</button>`
-    + `<span class="hint">${escapeHtml(W.recoverHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`
-    + ready.fences.map((fence) => `<form class="ohform" data-outside-form="abandon" data-outside-scope="${escapeHtml(fence.scope)}" data-outside-confirm="${escapeHtml(W.abandonConfirm)}">`
-      + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml(W.abandon)}</button>`
-      + `<span class="hint">${escapeHtml(W.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join('')
-    + `</div>`;
-  return renderSection({ id: 'fence', title: W.fenceTitle, summary: '', open: true, attn: true, body });
+  return renderSection({ id: 'limits', title: W.limitsTitle, summary: `${limit} · ${funded}`, body });
 }
 
 /** How often the page re-reads itself while the writer check runs. */
@@ -583,29 +653,6 @@ function renderWriter(writer: DashboardOutsideHelpWriter, canEdit: boolean): str
   parts.push(renderWriterCheck(writer, canEdit));
   const summary = choice ? choice.model : C.builtInShort;
   return renderSection({ id: 'writer', title: C.title, summary, open: writer.check.state !== 'idle', body: `<div data-outside-writer>${parts.join('')}</div>` });
-}
-
-/**
- * "How should your model prepare a question before it leaves?" (Standard,
- * owner decision 2026-10-10): exactly as written, lightly cleaned (the preset
- * shown in full and editable: an edited preset is saved as the user's own),
- * or by the user's own instruction. No built-in content rules.
- */
-function renderStandard(standard: NonNullable<DashboardOutsideHelpStatus['standard']>, canEdit: boolean): string {
-  const C = W.standard;
-  const disabled = canEdit ? '' : ' disabled aria-disabled="true"';
-  const options = (['as_written', 'light_cleanup', 'custom'] as const).map((mode) => {
-    const copy = C.modes[mode];
-    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? ' checked' : ''}${disabled}>`
-      + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
-  }).join('');
-  const text = standard.mode === 'custom' && standard.instruction !== undefined ? standard.instruction : standard.preset;
-  return `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml(standard.mode)}" data-outside-preset="${escapeHtml(standard.preset)}">`
-    + `<div class="sect">${escapeHtml(C.title)}</div>${options}`
-    + `<label class="plabel" for="outside-standard-instruction">${escapeHtml(C.instructionLabel)}</label>`
-    + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml(text)}</textarea>`
-    + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(C.save)}</button></div>`
-    + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 
 function renderWriterCheck(writer: DashboardOutsideHelpWriter, canEdit: boolean): string {
@@ -677,27 +724,38 @@ function renderLanguages(status: DashboardOutsideHelpStatus, canEdit: boolean): 
   });
 }
 
-function renderDetails(route: ConfiguredRoute): string {
-  if (route.readinessUnavailable || !route.readiness) return '';
-  const ready = route.readiness;
-  const facts = [
-    ready.daemonFound ? fill(W.facts.daemon, { version: ready.daemonVersion ?? W.facts.versionUnknown }) : W.facts.daemonMissing,
-    ready.torMode === 'off' ? W.facts.torOff : ready.torFound ? W.facts.tor : W.facts.torMissing,
-    ready.apiKeyConfigured ? W.facts.key : W.facts.keyMissing,
-    fill(ready.requestsToday.count === 1 ? W.facts.todayOne : W.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
-    ready.expiry.state === 'active' && ready.expiry.expiryDate
-      ? fill(W.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? '') })
-      : ready.expiry.state === 'expired' ? W.facts.expired : W.facts.expiryUnknown,
-    fill(W.routeLabel, { label: ready.routeLabel }),
-    ...(ready.lastSession ? [fill(W.lastSession, { at: ready.lastSession.at.slice(0, 16).replace('T', ' '), result: ready.lastSession.result })] : []),
-  ];
-  return renderSection({
-    id: 'details',
-    title: W.detailsTitle,
-    summary: '',
-    open: false,
-    body: `<ul class="ohfacts" data-outside-facts>${facts.map((fact) => `<li>${escapeHtml(fact)}</li>`).join('')}</ul>`,
-  });
+/**
+ * Details: what anonymous answers are, the fuller cost-and-risk detail
+ * ("Everything to know first"), and the route's technical facts. Never on
+ * first view.
+ */
+function renderDetails(status: DashboardOutsideHelpStatus): string {
+  const route = status.route;
+  // While off, Before you turn this on says what it is; Details does not repeat it.
+  const about = (status.settings.state === 'on'
+    ? `<p class="pnote">${escapeHtml(W.intro)}</p><p class="pnote" data-outside-privacy>${escapeHtml(W.privacy)}</p>`
+    : '')
+    + `<p class="pnote ohsmall">${escapeHtml(W.experimental)}</p>`;
+  const more = `<div class="sect">${escapeHtml(W.disclosureMore)}</div>`
+    + `<ul class="ohlist" data-outside-disclosure-more>${W.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>`;
+  let facts = '';
+  if (route.state === 'configured' && route.readiness && !route.readinessUnavailable) {
+    const ready = route.readiness;
+    const list = [
+      ready.daemonFound ? fill(W.facts.daemon, { version: ready.daemonVersion ?? W.facts.versionUnknown }) : W.facts.daemonMissing,
+      ready.torMode === 'off' ? W.facts.torOff : ready.torFound ? W.facts.tor : W.facts.torMissing,
+      ready.apiKeyConfigured ? W.facts.key : W.facts.keyMissing,
+      fill(ready.requestsToday.count === 1 ? W.facts.todayOne : W.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
+      ready.expiry.state === 'active' && ready.expiry.expiryDate
+        ? fill(W.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? '') })
+        : ready.expiry.state === 'expired' ? W.facts.expired : W.facts.expiryUnknown,
+      fill(W.routeLabel, { label: ready.routeLabel }),
+      ...ready.fences.map((fence) => fill(fence.thisWallet ? W.fenceThis : W.fenceOther, { at: shortTime(fence.at) })),
+      ...(ready.lastSession ? [fill(W.lastSession, { at: shortTime(ready.lastSession.at), result: ready.lastSession.result })] : []),
+    ];
+    facts = `<div class="sect">${escapeHtml(W.factsTitle)}</div><ul class="ohfacts" data-outside-facts>${list.map((fact) => `<li>${escapeHtml(fact)}</li>`).join('')}</ul>`;
+  }
+  return renderSection({ id: 'details', title: W.detailsTitle, summary: '', body: about + more + facts });
 }
 
 /**
@@ -714,8 +772,6 @@ export interface OutsideHelpClientCopy {
   restarting: string;
   on: string;
   off: string;
-  levelSave: string;
-  levelAcceptSave: string;
 }
 
 export function outsideHelpClientScript(config: { csrfToken: string; paths: typeof DASHBOARD_OUTSIDE_HELP_PATHS; copy: OutsideHelpClientCopy; writerPollMs?: number }): string {
@@ -753,30 +809,32 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     if (result && typeof result.error === 'string' && result.error) return result.error;
     return response && response.status ? config.copy.failedStatus.replace('{status}', String(response.status)) : config.copy.failed;
   }
-  // Standard chosen while the statements are not accepted: they show inline,
-  // and the button reads Accept and save. Strict: the button is a plain Save,
-  // and the statements show in their own section instead.
-  var levelForm = root.querySelector('form[data-outside-form="level"]');
-  var levelAcks = levelForm ? levelForm.querySelector('[data-outside-level-acks]') : null;
-  var standalone = root.querySelector('[data-outside-ack-standalone]');
-  function levelAccepting() {
-    var picked = levelForm ? levelForm.querySelector('input[name="level"]:checked') : null;
-    return Boolean(levelAcks) && Boolean(picked) && picked.value === 'unnamed';
-  }
-  function syncLevel() {
-    if (!levelForm || !levelAcks) return;
-    var accepting = levelAccepting();
-    if (accepting) levelAcks.removeAttribute('hidden'); else levelAcks.setAttribute('hidden', '');
-    if (standalone) { if (accepting) standalone.setAttribute('hidden', ''); else standalone.removeAttribute('hidden'); }
-    var save = levelForm.querySelector('[data-outside-level-save]');
-    if (save) {
-      save.textContent = accepting ? config.copy.levelAcceptSave : config.copy.levelSave;
-      if (accepting) save.classList.add('primary'); else save.classList.remove('primary');
-    }
-  }
-  if (levelForm) {
-    levelForm.querySelectorAll('input[name="level"]').forEach(function (input) { input.addEventListener('change', syncLevel); });
-  }
+  // A problem's button that opens the section holding its fix: open it,
+  // bring it into view, and put the cursor in the field that needs the owner.
+  root.querySelectorAll('[data-outside-open]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var section = root.querySelector('details[data-outside-section="' + button.getAttribute('data-outside-open') + '"]');
+      if (!section) return;
+      section.open = true;
+      if (section.scrollIntoView) section.scrollIntoView({ block: 'start' });
+      var focus = button.getAttribute('data-outside-focus');
+      var target = focus ? section.querySelector('[name="' + focus + '"]') : section.querySelector('summary');
+      if (target && target.focus) target.focus();
+    });
+  });
+  // Locked: a fix's first click opens the local session (the reload then shows the real button).
+  var unlockForm = root.querySelector('form[data-outside-form="unlock"]');
+  root.querySelectorAll('[data-outside-needs-unlock]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      if (!unlockForm) return;
+      if (unlockForm.requestSubmit) unlockForm.requestSubmit(); else unlockForm.dispatchEvent(new Event('submit', { cancelable: true }));
+      if (unlockForm.scrollIntoView) unlockForm.scrollIntoView({ block: 'start' });
+    });
+  });
+  // Check again: readiness runs on every read of the page.
+  root.querySelectorAll('[data-outside-recheck]').forEach(function (button) {
+    button.addEventListener('click', function () { window.location.reload(); });
+  });
   // Each post carries the whole card's state for its route, wherever on the
   // card the fields sit: the switch reads the language boxes, and a limits
   // save reads the funding date and both limits. Only an Accept posts the
@@ -800,10 +858,13 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     }
     if (kind === 'level') {
       var picked = form.querySelector('input[name="level"]:checked');
-      // On or off as the status line says now (the switch updates it in place), so saving a level never flips the switch.
+      // On or off as the switch says now: the status line once the switch has
+      // updated it in place, else the saved setting (a paused card is still
+      // on), so saving a level never flips the switch.
       var state = root.querySelector('[data-outside-state-text]');
-      var current = state ? state.getAttribute('data-outside-state') : form.getAttribute('data-outside-current');
-      return { enabled: current === 'on' || current === 'needs_acceptance', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
+      var said = state ? state.getAttribute('data-outside-state') : '';
+      var current = said === 'on' || said === 'off' ? said : form.getAttribute('data-outside-current');
+      return { enabled: current === 'on', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
     }
     if (kind === 'writer') {
       var clearing = submitter && submitter.hasAttribute('data-outside-writer-clear');
@@ -886,20 +947,11 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       try {
         // The local unlock presents no credential at all: the boundary wants a
         // loopback browser and nothing else. Every other form carries the CSRF token.
-        var accepting = kind === 'level' && levelAccepting();
         var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var outcome = await send(paths[kind], body);
         if (!outcome.ok) return fail(outcome.text);
         var text = outcome.text;
         var result = outcome.result;
-        if (accepting) {
-          // Accept and save: the level is saved; now record the statements.
-          if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
-          var accepted = await send(config.paths.route, { acknowledged: statementIds(levelAcks) });
-          if (!accepted.ok) return fail(accepted.text);
-          text = accepted.text;
-          result = accepted.result;
-        }
         message(form, text, false);
         if (kind === 'enable' && body && !body.replace_invalid) {
           // Say the new state at once, before the reload that redraws the card.

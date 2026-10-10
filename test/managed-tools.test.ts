@@ -808,7 +808,8 @@ describe('the card section', () => {
     const setup = card.indexOf('data-outside-tools="setup"');
     expect(fix).toBeGreaterThan(card.indexOf('data-outside-blockers'));
     expect(card.slice(fix, fix + 400)).toContain('Tor is not installed on this computer.');
-    expect(setup).toBeGreaterThan(card.indexOf('data-outside-section="steps" open'));
+    expect(card.indexOf('data-outside-section="steps"')).toBeGreaterThan(0);
+    expect(setup).toBeGreaterThan(card.indexOf('data-outside-section="steps"'));
     expect(setup).toBeLessThan(card.indexOf('data-outside-steps'));
     expect(card.match(/<script>/g)!.length).toBe(2);
     expect(card).not.toContain('Install zkapi-clientd (version');

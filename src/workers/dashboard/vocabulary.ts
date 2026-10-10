@@ -2285,6 +2285,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     route_not_configured: 'Anonymous answers: off · not set up',
     fence_held: 'Anonymous answers: paused · unfinished payment',
     needs_acceptance: 'Anonymous answers: paused · accept the updated statements',
+    blocked: 'Anonymous answers: paused · needs a fix',
   },
   /** The honesty label: the network route is not verified on macOS, said plainly. */
   experimental: 'Experimental: on macOS, Olympus can\'t yet confirm the connection is anonymous (network route not verified).',
@@ -2332,29 +2333,31 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   },
   levels: {
     unnamed: {
+      short: 'Standard',
       title: 'Standard (recommended)',
       body: 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can\'t tell who sent it.',
     },
     general: {
+      short: 'Strict',
       title: 'Strict',
       body: 'Your model rewrites it into general questions first (Vitalik Buterin\'s approach).',
     },
   },
   /** How Standard prepares a question (owner decision 2026-10-10: open, the user's choice). */
   standard: {
-    title: 'How should your model prepare a question before it leaves?',
+    title: 'How your model prepares a question',
+    intro: 'At Standard, before a question leaves:',
+    /** The section's one line while Strict is chosen: the choice is kept, but only Standard uses it. */
+    unusedAtStrict: '{mode} (used at Standard only)',
     modes: {
-      as_written: { title: 'Exactly as written', body: 'No model step: the question goes out unchanged.' },
-      light_cleanup: { title: 'Lightly cleaned (default)', body: 'Your model follows this instruction. Edit it to make it your own.' },
-      custom: { title: 'By your own instruction', body: 'Your model follows exactly what you write here.' },
+      as_written: { short: 'Exactly as written', title: 'Exactly as written', body: 'No model step: the question goes out unchanged.' },
+      light_cleanup: { short: 'Lightly cleaned', title: 'Lightly cleaned (default)', body: 'Your model follows this instruction. Edit it to make it your own.' },
+      custom: { short: 'Your own instruction', title: 'By your own instruction', body: 'Your model follows exactly what you write here.' },
     },
     instructionLabel: 'Instruction for your model',
     save: 'Save',
   },
   levelSave: 'Save',
-  /** Standard chosen while the statements are not accepted: they show inline with one action. */
-  levelAcceptSave: 'Accept and save',
-  levelAcceptIntro: 'Nothing is sent until you accept these:',
   /** The public privacy line, in plain words (design §2, §A.10). */
   privacy: 'Your files and private answer stay on this computer. The outside model sees only the short question, and that question could still hint at private things.',
   state: {
@@ -2364,20 +2367,13 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     route_not_configured: 'Anonymous answers are off: zkAPI is not set up yet.',
     fence_held: 'Paused: an earlier question has not finished paying yet.',
     needs_acceptance: 'Paused until you accept the updated statements below.',
+    blocked: 'Paused: fix the problem below.',
   },
   /** Said only when a saved change needs a restart this worker could not do itself. */
   restartPending: 'Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.',
-  /** The status block: route health in one line. */
-  routeReady: 'Ready to ask.',
-  routeReadyNoTor: 'Ready to ask.',
-  /** Said beside Ready when Tor is off, in plain words (Details names Tor). */
+  /** Said under the status line when Tor is off, in plain words (Details names Tor). */
   addressVisible: 'Your network address will be visible to the provider.',
-  routeNotReady: 'Not ready: {reason}',
-  /** Only the statements are missing: everything else is ready, said without repeating them. */
-  routeReadyButStatements: 'Everything else is ready.',
-  routeMore: '(+{n} more below)',
   routeUnknown: 'Olympus could not check zkAPI right now.',
-  routeMissingShort: 'Not ready: zkAPI is not set up yet.',
   /**
    * Today's usage. Only each question's hold (the amount zkAPI holds for its
    * model, $1 to $6) is recorded, never the settled price, so the day's figure
@@ -2389,10 +2385,15 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   usageCounted: '(counted as up to ${usd} against your limits)',
   usageExpiry: 'balance expires about {date} ({days} days left)',
   usageExpired: 'balance past its estimated expiry',
-  usageExpiryUnknown: 'balance expiry unknown',
   /** How cost works, real cost first, in one line (owner, 2026-10-08); the statements carry the recorded wording. */
   costLine: 'A question usually costs a few cents. Up to $6 is held while it runs, and the rest comes back.',
   problemsTitle: 'To fix',
+  /** The one button of a problem whose fix sits in a section below, or that clears itself. */
+  checkAgain: 'Check again',
+  showSteps: 'Show the steps',
+  enterFundingDate: 'Enter the date',
+  chooseModel: 'Choose a model',
+  capsReached: 'Today\'s question and spending limits are reached.',
   disclosureTitle: 'Before you turn this on',
   /** Two short lines at first view; the fuller detail sits behind disclosureMore. */
   disclosureShort: [
@@ -2424,6 +2425,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   addRouteConfirm: 'This adds a consult-only zkAPI route to your privacy policy and restarts the Olympus worker. No money moves. Continue?',
   /** The Details disclosure: the route's technical facts, never on first view. */
   detailsTitle: 'Details',
+  factsTitle: 'This computer\'s zkAPI route',
   facts: {
     daemon: 'zkapi-clientd {version} found',
     versionUnknown: '(version unknown)',
@@ -2443,23 +2445,23 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   lastSession: 'Last consult: {at}, {result}.',
   /** The To fix list: plain words, each with where its fix is. Technical names stay in Set up zkAPI and Details. */
   blockers: {
-    daemon_not_found: 'The zkAPI app is not installed on this computer. See Set up zkAPI.',
-    daemon_version_unsupported: 'This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6: see Set up zkAPI.',
-    tor_not_found: 'The program that hides your network address is not installed. See Set up zkAPI.',
-    daemon_api_key_missing: 'Olympus does not have your zkAPI access key yet. See Set up zkAPI.',
+    daemon_not_found: 'The zkAPI app is not installed on this computer.',
+    daemon_version_unsupported: 'This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6.',
+    tor_not_found: 'The program that hides your network address is not installed.',
+    daemon_api_key_missing: 'Olympus does not have your zkAPI access key yet.',
     acknowledgements_incomplete: 'The statements on this page are not accepted yet. Nothing is sent until they are.',
-    funding_date_missing: 'Enter the day you paid in under Balance and limits, so Olympus can tell when the balance expires.',
-    funding_date_invalid: 'The day you paid in is in the future. Fix it under Balance and limits.',
-    note_expired: 'Your balance is past its estimated 30-day expiry.',
-    unresolved_session: 'An earlier question has not finished paying. Use Recover under Unfinished payment.',
-    unresolved_session_other_wallet: 'An unfinished payment belongs to another zkAPI wallet. Finish it there, or abandon it under Unfinished payment.',
-    stranded_processes: 'Tor or the zkAPI app from an earlier question is still running and Olympus could not stop it. Restart Olympus to clear it (olympus engine restart).',
+    funding_date_missing: 'Olympus needs the day you paid in to tell when your balance expires.',
+    funding_date_invalid: 'The day you paid in is in the future.',
+    note_expired: 'Your balance is past its estimated 30-day expiry. A new deposit starts a new balance.',
+    unresolved_session: 'An earlier question has not finished paying (held since {at}). No question is sent until it does.',
+    unresolved_session_other_wallet: 'An unfinished payment from another zkAPI wallet (held since {at}) stops questions. Finish it from that wallet, or abandon it.',
+    stranded_processes: 'Tor or the zkAPI app from an earlier question is still running and Olympus could not stop it. If checking again does not clear it, restart Olympus (olympus engine restart).',
     daemon_already_running: 'Another copy of the zkAPI app is already running. Close it; Olympus starts its own for each question.',
     tor_port_busy: 'Another program is using the connection Olympus needs to hide your network address.',
-    daily_cap_reached: 'Today\'s question limit is reached. Raise or remove it under Balance and limits.',
-    spend_cap_reached: 'Another question would pass today\'s spending limit. Raise or remove it under Balance and limits.',
+    daily_cap_reached: 'Today\'s question limit is reached.',
+    spend_cap_reached: 'Another question would pass today\'s spending limit.',
     state_unavailable: 'Olympus could not read its record of questions on this computer.',
-    key_reuse_on: 'The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off: see Set up zkAPI.',
+    key_reuse_on: 'The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off (the last step).',
   },
   blockerOther: 'Not ready yet ({code}).',
   stepsTitle: 'Set up zkAPI',
@@ -2476,8 +2478,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   costTitle: 'Cost and risk',
   costIntro: 'Nothing is sent until you accept these. If the wording changes, you are asked again.',
   accept: 'Accept',
-  acknowledged: 'You accepted the {n} cost and risk statements.',
-  acknowledgedReview: 'Review',
+  acknowledged: 'You accepted all {n}',
   limitsTitle: 'Balance and limits',
   limitsNone: 'No daily limit',
   limitsRequests: '{n} questions a day',
@@ -2494,10 +2495,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   removeLimitsHint: 'Clears both limits.',
   saveRestarts: 'Saving restarts Olympus to apply it.',
   saveRoute: 'Save',
-  fenceTitle: 'Unfinished payment',
-  fenceIntro: 'An earlier question has not been confirmed as paid. Until it is, no question is sent.',
-  fenceThis: 'Held since {at} (this wallet)',
-  fenceOther: 'Held since {at} (another wallet folder)',
+  fenceThis: 'Unfinished payment held since {at} (this wallet)',
+  fenceOther: 'Unfinished payment held since {at} (another wallet folder)',
   recover: 'Recover',
   recoverHint: 'Sends one empty request to finish it; up to $6 is held while it runs.',
   recoverConfirm: 'Recovery sends one fixed request with no content through the same route and reserves up to $6. Continue?',
@@ -2524,8 +2523,6 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   replaceFile: 'Replace the damaged settings file (anonymous answers stay off)',
   enableBlockedRoute: 'Add zkAPI first.',
   enableBlockedAcks: 'Accept the statements on this page first.',
-  edit: 'Edit',
-  setUp: 'Set up',
   saving: 'Saving…',
   saveFailed: 'Olympus could not save this. Try again.',
   /** A refusal that carried no words of its own: the HTTP status at least. */
@@ -2534,8 +2531,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   saveUnreachable: 'Olympus did not answer. If it is restarting, wait a moment and try again.',
   restarting: 'Restarting Olympus to apply it…',
   locked: 'Open dashboard controls to see and change anonymous answers.',
-  unlockIntro: 'Changing anonymous answers needs a session opened on this computer itself, not one an agent or the launch link opened. One click, in this browser.',
-  unlock: 'Unlock anonymous answers on this computer',
+  unlockIntro: 'Changes need a session opened here, not by an agent or the launch link.',
+  unlock: 'Unlock on this computer',
   native: 'Anonymous answers are set up on this computer\'s own dashboard only, never from an agent or ChatGPT.',
   unavailable: 'Anonymous answers are not available from this worker.',
 } as const;

@@ -56473,7 +56473,8 @@ var init_vocabulary = __esm(() => {
       invalid: "Anonymous answers: off · settings file damaged",
       route_not_configured: "Anonymous answers: off · not set up",
       fence_held: "Anonymous answers: paused · unfinished payment",
-      needs_acceptance: "Anonymous answers: paused · accept the updated statements"
+      needs_acceptance: "Anonymous answers: paused · accept the updated statements",
+      blocked: "Anonymous answers: paused · needs a fix"
     },
     experimental: "Experimental: on macOS, Olympus can't yet confirm the connection is anonymous (network route not verified).",
     intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
@@ -56517,27 +56518,29 @@ var init_vocabulary = __esm(() => {
     },
     levels: {
       unnamed: {
+        short: "Standard",
         title: "Standard (recommended)",
         body: "Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but can't tell who sent it."
       },
       general: {
+        short: "Strict",
         title: "Strict",
         body: "Your model rewrites it into general questions first (Vitalik Buterin's approach)."
       }
     },
     standard: {
-      title: "How should your model prepare a question before it leaves?",
+      title: "How your model prepares a question",
+      intro: "At Standard, before a question leaves:",
+      unusedAtStrict: "{mode} (used at Standard only)",
       modes: {
-        as_written: { title: "Exactly as written", body: "No model step: the question goes out unchanged." },
-        light_cleanup: { title: "Lightly cleaned (default)", body: "Your model follows this instruction. Edit it to make it your own." },
-        custom: { title: "By your own instruction", body: "Your model follows exactly what you write here." }
+        as_written: { short: "Exactly as written", title: "Exactly as written", body: "No model step: the question goes out unchanged." },
+        light_cleanup: { short: "Lightly cleaned", title: "Lightly cleaned (default)", body: "Your model follows this instruction. Edit it to make it your own." },
+        custom: { short: "Your own instruction", title: "By your own instruction", body: "Your model follows exactly what you write here." }
       },
       instructionLabel: "Instruction for your model",
       save: "Save"
     },
     levelSave: "Save",
-    levelAcceptSave: "Accept and save",
-    levelAcceptIntro: "Nothing is sent until you accept these:",
     privacy: "Your files and private answer stay on this computer. The outside model sees only the short question, and that question could still hint at private things.",
     state: {
       off: "Anonymous answers are off.",
@@ -56545,26 +56548,25 @@ var init_vocabulary = __esm(() => {
       invalid: "Anonymous answers are off: the settings file on this computer is damaged.",
       route_not_configured: "Anonymous answers are off: zkAPI is not set up yet.",
       fence_held: "Paused: an earlier question has not finished paying yet.",
-      needs_acceptance: "Paused until you accept the updated statements below."
+      needs_acceptance: "Paused until you accept the updated statements below.",
+      blocked: "Paused: fix the problem below."
     },
     restartPending: "Saved, but not applied yet: this Olympus cannot restart itself. Restart Olympus to apply the change.",
-    routeReady: "Ready to ask.",
-    routeReadyNoTor: "Ready to ask.",
     addressVisible: "Your network address will be visible to the provider.",
-    routeNotReady: "Not ready: {reason}",
-    routeReadyButStatements: "Everything else is ready.",
-    routeMore: "(+{n} more below)",
     routeUnknown: "Olympus could not check zkAPI right now.",
-    routeMissingShort: "Not ready: zkAPI is not set up yet.",
     usageNone: "No questions today",
     usageOne: "1 question today",
     usageMany: "{n} questions today",
     usageCounted: "(counted as up to ${usd} against your limits)",
     usageExpiry: "balance expires about {date} ({days} days left)",
     usageExpired: "balance past its estimated expiry",
-    usageExpiryUnknown: "balance expiry unknown",
     costLine: "A question usually costs a few cents. Up to $6 is held while it runs, and the rest comes back.",
     problemsTitle: "To fix",
+    checkAgain: "Check again",
+    showSteps: "Show the steps",
+    enterFundingDate: "Enter the date",
+    chooseModel: "Choose a model",
+    capsReached: "Today's question and spending limits are reached.",
     disclosureTitle: "Before you turn this on",
     disclosureShort: [
       "It asks only when you do: tell your agent to use Olympus zkAPI, and Olympus sends one short question.",
@@ -56587,6 +56589,7 @@ var init_vocabulary = __esm(() => {
     addRoute: "Add zkAPI to Olympus",
     addRouteConfirm: "This adds a consult-only zkAPI route to your privacy policy and restarts the Olympus worker. No money moves. Continue?",
     detailsTitle: "Details",
+    factsTitle: "This computer's zkAPI route",
     facts: {
       daemon: "zkapi-clientd {version} found",
       versionUnknown: "(version unknown)",
@@ -56605,23 +56608,23 @@ var init_vocabulary = __esm(() => {
     routeLabel: "Route: {label}.",
     lastSession: "Last consult: {at}, {result}.",
     blockers: {
-      daemon_not_found: "The zkAPI app is not installed on this computer. See Set up zkAPI.",
-      daemon_version_unsupported: "This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6: see Set up zkAPI.",
-      tor_not_found: "The program that hides your network address is not installed. See Set up zkAPI.",
-      daemon_api_key_missing: "Olympus does not have your zkAPI access key yet. See Set up zkAPI.",
+      daemon_not_found: "The zkAPI app is not installed on this computer.",
+      daemon_version_unsupported: "This version of the zkAPI app has not been checked by Olympus. Install version 0.1.5 or 0.1.6.",
+      tor_not_found: "The program that hides your network address is not installed.",
+      daemon_api_key_missing: "Olympus does not have your zkAPI access key yet.",
       acknowledgements_incomplete: "The statements on this page are not accepted yet. Nothing is sent until they are.",
-      funding_date_missing: "Enter the day you paid in under Balance and limits, so Olympus can tell when the balance expires.",
-      funding_date_invalid: "The day you paid in is in the future. Fix it under Balance and limits.",
-      note_expired: "Your balance is past its estimated 30-day expiry.",
-      unresolved_session: "An earlier question has not finished paying. Use Recover under Unfinished payment.",
-      unresolved_session_other_wallet: "An unfinished payment belongs to another zkAPI wallet. Finish it there, or abandon it under Unfinished payment.",
-      stranded_processes: "Tor or the zkAPI app from an earlier question is still running and Olympus could not stop it. Restart Olympus to clear it (olympus engine restart).",
+      funding_date_missing: "Olympus needs the day you paid in to tell when your balance expires.",
+      funding_date_invalid: "The day you paid in is in the future.",
+      note_expired: "Your balance is past its estimated 30-day expiry. A new deposit starts a new balance.",
+      unresolved_session: "An earlier question has not finished paying (held since {at}). No question is sent until it does.",
+      unresolved_session_other_wallet: "An unfinished payment from another zkAPI wallet (held since {at}) stops questions. Finish it from that wallet, or abandon it.",
+      stranded_processes: "Tor or the zkAPI app from an earlier question is still running and Olympus could not stop it. If checking again does not clear it, restart Olympus (olympus engine restart).",
       daemon_already_running: "Another copy of the zkAPI app is already running. Close it; Olympus starts its own for each question.",
       tor_port_busy: "Another program is using the connection Olympus needs to hide your network address.",
-      daily_cap_reached: "Today's question limit is reached. Raise or remove it under Balance and limits.",
-      spend_cap_reached: "Another question would pass today's spending limit. Raise or remove it under Balance and limits.",
+      daily_cap_reached: "Today's question limit is reached.",
+      spend_cap_reached: "Another question would pass today's spending limit.",
       state_unavailable: "Olympus could not read its record of questions on this computer.",
-      key_reuse_on: "The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off: see Set up zkAPI."
+      key_reuse_on: "The zkAPI app is set to reuse payment keys, which can link your questions. Turn that off (the last step)."
     },
     blockerOther: "Not ready yet ({code}).",
     stepsTitle: "Set up zkAPI",
@@ -56638,8 +56641,7 @@ var init_vocabulary = __esm(() => {
     costTitle: "Cost and risk",
     costIntro: "Nothing is sent until you accept these. If the wording changes, you are asked again.",
     accept: "Accept",
-    acknowledged: "You accepted the {n} cost and risk statements.",
-    acknowledgedReview: "Review",
+    acknowledged: "You accepted all {n}",
     limitsTitle: "Balance and limits",
     limitsNone: "No daily limit",
     limitsRequests: "{n} questions a day",
@@ -56655,10 +56657,8 @@ var init_vocabulary = __esm(() => {
     removeLimitsHint: "Clears both limits.",
     saveRestarts: "Saving restarts Olympus to apply it.",
     saveRoute: "Save",
-    fenceTitle: "Unfinished payment",
-    fenceIntro: "An earlier question has not been confirmed as paid. Until it is, no question is sent.",
-    fenceThis: "Held since {at} (this wallet)",
-    fenceOther: "Held since {at} (another wallet folder)",
+    fenceThis: "Unfinished payment held since {at} (this wallet)",
+    fenceOther: "Unfinished payment held since {at} (another wallet folder)",
     recover: "Recover",
     recoverHint: "Sends one empty request to finish it; up to $6 is held while it runs.",
     recoverConfirm: "Recovery sends one fixed request with no content through the same route and reserves up to $6. Continue?",
@@ -56684,16 +56684,14 @@ var init_vocabulary = __esm(() => {
     replaceFile: "Replace the damaged settings file (anonymous answers stay off)",
     enableBlockedRoute: "Add zkAPI first.",
     enableBlockedAcks: "Accept the statements on this page first.",
-    edit: "Edit",
-    setUp: "Set up",
     saving: "Saving…",
     saveFailed: "Olympus could not save this. Try again.",
     saveFailedStatus: "Olympus could not save this (error {status}). Try again.",
     saveUnreachable: "Olympus did not answer. If it is restarting, wait a moment and try again.",
     restarting: "Restarting Olympus to apply it…",
     locked: "Open dashboard controls to see and change anonymous answers.",
-    unlockIntro: "Changing anonymous answers needs a session opened on this computer itself, not one an agent or the launch link opened. One click, in this browser.",
-    unlock: "Unlock anonymous answers on this computer",
+    unlockIntro: "Changes need a session opened here, not by an agent or the launch link.",
+    unlock: "Unlock on this computer",
     native: "Anonymous answers are set up on this computer's own dashboard only, never from an agent or ChatGPT.",
     unavailable: "Anonymous answers are not available from this worker."
   };
@@ -101092,10 +101090,14 @@ function summaryOf(status) {
     return { state: "invalid" };
   if (status.route.state === "not_configured")
     return { state: "route_not_configured" };
-  if (status.route.state === "configured" && status.route.readiness && status.route.readiness.fences.length > 0)
+  const readiness = status.route.readiness;
+  if (readiness && readiness.fences.length > 0)
     return { state: "fence_held" };
-  if (status.settings.state === "on" && status.route.state === "configured" && !status.route.acknowledgements.complete)
+  if (status.settings.state === "on" && !status.route.acknowledgements.complete)
     return { state: "needs_acceptance" };
+  if (status.settings.state === "on" && (status.route.readinessUnavailable || readiness && readiness.blockers.some((code) => code !== "acknowledgements_incomplete"))) {
+    return { state: "blocked" };
+  }
   return { state: status.settings.state };
 }
 function outsideHelpBlockerWords(code) {
@@ -101106,50 +101108,42 @@ function shortDate(iso) {
   const month = match ? MONTHS[Number(match[2]) - 1] : undefined;
   return match && month ? `${Number(match[3])} ${month}` : iso;
 }
+function shortTime(iso) {
+  return `${shortDate(iso.slice(0, 10))} ${iso.slice(11, 16)}`.trim();
+}
 function renderOutsideHelpCard(status, input) {
   const summary = summaryOf(status);
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
-  const blockers = route.state === "configured" && route.readiness ? route.readiness.blockers : [];
+  const on = status.settings.state === "on";
   const parts = [];
   parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
-  parts.push(`<p class="ohlabel">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`);
-  parts.push(`<p class="pintro">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>`);
-  parts.push(`<p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>`);
+  if (canUnlock) {
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  }
+  const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
+  parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
-  if (canUnlock) {
-    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</p>` + `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-  }
-  parts.push(renderStatusBlock(status, summary, canEdit));
-  parts.push(renderLevel(status, canEdit));
-  if (status.standard)
-    parts.push(renderStandard(status.standard, status.settings.state === "invalid" ? false : canEdit));
-  if (status.writer?.modelProblem)
-    parts.push(`<p class="pnote ohwarn" data-outside-model-problem>${escapeHtml2(status.writer.modelProblem.message)}</p>`);
-  parts.push(renderProblems(status, canEdit));
-  const shortList = `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
-  const fullList = `<ul class="ohlist">${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
-  const on = status.settings.state === "on";
-  if (!on) {
-    parts.push(`<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle)}</div>${shortList}` + `<details class="howto" data-outside-disclosure-more><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</summary>${fullList}</details>`);
-  }
-  if (route.state === "configured")
-    parts.push(renderAcknowledgements(route, status.settings.level, canEdit));
+  parts.push(renderProblems(status, access));
+  if (route.state === "configured" && !route.acknowledgements.complete)
+    parts.push(renderStatementsToAccept(access));
   const more = [];
-  if (route.state === "configured" && route.readiness && route.readiness.fences.length > 0)
-    more.push(renderFence(route.readiness, canEdit));
+  if (!on)
+    more.push(renderBeforeTurningOn());
+  more.push(renderLevel(status, canEdit));
+  if (status.standard)
+    more.push(renderStandard(status.standard, status.settings.level, status.settings.state === "invalid" ? false : canEdit));
   if (status.writer)
     more.push(renderWriter(status.writer, canEdit));
   more.push(renderLanguages(status, canEdit));
   if (route.state === "configured")
-    more.push(renderLimits(route, blockers, canEdit));
-  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, route.state === "not_configured" || blockers.some((code) => SETUP_BLOCKERS.has(code)) || outsideHelpToolsNeedAttention(status.tools), renderOutsideHelpTools(status.tools, { canEdit })));
-  if (route.state === "configured")
-    more.push(renderDetails(route));
-  if (on)
-    more.push(renderSection({ id: "disclosure", title: DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore, summary: "", open: false, body: `<div data-outside-disclosure-more>${shortList}${fullList}</div>` }));
+    more.push(renderLimits(route, canEdit));
+  if (route.state === "configured" && route.acknowledgements.complete)
+    more.push(renderAccepted());
+  more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit })));
+  more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const config2 = {
     csrfToken: input.csrfToken ?? "",
@@ -101161,9 +101155,7 @@ function renderOutsideHelpCard(status, input) {
       unreachable: DASHBOARD_OUTSIDE_HELP_COPY.saveUnreachable,
       restarting: DASHBOARD_OUTSIDE_HELP_COPY.restarting,
       on: DASHBOARD_OUTSIDE_HELP_COPY.state.on,
-      off: DASHBOARD_OUTSIDE_HELP_COPY.state.off,
-      levelSave: DASHBOARD_OUTSIDE_HELP_COPY.levelSave,
-      levelAcceptSave: DASHBOARD_OUTSIDE_HELP_COPY.levelAcceptSave
+      off: DASHBOARD_OUTSIDE_HELP_COPY.state.off
     },
     writerPollMs: OUTSIDE_HELP_WRITER_POLL_MS
   };
@@ -101171,113 +101163,157 @@ function renderOutsideHelpCard(status, input) {
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
 }
-function renderStatusBlock(status, summary, canEdit) {
-  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
+function renderStatusBlock(status, summary, access) {
   const route = status.route;
   const on = status.settings.state === "on";
   const invalid2 = status.settings.state === "invalid";
   const blockedReason = invalid2 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = invalid2 ? `<button type="submit" class="btn primary" data-outside-replace${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const button = access === "read" ? "" : access === "unlock" ? unlockFirst(invalid2 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid2 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const tone = summary.state === "on" ? "on" : summary.state === "off" ? "off" : "attn";
-  const head = `<div class="ohhead"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + `<div class="pbuttons">${button}</div></div>`;
-  const lines = [renderRouteLine(route)];
-  if (route.state === "configured" && route.readiness)
-    lines.push(`<p class="ohline" data-outside-usage>${escapeHtml2(usageLine(route.readiness))}</p>`);
-  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">` + head + lines.join("") + `<p class="ohsmall" data-outside-cost>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)}</p>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const usage = route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
+  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid2 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+function usageLine(ready) {
+  const count = ready.requestsToday.count;
+  const today = count === 0 ? DASHBOARD_OUTSIDE_HELP_COPY.usageNone : `${count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.usageOne : fill(DASHBOARD_OUTSIDE_HELP_COPY.usageMany, { n: String(count) })} ${fill(DASHBOARD_OUTSIDE_HELP_COPY.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}`;
+  const expiry = ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.usageExpired : undefined;
+  return expiry ? `${today} · ${expiry}` : today;
+}
+function unlockFirst(label, primary = true) {
+  return `<button type="button" class="btn${primary ? " primary" : ""}" data-outside-needs-unlock>${escapeHtml2(label)}</button>`;
+}
+function problemLine(words, fix, access, input = {}) {
+  const canEdit = access === "edit";
+  let action = "";
+  if (fix?.kind === "post" && access === "unlock") {
+    action = unlockFirst(fix.label, fix.primary !== false);
+  } else if (fix?.kind === "post" && canEdit) {
+    action = `<form class="ohform ohinline" data-outside-form="${escapeHtml2(fix.form)}"${fix.attrs ?? ""}>` + `<button type="submit" class="btn${fix.primary === false ? "" : " primary"}">${escapeHtml2(fix.label)}</button>` + `${input.extra ?? ""}<span class="actmsg" data-action-message role="status"></span></form>`;
+  } else if (fix?.kind === "open") {
+    action = `<button type="button" class="btn" data-outside-open="${escapeHtml2(fix.section)}"${fix.focus ? ` data-outside-focus="${escapeHtml2(fix.focus)}"` : ""}>${escapeHtml2(fix.label)}</button>`;
+  } else if (fix?.kind === "recheck") {
+    action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.checkAgain)}</button>`;
+  }
+  return `<li${input.attrs ?? ""}><span>${escapeHtml2(words)}</span>${action}</li>`;
+}
+function renderProblems(status, access) {
+  const canEdit = access === "edit";
+  const route = status.route;
+  const items = [];
+  const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
+  if (tools)
+    items.push(tools);
+  if (route.state === "not_configured") {
+    items.push(route.policyWritable ? problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing, { kind: "post", form: "add-route", label: DASHBOARD_OUTSIDE_HELP_COPY.addRoute, attrs: ` data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}"` }, access, { attrs: " data-outside-route-missing" }) : problemLine(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile, { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs: " data-outside-route-missing" }));
+  } else if (route.readinessUnavailable || !route.readiness) {
+    items.push(problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown, { kind: "recheck" }, access, { attrs: ' data-outside-blocker="readiness_unavailable"' }));
+  } else {
+    const ready = route.readiness;
+    const blockers = ready.blockers;
+    const caps = blockers.filter((code) => CAP_BLOCKERS.has(code));
+    for (const code of blockers) {
+      if (code === "acknowledgements_incomplete")
+        continue;
+      if (CAP_BLOCKERS.has(code) && code !== caps[0])
+        continue;
+      const attrs = ` data-outside-blocker="${escapeHtml2(code)}"`;
+      const tool = TOOL_BLOCKERS.get(code);
+      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
+      if (entry?.source === "missing")
+        continue;
+      if (entry?.source === "configured_missing") {
+        items.push(problemLine(fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? "" }), { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs }));
+        continue;
+      }
+      if (code === "unresolved_session") {
+        items.push(renderFenceLine(ready, access));
+        continue;
+      }
+      if (code === "unresolved_session_other_wallet") {
+        items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }), { kind: "post", form: "abandon", label: DASHBOARD_OUTSIDE_HELP_COPY.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}"` }, access, { attrs })));
+        continue;
+      }
+      const words = CAP_BLOCKERS.has(code) && caps.length > 1 ? DASHBOARD_OUTSIDE_HELP_COPY.capsReached : outsideHelpBlockerWords(code);
+      const fix = CAP_BLOCKERS.has(code) ? { kind: "post", form: "route", label: DASHBOARD_OUTSIDE_HELP_COPY.removeLimits, attrs: " data-outside-nolimit" } : FUNDING_BLOCKERS.has(code) ? { kind: "open", section: "limits", label: DASHBOARD_OUTSIDE_HELP_COPY.enterFundingDate, focus: "funding_date" } : SETUP_BLOCKERS.has(code) ? { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps } : { kind: "recheck" };
+      items.push(problemLine(words, fix, access, { attrs }));
+    }
+  }
+  if (status.writer?.modelProblem) {
+    items.push(problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, access, { attrs: " data-outside-model-problem" }));
+  }
+  if (items.length === 0)
+    return "";
+  return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${items.join("")}</ul>`;
+}
+function renderFenceLine(ready, access) {
+  const canEdit = access === "edit";
+  const mine = ready.fences.find((fence) => fence.thisWallet);
+  const words = fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session, { at: mine ? shortTime(mine.at) : "" });
+  if (access === "unlock")
+    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
+  const abandon = mine && canEdit ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml2(mine.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const recover = canEdit ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
+}
+function renderSection(input) {
+  return `<details class="ohsect" id="outside-${escapeHtml2(input.id)}" data-outside-section="${escapeHtml2(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title">${escapeHtml2(input.title)}</span><span class="ohsect-sum">${escapeHtml2(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
+}
+function renderStatements(inputs) {
+  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml2(entry.id)}">${escapeHtml2(entry.statement)}</li>`).join("")}</ul>` + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml2(entry.id)}">`).join("") : "");
+}
+function renderStatementsToAccept(access) {
+  return `<form class="ohform ohaccept" data-outside-form="route" data-outside-accept data-outside-acknowledged="no">` + `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>${renderStatements(true)}` + (access === "edit" ? `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : access === "unlock" ? `<div class="pbuttons">${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+}
+function renderAccepted() {
+  return renderSection({
+    id: "statements",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.costTitle,
+    summary: fill(DASHBOARD_OUTSIDE_HELP_COPY.acknowledged, { n: String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length) }),
+    body: `<div data-outside-acknowledged="yes">${renderStatements(false)}</div>`
+  });
+}
+function renderBeforeTurningOn() {
+  return renderSection({
+    id: "before",
+    title: DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle,
+    summary: "",
+    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>` + `<p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` + `<p class="pnote" data-outside-cost>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)}</p>`
+  });
 }
 function renderLevel(status, canEdit) {
   const invalid2 = status.settings.state === "invalid";
-  const route = status.route;
-  const needsAcceptance = route.state === "configured" && !route.acknowledgements.complete;
   const current = status.settings.level;
   const blocked = !canEdit || invalid2 ? ' disabled aria-disabled="true"' : "";
   const options = ["unnamed", "general"].map((level) => {
     const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
     return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
   }).join("");
-  const accepting = needsAcceptance && current === "unnamed";
-  const acceptBlock = needsAcceptance ? `<div class="ohaccept" data-outside-level-acks${accepting ? "" : " hidden"}>` + `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelAcceptIntro)}</p>${renderStatements(true)}</div>` : "";
-  return `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelTitle)}</div>${options}${acceptBlock}` + `<div class="pbuttons"><button type="submit" class="btn${accepting ? " primary" : ""}" data-outside-level-save${blocked}>${escapeHtml2(accepting ? DASHBOARD_OUTSIDE_HELP_COPY.levelAcceptSave : DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid2 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return renderSection({ id: "level", title: DASHBOARD_OUTSIDE_HELP_COPY.levelTitle, summary: DASHBOARD_OUTSIDE_HELP_COPY.levels[current].short, body });
 }
-function renderStatements(inputs) {
-  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml2(entry.id)}">${escapeHtml2(entry.statement)}</li>`).join("")}</ul>` + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml2(entry.id)}">`).join("") : "");
-}
-function renderRouteLine(route) {
-  if (route.state === "not_configured")
-    return `<p class="ohline attn" data-outside-route="not_configured">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeMissingShort)}</p>`;
-  if (route.readinessUnavailable || !route.readiness)
-    return `<p class="ohline attn" data-outside-route="unknown">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown)}</p>`;
-  const ready = route.readiness;
-  if (ready.ready) {
-    return ready.torMode === "off" ? `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReadyNoTor)} <span class="attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</span></p>` : `<p class="ohline good" data-outside-route="ready">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReady)}</p>`;
-  }
-  const others = ready.blockers.filter((code) => code !== "acknowledgements_incomplete");
-  if (others.length === 0)
-    return `<p class="ohline" data-outside-route="ready_but_statements">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeReadyButStatements)}</p>`;
-  const first = others[0];
-  const reason = first ? outsideHelpBlockerWords(first) : DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown;
-  const more = others.length > 1 ? ` ${fill(DASHBOARD_OUTSIDE_HELP_COPY.routeMore, { n: String(others.length - 1) })}` : "";
-  return `<p class="ohline attn" data-outside-route="blocked">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.routeNotReady, { reason }))}${escapeHtml2(more)}</p>` + (ready.torMode === "off" ? `<p class="ohline attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "");
-}
-function usageLine(ready) {
-  const count = ready.requestsToday.count;
-  const pieces = [count === 0 ? DASHBOARD_OUTSIDE_HELP_COPY.usageNone : count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.usageOne : fill(DASHBOARD_OUTSIDE_HELP_COPY.usageMany, { n: String(count) })];
-  const head = count > 0 ? `${pieces[0]} ${fill(DASHBOARD_OUTSIDE_HELP_COPY.usageCounted, { usd: ready.spendToday.reservedUsd.toFixed(0) })}` : pieces[0];
-  pieces.splice(0, 1, head);
-  pieces.push(ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.usageExpiry, { date: shortDate(ready.expiry.expiryDate), days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.usageExpired : DASHBOARD_OUTSIDE_HELP_COPY.usageExpiryUnknown);
-  return pieces.join(" · ");
-}
-function renderProblems(status, canEdit) {
+function renderStandard(standard, level, canEdit) {
+  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.standard;
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  const route = status.route;
-  const items = [];
-  if (route.state === "not_configured") {
-    const action = route.policyWritable ? `<form class="ohform" data-outside-form="add-route" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}">` + `<button type="submit" class="btn"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRoute)}</button>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
-    items.push(`<li data-outside-route-missing><span>${escapeHtml2(route.policyWritable ? DASHBOARD_OUTSIDE_HELP_COPY.routeMissing : DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile)}</span>${action}</li>`);
-  } else if (route.readinessUnavailable || !route.readiness) {
-    items.push(`<li><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown)}</span></li>`);
-  } else {
-    for (const code of route.readiness.blockers) {
-      if (code === "acknowledgements_incomplete")
-        continue;
-      const tool = TOOL_BLOCKERS.get(code);
-      const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
-      if (entry?.source === "missing")
-        continue;
-      const words = entry?.source === "configured_missing" ? fill(DASHBOARD_OUTSIDE_HELP_TOOLS_COPY.configuredMissing, { tool: entry.label, path: entry.path ?? "" }) : outsideHelpBlockerWords(code);
-      items.push(`<li${entry ? ` data-outside-blocker="${escapeHtml2(code)}"` : ""}><span>${escapeHtml2(words)}</span></li>`);
-    }
-  }
-  const tools = renderOutsideHelpToolsFix(status.tools, { canEdit });
-  if (tools)
-    items.unshift(tools);
-  if (items.length === 0)
-    return "";
-  return `<div class="sect attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}</div><ul class="ohfix" data-outside-blockers>${items.join("")}</ul>`;
+  const options = ["as_written", "light_cleanup", "custom"].map((mode) => {
+    const copy = C2.modes[mode];
+    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
+  }).join("");
+  const text = standard.mode === "custom" && standard.instruction !== undefined ? standard.instruction : standard.preset;
+  const body = `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml2(standard.mode)}" data-outside-preset="${escapeHtml2(standard.preset)}">` + `<p class="pnote">${escapeHtml2(C2.intro)}</p>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml2(C2.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml2(text)}</textarea>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(C2.save)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const summary = level === "general" ? fill(C2.unusedAtStrict, { mode: C2.modes[standard.mode].short }) : C2.modes[standard.mode].short;
+  return renderSection({ id: "standard", title: C2.title, summary, body });
 }
-function renderSection(input) {
-  return `<details class="ohsect" data-outside-section="${escapeHtml2(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title${input.attn ? " attn" : ""}">${escapeHtml2(input.title)}</span><span class="ohsect-sum">${escapeHtml2(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
-}
-function renderSetupSteps(secretRef, needed, tools = "") {
+function renderSetupSteps(secretRef, tools = "") {
   const steps = DASHBOARD_OUTSIDE_HELP_COPY.steps.map((step) => fill(step, { secretRef }));
   return renderSection({
     id: "steps",
     title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
     summary: "",
-    open: needed,
-    attn: needed,
     body: `${tools}<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
   });
 }
-function renderAcknowledgements(route, level, canEdit) {
-  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  const n = String(ZKAPI_RISK_ACKNOWLEDGEMENTS.length);
-  if (route.acknowledgements.complete) {
-    return `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div>` + `<p class="pnote" data-outside-acknowledged="yes">${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.acknowledged, { n }))}</p>` + `<details class="howto" data-outside-ack-review><summary>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.acknowledgedReview)}</summary>${renderStatements(false)}</details>`;
-  }
-  return `<div data-outside-ack-standalone${level === "unnamed" ? " hidden" : ""}>` + `<div class="sect attn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div>` + `<p class="pnote" data-outside-acknowledged="no">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>` + `<form class="ohform" data-outside-form="route" data-outside-accept>${renderStatements(true)}` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
-}
-function renderLimits(route, blockers, canEdit) {
+function renderLimits(route, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const capped = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
   const limit = capped ? [
@@ -101285,18 +101321,10 @@ function renderLimits(route, blockers, canEdit) {
     ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
   ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
   const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
-  const needed = blockers.some((code) => LIMIT_BLOCKERS.has(code));
-  const noLimit = capped ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn primary"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>`;
+  const noLimit = capped && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
   const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
-  const body = today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
-  return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, open: needed, attn: needed, body });
-}
-function renderFence(ready, canEdit) {
-  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  const mine = ready.fences.some((fence) => fence.thisWallet);
-  const rows = ready.fences.map((fence) => `<li>${escapeHtml2(fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: fence.at.slice(0, 16).replace("T", " ") }))}</li>`).join("");
-  const body = `<p class="pnote ohwarn" data-outside-fence>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fenceIntro)}</p><ul class="ohlist">${rows}</ul>` + `<div class="ohfence">` + `<form class="ohform" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary"${mine ? "" : ' disabled aria-disabled="true"'}${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}</span><span class="actmsg" data-action-message role="status"></span></form>` + ready.fences.map((fence) => `<form class="ohform" data-outside-form="abandon" data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet"${disabled}>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button>` + `<span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}</span><span class="actmsg" data-action-message role="status"></span></form>`).join("") + `</div>`;
-  return renderSection({ id: "fence", title: DASHBOARD_OUTSIDE_HELP_COPY.fenceTitle, summary: "", open: true, attn: true, body });
+  const body = `<p class="pnote" data-outside-cost-line>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, body });
 }
 function openAiModel(model) {
   return typeof model === "string" && /^openai\//i.test(model.trim());
@@ -101318,16 +101346,6 @@ function renderWriter(writer, canEdit) {
   parts.push(renderWriterCheck(writer, canEdit));
   const summary = choice ? choice.model : C2.builtInShort;
   return renderSection({ id: "writer", title: C2.title, summary, open: writer.check.state !== "idle", body: `<div data-outside-writer>${parts.join("")}</div>` });
-}
-function renderStandard(standard, canEdit) {
-  const C2 = DASHBOARD_OUTSIDE_HELP_COPY.standard;
-  const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  const options = ["as_written", "light_cleanup", "custom"].map((mode) => {
-    const copy = C2.modes[mode];
-    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
-  }).join("");
-  const text = standard.mode === "custom" && standard.instruction !== undefined ? standard.instruction : standard.preset;
-  return `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml2(standard.mode)}" data-outside-preset="${escapeHtml2(standard.preset)}">` + `<div class="sect">${escapeHtml2(C2.title)}</div>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml2(C2.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml2(text)}</textarea>` + `<div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(C2.save)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function renderWriterCheck(writer, canEdit) {
   const C2 = DASHBOARD_OUTSIDE_HELP_COPY.writer;
@@ -101386,26 +101404,26 @@ function renderLanguages(status, canEdit) {
     body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
   });
 }
-function renderDetails(route) {
-  if (route.readinessUnavailable || !route.readiness)
-    return "";
-  const ready = route.readiness;
-  const facts = [
-    ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
-    ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
-    ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
-    fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
-    ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown,
-    fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }),
-    ...ready.lastSession ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.lastSession, { at: ready.lastSession.at.slice(0, 16).replace("T", " "), result: ready.lastSession.result })] : []
-  ];
-  return renderSection({
-    id: "details",
-    title: DASHBOARD_OUTSIDE_HELP_COPY.detailsTitle,
-    summary: "",
-    open: false,
-    body: `<ul class="ohfacts" data-outside-facts>${facts.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>`
-  });
+function renderDetails(status) {
+  const route = status.route;
+  const about = (status.settings.state === "on" ? `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p><p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` : "") + `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`;
+  const more = `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</div>` + `<ul class="ohlist" data-outside-disclosure-more>${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
+  let facts = "";
+  if (route.state === "configured" && route.readiness && !route.readinessUnavailable) {
+    const ready = route.readiness;
+    const list = [
+      ready.daemonFound ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.daemon, { version: ready.daemonVersion ?? DASHBOARD_OUTSIDE_HELP_COPY.facts.versionUnknown }) : DASHBOARD_OUTSIDE_HELP_COPY.facts.daemonMissing,
+      ready.torMode === "off" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.torOff : ready.torFound ? DASHBOARD_OUTSIDE_HELP_COPY.facts.tor : DASHBOARD_OUTSIDE_HELP_COPY.facts.torMissing,
+      ready.apiKeyConfigured ? DASHBOARD_OUTSIDE_HELP_COPY.facts.key : DASHBOARD_OUTSIDE_HELP_COPY.facts.keyMissing,
+      fill(ready.requestsToday.count === 1 ? DASHBOARD_OUTSIDE_HELP_COPY.facts.todayOne : DASHBOARD_OUTSIDE_HELP_COPY.facts.today, { n: String(ready.requestsToday.count), usd: ready.spendToday.reservedUsd.toFixed(0) }),
+      ready.expiry.state === "active" && ready.expiry.expiryDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.facts.expiry, { date: ready.expiry.expiryDate, days: String(ready.expiry.daysLeft ?? "") }) : ready.expiry.state === "expired" ? DASHBOARD_OUTSIDE_HELP_COPY.facts.expired : DASHBOARD_OUTSIDE_HELP_COPY.facts.expiryUnknown,
+      fill(DASHBOARD_OUTSIDE_HELP_COPY.routeLabel, { label: ready.routeLabel }),
+      ...ready.fences.map((fence) => fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: shortTime(fence.at) })),
+      ...ready.lastSession ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.lastSession, { at: shortTime(ready.lastSession.at), result: ready.lastSession.result })] : []
+    ];
+    facts = `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.factsTitle)}</div><ul class="ohfacts" data-outside-facts>${list.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>`;
+  }
+  return renderSection({ id: "details", title: DASHBOARD_OUTSIDE_HELP_COPY.detailsTitle, summary: "", body: about + more + facts });
 }
 function outsideHelpClientScript(config2) {
   return `(function () {
@@ -101442,30 +101460,32 @@ function outsideHelpClientScript(config2) {
     if (result && typeof result.error === 'string' && result.error) return result.error;
     return response && response.status ? config.copy.failedStatus.replace('{status}', String(response.status)) : config.copy.failed;
   }
-  // Standard chosen while the statements are not accepted: they show inline,
-  // and the button reads Accept and save. Strict: the button is a plain Save,
-  // and the statements show in their own section instead.
-  var levelForm = root.querySelector('form[data-outside-form="level"]');
-  var levelAcks = levelForm ? levelForm.querySelector('[data-outside-level-acks]') : null;
-  var standalone = root.querySelector('[data-outside-ack-standalone]');
-  function levelAccepting() {
-    var picked = levelForm ? levelForm.querySelector('input[name="level"]:checked') : null;
-    return Boolean(levelAcks) && Boolean(picked) && picked.value === 'unnamed';
-  }
-  function syncLevel() {
-    if (!levelForm || !levelAcks) return;
-    var accepting = levelAccepting();
-    if (accepting) levelAcks.removeAttribute('hidden'); else levelAcks.setAttribute('hidden', '');
-    if (standalone) { if (accepting) standalone.setAttribute('hidden', ''); else standalone.removeAttribute('hidden'); }
-    var save = levelForm.querySelector('[data-outside-level-save]');
-    if (save) {
-      save.textContent = accepting ? config.copy.levelAcceptSave : config.copy.levelSave;
-      if (accepting) save.classList.add('primary'); else save.classList.remove('primary');
-    }
-  }
-  if (levelForm) {
-    levelForm.querySelectorAll('input[name="level"]').forEach(function (input) { input.addEventListener('change', syncLevel); });
-  }
+  // A problem's button that opens the section holding its fix: open it,
+  // bring it into view, and put the cursor in the field that needs the owner.
+  root.querySelectorAll('[data-outside-open]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var section = root.querySelector('details[data-outside-section="' + button.getAttribute('data-outside-open') + '"]');
+      if (!section) return;
+      section.open = true;
+      if (section.scrollIntoView) section.scrollIntoView({ block: 'start' });
+      var focus = button.getAttribute('data-outside-focus');
+      var target = focus ? section.querySelector('[name="' + focus + '"]') : section.querySelector('summary');
+      if (target && target.focus) target.focus();
+    });
+  });
+  // Locked: a fix's first click opens the local session (the reload then shows the real button).
+  var unlockForm = root.querySelector('form[data-outside-form="unlock"]');
+  root.querySelectorAll('[data-outside-needs-unlock]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      if (!unlockForm) return;
+      if (unlockForm.requestSubmit) unlockForm.requestSubmit(); else unlockForm.dispatchEvent(new Event('submit', { cancelable: true }));
+      if (unlockForm.scrollIntoView) unlockForm.scrollIntoView({ block: 'start' });
+    });
+  });
+  // Check again: readiness runs on every read of the page.
+  root.querySelectorAll('[data-outside-recheck]').forEach(function (button) {
+    button.addEventListener('click', function () { window.location.reload(); });
+  });
   // Each post carries the whole card's state for its route, wherever on the
   // card the fields sit: the switch reads the language boxes, and a limits
   // save reads the funding date and both limits. Only an Accept posts the
@@ -101489,10 +101509,13 @@ function outsideHelpClientScript(config2) {
     }
     if (kind === 'level') {
       var picked = form.querySelector('input[name="level"]:checked');
-      // On or off as the status line says now (the switch updates it in place), so saving a level never flips the switch.
+      // On or off as the switch says now: the status line once the switch has
+      // updated it in place, else the saved setting (a paused card is still
+      // on), so saving a level never flips the switch.
       var state = root.querySelector('[data-outside-state-text]');
-      var current = state ? state.getAttribute('data-outside-state') : form.getAttribute('data-outside-current');
-      return { enabled: current === 'on' || current === 'needs_acceptance', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
+      var said = state ? state.getAttribute('data-outside-state') : '';
+      var current = said === 'on' || said === 'off' ? said : form.getAttribute('data-outside-current');
+      return { enabled: current === 'on', revision: Number(root.getAttribute('data-revision') || '0'), level: picked ? picked.value : form.getAttribute('data-outside-level') };
     }
     if (kind === 'writer') {
       var clearing = submitter && submitter.hasAttribute('data-outside-writer-clear');
@@ -101575,20 +101598,11 @@ function outsideHelpClientScript(config2) {
       try {
         // The local unlock presents no credential at all: the boundary wants a
         // loopback browser and nothing else. Every other form carries the CSRF token.
-        var accepting = kind === 'level' && levelAccepting();
         var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var outcome = await send(paths[kind], body);
         if (!outcome.ok) return fail(outcome.text);
         var text = outcome.text;
         var result = outcome.result;
-        if (accepting) {
-          // Accept and save: the level is saved; now record the statements.
-          if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
-          var accepted = await send(config.paths.route, { acknowledged: statementIds(levelAcks) });
-          if (!accepted.ok) return fail(accepted.text);
-          text = accepted.text;
-          result = accepted.result;
-        }
         message(form, text, false);
         if (kind === 'enable' && body && !body.replace_invalid) {
           // Say the new state at once, before the reload that redraws the card.
@@ -101610,7 +101624,7 @@ function outsideHelpClientScript(config2) {
   });
 })();`;
 }
-var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS, LIMIT_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
 var init_outside_help = __esm(() => {
   init_zkapi_consult_settings();
   init_components();
@@ -101640,8 +101654,9 @@ var init_outside_help = __esm(() => {
     it: "Italian"
   };
   MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  LIMIT_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid", "note_expired", "daily_cap_reached", "spend_cap_reached"]);
-  SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on"]);
+  CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
+  FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
+  SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
   TOOL_BLOCKERS = new Map([["daemon_not_found", "zkapi-clientd"], ["tor_not_found", "tor"]]);
 });
 
@@ -107106,27 +107121,31 @@ var LOCAL_PAGE_CSS = `
 .modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
 .modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
 `, DASHBOARD_OUTSIDE_HELP_CSS = `
-.outside .ohlabel { color: var(--t3); font-size: var(--fs-caption); margin: -2px 0 10px; }
-/* The status block: the switch, the route in one line, today's usage. */
-.outside .ohpanel { margin: 0 0 8px; padding: 16px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
-.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; margin: 0 0 4px; }
+/* The status line: the state and today's count, the switch beside them. */
+.outside .ohpanel { margin: 0 0 12px; padding: 14px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
+.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
+.outside .ohstatewrap { display: grid; gap: 2px; min-width: 0; flex: 1 1 320px; }
+.outside .ohhead > .pbuttons { flex: none; }
 .outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
 .outside .dot.on { background: var(--good); }
 .outside .dot.off { background: transparent; border: 2px solid var(--off); }
 .outside .dot.attn { background: var(--warn-fill); }
-.outside .ohline { margin: 0 0 0 20px; color: var(--t2); }
-.outside .ohline.good { color: var(--good); font-weight: 600; }
-.outside .ohline.attn, .outside .ohline .attn { color: var(--warn); font-weight: 600; }
-.outside .ohline .attn { font-weight: 500; }
-.outside .ohpanel .ohsmall { margin: 4px 0 0 20px; }
+.outside .ohline { margin: 0 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.outside .ohline.attn { color: var(--warn); font-weight: 600; }
 .outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
 .outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
-/* Problems: one tinted list, a line each, the fix in the line. */
-.outside .ohfix { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+/* Problems: one tinted list, a line each, its one button in the line. */
+.outside .ohfix { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
 .outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
 .outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
 .outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
-.outside .ohfix .ohform { margin: 0; }
+.outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .ohactions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
+/* The statements, in full only until accepted. */
+.outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }
+.outside .ohaccept .sect { margin-top: 0; }
+.outside .ohaccept .ohlist { margin-bottom: 4px; }
 .outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
 .outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
 .outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
@@ -107135,7 +107154,7 @@ var LOCAL_PAGE_CSS = `
 .outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
 /* Secondary sections: one line each (title and a short summary), open only when they need attention. */
 .outside details.ohsect { border-top: 1px solid var(--line); }
-.outside .ohmore { margin: 28px 0 0; }
+.outside .ohmore { margin: 20px 0 0; }
 .outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
 .outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
 .outside details.ohsect > summary::-webkit-details-marker { display: none; }
@@ -107143,7 +107162,6 @@ var LOCAL_PAGE_CSS = `
 .outside details.ohsect[open] > summary::before { content: '\\25BE'; }
 .outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
 .outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
-.outside .ohsect-title.attn { color: var(--warn); }
 .outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
 .outside .ohsect-sum:empty { display: none; }
 .outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
@@ -107156,16 +107174,14 @@ var LOCAL_PAGE_CSS = `
 .outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
 .outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .outside .ohoff { color: var(--t3); }
-.outside .ohfence { display: grid; gap: 10px; margin: 8px 0 0; }
-.outside .ohfence .ohform { grid-template-columns: auto 1fr; align-items: center; }
-.outside .ohfence .ohform .actmsg { grid-column: 1 / -1; }
 .outside .actmsg[data-state="error"] { color: var(--bad); }
-.outside .ohunlock { margin: 0 0 12px; padding: 12px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
-.outside .ohunlock .pnote { margin: 0; color: var(--t1); }
+.outside .ohunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohunlock .hint { color: var(--t2); }
+.outside .ohunlock .actmsg:empty { display: none; }
 @media (max-width: 700px) {
   .outside .ohpanel { padding: 14px; }
   .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
-  .outside .ohline, .outside .ohpanel .ohsmall { margin-left: 0; }
+  .outside .ohline { margin-left: 0; }
   .outside .btn { white-space: normal; text-align: left; }
   .outside .ohsect-body { padding-left: 0; }
 }
