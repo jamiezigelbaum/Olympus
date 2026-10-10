@@ -70,8 +70,8 @@ export interface BuiltInPrivateAnswerModelOptions {
   /**
    * Re-reads one evidence item's own text, up to `maxChars`, with its
    * passages chosen for `question` (the whole item when it fits), from the
-   * store on this computer. The panel reads an item that clearly leads in
-   * depth through it. Without it, the passages the evidence carries are read.
+   * store on this computer. The panel reads the items it picked through it.
+   * Without it, the passages the evidence carries are read.
    * Undefined, or a policy denial, means the store refuses the item now (its
    * tier, the owner's scope, or it is gone): the item is dropped, never read
    * from the passages it carried. Any other failure, or an empty result, keeps
@@ -152,6 +152,11 @@ export interface PanelAnswerLimits {
   /** Characters of the leading items' text a summary answer reads (their best passages). */
   leadingEvidenceChars: number;
   /**
+   * Characters of text a summary answer without a clear lead reads, shared
+   * by the items read, each re-read for its best passages at its share.
+   */
+  summaryEvidenceChars: number;
+  /**
    * `detail: "full"`: characters of item text read in depth (whole items
    * when they fit), shared by the items read, with the larger prompt and
    * answer budgets below. ChatGPT's model asks for it through the tool's
@@ -180,6 +185,10 @@ export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
   // the gain while a clear leader is still read alone, in depth.
   leadGap: 0.03,
   leadingEvidenceChars: 5_000,
+  // Search fits a dozen items' passages into one pack (about 1.6k characters
+  // each); the panel reads at most four, so it re-reads them at a share of
+  // this. Within the standard prompt with the rules and labels around it.
+  summaryEvidenceChars: 8_000,
   // Full detail on a small local model is bounded by prefill and generation
   // speed: on a loaded Mac 10k characters of evidence and a 3.7k answer budget
   // took 179 s. About 7k characters of the item's text and an answer of about
@@ -256,16 +265,17 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       /** The depth re-read's text for an item, by index into read.items. */
       const deepItems = new Map<number, BuiltInEvidenceItem>();
       // Full: the items read are re-read whole (or their best passages)
-      // within the deep budget. Summary: only leading items are re-read, for
-      // their best passages within a summary-sized budget (results pages,
-      // not page headers); otherwise the search-time passages are read.
-      if (options.readItem && (full || selection.leading) && picked.length > 0) {
+      // within the deep budget. Summary: the items read are re-read for their
+      // best passages (results pages, not page headers) within a
+      // summary-sized budget, the leading items' own when they lead. The
+      // search-time passages were cut to share a pack with every match.
+      if (options.readItem && picked.length > 0) {
         picked = await admit(picked);
         const deep = await readInDepth(
           question,
           picked.map((index) => read.items[index]!),
           picked.map(hitOf),
-          full ? limits.deepEvidenceChars : limits.leadingEvidenceChars,
+          full ? limits.deepEvidenceChars : selection.leading ? limits.leadingEvidenceChars : limits.summaryEvidenceChars,
           options.readItem,
           signal,
         );

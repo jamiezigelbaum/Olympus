@@ -146,19 +146,31 @@ describe('reading leading items in depth', () => {
     expect(Math.max(...sizes)).toBeLessThanOrEqual(PANEL_ANSWER_LIMITS.leadingEvidenceChars);
   });
 
-  test('without a clear lead, four items at the standard budget; an uncited item is not a source', async () => {
+  // 2026-10-10 live: four items read at their search-time passages (about
+  // 1.6k characters each, cut to share a pack with every match) left a
+  // letter's deed clause unread. The items read are re-read at a share of
+  // the summary budget.
+  test('without a clear lead, four items, each re-read within a share of the summary budget; an uncited item is not a source', async () => {
     const evidence = ['a', 'b', 'c', 'd'].map((id) => hit(id, `${id}.pdf`, `text ${id}`));
     let seen: { items: readonly BuiltInEvidenceItem[]; options: AnswerPrivatelyOptions } | undefined;
-    let reads = 0;
+    const sizes: number[] = [];
     const panel = panelWith(async (_q, items, options) => {
       seen = { items, options };
       return { answer: 'x', citations: [{ id: 'b', claim: 'c' }], unanswered: [], modelId: 'm' };
-    }, { relevance: async () => [0.50, 0.495, 0.49, 0.485], readItem: async () => { reads += 1; return ['deep']; } });
+    }, {
+      relevance: async () => [0.50, 0.495, 0.49, 0.485],
+      readItem: async (item, request) => {
+        sizes.push(request.maxChars);
+        const id = (item.provenance as { sourceItem: { localItemId: string } }).sourceItem.localItemId;
+        return [`${id}-passage.`.repeat(2_000).slice(0, request.maxChars)];
+      },
+    });
     const result = await panel.answerPrivately('q', evidence);
     expect(seen!.items).toHaveLength(4);
     expect(seen!.options.maxPromptBytes).toBe(PANEL_ANSWER_LIMITS.maxPromptBytes);
     expect(seen!.options.maxAnswerChars).toBe(PANEL_ANSWER_LIMITS.maxAnswerChars);
-    expect(reads).toBe(0);
+    expect(seen!.items.map((item) => item.text.length)).toEqual(Array(4).fill(PANEL_ANSWER_LIMITS.summaryEvidenceChars / 4));
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(PANEL_ANSWER_LIMITS.summaryEvidenceChars);
     expect(result.citations).toEqual([{ title: 'b.pdf', source: 'fixture' }]);
   });
 

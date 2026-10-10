@@ -12231,6 +12231,9 @@ export interface ConnectorStorePassageFocus {
 // At most this many passages from one item, so a long document contributes
 // its best few passages rather than a smear of every chunk.
 const MAX_PASSAGES_PER_CANDIDATE = 3;
+// Chunks this close to the best by embedding share the passage budget (see
+// selectEvidencePassages). The panel's lead gap on the same cosine scale.
+const PASSAGE_TIE_MARGIN = 0.03;
 
 // An item that fits its budget is returned whole, exactly as before. A longer
 // one yields its best passages instead of its first ones: the chunk a
@@ -12284,7 +12287,14 @@ function selectEvidencePassages(
     return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
   }
   // Most relevant first (the anchor, then by embedding), filled whole until
-  // the budget runs out, then read in document order.
+  // the budget runs out, then read in document order. Chunks within
+  // PASSAGE_TIE_MARGIN of the best by embedding are a near-tie: they share
+  // the budget (the shorter whole, the rest an equal share from their start)
+  // rather than the first taking it all. A question in one language over a
+  // document in another matches no query term, so the embedding alone
+  // ranks, and its near-ties do not say which passage answers (2026-10-10
+  // live: a Spanish letter of intent's opening chunk at 0.740 took the whole
+  // budget from the deed and expenses clause at 0.732).
   const ranked = chunks
     .map((_, index) => index)
     .sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0)
@@ -12292,8 +12302,23 @@ function selectEvidencePassages(
       || left - right);
   const kept = new Map<number, string>();
   let remaining = maxChars;
+  const best = Math.max(...ranked.map(relevance));
+  const tied = Number.isFinite(best)
+    ? ranked
+      .filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN)
+      .slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)))
+    : [];
+  if (tied.length > 1) {
+    const byLength = [...tied].sort((left, right) => chunks[left]!.length - chunks[right]!.length || left - right);
+    byLength.forEach((index, position) => {
+      const included = chunks[index]!.slice(0, Math.floor(remaining / (byLength.length - position)));
+      kept.set(index, included);
+      remaining -= included.length;
+    });
+  }
   for (const index of ranked) {
     if (remaining <= 0) break;
+    if (kept.has(index)) continue;
     const text = chunks[index]!;
     const included = text.length > remaining ? text.slice(0, remaining) : text;
     kept.set(index, included);

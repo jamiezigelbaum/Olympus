@@ -19119,9 +19119,21 @@ function selectEvidencePassages(chunks, maxChars, focus, context = {}) {
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
   const kept = new Map;
   let remaining = maxChars;
+  const best = Math.max(...ranked.map(relevance));
+  const tied = Number.isFinite(best) ? ranked.filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN).slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE))) : [];
+  if (tied.length > 1) {
+    const byLength = [...tied].sort((left, right) => chunks[left].length - chunks[right].length || left - right);
+    byLength.forEach((index, position) => {
+      const included = chunks[index].slice(0, Math.floor(remaining / (byLength.length - position)));
+      kept.set(index, included);
+      remaining -= included.length;
+    });
+  }
   for (const index of ranked) {
     if (remaining <= 0)
       break;
+    if (kept.has(index))
+      continue;
     const text = chunks[index];
     const included = text.length > remaining ? text.slice(0, remaining) : text;
     kept.set(index, included);
@@ -20382,7 +20394,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_media_cache();
@@ -121803,9 +121815,9 @@ function createBuiltInPrivateAnswerModel(options) {
       const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
       let picked = selection.items.map((position) => live[position]);
       const deepItems = new Map;
-      if (options.readItem && (full || selection.leading) && picked.length > 0) {
+      if (options.readItem && picked.length > 0) {
         picked = await admit(picked);
-        const deep = await readInDepth(question, picked.map((index) => read.items[index]), picked.map(hitOf), full ? limits.deepEvidenceChars : limits.leadingEvidenceChars, options.readItem, signal);
+        const deep = await readInDepth(question, picked.map((index) => read.items[index]), picked.map(hitOf), full ? limits.deepEvidenceChars : selection.leading ? limits.leadingEvidenceChars : limits.summaryEvidenceChars, options.readItem, signal);
         const kept = deep.flatMap((item, position) => item ? [{ item, index: picked[position] }] : []);
         picked = kept.map((entry) => entry.index);
         for (const entry of kept)
@@ -122203,6 +122215,7 @@ var init_private_answer_model = __esm(() => {
     maxLeadingItems: 2,
     leadGap: 0.03,
     leadingEvidenceChars: 5000,
+    summaryEvidenceChars: 8000,
     deepEvidenceChars: 7000,
     deepPromptBytes: 11500,
     deepAnswerChars: 2700
