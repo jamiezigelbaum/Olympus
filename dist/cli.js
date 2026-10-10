@@ -53480,6 +53480,7 @@ var init_vocabulary = __esm(() => {
     showSent: "Show what was sent",
     hideSent: "Hide what was sent",
     askAnother: "Ask another",
+    opening: "Opening a new question…",
     askAgain: "To ask another private question, ask ChatGPT to open a new one."
   };
   DASHBOARD_LOCAL_COPY = {
@@ -72128,6 +72129,7 @@ function boundConsultWriterInput(input) {
   }
   return Object.freeze({
     question: clean(input.question, CONSULT_WRITER_LIMITS.questionChars),
+    ...input.direct && typeof input.feedback === "string" && input.feedback.trim() ? { feedback: clean(input.feedback, CONSULT_WRITER_FEEDBACK_CHARS) } : {},
     answer: clean(input.answer, CONSULT_WRITER_LIMITS.answerChars),
     gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : []).map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars)).filter(Boolean).slice(0, CONSULT_WRITER_LIMITS.gaps)),
     ...evidence.length > 0 ? { evidence: Object.freeze(evidence) } : {},
@@ -72170,7 +72172,9 @@ ${CONSULT_STANDARD_REPLY_FORMAT}` }),
   if (bounded.direct) {
     return Object.freeze([
       Object.freeze({ role: "system", content: consultWriterSystem(level, { direct: true }) }),
-      Object.freeze({ role: "user", content: `Question: ${bounded.question}` })
+      Object.freeze({ role: "user", content: bounded.feedback ? `Question: ${bounded.question}
+
+Your previous draft was refused by the privacy check: ${bounded.feedback} Write the questions again without that; use bands and classes of thing instead.` : `Question: ${bounded.question}` })
     ]);
   }
   const user = [
@@ -72485,7 +72489,7 @@ async function runOwnConsultWriter(input, options) {
     return { kind: "declined", promptTokens: 0, ms };
   return { kind: "questions", questions: reply.questions, promptTokens: 0, ms };
 }
-var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_DIRECT_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_STRICT_RULES, CONSULT_WRITER_STRICT_FORM = "Form: each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary words of the user's language only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings or spelled-out letters. At most three questions, on one subject, at most 600 bytes and 80 words in all; do not reuse wording between them.", CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_SYSTEM_DIRECT, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA;
+var CONSULT_WRITER_LIMITS, CONSULT_STANDARD_REPLY_FORMAT = 'Reply with one JSON object and nothing else: {"questions": ["..."]} holding the prepared question (one to three parts, each plain text), or {"questions": null} to send nothing.', CONSULT_WRITER_COMMON_HEAD, CONSULT_WRITER_DIRECT_HEAD, CONSULT_WRITER_COMMON_TAIL, CONSULT_WRITER_STRICT_RULES, CONSULT_WRITER_STRICT_FORM = "Form: each question is one plain sentence on one line, at most 25 words and at most twelve content words, ending with a single question mark. Ordinary words of the user's language only: no line breaks, markup, code, links, slashes, mail addresses, handles, version strings or spelled-out letters. At most three questions, on one subject, at most 600 bytes and 80 words in all; do not reuse wording between them.", CONSULT_WRITER_SYSTEM, CONSULT_WRITER_SYSTEM_UNNAMED, CONSULT_WRITER_SYSTEM_DIRECT, CONSULT_STANDARD_RESPONSE_SCHEMA, CONSULT_WRITER_RESPONSE_SCHEMA, CONSULT_WRITER_FEEDBACK_CHARS = 240;
 var init_consult_writer = __esm(() => {
   init_model_transport();
   init_local_model_policy();
@@ -87727,17 +87731,17 @@ function isPanelOrigin(origin, extraOrigins = []) {
 function privateAnswerRoute(path) {
   if (!PRIVATE_ANSWER_PATH_PATTERN.test(path))
     return;
-  const suffix = path.endsWith(PRIVATE_ANSWER_OPEN_SUFFIX) ? PRIVATE_ANSWER_OPEN_SUFFIX : path.endsWith(PRIVATE_ANSWER_ASK_SUFFIX) ? PRIVATE_ANSWER_ASK_SUFFIX : "";
-  const action = suffix === PRIVATE_ANSWER_OPEN_SUFFIX ? "open" : suffix === PRIVATE_ANSWER_ASK_SUFFIX ? "ask" : "collect";
+  const suffix = path.endsWith(PRIVATE_ANSWER_OPEN_SUFFIX) ? PRIVATE_ANSWER_OPEN_SUFFIX : path.endsWith(PRIVATE_ANSWER_ASK_SUFFIX) ? PRIVATE_ANSWER_ASK_SUFFIX : path.endsWith(PRIVATE_ANSWER_ANOTHER_SUFFIX) ? PRIVATE_ANSWER_ANOTHER_SUFFIX : "";
+  const action = suffix === PRIVATE_ANSWER_OPEN_SUFFIX ? "open" : suffix === PRIVATE_ANSWER_ASK_SUFFIX ? "ask" : suffix === PRIVATE_ANSWER_ANOTHER_SUFFIX ? "another" : "collect";
   return { jobId: path.slice(PRIVATE_ANSWER_PATH_PREFIX.length, path.length - suffix.length), action };
 }
 function privateAnswerInstallId(jobId) {
   return credentialInstallId("private", jobId);
 }
-var PRIVATE_ANSWER_PATH_PREFIX = "/private/", PRIVATE_ANSWER_PATH_PATTERN, PRIVATE_ANSWER_OPEN_SUFFIX = "/open", PRIVATE_ANSWER_ASK_SUFFIX = "/ask", PRIVATE_ANSWER_MAX_REQUEST_BYTES = 512, PRIVATE_QUESTION_MAX_REQUEST_BYTES = 16384, SANDBOX_HOST = "web-sandbox.oaiusercontent.com", SANDBOX_SUBDOMAIN;
+var PRIVATE_ANSWER_PATH_PREFIX = "/private/", PRIVATE_ANSWER_PATH_PATTERN, PRIVATE_ANSWER_OPEN_SUFFIX = "/open", PRIVATE_ANSWER_ASK_SUFFIX = "/ask", PRIVATE_ANSWER_ANOTHER_SUFFIX = "/another", PRIVATE_ANSWER_MAX_REQUEST_BYTES = 512, PRIVATE_QUESTION_MAX_REQUEST_BYTES = 16384, SANDBOX_HOST = "web-sandbox.oaiusercontent.com", SANDBOX_SUBDOMAIN;
 var init_private_answer = __esm(() => {
   init_tokens();
-  PRIVATE_ANSWER_PATH_PATTERN = /^\/private\/oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}(?:\/open|\/ask)?$/;
+  PRIVATE_ANSWER_PATH_PATTERN = /^\/private\/oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}(?:\/open|\/ask|\/another)?$/;
   SANDBOX_SUBDOMAIN = /^(?:https|codex-sandbox):\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.web-sandbox\.oaiusercontent\.com$/;
 });
 
@@ -117653,6 +117657,261 @@ var init_private_answer_contract = __esm(() => {
   };
 });
 
+// src/workers/dashboard/chatgpt/markdown.ts
+function chatgptMarkdownRender(doc2, container, text2) {
+  const lines = text2.replace(/\r\n?/g, `
+`).split(`
+`);
+  let i = 0;
+  const node = (tag, parent, cls) => {
+    const made = doc2.createElement(tag);
+    if (cls)
+      made.className = cls;
+    parent.appendChild(made);
+    return made;
+  };
+  const isBlank = (line) => line === undefined || !line.trim();
+  const fence = (line) => {
+    const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    return m ? m[1] : null;
+  };
+  const tableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
+  const tableRule = (line) => /^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(line) || /^\s*\|(\s*:?-{3,}:?\s*\|)+\s*$/.test(line);
+  const listItem = (line) => {
+    const m = /^(\s*)(?:([-*+])|(\d{1,3}[.)]))\s+(.*)$/.exec(line);
+    if (!m)
+      return null;
+    return { indent: m[1].length, ordered: m[3] !== undefined, text: m[4] };
+  };
+  const cells = (line) => {
+    const trimmed2 = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+    const out = [];
+    let cur = "";
+    for (let k = 0;k < trimmed2.length; k++) {
+      const ch = trimmed2[k];
+      if (ch === "\\" && trimmed2[k + 1] === "|") {
+        cur += "|";
+        k++;
+        continue;
+      }
+      if (ch === "|") {
+        out.push(cur.trim());
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+    out.push(cur.trim());
+    return out;
+  };
+  const inline = (parent, src) => {
+    let buf = "";
+    const flush = () => {
+      if (buf) {
+        parent.appendChild(doc2.createTextNode(buf));
+        buf = "";
+      }
+    };
+    let k = 0;
+    while (k < src.length) {
+      const ch = src[k];
+      if (ch === "\\" && k + 1 < src.length && /[\\`*_[\]()#+\-.!|>~]/.test(src[k + 1])) {
+        buf += src[k + 1];
+        k += 2;
+        continue;
+      }
+      if (ch === "`") {
+        const run = /^`+/.exec(src.slice(k))[0];
+        const close = src.indexOf(run, k + run.length);
+        if (close > 0) {
+          flush();
+          const span = src.slice(k + run.length, close);
+          node("code", parent).textContent = span.length > 2 && span[0] === " " && span[span.length - 1] === " " ? span.slice(1, -1) : span;
+          k = close + run.length;
+          continue;
+        }
+      }
+      if (ch === "[") {
+        const m = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/.exec(src.slice(k));
+        if (m) {
+          flush();
+          const a = node("a", parent);
+          a.setAttribute("href", m[2]);
+          a.setAttribute("target", "_blank");
+          a.setAttribute("rel", "noopener noreferrer");
+          inline(a, m[1]);
+          k += m[0].length;
+          continue;
+        }
+      }
+      if (ch === "*" || ch === "_") {
+        const double = src[k + 1] === ch;
+        const mark = double ? ch + ch : ch;
+        const rest = src.slice(k + mark.length);
+        if (rest && !/^\s/.test(rest)) {
+          let close = -1;
+          let from = 0;
+          for (;; ) {
+            const at = rest.indexOf(mark, from);
+            if (at < 0)
+              break;
+            if (at > 0 && !/\s/.test(rest[at - 1]) && (ch === "*" || !/\w/.test(rest[at + mark.length] || ""))) {
+              close = at;
+              break;
+            }
+            from = at + 1;
+          }
+          if (close > 0) {
+            flush();
+            inline(node(double ? "strong" : "em", parent), rest.slice(0, close));
+            k += mark.length + close + mark.length;
+            continue;
+          }
+        }
+      }
+      buf += ch;
+      k++;
+    }
+    flush();
+  };
+  const blocks = (parent, stop) => {
+    let para = [];
+    const endPara = () => {
+      if (!para.length)
+        return;
+      inline(node("p", parent), para.join(" ").replace(/\s+/g, " ").trim());
+      para = [];
+    };
+    while (i < lines.length) {
+      const line = lines[i];
+      if (stop(line))
+        break;
+      if (isBlank(line)) {
+        endPara();
+        i++;
+        continue;
+      }
+      const open7 = fence(line);
+      if (open7) {
+        endPara();
+        i++;
+        const body = [];
+        while (i < lines.length && !(fence(lines[i]) && fence(lines[i])[0] === open7[0] && fence(lines[i]).length >= open7.length))
+          body.push(lines[i++]);
+        if (i < lines.length)
+          i++;
+        node("code", node("pre", parent)).textContent = body.join(`
+`);
+        continue;
+      }
+      const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      if (heading) {
+        endPara();
+        inline(node("h" + Math.min(6, heading[1].length + 2), parent), heading[2]);
+        i++;
+        continue;
+      }
+      if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+        endPara();
+        node("hr", parent);
+        i++;
+        continue;
+      }
+      if (/^\s{0,3}>/.test(line)) {
+        endPara();
+        const quoted = [];
+        while (i < lines.length && /^\s{0,3}>/.test(lines[i]))
+          quoted.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
+        chatgptMarkdownRender(doc2, node("blockquote", parent), quoted.join(`
+`));
+        continue;
+      }
+      if (tableRow(line) && i + 1 < lines.length && tableRule(lines[i + 1])) {
+        endPara();
+        const table = node("table", parent);
+        const headRow = node("tr", node("thead", table));
+        for (const cell of cells(line))
+          inline(node("th", headRow), cell);
+        i += 2;
+        const tbody = node("tbody", table);
+        while (i < lines.length && tableRow(lines[i])) {
+          const row = node("tr", tbody);
+          for (const cell of cells(lines[i]))
+            inline(node("td", row), cell);
+          i++;
+        }
+        continue;
+      }
+      const item = listItem(line);
+      if (item && (para.length === 0 || item.indent === 0)) {
+        endPara();
+        list(parent, item.indent, item.ordered);
+        continue;
+      }
+      if (/^(?: {4}|\t)/.test(line) && para.length === 0) {
+        const body = [];
+        while (i < lines.length && (/^(?: {4}|\t)/.test(lines[i]) || isBlank(lines[i]) && i + 1 < lines.length && /^(?: {4}|\t)/.test(lines[i + 1])))
+          body.push(lines[i++].replace(/^(?: {4}|\t)/, ""));
+        node("code", node("pre", parent)).textContent = body.join(`
+`);
+        continue;
+      }
+      para.push(line.trim());
+      i++;
+    }
+    endPara();
+  };
+  const list = (parent, indent, ordered) => {
+    const wrap = node(ordered ? "ol" : "ul", parent);
+    while (i < lines.length) {
+      const item = listItem(lines[i]);
+      if (!item || item.indent < indent)
+        break;
+      if (item.indent >= indent + 2) {
+        const last = wrap.lastElementChild;
+        if (!last)
+          break;
+        list(last, item.indent, item.ordered);
+        continue;
+      }
+      if (item.ordered !== ordered)
+        break;
+      i++;
+      const li = node("li", wrap);
+      const text3 = [item.text];
+      while (i < lines.length && !isBlank(lines[i]) && !listItem(lines[i]) && /^\s/.test(lines[i]))
+        text3.push(lines[i++].trim());
+      inline(li, text3.join(" "));
+      if (i < lines.length && isBlank(lines[i]) && i + 1 < lines.length) {
+        const next = listItem(lines[i + 1]);
+        if (next && next.indent >= indent)
+          i++;
+      }
+    }
+  };
+  blocks(container, () => false);
+}
+var CHATGPT_MARKDOWN_CSS = `
+.answer.md{white-space:normal;display:block}
+.answer.md>*{margin:0 0 0.625rem}
+.answer.md>*:last-child{margin-bottom:0}
+.answer.md h3,.answer.md h4,.answer.md h5,.answer.md h6{font-size:1rem;font-weight:650;line-height:1.35;margin-top:0.875rem}
+.answer.md h3{font-size:1.0625rem}
+.answer.md>h3:first-child,.answer.md>h4:first-child{margin-top:0}
+.answer.md ul,.answer.md ol{padding-left:1.375rem}
+.answer.md li{margin:0.25rem 0}
+.answer.md li>ul,.answer.md li>ol{margin:0.25rem 0 0}
+.answer.md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875em;background:var(--code-bg,rgba(128,128,128,0.14));border-radius:4px;padding:0.1em 0.3em}
+.answer.md pre{background:var(--code-bg,rgba(128,128,128,0.14));border-radius:8px;padding:0.625rem 0.75rem;overflow-x:auto}
+.answer.md pre code{background:none;padding:0;font-size:0.8125rem;line-height:1.5}
+.answer.md blockquote{margin:0 0 0.625rem;padding:0 0 0 0.75rem;border-left:3px solid var(--rule,rgba(128,128,128,0.35));opacity:0.9}
+.answer.md hr{border:0;border-top:1px solid var(--rule,rgba(128,128,128,0.35));margin:0.75rem 0}
+.answer.md table{border-collapse:collapse;width:100%;font-size:0.875rem;display:block;overflow-x:auto}
+.answer.md th,.answer.md td{border:1px solid var(--rule,rgba(128,128,128,0.35));padding:0.375rem 0.5rem;text-align:left;vertical-align:top}
+.answer.md th{font-weight:650}
+.answer.md a{color:inherit;text-decoration:underline}
+`;
+
 // src/workers/dashboard/chatgpt/private-answer.ts
 function chatgptPrivateAnswerProgram(config2) {
   const doc2 = document;
@@ -118357,9 +118616,15 @@ function chatgptPrivateAnswerProgram(config2) {
     const body = el("div", "answer");
     body.setAttribute("tabindex", "-1");
     body.setAttribute("data-key", "answer");
-    const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
-    for (const part of paragraphs)
-      body.appendChild(el("p", "", part));
+    const markdown = window.olympusMarkdown;
+    if (typeof markdown === "function") {
+      body.className = "answer md";
+      markdown(doc2, body, shown.text);
+    } else {
+      const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+      for (const part of paragraphs)
+        body.appendChild(el("p", "", part));
+    }
     view.card.appendChild(body);
     if (shown.sources.length)
       view.card.appendChild(sourcesView(shown.sources));
@@ -118511,7 +118776,7 @@ function chatgptPrivateAnswerPageHtml(options) {
     "</head>",
     "<body>",
     '<div id="panel"></div>',
-    `<script>(${chatgptPrivateAnswerProgram.toString()})(${scriptJson3(config2)});</script>`,
+    `<script>window.olympusMarkdown=(${chatgptMarkdownRender.toString()});(${chatgptPrivateAnswerProgram.toString()})(${scriptJson3(config2)});</script>`,
     "</body>",
     "</html>",
     ""
@@ -118564,6 +118829,7 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .bar{height:0.25rem;margin-top:0.375rem;border-radius:999px;background:var(--hair);overflow:hidden}
 .bar-fill{height:100%;background:var(--run)}
 .answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
+${CHATGPT_MARKDOWN_CSS}
 .answer:focus{outline:none}
 .sources{margin-top:0.5rem}
 .src-toggle{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.8125rem;font-weight:500;line-height:1.4;color:var(--muted);background:none;border:0;border-radius:6px;padding:0.125rem 0;margin:0;cursor:pointer;-webkit-appearance:none;appearance:none}
@@ -118619,6 +118885,8 @@ var init_private_answer_resource = __esm(() => {
 // src/core/consult-ask.ts
 var exports_consult_ask = {};
 __export(exports_consult_ask, {
+  consultGateRetryFeedback: () => consultGateRetryFeedback,
+  consultGateRefusedMessage: () => consultGateRefusedMessage,
   consultAskLevelToSettings: () => consultAskLevelToSettings,
   consultAskLevelFromSettings: () => consultAskLevelFromSettings,
   askAnonymously: () => askAnonymously,
@@ -118632,6 +118900,18 @@ function consultAskLevelToSettings(level) {
 }
 function consultAskLevelFromSettings(level) {
   return level === "general" ? "strict" : "standard";
+}
+function consultGateRetryFeedback(reasons) {
+  if (reasons.length === 0 || !reasons.every((reason) => CONSULT_GATE_RETRY_REASONS.has(reason)))
+    return;
+  const kinds = [...new Set(reasons.map((reason) => CONSULT_GATE_CARRIED[reason]))];
+  return `it kept ${kinds.join(" and ")} from the question.`;
+}
+function consultGateRefusedMessage(reasons) {
+  const kinds = [...new Set(reasons.map((reason) => CONSULT_GATE_CARRIED[reason]).filter((kind) => kind !== undefined))];
+  if (kinds.length === 0 || reasons.some((reason) => CONSULT_GATE_CARRIED[reason] === undefined))
+    return CONSULT_ASK_MESSAGES.gateRefused;
+  return CONSULT_ASK_MESSAGES.gateRefusedCarrying.replace("{what}", kinds.join(" and "));
 }
 function askBinding(read) {
   const settings = read.state === "valid" ? read.settings : undefined;
@@ -118749,15 +119029,34 @@ async function askAnonymously(input, deps) {
     questions = written.questions;
     rewritten = true;
   }
+  const context = { entries: [{ kind: "text", text: typed, path: "writerVisible[]", group: -2 }], overflow: false };
+  const gate = (draft) => evaluateConsultRequest([...draft], context, {}, {}, strict ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: "general", askedQuestionTexts: [typed], net: writer ? "thin" : "full" } : { net: "secrets" });
+  let verdict = gate(questions);
+  const feedback = verdict.decision !== "pass" && strict && rewritten && !writer ? consultGateRetryFeedback(verdict.reasons) : undefined;
+  if (feedback !== undefined) {
+    let again;
+    try {
+      again = await deps.prepare({ question: typed, answer: "", gaps: [], direct: true, feedback }, writer, "general", input.signal);
+    } catch {
+      again = { kind: "failed", reason: "request_failed" };
+    }
+    if (input.signal?.aborted)
+      return { ok: false, code: "cancelled", message: CONSULT_ASK_MESSAGES.cancelled };
+    if (again.kind === "questions") {
+      const second = gate(again.questions);
+      if (second.decision === "pass") {
+        questions = again.questions;
+        verdict = second;
+      }
+    }
+  }
   const sent = questions.join(`
 `);
-  const context = { entries: [{ kind: "text", text: typed, path: "writerVisible[]", group: -2 }], overflow: false };
-  const verdict = evaluateConsultRequest([...questions], context, {}, {}, strict ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: "general", askedQuestionTexts: [typed], net: writer ? "thin" : "full" } : { net: "secrets" });
   if (verdict.decision !== "pass") {
     if ([...verdict.reasons].includes("question_too_many_bytes"))
       return { ok: false, code: "question_too_long", message: CONSULT_ASK_MESSAGES.tooManyBytes, sent };
     const secret = [...verdict.reasons].some((reason) => /secret/i.test(reason));
-    return { ok: false, code: secret || !strict ? "secret_detected" : "gate_refused", message: secret || !strict ? CONSULT_ASK_MESSAGES.secret : CONSULT_ASK_MESSAGES.gateRefused, sent };
+    return { ok: false, code: secret || !strict ? "secret_detected" : "gate_refused", message: secret || !strict ? CONSULT_ASK_MESSAGES.secret : consultGateRefusedMessage(verdict.reasons), sent };
   }
   const bound = askBinding(read);
   let stale = false;
@@ -118806,7 +119105,7 @@ async function askAnonymously(input, deps) {
 function validModelId(value) {
   return typeof value === "string" && value.trim() === value && value.length > 0 && value.length <= MAX_MODEL_ID_CHARS2 && !/[\u0000-\u001F\u007F\s]/.test(value);
 }
-var CONSULT_ASK_MAX_CHARS = 4000, CONSULT_ASK_LEVELS, CONSULT_ASK_CLEANUPS, CONSULT_ASK_MESSAGES, MAX_MODEL_ID_CHARS2 = 128;
+var CONSULT_ASK_MAX_CHARS = 4000, CONSULT_ASK_LEVELS, CONSULT_ASK_CLEANUPS, CONSULT_ASK_MESSAGES, CONSULT_GATE_CARRIED, CONSULT_GATE_RETRY_REASONS, MAX_MODEL_ID_CHARS2 = 128;
 var init_consult_ask = __esm(() => {
   init_consult_gate();
   init_consult_settings();
@@ -118820,6 +119119,7 @@ var init_consult_ask = __esm(() => {
     writerFailed: "Your model could not prepare the question, so nothing was sent.",
     secret: "Not sent: the question looks like it contains a password, key or token.",
     gateRefused: "Not sent: at Strict the rewritten question still carried something identifying, so Olympus held it back. Try Standard, or ask more generally.",
+    gateRefusedCarrying: "Not sent: at Strict the rewritten question still carried {what} from your question, so Olympus held it back. Try Standard, or ask more generally.",
     noRoute: "Set up the zkAPI route first.",
     stale: "The anonymous answers settings changed while the question was being prepared, so nothing was sent. Ask again.",
     needsChoice: "Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.",
@@ -118832,6 +119132,18 @@ var init_consult_ask = __esm(() => {
     cancelled: "The request was cancelled before the question was sent; nothing was charged.",
     tooManyBytes: "Not sent: the question is over 8 KiB once encoded. Shorten it."
   });
+  CONSULT_GATE_CARRIED = {
+    snapshot_figure: "an exact figure",
+    snapshot_date: "a date",
+    snapshot_name: "a name",
+    snapshot_hostname: "a web address",
+    snapshot_identifier: "an identifier",
+    encoded_identifier: "an identifier",
+    identifier_shape: "an identifier",
+    owner_question_copy: "wording copied",
+    shared_token_run: "wording copied"
+  };
+  CONSULT_GATE_RETRY_REASONS = new Set(["snapshot_figure", "snapshot_date", "snapshot_name", "snapshot_hostname", "owner_question_copy", "shared_token_run"]);
 });
 
 // src/workers/chatgpt/private-question-contract.ts
@@ -118925,25 +119237,32 @@ function chatgptPrivateQuestionProgram(config2) {
     if (theme !== before)
       render();
   });
+  function readMeta(value) {
+    if (!(value && typeof value === "object" && value.v === 1 && typeof value.jobId === "string" && JOB_ID.test(value.jobId) && typeof value.askKey === "string" && /^[A-Za-z0-9_-]{87}$/.test(value.askKey)))
+      return null;
+    return {
+      jobId: value.jobId,
+      askKey: value.askKey,
+      level: value.level === "strict" ? "strict" : "standard",
+      cleanup: value.cleanup === "light_cleanup" || value.cleanup === "custom" ? value.cleanup : "as_written",
+      customInstruction: value.customInstruction === true,
+      maxChars: typeof value.maxChars === "number" && isFinite(value.maxChars) && value.maxChars > 0 ? Math.floor(value.maxChars) : 4000
+    };
+  }
   function accept(meta2, quiet) {
     const value = meta2 && typeof meta2 === "object" ? meta2[config2.metaKey] : undefined;
     if (value === undefined && info)
       return;
-    let next = null;
-    if (value && typeof value === "object" && value.v === 1 && typeof value.jobId === "string" && JOB_ID.test(value.jobId) && typeof value.askKey === "string" && /^[A-Za-z0-9_-]{87}$/.test(value.askKey)) {
-      next = {
-        jobId: value.jobId,
-        askKey: value.askKey,
-        level: value.level === "strict" ? "strict" : "standard",
-        cleanup: value.cleanup === "light_cleanup" || value.cleanup === "custom" ? value.cleanup : "as_written",
-        customInstruction: value.customInstruction === true,
-        maxChars: typeof value.maxChars === "number" && isFinite(value.maxChars) && value.maxChars > 0 ? Math.floor(value.maxChars) : 4000
-      };
-    }
+    const next = readMeta(value);
     if (info && next && info.jobId === next.jobId)
       return;
     if (!info && !next)
       return;
+    start(next, !quiet || !!next);
+    if (next)
+      resume(next.jobId, 0);
+  }
+  function start(next, draw) {
     run++;
     info = next;
     phase = "compose";
@@ -118955,20 +119274,73 @@ function chatgptPrivateQuestionProgram(config2) {
     cleanup = next ? next.cleanup : "";
     sentOpen = false;
     pair = null;
-    if (!quiet || next)
+    if (draw)
       render();
-    if (next)
-      resume(next.jobId);
   }
-  async function resume(jobId) {
+  async function resume(jobId, depth) {
     const mine = run;
     const kept = await keptKey(jobId);
-    if (mine !== run || !kept || !kept.asked)
+    if (mine !== run || !kept)
+      return;
+    if (kept.next && depth < 20) {
+      const following = await keptKey(kept.next.jobId);
+      if (mine !== run)
+        return;
+      if (following || depth === 0) {
+        start(kept.next, true);
+        resume(kept.next.jobId, depth + 1);
+        return;
+      }
+    }
+    if (!kept.asked)
       return;
     pair = { jobId, privateKey: kept.privateKey, publicKey: kept.publicKey };
     phase = "waiting";
     render();
     collect(false);
+  }
+  async function another() {
+    if (!info || !pair || phase !== "done")
+      return;
+    const mine = ++run;
+    const jobId = info.jobId;
+    const keys = pair;
+    phase = "opening";
+    render();
+    try {
+      const controller = typeof window.AbortController === "function" ? new window.AbortController : null;
+      const response = await bounded(window.fetch(config2.relayOrigin + "/private/" + jobId + "/another", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ v: 1, publicKey: keys.publicKey }),
+        ...controller ? { signal: controller.signal } : {}
+      }), config2.requestTimeoutMs, controller);
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+        body = null;
+      }
+      if (mine !== run)
+        return;
+      const next = response.status === 200 && body && body.status === "opened" ? readMeta(body.meta) : null;
+      if (!next) {
+        phase = "gone";
+        render();
+        return;
+      }
+      await keepKey(jobId, keys.privateKey, keys.publicKey, true, next);
+      if (mine !== run)
+        return;
+      start(next, true);
+      focusAfter = "question";
+      render();
+    } catch {
+      if (mine !== run)
+        return;
+      phase = "gone";
+      render();
+    }
   }
   const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
   const utf83 = (text2) => new TextEncoder().encode(text2);
@@ -119112,15 +119484,15 @@ function chatgptPrivateQuestionProgram(config2) {
         return null;
       if (typeof value.publicKey !== "string" || !/^[A-Za-z0-9_-]{87}$/.test(value.publicKey))
         return null;
-      return { privateKey, publicKey: value.publicKey, asked: value.asked === true };
+      return { privateKey, publicKey: value.publicKey, asked: value.asked === true, next: readMeta(value.next) };
     } catch {
       return null;
     }
   }
-  async function keepKey(jobId, privateKey, publicKey, asked) {
+  async function keepKey(jobId, privateKey, publicKey, asked, next) {
     try {
       await inStore("readwrite", (store) => {
-        store.put({ privateKey, publicKey, asked, createdAt: Date.now() }, jobId);
+        store.put({ privateKey, publicKey, asked, createdAt: Date.now(), ...next ? { next: { v: 1, ...next } } : {} }, jobId);
       });
     } catch {}
     dropOldKeys();
@@ -119493,9 +119865,16 @@ function chatgptPrivateQuestionProgram(config2) {
       return card;
     }
     card.appendChild(head(T.notSeen));
-    const text2 = el("div", "answer", shown.answer);
+    const text2 = el("div", "answer");
     text2.setAttribute("data-key", "answer");
     text2.setAttribute("tabindex", "-1");
+    const markdown = window.olympusMarkdown;
+    if (typeof markdown === "function") {
+      text2.className = "answer md";
+      markdown(doc2, text2, shown.answer);
+    } else {
+      text2.textContent = shown.answer;
+    }
     card.appendChild(text2);
     const how = shown.level === "strict" ? T.howStrict : shown.cleanup === "as_written" ? T.howAsWritten : shown.cleanup === "custom" ? T.howCustom : T.howLightCleanup;
     const foot = [shown.model ? fill2(T.answeredBy, { model: shown.model }) : "", how].filter(Boolean).join(" · ");
@@ -119527,8 +119906,7 @@ function chatgptPrivateQuestionProgram(config2) {
     button.type = "button";
     button.setAttribute("data-key", "again");
     button.addEventListener("click", () => {
-      phase = "gone";
-      render();
+      another();
     });
     actions.appendChild(button);
     return actions;
@@ -119549,6 +119927,8 @@ function chatgptPrivateQuestionProgram(config2) {
         root.appendChild(composeView(info));
       else if (phase === "sending")
         root.appendChild(workingView(T.sending));
+      else if (phase === "opening")
+        root.appendChild(workingView(T.opening));
       else if (phase === "waiting")
         root.appendChild(workingView(T.waiting));
       else if (phase === "done" && result)
@@ -119675,7 +120055,7 @@ function chatgptPrivateQuestionPageHtml(options) {
     "</head>",
     "<body>",
     '<div id="panel"></div>',
-    `<script>(${chatgptPrivateQuestionProgram.toString()})(${scriptJson4(config2)});</script>`,
+    `<script>window.olympusMarkdown=(${chatgptMarkdownRender.toString()});(${chatgptPrivateQuestionProgram.toString()})(${scriptJson4(config2)});</script>`,
     "</body>",
     "</html>",
     ""
@@ -124141,6 +124521,8 @@ function createPrivateAnswerHandler(options) {
       return reply({ status: 400, body: { status: "invalid" } });
     if (route.action === "ask")
       return reply(options.questions ? await options.questions.ask(jobId, record3) : { status: 410, body: { status: "gone" } });
+    if (route.action === "another")
+      return reply(options.questions ? await options.questions.another(jobId, record3.publicKey) : { status: 410, body: { status: "gone" } });
     if (options.questions?.has(jobId)) {
       return reply(route.action === "open" ? { status: 410, body: { status: "gone" } } : await options.questions.collect(jobId, record3.publicKey));
     }
@@ -124323,6 +124705,27 @@ class PrivateQuestionJobs {
     if (!this.takePoll(job))
       return { status: 429, body: { status: "rate_limited" }, retryAfterSeconds: PENDING_RETRY_SECONDS2 };
     return this.outcome(job);
+  }
+  async another(jobId, publicKey) {
+    this.sweep();
+    const job = this.jobs.get(jobId);
+    if (!job || privateAnswerInstallId(jobId) !== this.options.installId())
+      return gone2();
+    const panel = await importPanelPublicKey(publicKey);
+    if (!panel)
+      return invalid3();
+    if (this.jobs.get(jobId) !== job)
+      return gone2();
+    if (job.claimKey === undefined || job.claimKey !== panel.raw)
+      return { status: 409, body: { status: "claimed" } };
+    if (job.state !== "done")
+      return { status: 409, body: { status: "pending" } };
+    if (!this.takePoll(job))
+      return { status: 429, body: { status: "rate_limited" }, retryAfterSeconds: PENDING_RETRY_SECONDS2 };
+    const meta2 = await this.begin();
+    if (!meta2)
+      return { status: 503, body: { status: "mac_offline" }, retryAfterSeconds: 30 };
+    return { status: 200, body: { status: "opened", v: 1, meta: meta2 } };
   }
   sweep(at = this.now()) {
     for (const [id, job] of this.jobs)

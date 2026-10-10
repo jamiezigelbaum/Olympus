@@ -95,11 +95,11 @@ describe('Ask anonymously', () => {
   /** A question at Standard, as an agent sends it once the level is chosen. */
   const q = (question: unknown): ConsultAskInput => ({ question, level: 'standard' });
 
-  function deps(read: ConsultSettingsRead, prepared: Awaited<ReturnType<ConsultAskDependencies['prepare']>> = { kind: 'questions', questions: ['How long do landlords usually take to return a deposit?'], promptTokens: 1, ms: 1 }) {
+  function deps(read: ConsultSettingsRead, prepared: Awaited<ReturnType<ConsultAskDependencies['prepare']>> = { kind: 'questions', questions: ['How long do landlords usually take to return a deposit?'], promptTokens: 1, ms: 1 }, later: Array<Awaited<ReturnType<ConsultAskDependencies['prepare']>>> = []) {
     const calls = { prepare: [] as ConsultWriterInput[], levels: [] as string[], send: [] as string[], sendOptions: [] as ConsultAskSendOptions[], remembered: [] as Array<{ level: string; cleanup?: string }> };
     const value: ConsultAskDependencies = {
       settings: () => read,
-      prepare: async (input, _writer, level) => { calls.prepare.push(input); calls.levels.push(level); return prepared; },
+      prepare: async (input, _writer, level) => { calls.prepare.push(input); calls.levels.push(level); return calls.prepare.length > 1 ? later[calls.prepare.length - 2] ?? prepared : prepared; },
       // Like the transport: final authorization runs just before dispatch; false sends nothing.
       send: async (question, authorize, options) => {
         if (!authorize()) return { ok: false, error: { code: 'authorization_refused', message: 'refused', outcome: 'not_sent', networkIdentity: 'not_verified' } };
@@ -153,6 +153,48 @@ describe('Ask anonymously', () => {
       send: async () => ({ ok: false, error: { code: 'model_unavailable', message: 'not listed', outcome: 'not_sent', networkIdentity: 'not_verified' } }),
     };
     expect(await askAnonymously(q('What is a deposit?'), missing)).toEqual({ ok: false, code: 'model_unavailable', message: 'not listed', sent: 'What is a deposit?', outcome: 'not_sent' });
+  });
+
+  test('Strict, built-in writer: a draft that kept an exact figure gets one more draft with the finding as feedback (live test 2026-10-10)', async () => {
+    const typed = 'My landlord wants to raise my rent by 40% next month. What are my options?';
+    const kept = { kind: 'questions' as const, questions: ['What protections usually exist for tenants facing a 40% rent increase?'], promptTokens: 1, ms: 1 };
+    const clean = { kind: 'questions' as const, questions: ['What protections usually exist for tenants facing a large rent increase?'], promptTokens: 1, ms: 1 };
+    const cured = deps(settings(), kept, [clean]);
+    const sent = await askAnonymously({ question: typed, level: 'strict' as const }, cured.value);
+    expect(sent).toMatchObject({ ok: true, rewritten: true, sent: clean.questions[0]! });
+    expect(cured.calls.prepare).toHaveLength(2);
+    expect(cured.calls.prepare[1]).toEqual({ question: typed, answer: '', gaps: [], direct: true, feedback: 'it kept an exact figure from the question.' });
+    expect(cured.calls.levels).toEqual(['general', 'general']);
+    expect(cured.calls.send).toEqual([clean.questions[0]!]);
+    // The second draft kept it too: refused, naming the kind of thing carried, never the value.
+    const stubborn = deps(settings(), kept, [kept]);
+    const refused = await askAnonymously({ question: typed, level: 'strict' as const }, stubborn.value);
+    expect(refused).toEqual({ ok: false, code: 'gate_refused', message: 'Not sent: at Strict the rewritten question still carried an exact figure from your question, so Olympus held it back. Try Standard, or ask more generally.', sent: kept.questions[0]! });
+    expect(stubborn.calls.prepare).toHaveLength(2);
+    expect(stubborn.calls.send).toEqual([]);
+    // A second draft that fails or declines leaves the first refusal standing.
+    const failed = deps(settings(), kept, [{ kind: 'declined', promptTokens: 1, ms: 1 }]);
+    expect(await askAnonymously({ question: typed, level: 'strict' as const }, failed.value)).toMatchObject({ ok: false, code: 'gate_refused' });
+    // The owner's own writer gets no retry: its thin net passes the figure anyway, and its drafts are its own.
+    const own = deps(settings({ writer: { baseUrl: 'http://127.0.0.1:11434/v1', model: 'm' } }), kept, [clean]);
+    await askAnonymously({ question: typed, level: 'strict' as const }, own.value);
+    expect(own.calls.prepare).toHaveLength(1);
+    // Standard never retries: its only rule is secrets.
+    const standard = deps(settings(), kept, [clean]);
+    expect(await askAnonymously({ question: typed, level: 'standard' as const }, standard.value)).toMatchObject({ ok: true, sent: kept.questions[0]! });
+    expect(standard.calls.prepare).toHaveLength(1);
+  });
+
+  test('the direct prompt carries the retry feedback as one line after the question, bounded, and only on a direct ask', () => {
+    const base = { question: 'My rent is going up 40%. Options?', answer: '', gaps: [] };
+    const plain = buildConsultWriterPrompt({ ...base, direct: true }, 'general');
+    const retry = buildConsultWriterPrompt({ ...base, direct: true, feedback: 'it kept an exact figure from the question.' }, 'general');
+    expect(plain[1]!.content).toBe('Question: My rent is going up 40%. Options?');
+    expect(retry[1]!.content).toBe('Question: My rent is going up 40%. Options?\n\nYour previous draft was refused by the privacy check: it kept an exact figure from the question. Write the questions again without that; use bands and classes of thing instead.');
+    expect(retry[0]!.content).toBe(plain[0]!.content);
+    expect(buildConsultWriterPrompt({ ...base, direct: true, feedback: 'x'.repeat(400) }, 'general')[1]!.content).toHaveLength('Question: My rent is going up 40%. Options?'.length + 'Your previous draft was refused by the privacy check: '.length + 240 + '\n\n'.length + ' Write the questions again without that; use bands and classes of thing instead.'.length);
+    expect(buildConsultWriterPrompt({ ...base, feedback: 'ignored', instruction: 'Tidy it.' }, 'unnamed')[1]!.content).not.toContain('ignored');
+    expect(buildConsultWriterPrompt({ ...base, feedback: 'ignored' }, 'general')[1]!.content).not.toContain('ignored');
   });
 
   test('a labelled secret in the typed question stays refused, with or without its label (review of PR #209)', async () => {
@@ -253,8 +295,9 @@ describe('Ask anonymously', () => {
     expect('cleanup' in result).toBe(false);
     // The rewrite still names the person: held back as gate_refused, nothing sent.
     const leaky = deps(settings({ standardMode: 'as_written' }), { kind: 'questions', questions: ['When will Jo at Heron Lettings return the deposit?'], promptTokens: 1, ms: 1 });
-    expect(await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', level: 'strict' }, leaky.value)).toMatchObject({ ok: false, code: 'gate_refused', message: CONSULT_ASK_MESSAGES.gateRefused });
+    expect(await askAnonymously({ question: 'When will Jo at Heron Lettings return my deposit?', level: 'strict' }, leaky.value)).toMatchObject({ ok: false, code: 'gate_refused', message: 'Not sent: at Strict the rewritten question still carried wording copied from your question, so Olympus held it back. Try Standard, or ask more generally.' });
     expect(leaky.calls.send).toEqual([]);
+    expect(leaky.calls.prepare).toHaveLength(2); // one redraft was asked for, with the finding, and kept the wording
   });
 
   test('a one-off model and a cleanup override apply to this question only; custom needs a saved instruction; bad values are refused unsent', async () => {

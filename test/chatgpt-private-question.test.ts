@@ -145,6 +145,37 @@ describe('the jobs: begin → ask → collect', () => {
     expect((await h.jobs.collect(meta.jobId, other.panel.publicKey)).status).toBe(409);
   });
 
+  test('Ask another: a new job for the key that asked, once the outcome is in; never for another key or a job still running', async () => {
+    const h = harness();
+    const meta = (await h.jobs.begin())!;
+    const { panel, body } = await panelAsk(meta, { v: 1, question: 'q', level: 'strict' });
+    // Nothing asked yet: no key has claimed the job.
+    expect((await h.jobs.another(meta.jobId, panel.publicKey)).status).toBe(409);
+    expect((await h.jobs.ask(meta.jobId, body)).status).toBe(202);
+    expect(await h.jobs.another(meta.jobId, panel.publicKey)).toEqual({ status: 409, body: { status: 'pending' } });
+    h.answer(ANSWERED);
+    await settle();
+    const other = await generatePanelKeyPair();
+    expect(await h.jobs.another(meta.jobId, other.publicKey)).toEqual({ status: 409, body: { status: 'claimed' } });
+    expect((await h.jobs.another(meta.jobId, 'junk')).status).toBe(400);
+    const opened = await h.jobs.another(meta.jobId, panel.publicKey);
+    expect(opened.status).toBe(200);
+    const next = (opened.body as unknown as { meta: PrivateQuestionMetaV1 }).meta;
+    expect(opened.body).toMatchObject({ status: 'opened', v: 1 });
+    expect(next).toMatchObject({ v: 1, level: 'strict', cleanup: 'as_written', customInstruction: false, maxChars: PRIVATE_QUESTION_MAX_CHARS });
+    expect(next.jobId).not.toBe(meta.jobId);
+    expect(next.askKey).not.toBe(meta.askKey);
+    expect(h.jobs.has(next.jobId)).toBe(true);
+    // The old job still answers its panel; the new one takes a question of its own.
+    expect((await h.jobs.collect(meta.jobId, panel.publicKey)).status).toBe(200);
+    const second = await panelAsk(next, { v: 1, question: 'q2', level: 'standard' });
+    expect((await h.jobs.ask(next.jobId, second.body)).status).toBe(202);
+    expect(h.asked).toEqual([{ question: 'q', level: 'strict' }, { question: 'q2', level: 'standard' }]);
+    expect((await h.jobs.another(`oly2p.${INSTALL}.${'z'.repeat(43)}`, panel.publicKey)).status).toBe(410);
+    const none = new PrivateQuestionJobs({ installId: () => undefined, ask: () => Promise.resolve(ANSWERED), choice: () => ({ level: 'strict', cleanup: 'as_written', customInstruction: false }) });
+    expect((await none.another(meta.jobId, panel.publicKey)).status).toBe(410);
+  });
+
   test('a refusal from the ask lane, and a thrown ask, come back sealed in the user\'s words', async () => {
     const h = harness();
     const meta = (await h.jobs.begin())!;
@@ -298,6 +329,13 @@ describe('the HTTP handler: /ask and the collection of a question job', () => {
     const ready = await post(handler, `/private/${meta.jobId}`, { v: 1, publicKey: panel.publicKey, cap: 2 });
     expect(ready.status).toBe(200);
     const sealed = await ready.json();
+    // Ask another: routed to the question jobs too; a new job for the asking key.
+    const another = await post(handler, `/private/${meta.jobId}/another`, { v: 1, publicKey: panel.publicKey });
+    expect(another.status).toBe(200);
+    const next = (await another.json()) as { status: string; meta: PrivateQuestionMetaV1 };
+    expect(next.status).toBe('opened');
+    expect(h.jobs.has(next.meta.jobId)).toBe(true);
+    expect((await post(handler, `/private/${meta.jobId}/another`, { v: 1, publicKey: panel.publicKey, pad: 'x'.repeat(600) })).status).toBe(413);
     expect(sealed.status).toBe('ready');
     expect(JSON.parse((await openPrivateAnswer(meta.jobId, panel.privateKey, sealed)).replace(/\s+$/, ''))).toMatchObject({ state: 'answered', answer: 'Negotiate, or move.' });
     // A question job has no sources to open.
@@ -322,6 +360,7 @@ describe('the shared relay route', () => {
     expect(privateAnswerRoute(`/private/${jobId}`)).toEqual({ jobId, action: 'collect' });
     expect(privateAnswerRoute(`/private/${jobId}/open`)).toEqual({ jobId, action: 'open' });
     expect(privateAnswerRoute(`/private/${jobId}/ask`)).toEqual({ jobId, action: 'ask' });
+    expect(privateAnswerRoute(`/private/${jobId}/another`)).toEqual({ jobId, action: 'another' });
     for (const path of [`/private/${jobId}/asks`, `/private/${jobId}/ask/`, `/private/${jobId}/ask/x`, `/private/${jobId}/open/ask`, '/private//ask']) {
       expect(privateAnswerRoute(path), path).toBeUndefined();
     }

@@ -38,6 +38,7 @@ interface Host {
   calls: Array<[string, unknown]>;
   asks: Asked[];
   collects: Collected[];
+  anothers: Collected[];
   text(): string;
   field(): HTMLTextAreaElement;
   button(label: string): HTMLButtonElement;
@@ -112,7 +113,11 @@ interface MountOptions {
   collectReplies?: Array<number | 'ready' | 'throw'>;
   result?: PrivateQuestionResultV1;
   pollCapMs?: number;
+  /** The relay's reply to /another: 'opened' (a new job, JOB2, with the same engine key) or a status. */
+  anotherReply?: number | 'opened';
 }
+const JOB2 = `oly2p.${'a'.repeat(32)}.${'C'.repeat(43)}`;
+const jobOf = (url: string) => url.slice(url.indexOf('/private/') + '/private/'.length).split('/')[0]!;
 
 function metaFor(engine: Engine, extra: Record<string, unknown> = {}) {
   return { [PRIVATE_QUESTION_META_KEY]: { v: 1, jobId: JOB, askKey: engine.publicKey, level: 'strict', cleanup: 'as_written', customInstruction: false, maxChars: 4000, ...extra } };
@@ -128,6 +133,7 @@ function mount(options: MountOptions): Host {
   const calls: Host['calls'] = [];
   const asks: Asked[] = [];
   const collects: Collected[] = [];
+  const anothers: Collected[] = [];
   const collectReplies = options.collectReplies ?? ['ready'];
   const dispatch = (data: unknown) => win.dispatchEvent(new win.MessageEvent('message', { data, source: parent as any }));
   const parent = {
@@ -139,7 +145,7 @@ function mount(options: MountOptions): Host {
   Object.defineProperty(win, 'parent', { value: parent, configurable: true });
   Object.defineProperty(win, 'crypto', { value: globalThis.crypto, configurable: true });
   if (options.idb) Object.defineProperty(win, 'indexedDB', { value: options.idb.factory, configurable: true });
-  let claimed: string | undefined;
+  const claimed = new Map<string, string>();
   Object.defineProperty(win, 'fetch', {
     configurable: true,
     value: async (url: string, init: any) => {
@@ -152,21 +158,26 @@ function mount(options: MountOptions): Host {
         let opened: unknown = 'undecipherable';
         if (panel) {
           try {
-            opened = JSON.parse(await openPrivateQuestion(JOB, options.engine.privateKey, panel.key, { iv: body.iv, ciphertext: body.ciphertext }));
+            opened = JSON.parse(await openPrivateQuestion(jobOf(url), options.engine.privateKey, panel.key, { iv: body.iv, ciphertext: body.ciphertext }));
           } catch { /* stays undecipherable */ }
         }
         asks.push({ url, body, opened });
         if (options.askReply !== undefined && options.askReply !== 202) return json(options.askReply, { status: 'x' });
-        claimed ??= body.publicKey;
+        if (!claimed.has(jobOf(url))) claimed.set(jobOf(url), body.publicKey);
         return json(202, { status: 'pending' }, { 'Retry-After': '1' });
       }
+      if (url.endsWith('/another')) {
+        anothers.push({ url, body });
+        if (options.anotherReply !== undefined && options.anotherReply !== 'opened') return json(options.anotherReply, { status: 'x' });
+        return json(200, { status: 'opened', v: 1, meta: { v: 1, jobId: JOB2, askKey: options.engine.publicKey, level: 'standard', cleanup: 'light_cleanup', customInstruction: false, maxChars: 4000 } });
+      }
       collects.push({ url, body });
-      if (claimed && claimed !== body.publicKey) return json(409, { status: 'claimed' });
+      if (claimed.has(jobOf(url)) && claimed.get(jobOf(url)) !== body.publicKey) return json(409, { status: 'claimed' });
       const reply = collectReplies.length > 1 ? collectReplies.shift()! : collectReplies[0]!;
       if (reply === 'throw') throw new TypeError('Failed to fetch');
       if (reply === 'ready') {
         const panel = await importPanelPublicKey(body.publicKey);
-        const sealed = await sealPrivateAnswer(JOB, panel!.key, padPrivateAnswerPlaintext(JSON.stringify(options.result ?? ANSWERED)));
+        const sealed = await sealPrivateAnswer(jobOf(url), panel!.key, padPrivateAnswerPlaintext(JSON.stringify(options.result ?? ANSWERED)));
         return json(200, { status: 'ready', v: 1, ...sealed });
       }
       return json(reply, reply === 202 ? { status: 'pending' } : { status: 'x' }, reply === 202 ? { 'Retry-After': '1' } : {});
@@ -186,6 +197,7 @@ function mount(options: MountOptions): Host {
     calls,
     asks,
     collects,
+    anothers,
     text: () => panel().textContent ?? '',
     field: () => panel().querySelector('textarea') as unknown as HTMLTextAreaElement,
     button: (label) => {
@@ -318,6 +330,76 @@ describe('asking', () => {
     expect(again.asks).toHaveLength(0);
     expect(again.collects[0]!.body.publicKey).toBe(key);
     expectNothingLeaked(again);
+  });
+
+  test('the answer renders as Markdown built from text, never as HTML', async () => {
+    const engine = await generateEngineKeyPair();
+    const answer = '# Options\n\n**Bold** and <b>tag</b> with `code`\n\n- one\n- two\n  - deeper\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n> quoted\n\nSee [the site](https://example.com) not [this](javascript:alert(1)).';
+    const host = mount({ engine, result: { ...ANSWERED, answer } });
+    host.push({ _meta: metaFor(engine) });
+    await host.until(() => !!host.field(), 'the form');
+    host.field().value = SECRET_QUESTION;
+    host.field().dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button(W.send).click();
+    await host.until(() => host.text().includes('Options'), 'the answer');
+    const doc = host.win.document;
+    expect(doc.querySelector('.answer.md h3')?.textContent).toBe('Options');
+    expect(doc.querySelector('.answer strong')?.textContent).toBe('Bold');
+    expect(doc.querySelector('.answer code')?.textContent).toBe('code');
+    expect(doc.querySelector('.answer b')).toBeNull();
+    expect(host.text()).toContain('<b>tag</b>');
+    expect(doc.querySelectorAll('.answer li').length).toBe(3);
+    expect(doc.querySelector('.answer li ul')).not.toBeNull();
+    expect(Array.from(doc.querySelectorAll('.answer td')).map((cell) => cell.textContent)).toEqual(['1', '2']);
+    expect(doc.querySelector('.answer blockquote p')?.textContent).toBe('quoted');
+    const links = Array.from(doc.querySelectorAll('.answer a'));
+    expect(links.map((a) => [a.getAttribute('href'), a.getAttribute('rel'), a.getAttribute('target')])).toEqual([['https://example.com', 'noopener noreferrer', '_blank']]);
+    expect(host.text()).toContain('[this](javascript:alert(1))');
+    expect(doc.querySelector('.answer')?.innerHTML).not.toContain('<b>');
+  });
+
+  test('Ask another opens a new question in place from this computer; when it cannot, the host\'s way is shown', async () => {
+    const engine = await generateEngineKeyPair();
+    const idb = fakeIndexedDb();
+    const host = mount({ engine, idb });
+    host.push({ _meta: metaFor(engine) });
+    await host.until(() => !!host.field(), 'the form');
+    host.field().value = SECRET_QUESTION;
+    host.field().dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button(W.send).click();
+    await host.until(() => host.text().includes(SECRET_ANSWER), 'the answer');
+    const askingKey = host.asks[0]!.body.publicKey;
+    host.button(W.askAnother).click();
+    await host.until(() => !!host.field(), 'the new form');
+    expect(host.anothers).toEqual([{ url: `${RELAY}/private/${JOB}/another`, body: { v: 1, publicKey: askingKey } }]);
+    expect(host.text()).not.toContain(W.askAgain);
+    expect(host.text()).not.toContain(SECRET_ANSWER);
+    // The new job's defaults (Standard, lightly cleaned) and a second question sealed to it, under its own id.
+    host.field().value = 'Is ibuprofen safe with a blood thinner?';
+    host.field().dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button(W.send).click();
+    await host.until(() => host.asks.length === 2, 'the second ask');
+    expect(host.asks[1]!.url).toBe(`${RELAY}/private/${JOB2}/ask`);
+    expect(host.asks[1]!.opened).toEqual({ v: 1, question: 'Is ibuprofen safe with a blood thinner?', level: 'standard', cleanup: 'light_cleanup' });
+    await host.until(() => host.text().includes(SECRET_ANSWER), 'the second answer');
+    // A re-mount with the original tool result follows to the newest job instead of the first one's answer.
+    const again = mount({ engine, idb });
+    again.push({ _meta: metaFor(engine) });
+    await again.until(() => again.text().includes(SECRET_ANSWER), 'the newest answer after a re-mount');
+    expect([...new Set(again.collects.map((call) => call.url))]).toEqual([`${RELAY}/private/${JOB2}`]);
+    expect(again.asks).toHaveLength(0);
+    // Nothing of the questions reached the host.
+    for (const h of [host, again]) expect(JSON.stringify([h.sent, h.calls])).not.toContain('ibuprofen');
+
+    const gone = mount({ engine, anotherReply: 410 });
+    gone.push({ _meta: metaFor(engine) });
+    await gone.until(() => !!gone.field(), 'the form');
+    gone.field().value = SECRET_QUESTION;
+    gone.field().dispatchEvent(new gone.win.Event('input') as unknown as Event);
+    gone.button(W.send).click();
+    await gone.until(() => gone.text().includes(SECRET_ANSWER), 'the answer');
+    gone.button(W.askAnother).click();
+    await gone.until(() => gone.text().includes(W.askAgain), 'the host\'s way');
   });
 
   test('relay failures are told in plain words: unreachable, claimed, expired, offline, too slow', async () => {

@@ -124,6 +124,12 @@ export interface ConsultWriterInput {
    */
   readonly evidence?: readonly string[];
   /**
+   * A direct Strict ask only: why the gate refused the previous draft, in
+   * the writer's own terms (consult-ask's retry); the prompt asks for one
+   * more draft without it. Ignored on every other request.
+   */
+  readonly feedback?: string;
+  /**
    * Standard's instruction (light cleanup, or the user's own text), used
    * verbatim as the writer's rules, wrapped only by the fixed reply format.
    * Present: the writer prepares the question (with any evidence) for
@@ -316,6 +322,9 @@ export const CONSULT_WRITER_RESPONSE_SCHEMA: Readonly<Record<string, unknown>> =
  * §A.3 limits (cut at a code-point boundary; control characters removed).
  * Nothing else is ever in the prompt.
  */
+/** The retry feedback's bound (one short sentence from consult-ask, never user text). */
+const CONSULT_WRITER_FEEDBACK_CHARS = 240;
+
 export function boundConsultWriterInput(input: ConsultWriterInput): ConsultWriterInput {
   const clean = (text: unknown, max: number): string => (typeof text === 'string' ? Array.from(text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ').trim()).slice(0, max).join('') : '');
   const evidence: string[] = [];
@@ -329,6 +338,7 @@ export function boundConsultWriterInput(input: ConsultWriterInput): ConsultWrite
   }
   return Object.freeze({
     question: clean(input.question, CONSULT_WRITER_LIMITS.questionChars),
+    ...(input.direct && typeof input.feedback === 'string' && input.feedback.trim() ? { feedback: clean(input.feedback, CONSULT_WRITER_FEEDBACK_CHARS) } : {}),
     answer: clean(input.answer, CONSULT_WRITER_LIMITS.answerChars),
     gaps: Object.freeze((Array.isArray(input.gaps) ? input.gaps : [])
       .map((gap) => clean(gap, CONSULT_WRITER_LIMITS.gapChars))
@@ -379,7 +389,9 @@ export function buildConsultWriterPrompt(input: ConsultWriterInput, level: Consu
     // A direct ask at Strict: the question alone; no first answer, no gaps.
     return Object.freeze([
       Object.freeze({ role: 'system' as const, content: consultWriterSystem(level, { direct: true }) }),
-      Object.freeze({ role: 'user' as const, content: `Question: ${bounded.question}` }),
+      Object.freeze({ role: 'user' as const, content: bounded.feedback
+        ? `Question: ${bounded.question}\n\nYour previous draft was refused by the privacy check: ${bounded.feedback} Write the questions again without that; use bands and classes of thing instead.`
+        : `Question: ${bounded.question}` }),
     ]);
   }
   const user = [
