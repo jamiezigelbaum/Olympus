@@ -51046,50 +51046,2780 @@ function boundedLogErrorMessage(error) {
 }
 var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
 
+// src/core/managed-tools.ts
+var exports_managed_tools = {};
+__export(exports_managed_tools, {
+  parseTarArchive: () => parseTarArchive,
+  managedToolsState: () => managedToolsState,
+  managedToolsRoot: () => managedToolsRoot,
+  managedToolsPlatform: () => managedToolsPlatform,
+  managedToolsBase: () => managedToolsBase,
+  managedToolExecutable: () => managedToolExecutable,
+  installManagedTools: () => installManagedTools,
+  defaultVersionCheck: () => defaultVersionCheck,
+  defaultCommandRunner: () => defaultCommandRunner,
+  createManagedToolsJob: () => createManagedToolsJob,
+  ManagedToolsError: () => ManagedToolsError,
+  MANAGED_TOOL_PINS: () => MANAGED_TOOL_PINS,
+  MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
+});
+import { execFile } from "node:child_process";
+import { createHash as createHash35, randomUUID as randomUUID16 } from "node:crypto";
+import {
+  accessSync as accessSync4,
+  constants as constants3,
+  lstatSync as lstatSync14,
+  mkdirSync as mkdirSync23,
+  readFileSync as readFileSync28,
+  readdirSync as readdirSync5,
+  realpathSync as realpathSync3,
+  renameSync as renameSync10,
+  rmSync as rmSync11,
+  statSync as statSync16,
+  symlinkSync,
+  writeFileSync as writeFileSync9,
+  chmodSync as chmodSync13
+} from "node:fs";
+import { open as open4 } from "node:fs/promises";
+import { homedir as homedir35 } from "node:os";
+import { dirname as dirname32, isAbsolute as isAbsolute10, join as join47, posix, sep as sep6 } from "node:path";
+import { gunzip } from "node:zlib";
+function zkapiAsset(name, sha2563, bytes) {
+  return { url: `${ZKAPI_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
+}
+function torMacAsset(name, sha2563, bytes, adhocSign) {
+  return { url: `${TOR_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"], ...adhocSign ? { adhocSign } : {} };
+}
+function torLinuxAsset(name, sha2563, bytes) {
+  return {
+    url: `${TOR_RELEASE}/${name}`,
+    sha256: sha2563,
+    bytes,
+    executable: "bin/tor",
+    required: ["tor/tor", "tor/libevent-2.1.so.7", "tor/libssl.so.3", "tor/libcrypto.so.3"],
+    skip: ["debug/"],
+    launcher: { path: "bin/tor", target: "tor/tor", libraryDir: "tor" }
+  };
+}
+function managedToolsPlatform(platform2 = process.platform, arch = process.arch) {
+  if (platform2 === "darwin" && (arch === "arm64" || arch === "x64"))
+    return `darwin-${arch}`;
+  if (platform2 === "linux" && (arch === "arm64" || arch === "x64" || arch === "ia32"))
+    return `linux-${arch}`;
+  return;
+}
+function managedToolsBase(host = {}) {
+  const env = host.env ?? process.env;
+  const platform2 = host.platform ?? process.platform;
+  const home2 = env.HOME?.trim() || (host.env ? undefined : homedir35());
+  if (platform2 === "darwin")
+    return home2 && isAbsolute10(home2) ? join47(home2, "Library", "Application Support", "Olympus") : undefined;
+  if (platform2 === "linux") {
+    const xdg = env.XDG_DATA_HOME?.trim();
+    if (xdg && isAbsolute10(xdg))
+      return join47(xdg, "olympus");
+    return home2 && isAbsolute10(home2) ? join47(home2, ".local", "share", "olympus") : undefined;
+  }
+  return;
+}
+function managedToolsRoot(host = {}) {
+  const base = managedToolsBase(host);
+  return base ? join47(base, "tools") : undefined;
+}
+function currentUid(host) {
+  return host.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
+}
+function privatelyOwned(path, uid, kind) {
+  try {
+    const stats = statSync16(path);
+    if (kind === "dir" ? !stats.isDirectory() : !stats.isFile())
+      return false;
+    if (uid !== undefined && stats.uid !== uid)
+      return false;
+    return (stats.mode & 18) === 0;
+  } catch {
+    return false;
+  }
+}
+function within(parent, child) {
+  return child.startsWith(parent.endsWith(sep6) ? parent : `${parent}${sep6}`);
+}
+function readManifest(path, uid) {
+  try {
+    const stats = lstatSync14(path);
+    if (!stats.isFile() || uid !== undefined && stats.uid !== uid || (stats.mode & 18) !== 0)
+      return;
+    const parsed = JSON.parse(readFileSync28(path, "utf8"));
+    if (parsed.schema !== 1 || typeof parsed.tool !== "string" || typeof parsed.version !== "string" || typeof parsed.sha256 !== "string")
+      return;
+    return parsed;
+  } catch {
+    return;
+  }
+}
+function managedToolExecutable(tool, host = {}) {
+  const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
+  const platformKey = managedToolsPlatform(host.platform, host.arch);
+  const asset = platformKey && pin ? pin.assets[platformKey] : undefined;
+  const base = managedToolsBase(host);
+  if (!pin || !asset || !base)
+    return;
+  const uid = currentUid(host);
+  const root = join47(base, "tools");
+  const versionDir = join47(root, tool, pin.version);
+  for (const dir of [base, root, join47(root, tool), versionDir]) {
+    try {
+      if (lstatSync14(dir).isSymbolicLink())
+        return;
+    } catch {
+      return;
+    }
+    if (!privatelyOwned(dir, uid, "dir"))
+      return;
+  }
+  const manifest = readManifest(join47(versionDir, MANIFEST_FILE), uid);
+  if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
+    return;
+  try {
+    const realDir = realpathSync3(versionDir);
+    for (const required3 of new Set([...asset.required, asset.executable])) {
+      if (!trustedInside(realDir, join47(versionDir, required3), uid, versionDir))
+        return;
+    }
+    const real = realpathSync3(join47(versionDir, asset.executable));
+    accessSync4(real, constants3.X_OK);
+    return real;
+  } catch {
+    return;
+  }
+}
+function trustedInside(realDir, path, uid, versionDir) {
+  if (versionDir) {
+    const parts = path.slice(versionDir.length + 1).split(sep6);
+    for (let index = 1;index <= parts.length; index += 1) {
+      let stats;
+      try {
+        stats = lstatSync14(join47(versionDir, ...parts.slice(0, index)));
+      } catch {
+        return false;
+      }
+      if (uid !== undefined && stats.uid !== uid && stats.uid !== 0)
+        return false;
+      if (!stats.isSymbolicLink() && (stats.mode & 18) !== 0)
+        return false;
+    }
+  }
+  let real;
+  try {
+    real = realpathSync3(path);
+  } catch {
+    return false;
+  }
+  if (!within(realDir, real) || !privatelyOwned(real, uid, "file"))
+    return false;
+  for (let dir = dirname32(real);dir !== realDir; dir = dirname32(dir)) {
+    if (!within(realDir, dir) || !privatelyOwned(dir, uid, "dir"))
+      return false;
+  }
+  return true;
+}
+function managedToolsState(host = {}) {
+  const platformKey = managedToolsPlatform(host.platform, host.arch);
+  return MANAGED_TOOL_ORDER.map((tool) => {
+    const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
+    const executable = managedToolExecutable(tool, host);
+    return {
+      tool,
+      label: pin.label,
+      version: pin.version,
+      offered: platformKey !== undefined && pin.assets[platformKey] !== undefined,
+      installed: executable !== undefined,
+      ...executable ? { executable } : {}
+    };
+  });
+}
+async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) {
+  if (platformKey !== "darwin-arm64" || !asset.adhocSign?.length)
+    return [];
+  const realStaging = realpathSync3(staging);
+  const signed = [];
+  for (const relative6 of asset.adhocSign) {
+    const file = join47(staging, relative6);
+    let real;
+    try {
+      real = realpathSync3(file);
+    } catch {
+      throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${relative6}, so nothing was installed.`, tool);
+    }
+    if (!within(realStaging, real) || !lstatSync14(file).isFile()) {
+      throw new ManagedToolsError("unsafe_archive", `The ${label} download has an unexpected ${relative6}, so nothing was installed.`, tool);
+    }
+    const inspect = await run(CODESIGN, ["-dv", real]);
+    if (inspect.error)
+      throw new ManagedToolsError("signing_failed", `Olympus could not find the macOS code-signing tool, so ${label} was not installed.`, tool);
+    if (inspect.code === 0)
+      continue;
+    if (!/code object is not signed at all/.test(`${inspect.stderr}
+${inspect.stdout}`)) {
+      throw new ManagedToolsError("signing_failed", `macOS could not read the signature of ${label}'s ${relative6}, so it was not installed.`, tool);
+    }
+    const sign = await run(CODESIGN, ["--force", "--sign", "-", real]);
+    if (sign.error || sign.code !== 0) {
+      throw new ManagedToolsError("signing_failed", `macOS could not prepare ${label} to run on this Mac (signing ${relative6} failed), so it was not installed.`, tool);
+    }
+    signed.push(relative6);
+  }
+  return signed;
+}
+async function defaultClearQuarantine(dir) {
+  await new Promise((resolve9) => {
+    execFile("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve9());
+  });
+}
+function ensureOwnedDirectory(path, uid, label) {
+  try {
+    mkdirSync23(path, { mode: 448 });
+  } catch (error) {
+    if (error.code !== "EEXIST")
+      throw new ManagedToolsError("folder_unsafe", `Olympus could not create ${label}.`);
+  }
+  let stats;
+  try {
+    stats = lstatSync14(path);
+  } catch {
+    throw new ManagedToolsError("folder_unsafe", `Olympus could not read ${label}.`);
+  }
+  if (stats.isSymbolicLink() || !stats.isDirectory())
+    throw new ManagedToolsError("folder_unsafe", `${label} is not a plain folder.`);
+  if (uid !== undefined && stats.uid !== uid)
+    throw new ManagedToolsError("folder_unsafe", `${label} belongs to another user.`);
+  if ((stats.mode & 18) !== 0)
+    throw new ManagedToolsError("folder_unsafe", `${label} can be changed by other users.`);
+}
+async function installManagedTools(options = {}) {
+  const pins = options.pins ?? MANAGED_TOOL_PINS;
+  const tools = options.tools ?? MANAGED_TOOL_ORDER;
+  const platformKey = managedToolsPlatform(options.platform, options.arch);
+  const base = managedToolsBase(options);
+  if (!platformKey || !base) {
+    return {
+      ok: false,
+      tools: tools.map((tool) => ({ tool, version: pins[tool].version, outcome: "failed", code: "unsupported_platform", message: "Olympus has no downloads for this kind of computer." }))
+    };
+  }
+  const uid = currentUid(options);
+  const root = join47(base, "tools");
+  try {
+    mkdirSync23(dirname32(base), { recursive: true, mode: 448 });
+    ensureOwnedDirectory(base, uid, "The Olympus folder");
+    ensureOwnedDirectory(root, uid, "The Olympus tools folder");
+  } catch (error) {
+    const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("folder_unsafe", "Olympus could not prepare its tools folder.");
+    return { ok: false, root, tools: tools.map((tool) => ({ tool, version: pins[tool].version, outcome: "failed", code: failure.code, message: failure.message })) };
+  }
+  try {
+    return await withFileLease(join47(root, "install"), async (lease) => {
+      const results = [];
+      for (const tool of tools) {
+        try {
+          results.push(await installOne(tool, pins[tool], platformKey, root, uid, options, lease));
+        } catch (error) {
+          if (!(error instanceof FileLeaseLostError))
+            throw error;
+          for (const rest of tools.slice(results.length)) {
+            results.push({ tool: rest, version: pins[rest].version, outcome: "failed", code: "lease_lost", message: "Another install took over, so this one stopped without changing anything more." });
+          }
+          break;
+        }
+      }
+      return { ok: results.every((result) => result.outcome !== "failed"), root, tools: results };
+    }, { acquireTimeoutMs: 500, staleAfterMs: 60000 });
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError) {
+      return { ok: false, root, tools: tools.map((tool) => ({ tool, version: pins[tool].version, outcome: "failed", code: "busy", message: "Another install is already running." })) };
+    }
+    throw error;
+  }
+}
+async function installOne(tool, pin, platformKey, root, uid, options, lease) {
+  const commit = (write) => lease.commit(write);
+  const asset = pin.assets[platformKey];
+  if (!asset) {
+    return { tool, version: pin.version, outcome: "not_offered", message: `${pin.label} publishes no build for this computer.` };
+  }
+  const host = { ...options, ...uid !== undefined ? { uid } : {} };
+  const existing = managedToolExecutable(tool, host);
+  if (existing)
+    return { tool, version: pin.version, outcome: "already_installed", executable: existing };
+  const toolDir = join47(root, tool);
+  const versionDir = join47(toolDir, pin.version);
+  const id = randomUUID16();
+  const download = join47(toolDir, `.download-${id}`);
+  const staging = join47(toolDir, `.staging-${id}`);
+  try {
+    await commit(async () => {
+      ensureOwnedDirectory(toolDir, uid, `The ${pin.label} folder`);
+      for (const entry of readdirSync5(toolDir)) {
+        if (/^\.(download|staging|old)-/.test(entry))
+          rmSync11(join47(toolDir, entry), { recursive: true, force: true });
+      }
+    });
+    options.onProgress?.({ tool, phase: "downloading", receivedBytes: 0, totalBytes: asset.bytes });
+    const sha2563 = await downloadTo(download, asset, options, (receivedBytes) => options.onProgress?.({ tool, phase: "downloading", receivedBytes, totalBytes: asset.bytes }), tool, pin.label);
+    options.onProgress?.({ tool, phase: "checking" });
+    if (sha2563 !== asset.sha256) {
+      throw new ManagedToolsError("hash_mismatch", `The ${pin.label} download did not match its pinned fingerprint, so nothing was installed.`, tool);
+    }
+    options.onProgress?.({ tool, phase: "installing" });
+    await lease.assertOwned();
+    mkdirSync23(staging, { mode: 448 });
+    await extractVerifiedArchive(download, staging, asset, tool);
+    rmSync11(download, { force: true });
+    for (const required3 of asset.required) {
+      if (!privatelyOwned(join47(staging, required3), uid, "file")) {
+        throw new ManagedToolsError("archive_incomplete", `The ${pin.label} download is missing ${required3}, so nothing was installed.`, tool);
+      }
+    }
+    if ((options.platform ?? process.platform) === "darwin")
+      await (options.clearQuarantine ?? defaultClearQuarantine)(staging);
+    const adhocSigned = await adhocSignUnsigned(staging, asset, platformKey, options.runCommand ?? defaultCommandRunner, pin.label, tool);
+    const check = await (options.versionCheck ?? defaultVersionCheck)(join47(staging, asset.executable), {
+      cwd: staging,
+      env: { PATH: "/usr/bin:/bin", ...options.env?.HOME ? { HOME: options.env.HOME } : process.env.HOME ? { HOME: process.env.HOME } : {} }
+    });
+    if (!check.ok || !pin.versionLine.test(check.stdout.trim())) {
+      const detail = check.ok ? `it reported "${check.stdout.trim().split(`
+`)[0]?.slice(0, 80) ?? ""}"` : check.detail;
+      throw new ManagedToolsError("will_not_run", `${pin.label} was downloaded and its fingerprint matched, but this computer would not run it (${detail}), so it was not installed.`, tool);
+    }
+    const manifest = {
+      schema: 1,
+      tool,
+      version: pin.version,
+      platform: platformKey,
+      asset: asset.url.slice(asset.url.lastIndexOf("/") + 1),
+      sha256: asset.sha256,
+      installedAt: (options.now ?? (() => new Date))().toISOString(),
+      ...adhocSigned.length > 0 ? { adhocSigned } : {}
+    };
+    writeFileSync9(join47(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}
+`, { mode: 384, flag: "wx" });
+    await commit(async () => {
+      let old;
+      try {
+        lstatSync14(versionDir);
+        old = join47(toolDir, `.old-${id}`);
+        renameSync10(versionDir, old);
+      } catch (error) {
+        if (error.code !== "ENOENT")
+          throw error;
+      }
+      renameSync10(staging, versionDir);
+      if (old)
+        rmSync11(old, { recursive: true, force: true });
+    });
+    const executable = managedToolExecutable(tool, host);
+    if (!executable)
+      throw new ManagedToolsError("install_failed", `${pin.label} was installed but could not be found afterwards.`, tool);
+    return { tool, version: pin.version, outcome: "installed", executable };
+  } catch (error) {
+    rmSync11(download, { force: true });
+    rmSync11(staging, { recursive: true, force: true });
+    if (error instanceof FileLeaseLostError)
+      throw error;
+    const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("install_failed", `${pin.label} could not be installed: ${error.message}`, tool);
+    return { tool, version: pin.version, outcome: "failed", code: failure.code, message: failure.message };
+  }
+}
+async function downloadTo(path, asset, options, onBytes, tool, label) {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  let response;
+  try {
+    response = await fetchImpl(asset.url, { signal, redirect: "follow" });
+  } catch {
+    throw new ManagedToolsError("download_failed", `${label} could not be downloaded. Check the connection and try again.`, tool);
+  }
+  if (!response.ok || !response.body) {
+    throw new ManagedToolsError("download_failed", `${label} could not be downloaded (HTTP ${response.status}). Try again later.`, tool);
+  }
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > 0 && declared !== asset.bytes) {
+    await response.body.cancel().catch(() => {
+      return;
+    });
+    throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
+  }
+  const hash = createHash35("sha256");
+  const file = await open4(path, "wx", 384);
+  let received = 0;
+  let lastReport = 0;
+  try {
+    const reader = response.body.getReader();
+    for (;; ) {
+      const chunk = await reader.read().catch(() => {
+        throw new ManagedToolsError("download_failed", `The ${label} download stopped part way. Try again.`, tool);
+      });
+      if (chunk.done)
+        break;
+      received += chunk.value.byteLength;
+      if (received > asset.bytes) {
+        await reader.cancel().catch(() => {
+          return;
+        });
+        throw new ManagedToolsError("size_mismatch", `The ${label} download is larger than the pinned size, so nothing was installed.`, tool);
+      }
+      hash.update(chunk.value);
+      await file.write(chunk.value);
+      if (received - lastReport >= 1024 * 1024) {
+        lastReport = received;
+        onBytes(received);
+      }
+    }
+  } finally {
+    await file.close();
+  }
+  onBytes(received);
+  if (received !== asset.bytes) {
+    throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
+  }
+  return hash.digest("hex");
+}
+function octal(field) {
+  const text = field.toString("latin1").replace(/\0.*$/s, "").trim();
+  if (text === "")
+    return 0;
+  if (!/^[0-7]+$/.test(text))
+    throw new ManagedToolsError("unsafe_archive", "The archive has a malformed header.");
+  return Number.parseInt(text, 8);
+}
+function cString2(field) {
+  const end = field.indexOf(0);
+  return field.subarray(0, end === -1 ? field.length : end).toString("utf8");
+}
+function parsePax(data) {
+  const out = {};
+  let offset = 0;
+  while (offset < data.length) {
+    const space = data.indexOf(32, offset);
+    if (space === -1)
+      break;
+    const length = Number.parseInt(data.subarray(offset, space).toString("latin1"), 10);
+    if (!Number.isSafeInteger(length) || length <= 0 || offset + length > data.length)
+      throw new ManagedToolsError("unsafe_archive", "The archive has a malformed extended header.");
+    const record = data.subarray(space + 1, offset + length - 1).toString("utf8");
+    const equals = record.indexOf("=");
+    if (equals > 0)
+      out[record.slice(0, equals)] = record.slice(equals + 1);
+    offset += length;
+  }
+  return out;
+}
+function parseTarArchive(tar) {
+  const entries = [];
+  let offset = 0;
+  let pax = {};
+  let longName;
+  let longLink;
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0))
+      break;
+    const stored = octal(header.subarray(148, 156));
+    let sum2 = 0;
+    for (let index = 0;index < 512; index += 1)
+      sum2 += index >= 148 && index < 156 ? 32 : header[index];
+    if (sum2 !== stored)
+      throw new ManagedToolsError("unsafe_archive", "The archive has a header with a bad checksum.");
+    const typeflag = String.fromCharCode(header[156]);
+    const size = octal(header.subarray(124, 136));
+    const dataStart = offset + 512;
+    const dataEnd = dataStart + size;
+    if (dataEnd > tar.length)
+      throw new ManagedToolsError("unsafe_archive", "The archive is truncated.");
+    const data = tar.subarray(dataStart, dataEnd);
+    offset = dataStart + Math.ceil(size / 512) * 512;
+    if (typeflag === "x") {
+      pax = parsePax(data);
+      continue;
+    }
+    if (typeflag === "g")
+      continue;
+    if (typeflag === "L") {
+      longName = cString2(data);
+      continue;
+    }
+    if (typeflag === "K") {
+      longLink = cString2(data);
+      continue;
+    }
+    const magic = header.subarray(257, 263).toString("latin1");
+    const prefix = magic === "ustar\x00" ? cString2(header.subarray(345, 500)) : "";
+    const baseName = cString2(header.subarray(0, 100));
+    const name = pax.path ?? longName ?? (prefix ? `${prefix}/${baseName}` : baseName);
+    const link = pax.linkpath ?? longLink ?? cString2(header.subarray(157, 257));
+    const mode = octal(header.subarray(100, 108));
+    pax = {};
+    longName = undefined;
+    longLink = undefined;
+    if (typeflag === "0" || typeflag === "\x00" || typeflag === "7") {
+      entries.push({ path: name, type: "file", mode, data: Buffer.from(data) });
+    } else if (typeflag === "5") {
+      entries.push({ path: name, type: "dir", mode });
+    } else if (typeflag === "2") {
+      entries.push({ path: name, type: "symlink", mode, linkTarget: link });
+    } else if (typeflag === "1") {
+      throw new ManagedToolsError("unsafe_archive", `The archive has a hard link (${name}).`);
+    } else {
+      throw new ManagedToolsError("unsafe_archive", `The archive has a special file (${name}).`);
+    }
+  }
+  return entries;
+}
+function safeRelativePath(raw) {
+  if (raw.includes("\x00") || raw.includes("\\"))
+    throw new ManagedToolsError("unsafe_archive", `The archive has an unsafe path (${raw}).`);
+  if (raw.startsWith("/") || /^[A-Za-z]:/.test(raw))
+    throw new ManagedToolsError("unsafe_archive", `The archive has an absolute path (${raw}).`);
+  const trimmed2 = raw.replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+  if (trimmed2 === "" || trimmed2 === ".")
+    return "";
+  if (trimmed2.split("/").some((part) => part === ".."))
+    throw new ManagedToolsError("unsafe_archive", `The archive has a path that leaves its folder (${raw}).`);
+  const normal = posix.normalize(trimmed2);
+  if (normal.startsWith("../") || normal === ".." || posix.isAbsolute(normal))
+    throw new ManagedToolsError("unsafe_archive", `The archive has a path that leaves its folder (${raw}).`);
+  return normal;
+}
+async function extractVerifiedArchive(archivePath, staging, asset, tool) {
+  const compressed = readFileSync28(archivePath);
+  let tar;
+  try {
+    tar = await new Promise((resolve9, reject) => gunzip(compressed, { maxOutputLength: MAX_UNPACKED_BYTES }, (error, out) => error ? reject(error) : resolve9(out)));
+  } catch {
+    throw new ManagedToolsError("unsafe_archive", "The archive could not be unpacked.", tool);
+  }
+  let entries;
+  try {
+    entries = parseTarArchive(tar);
+  } catch (error) {
+    if (error instanceof ManagedToolsError)
+      throw new ManagedToolsError(error.code, error.message, tool);
+    throw error;
+  }
+  const planned = [];
+  const seen = new Set;
+  for (const entry of entries) {
+    const relative6 = safeRelativePath(entry.path);
+    if (relative6 === "")
+      continue;
+    if (asset.skip?.some((prefix) => relative6 === prefix.replace(/\/$/, "") || relative6.startsWith(prefix)))
+      continue;
+    const target = asset.rename?.[relative6] ?? relative6;
+    if (seen.has(target) && entry.type !== "dir")
+      throw new ManagedToolsError("unsafe_archive", `The archive names ${target} twice.`, tool);
+    seen.add(target);
+    if (entry.type === "symlink") {
+      const link = entry.linkTarget ?? "";
+      if (link === "" || link.includes("\x00") || posix.isAbsolute(link))
+        throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
+      const resolved = posix.normalize(posix.join(posix.dirname(target), link));
+      if (resolved === ".." || resolved.startsWith("../"))
+        throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
+    }
+    planned.push({ ...entry, target });
+  }
+  for (const pathName of [...seen]) {
+    const parts = pathName.split("/");
+    for (let index = 1;index < parts.length; index += 1) {
+      const parent = parts.slice(0, index).join("/");
+      if (planned.some((entry) => entry.type === "symlink" && entry.target === parent)) {
+        throw new ManagedToolsError("unsafe_archive", `The archive writes through a link (${pathName}).`, tool);
+      }
+    }
+  }
+  const mkdirs = (relative6) => {
+    mkdirSync23(join47(staging, relative6), { recursive: true, mode: 448 });
+  };
+  for (const entry of planned) {
+    if (entry.type === "dir")
+      mkdirs(entry.target);
+  }
+  for (const entry of planned) {
+    if (entry.type !== "file")
+      continue;
+    mkdirs(posix.dirname(entry.target));
+    const destination = join47(staging, entry.target);
+    writeFileSync9(destination, entry.data ?? Buffer.alloc(0), { flag: "wx", mode: entry.mode & 64 ? 448 : 384 });
+    chmodSync13(destination, entry.mode & 64 ? 448 : 384);
+  }
+  for (const entry of planned) {
+    if (entry.type !== "symlink")
+      continue;
+    mkdirs(posix.dirname(entry.target));
+    symlinkSync(entry.linkTarget, join47(staging, entry.target));
+  }
+  const realStaging = realpathSync3(staging);
+  for (const entry of planned) {
+    if (entry.type !== "symlink")
+      continue;
+    let real;
+    try {
+      real = realpathSync3(join47(staging, entry.target));
+    } catch {
+      throw new ManagedToolsError("unsafe_archive", `The archive has a link that leads nowhere (${entry.path}).`, tool);
+    }
+    if (!within(realStaging, real))
+      throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
+  }
+  if (asset.launcher) {
+    mkdirs(posix.dirname(asset.launcher.path));
+    const launcher = [
+      "#!/bin/sh",
+      "# Written by Olympus: runs the bundled Tor with its own libraries.",
+      "# No external command: the folder comes from $0 by parameter expansion.",
+      'case "$0" in',
+      '  */*) here="${0%/*}/.." ;;',
+      '  *) echo "olympus tor launcher: run it by its path (with a /), not a bare PATH lookup" >&2; exit 127 ;;',
+      "esac",
+      `LD_LIBRARY_PATH="$here/${asset.launcher.libraryDir}" exec "$here/${asset.launcher.target}" "$@"`,
+      ""
+    ].join(`
+`);
+    writeFileSync9(join47(staging, asset.launcher.path), launcher, { flag: "wx", mode: 448 });
+    chmodSync13(join47(staging, asset.launcher.path), 448);
+  }
+  for (const entry of planned) {
+    if (entry.type === "dir")
+      chmodSync13(join47(staging, entry.target), 448);
+  }
+}
+function createManagedToolsJob(options = {}) {
+  const now = options.now ?? (() => new Date);
+  let state = { state: "idle" };
+  let current = Promise.resolve();
+  return {
+    start() {
+      if (state.state === "running")
+        return "running";
+      const startedAt = now().toISOString();
+      state = { state: "running", tool: (options.tools ?? MANAGED_TOOL_ORDER)[0], phase: "downloading", startedAt };
+      current = installManagedTools({
+        ...options,
+        onProgress: (event) => {
+          state = { state: "running", tool: event.tool, phase: event.phase, ...event.receivedBytes !== undefined ? { receivedBytes: event.receivedBytes } : {}, ...event.totalBytes !== undefined ? { totalBytes: event.totalBytes } : {}, startedAt };
+          options.onProgress?.(event);
+        }
+      }).then((result) => {
+        const failed = result.tools.find((tool) => tool.outcome === "failed");
+        state = failed ? { state: "failed", at: now().toISOString(), tool: failed.tool, code: failed.code ?? "install_failed", message: failed.message ?? "The install did not finish.", result } : { state: "done", at: now().toISOString(), result };
+      }, (error) => {
+        state = { state: "failed", at: now().toISOString(), code: "install_failed", message: `The install did not finish: ${error.message}` };
+      });
+      return "started";
+    },
+    progress: () => state,
+    settled: () => current
+  };
+}
+var ZKAPI_RELEASE = "https://github.com/ethereum/zkapi/releases/download/clientd-v0.1.6", ZKAPI_REQUIRED, ZKAPI_RENAME, TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve9) => {
+  execFile(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
+    if (!error) {
+      resolve9({ code: 0, stdout, stderr });
+      return;
+    }
+    const failure = error;
+    if (typeof failure.code === "string")
+      resolve9({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
+    else
+      resolve9({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
+  });
+}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve9) => {
+  execFile(executable, ["--version"], { cwd: options.cwd, env: options.env, timeout: VERSION_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (error, stdout) => {
+    if (error) {
+      const failure = error;
+      const detail = failure.signal ? `stopped by ${failure.signal}` : failure.code !== undefined ? `exit ${String(failure.code)}` : failure.message;
+      resolve9({ ok: false, detail });
+      return;
+    }
+    resolve9({ ok: true, stdout });
+  });
+});
+var init_managed_tools = __esm(() => {
+  init_file_lease();
+  ZKAPI_REQUIRED = [
+    "bin/zkapi-clientd",
+    "bin/zkapi-walletd",
+    "share/zkapi-clientd/build-info.json",
+    "share/zkapi-clientd/proof-setup/manifest.json",
+    "share/zkapi-clientd/proof-setup/request.pk",
+    "share/zkapi-clientd/proof-setup/request.vk",
+    "share/zkapi-clientd/proof-setup/withdrawal.pk",
+    "share/zkapi-clientd/proof-setup/withdrawal.vk"
+  ];
+  ZKAPI_RENAME = { "zkapi-clientd": "bin/zkapi-clientd", "zkapi-walletd": "bin/zkapi-walletd" };
+  MANAGED_TOOL_PINS = {
+    tor: {
+      tool: "tor",
+      label: "Tor",
+      version: "15.0.24",
+      versionLine: /^Tor version \d+\.\d+\.\d+/,
+      assets: {
+        "darwin-arm64": torMacAsset("tor-expert-bundle-macos-aarch64-15.0.24.tar.gz", "d47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644", 18724201, ["tor/tor", "tor/libevent-2.1.7.dylib"]),
+        "darwin-x64": torMacAsset("tor-expert-bundle-macos-x86_64-15.0.24.tar.gz", "8acb0b590f6be34084dcb6d84009ac0c61cc7c5261b7a19d2ab94845aa9bd5b6", 19356806),
+        "linux-x64": torLinuxAsset("tor-expert-bundle-linux-x86_64-15.0.24.tar.gz", "8e012ec6815d7899cb64011582e2dade88e74119c6661068a2a3252de0ccd7f2", 32348376),
+        "linux-ia32": torLinuxAsset("tor-expert-bundle-linux-i686-15.0.24.tar.gz", "7537fea3478d05b8af25d7f8199c031b281f7015c32bb4177bef71f8e5100d9b", 25964591)
+      }
+    },
+    "zkapi-clientd": {
+      tool: "zkapi-clientd",
+      label: "zkAPI",
+      version: "0.1.6",
+      versionLine: /^zkapi-clientd 0\.1\.6(\s|$)/,
+      assets: {
+        "darwin-arm64": zkapiAsset("zkapi-clientd_0.1.6_darwin_arm64.tar.gz", "0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4", 22904346),
+        "darwin-x64": zkapiAsset("zkapi-clientd_0.1.6_darwin_amd64.tar.gz", "ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12", 23547367),
+        "linux-x64": zkapiAsset("zkapi-clientd_0.1.6_linux_amd64.tar.gz", "41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95", 23826995),
+        "linux-arm64": zkapiAsset("zkapi-clientd_0.1.6_linux_arm64.tar.gz", "41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf", 23612951)
+      }
+    }
+  };
+  MANAGED_TOOL_ORDER = ["tor", "zkapi-clientd"];
+  MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
+  DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+  ManagedToolsError = class ManagedToolsError extends Error {
+    code;
+    tool;
+    constructor(code, message, tool) {
+      super(message);
+      this.code = code;
+      this.tool = tool;
+    }
+  };
+});
+
+// src/core/consult-transport-zkapi.ts
+var exports_consult_transport_zkapi = {};
+__export(exports_consult_transport_zkapi, {
+  zkapiWalletDirectory: () => zkapiWalletDirectory,
+  zkapiUsageToday: () => zkapiUsageToday,
+  zkapiUnresolvedSession: () => zkapiUnresolvedSession,
+  zkapiStageRows: () => zkapiStageRows,
+  zkapiRouteLabel: () => zkapiRouteLabel,
+  zkapiOutstandingFences: () => zkapiOutstandingFences,
+  zkapiMoneyStatus: () => zkapiMoneyStatus,
+  zkapiLastSession: () => zkapiLastSession,
+  zkapiFenceScope: () => zkapiFenceScope,
+  zkapiConsultReadiness: () => zkapiConsultReadiness,
+  zkapiConsultInFlightOnDisk: () => zkapiConsultInFlightOnDisk,
+  validZkapiConsultQuestion: () => validZkapiConsultQuestion,
+  trustedFallbackExecutable: () => trustedFallbackExecutable,
+  standardExecutableDirectories: () => standardExecutableDirectories,
+  sendZkapiConsult: () => sendZkapiConsult,
+  resolveZkapiExecutable: () => resolveZkapiExecutable,
+  resolveZkapiConsultTransport: () => resolveZkapiConsultTransport,
+  resolveExecutable: () => resolveExecutable,
+  reserveZkapiRequest: () => reserveZkapiRequest,
+  recoverZkapiSession: () => recoverZkapiSession,
+  openZkapiConsultSession: () => openZkapiConsultSession,
+  inspectLoopbackListener: () => inspectLoopbackListener,
+  formatZkapiStageTable: () => formatZkapiStageTable,
+  defaultZkapiStatePath: () => defaultZkapiStatePath,
+  defaultZkapiConfinement: () => defaultZkapiConfinement,
+  darwinSandboxProfile: () => darwinSandboxProfile,
+  daemonEnvironment: () => daemonEnvironment,
+  confinementStatement: () => confinementStatement,
+  confinementLevel: () => confinementLevel,
+  abandonZkapiFence: () => abandonZkapiFence,
+  ZKAPI_SUPPORTED_DAEMON_VERSIONS: () => ZKAPI_SUPPORTED_DAEMON_VERSIONS,
+  ZKAPI_STAGE_LABELS: () => ZKAPI_STAGE_LABELS,
+  ZKAPI_SESSION_READY_TIMEOUT_MS: () => ZKAPI_SESSION_READY_TIMEOUT_MS,
+  ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD,
+  DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
+});
+import { spawn as spawn4, execFileSync as execFileSync2 } from "node:child_process";
+import { createHash as createHash36, randomUUID as randomUUID17 } from "node:crypto";
+import { accessSync as accessSync5, chmodSync as chmodSync14, constants as constants4, existsSync as existsSync30, mkdirSync as mkdirSync24, mkdtempSync, readdirSync as readdirSync6, readFileSync as readFileSync29, readlinkSync, realpathSync as realpathSync4, rmSync as rmSync12, statSync as statSync17, writeFileSync as writeFileSync10 } from "node:fs";
+import { createConnection } from "node:net";
+import { homedir as homedir36, tmpdir as tmpdir3 } from "node:os";
+import { delimiter as delimiter4, dirname as dirname33, isAbsolute as isAbsolute11, join as join48, resolve as resolvePath } from "node:path";
+function zkapiStageRows(timings) {
+  if (!timings)
+    return [];
+  return ZKAPI_STAGE_LABELS.filter(([key]) => typeof timings[key] === "number").map(([key, label]) => ({ label, ms: timings[key] }));
+}
+function formatZkapiStageTable(timings) {
+  const rows = zkapiStageRows(timings);
+  if (rows.length === 0)
+    return "no stage timings recorded";
+  const width = Math.max(...rows.map((row) => row.label.length));
+  const msWidth = Math.max(...rows.map((row) => String(row.ms).length));
+  return rows.map((row) => `${row.label.padEnd(width)}  ${String(row.ms).padStart(msWidth)} ms`).join(`
+`);
+}
+function resolveZkapiConsultTransport(profiles, resolveSecret, extra = {}) {
+  const routes = Object.values(profiles).filter((profile) => profile.provider === "zkapi" && profile.zkapi && profile.baseUrl);
+  if (routes.length !== 1)
+    return;
+  const route = routes[0];
+  let apiKey;
+  try {
+    apiKey = resolveSecret(route.secretRef);
+  } catch {
+    apiKey = undefined;
+  }
+  return {
+    baseUrl: route.baseUrl,
+    model: extra.model ?? route.model ?? "",
+    ...apiKey ? { apiKey } : {},
+    settings: route.zkapi,
+    ...extra.env ? { env: extra.env } : {},
+    ...extra.statePath ? { statePath: extra.statePath } : {}
+  };
+}
+function failure(code, outcome, networkIdentity, extra = {}) {
+  return { ok: false, error: { code, message: MESSAGES[code], outcome, networkIdentity, ...extra } };
+}
+function zkapiRouteLabel(receipt) {
+  if (receipt.keyReuse !== "verified_off" || receipt.inferenceAuth !== "verified") {
+    return "not anonymous: key isolation or local authentication not confirmed";
+  }
+  if (receipt.tor === "off")
+    return "payment privacy only (network address visible)";
+  if (receipt.postStopProbe === "still_reachable") {
+    return "payment privacy only: the daemon still reached the network after Tor stopped (Tor bypass observed)";
+  }
+  const confined = receipt.confinementSelfTest === "passed" ? receipt.confinement : "none";
+  if (confined === "loopback_filtered" && receipt.freshTorClient && receipt.settlement !== "not_confirmed" && receipt.settlement !== "pending") {
+    return "anonymous route (payment, key and network identity hidden)";
+  }
+  const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : receipt.settlement === "pending" ? "; lease settlement pending" : "";
+  return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
+}
+function networkIdentityFor(receipt) {
+  if (receipt.tor === "off" || receipt.postStopProbe === "still_reachable")
+    return "visible";
+  return zkapiRouteLabel(receipt).startsWith("anonymous route") ? "hidden" : "not_verified";
+}
+function zkapiMoneyStatus(settings, now) {
+  const required3 = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id);
+  const currentVersion = settings.acknowledgements.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION;
+  const accepted = currentVersion ? required3.filter((id) => settings.acknowledgements.accepted.includes(id)).length : 0;
+  return {
+    acknowledgements: { complete: accepted === required3.length, accepted, required: required3.length },
+    expiryEstimate: expiryEstimate(settings.fundingDate, now),
+    depositAboveSuggestedCeiling: (settings.depositUsd ?? 0) > ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD
+  };
+}
+function expiryEstimate(fundingDate, now) {
+  if (!fundingDate)
+    return { state: "unknown", notice: "unknown" };
+  const funded = parseIsoDate(fundingDate);
+  const today = parseIsoDate(now.toISOString().slice(0, 10));
+  if (!funded || !today || funded.getTime() > today.getTime()) {
+    return { state: "invalid", fundingDate, notice: "unknown" };
+  }
+  const expiry = new Date(funded.getTime() + ZKAPI_NOTE_TTL_DAYS * DAY_MS);
+  const daysLeft = Math.round((expiry.getTime() - today.getTime()) / DAY_MS);
+  const expiryDate = expiry.toISOString().slice(0, 10);
+  if (daysLeft <= 0)
+    return { state: "expired", fundingDate, expiryDate, daysLeft: 0, notice: "expired" };
+  const [ten, five, two] = ZKAPI_EXPIRY_NOTICE_DAYS;
+  const notice = daysLeft <= two ? "two_days" : daysLeft <= five ? "five_days" : daysLeft <= ten ? "ten_days" : "none";
+  return { state: "active", fundingDate, expiryDate, daysLeft, notice };
+}
+function settingsBlockers(money) {
+  const blockers = [];
+  if (!money.acknowledgements.complete)
+    blockers.push("acknowledgements_incomplete");
+  if (money.expiryEstimate.state === "unknown")
+    blockers.push("funding_date_missing");
+  if (money.expiryEstimate.state === "invalid")
+    blockers.push("funding_date_invalid");
+  if (money.expiryEstimate.state === "expired")
+    blockers.push("note_expired");
+  return blockers;
+}
+function versionSupported(version) {
+  const normalized = version?.replace(/^v/, "");
+  return ZKAPI_SUPPORTED_DAEMON_VERSIONS.includes(normalized ?? "");
+}
+function confinementLevel(policy) {
+  if (policy.nonLoopback !== "denied" || policy.unixSockets !== "denied")
+    return "none";
+  return policy.loopbackOutbound === "session_ports_only" ? "loopback_filtered" : "non_loopback_blocked";
+}
+function confinementStatement(level) {
+  if (level === "loopback_filtered") {
+    return "network confinement allowed only this session's Tor and daemon ports";
+  }
+  if (level === "non_loopback_blocked") {
+    return "in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered";
+  }
+  return "no network confinement";
+}
+function darwinSandboxProfile(policy, ports) {
+  const rules = ["(version 1)", "(allow default)"];
+  if (policy.nonLoopback === "denied" || policy.unixSockets === "denied") {
+    rules.push("(deny network*)");
+    rules.push('(allow network-bind (local ip "localhost:*"))');
+    rules.push('(allow network-inbound (local ip "localhost:*"))');
+    if (policy.loopbackOutbound === "any") {
+      rules.push('(allow network-outbound (remote ip "localhost:*"))');
+    } else {
+      rules.push(`(allow network-outbound (remote ip "localhost:${ports.tor}"))`);
+      rules.push(`(allow network-outbound (remote ip "localhost:${ports.daemon}"))`);
+    }
+  }
+  return rules.join("");
+}
+function runSelfTestProbe(argv, env) {
+  try {
+    return JSON.parse(execFileSync2(argv[0], argv.slice(1), {
+      encoding: "utf8",
+      timeout: 1e4,
+      env,
+      stdio: ["ignore", "pipe", "ignore"]
+    }));
+  } catch {
+    return;
+  }
+}
+function defaultZkapiConfinement() {
+  if (process.platform === "darwin" && existsSync30("/usr/bin/sandbox-exec")) {
+    const level = confinementLevel(DARWIN_POLICY);
+    return {
+      level,
+      limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
+      wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
+      selfTest: async (workDir, env) => {
+        const script = join48(workDir, "confinement-self-test.cjs");
+        writeFileSync10(script, SELF_TEST_SCRIPT, { mode: 384 });
+        const outside = runSelfTestProbe([process.execPath, script], env);
+        const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
+        return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
+      }
+    };
+  }
+  return {
+    level: "none",
+    limit: "no network confinement is implemented on this platform",
+    wrap: (argv) => [...argv],
+    selfTest: async () => false
+  };
+}
+function defaultZkapiStatePath(home2 = homedir36()) {
+  return join48(home2, ".olympus", "zkapi-consult-state.json");
+}
+function utcDay(now) {
+  return now.toISOString().slice(0, 10);
+}
+function readState5(path) {
+  if (!existsSync30(path))
+    return;
+  const parsed = JSON.parse(readFileSync29(path, "utf8"));
+  if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
+    throw new Error("zkAPI state record is malformed");
+  }
+  return parsed;
+}
+function zkapiUsageToday(path, now) {
+  const state = readState5(path);
+  return state && state.day === utcDay(now) ? { count: state.count, reservedMicroUsd: state.reservedMicroUsd } : { count: 0, reservedMicroUsd: 0 };
+}
+function zkapiLastSession(path) {
+  return readState5(path)?.lastSession;
+}
+function zkapiOutstandingFences(path) {
+  return readState5(path)?.fences ?? {};
+}
+function zkapiUnresolvedSession(path, scope) {
+  const fences = zkapiOutstandingFences(path);
+  return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
+}
+function zkapiWalletDirectory(env) {
+  const home2 = env.HOME?.trim() || homedir36();
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join48(home2, "Library", "Application Support", "zkapi-clientd") : join48(env.XDG_CONFIG_HOME?.trim() || join48(home2, ".config"), "zkapi-clientd"));
+  const absolute = resolvePath(configured);
+  try {
+    return realpathSync4(absolute);
+  } catch {
+    return absolute;
+  }
+}
+function zkapiFenceScope(input) {
+  return createHash36("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+}
+function abandonZkapiFence(path, scope, now) {
+  let found = false;
+  updateState(path, now, (state) => {
+    const fence = state.fences?.[scope];
+    if (!fence)
+      return;
+    found = true;
+    const { [scope]: _abandoned, ...others } = state.fences ?? {};
+    const { fences: _all, ...rest } = state;
+    return {
+      ...rest,
+      ...Object.keys(others).length > 0 ? { fences: others } : {},
+      abandonedFences: { ...state.abandonedFences, [scope]: { ...fence, abandonedAt: now.toISOString() } }
+    };
+  });
+  return found;
+}
+function updateState(path, now, mutate) {
+  mkdirSync24(dirname33(path), { recursive: true, mode: 448 });
+  return withFileLeaseSync(path, (lease) => {
+    const day = utcDay(now);
+    const current = readState5(path);
+    const base = current && current.day === day ? current : {
+      version: 1,
+      day,
+      count: 0,
+      reservedMicroUsd: 0,
+      ...current?.lastSession ? { lastSession: current.lastSession } : {},
+      ...current?.fences ? { fences: current.fences } : {},
+      ...current?.abandonedFences ? { abandonedFences: current.abandonedFences } : {},
+      ...current?.running ? { running: current.running } : {}
+    };
+    const next = mutate(base);
+    if (!next)
+      return base;
+    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify(next)}
+`));
+    return next;
+  }, { acquireTimeoutMs: 5000 });
+}
+function ownerLimits(settings) {
+  return {
+    ...settings.dailyRequestCap !== undefined ? { requestCap: settings.dailyRequestCap } : {},
+    ...settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1e6) } : {}
+  };
+}
+function reserveZkapiRequest(path, limits, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
+  let refusal;
+  updateState(path, now, (state) => {
+    if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
+      refusal = "daily_cap_reached";
+      return;
+    }
+    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits.spendCapMicroUsd) {
+      refusal = "spend_cap_reached";
+      return;
+    }
+    return {
+      ...state,
+      count: state.count + 1,
+      reservedMicroUsd: state.reservedMicroUsd + allowanceMicroUsd,
+      fences: (() => {
+        const { scope, ...facts } = fence;
+        return { ...state.fences, [scope]: { ...facts, at: now.toISOString() } };
+      })()
+    };
+  });
+  return refusal ? { reserved: false, reason: refusal } : { reserved: true };
+}
+function supervise(role, watchdog, argv, env, onLine, onExit) {
+  const child = spawn4(process.execPath, [watchdog, String(process.pid), ...argv], { env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  const handle = {
+    role,
+    child,
+    pgid: child.pid ?? -1,
+    leader: child.pid ? processInstanceIdentity(child.pid) : undefined,
+    gone: false,
+    leaderExited: false,
+    childExited: false,
+    deliberate: false,
+    go: () => {
+      child.stdin?.write(`go
+`);
+    }
+  };
+  let reported = false;
+  const report = () => {
+    if (reported)
+      return;
+    reported = true;
+    onExit(handle);
+  };
+  const exited = () => {
+    handle.leaderExited = true;
+    report();
+  };
+  child.on("exit", exited);
+  child.on("error", exited);
+  child.stdin?.on("error", () => {
+    return;
+  });
+  for (const stream of [child.stdout, child.stderr]) {
+    let pending = "";
+    stream?.setEncoding("utf8");
+    stream?.on("data", (chunk) => {
+      pending += chunk;
+      let index = pending.indexOf(`
+`);
+      while (index >= 0) {
+        const line = pending.slice(0, index);
+        if (line === WATCHDOG_CHILD_EXITED) {
+          handle.childExited = true;
+          report();
+        } else {
+          onLine(line);
+        }
+        pending = pending.slice(index + 1);
+        index = pending.indexOf(`
+`);
+      }
+      if (pending.length > 64 * 1024)
+        pending = "";
+    });
+  }
+  return handle;
+}
+function groupAlive(pgid) {
+  if (pgid <= 0)
+    return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+async function stopGroup(pgid, stillOurs = () => true) {
+  if (!groupAlive(pgid))
+    return true;
+  if (!stillOurs())
+    return false;
+  try {
+    process.kill(-pgid, "SIGTERM");
+  } catch {}
+  const deadline = Date.now() + STOP_GRACE_MS;
+  while (groupAlive(pgid) && Date.now() < deadline)
+    await sleep2(POLL_MS);
+  if (!groupAlive(pgid))
+    return true;
+  if (!stillOurs())
+    return false;
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {}
+  const killDeadline = Date.now() + KILL_GRACE_MS;
+  while (groupAlive(pgid) && Date.now() < killDeadline)
+    await sleep2(POLL_MS);
+  return !groupAlive(pgid);
+}
+function activeGroupIsOurs(handle) {
+  if (!handle.leader)
+    return false;
+  try {
+    process.kill(handle.pgid, 0);
+  } catch (error) {
+    if (error.code !== "EPERM")
+      return false;
+  }
+  const current = processInstanceIdentity(handle.pgid);
+  if (!current)
+    return false;
+  if (handle.leader.bootId && current.bootId && handle.leader.bootId !== current.bootId)
+    return false;
+  return current.platform === handle.leader.platform && current.mechanism === handle.leader.mechanism && current.startTime === handle.leader.startTime;
+}
+async function stopOwned(handle) {
+  if (handle.gone)
+    return true;
+  const stopped = await stopGroup(handle.pgid, () => activeGroupIsOurs(handle));
+  if (stopped)
+    handle.gone = true;
+  return stopped;
+}
+function currentBootId() {
+  return processInstanceIdentity(process.pid)?.bootId;
+}
+function recordedGroupState(group, recordedBootId) {
+  const boot = currentBootId();
+  const groupBoot = group.leader?.bootId ?? recordedBootId;
+  if (groupBoot && boot && groupBoot !== boot)
+    return "gone";
+  if (!groupAlive(group.pgid))
+    return "gone";
+  let leaderAlive = true;
+  try {
+    process.kill(group.pgid, 0);
+  } catch (error) {
+    leaderAlive = error.code === "EPERM";
+  }
+  if (!leaderAlive)
+    return "unknown";
+  const current = processInstanceIdentity(group.pgid);
+  if (!group.leader || !current)
+    return "unknown";
+  if (group.leader.platform !== current.platform || group.leader.mechanism !== current.mechanism)
+    return "unknown";
+  return group.leader.startTime === current.startTime ? "ours" : "gone";
+}
+function zkapiConsultInFlightOnDisk(statePath) {
+  let state;
+  try {
+    state = readState5(statePath);
+  } catch {
+    return;
+  }
+  const running = state?.running;
+  if (!running || !supervisorAlive(running.supervisor))
+    return;
+  return { since: zkapiRunningSince(statePath) };
+}
+function zkapiRunningSince(statePath) {
+  try {
+    return statSync17(statePath).mtime.toISOString();
+  } catch {
+    return "an unknown time";
+  }
+}
+function supervisorAlive(supervisor) {
+  if (supervisor.pid === process.pid)
+    return false;
+  const boot = currentBootId();
+  if (supervisor.instance?.bootId && boot && supervisor.instance.bootId !== boot)
+    return false;
+  try {
+    process.kill(supervisor.pid, 0);
+  } catch (error) {
+    if (error.code !== "EPERM")
+      return false;
+  }
+  const current = processInstanceIdentity(supervisor.pid);
+  if (!supervisor.instance || !current)
+    return true;
+  return supervisor.instance.mechanism !== current.mechanism || supervisor.instance.startTime === current.startTime;
+}
+async function recoverStrandedGroups(statePath, now) {
+  const running = readState5(statePath)?.running;
+  if (!running)
+    return "clear";
+  if (supervisorAlive(running.supervisor))
+    return "busy";
+  const recordedBoot = running.supervisor.instance?.bootId;
+  let allGone = true;
+  for (const group of running.groups) {
+    const state = recordedGroupState(group, recordedBoot);
+    if (state === "unknown") {
+      allGone = false;
+      continue;
+    }
+    if (state === "ours" && !await stopGroup(group.pgid, () => recordedGroupState(group, recordedBoot) === "ours")) {
+      allGone = false;
+    }
+  }
+  if (!allGone)
+    return "stranded";
+  if (running.workDir) {
+    try {
+      rmSync12(running.workDir, { recursive: true, force: true });
+    } catch {}
+  }
+  updateState(statePath, now, (state) => {
+    const { running: _gone, ...rest } = state;
+    return rest;
+  });
+  return "clear";
+}
+function processGroupOf(pid) {
+  try {
+    if (process.platform === "linux") {
+      const stat3 = readFileSync29(`/proc/${pid}/stat`, "utf8");
+      const fields = stat3.slice(stat3.lastIndexOf(")") + 1).trim().split(/\s+/);
+      const pgrp = Number(fields[2]);
+      return Number.isInteger(pgrp) ? pgrp : undefined;
+    }
+    const out = execFileSync2("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    return /^\d+$/.test(out) ? Number(out) : undefined;
+  } catch {
+    return;
+  }
+}
+function childEnvironment(env) {
+  const out = {};
+  for (const key of CHILD_ENV_KEYS) {
+    const value = env[key];
+    if (value)
+      out[key] = value;
+  }
+  return out;
+}
+function daemonEnvironment(base, daemonExecutable) {
+  let real = daemonExecutable;
+  try {
+    real = realpathSync4(daemonExecutable);
+  } catch {}
+  const installBin = dirname33(real);
+  const rest = (base.PATH ?? "").split(delimiter4).filter((entry) => entry && entry !== installBin);
+  return { ...base, PATH: [installBin, ...rest].join(delimiter4) };
+}
+function standardExecutableDirectories(env, platform2 = process.platform) {
+  const home2 = env.HOME?.trim();
+  const local = home2 && isAbsolute11(home2) ? [join48(home2, ".local", "bin")] : [];
+  if (platform2 === "darwin")
+    return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
+  if (platform2 === "linux")
+    return [...local, "/usr/local/bin"];
+  return local;
+}
+function trustedChain(path, probe, uid) {
+  for (let current = path;; current = dirname33(current)) {
+    const stats = probe.stat(current);
+    if (current !== path && !stats.isDirectory())
+      return false;
+    if (stats.uid !== uid && stats.uid !== 0)
+      return false;
+    if ((stats.mode & 18) !== 0)
+      return false;
+    if (dirname33(current) === current)
+      return true;
+  }
+}
+function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) {
+  const uid = probe.uid();
+  if (uid === undefined)
+    return;
+  try {
+    const real = probe.realpath(candidate);
+    const target = probe.stat(real);
+    if (!target.isFile() || !probe.executable(real))
+      return;
+    if (!trustedChain(real, probe, uid))
+      return;
+    if (!trustedChain(probe.realpath(dirname33(candidate)), probe, uid))
+      return;
+    return real;
+  } catch {
+    return;
+  }
+}
+function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
+  const pathDirectories = (env.PATH ?? "").split(delimiter4).filter(Boolean);
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join48(dir, name));
+  for (const candidate of candidates) {
+    try {
+      accessSync5(candidate, constants4.X_OK);
+      if (statSync17(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  if (explicit)
+    return;
+  for (const dir of standardExecutableDirectories(env, platform2)) {
+    if (pathDirectories.includes(dir))
+      continue;
+    const found = trustedFallbackExecutable(join48(dir, name), trust);
+    if (found)
+      return found;
+  }
+  return;
+}
+function sleep2(ms) {
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
+}
+async function waitFor(condition, timeoutMs, options = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;; ) {
+    if (await condition(Math.max(0, deadline - Date.now())))
+      return true;
+    if (options.signal?.aborted || options.giveUp?.())
+      return false;
+    if (Date.now() >= deadline)
+      return false;
+    await sleep2(Math.min(options.pollMs ?? POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+}
+function portAnswers(port) {
+  return new Promise((resolve9) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const done = (value) => {
+      socket.destroy();
+      resolve9(value);
+    };
+    socket.setTimeout(1000, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+function parseDaemonLine(facts, line) {
+  let match = /zkAPI client (\S+) listening at http:\/\/(\S+)\/v1 \(zkapi\); (.+)$/.exec(line);
+  if (match) {
+    facts.version = match[1];
+    facts.listen = match[2];
+    facts.transport = match[3].trim();
+    return;
+  }
+  if (line.includes("Ephemeral key isolation: fresh OpenRouter key for every completion")) {
+    facts.keyReuse = "off";
+    return;
+  }
+  if (/Ephemeral key reuse enabled for up to \d+ seconds/.test(line)) {
+    facts.keyReuse = "on";
+    return;
+  }
+  if (line.includes("Use zkapi-clientd config --api-key to configure your client")) {
+    facts.inferenceAuth = "required";
+    return;
+  }
+  if (line.includes("Localhost inference needs no API key")) {
+    facts.inferenceAuth = "not_required";
+    return;
+  }
+  match = /request started method=\S+ route=(\S+) request=(\d+)/.exec(line);
+  if (match) {
+    facts.requests.set(Number(match[2]), { route: match[1], keys: [] });
+    return;
+  }
+  match = /request key selected request=(\d+) key_ref=(\d+) source=(fresh|reused)/.exec(line);
+  if (match) {
+    facts.requests.get(Number(match[1]))?.keys.push({ keyRef: Number(match[2]), source: match[3] });
+    return;
+  }
+  match = /request \S+ method=\S+ route=\S+ status=(\d+) duration=\S+ request=(\d+)/.exec(line);
+  if (match) {
+    const request = facts.requests.get(Number(match[2]));
+    if (request)
+      request.finished = { status: Number(match[1]) };
+    return;
+  }
+  match = /automatic settlement result key_ref=(\d+) ready=(true|false)/.exec(line);
+  if (match)
+    facts.settled.set(Number(match[1]), match[2] === "true");
+}
+async function probeRequest(fetchImpl, url, init, signal, timeoutMs = PROBE_TIMEOUT_MS) {
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const response = await fetchImpl(url, { ...init, redirect: "error", signal: controller.signal });
+    const body = await readBounded(response, PROBE_MAX_BYTES);
+    return { status: response.status, headers: response.headers, body: body.ok ? body.text : "" };
+  } catch {
+    return;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function daemonErrorEnvelope(body) {
+  try {
+    const error = JSON.parse(body).error;
+    if (!error || typeof error.code !== "string" || error.type !== error.code || typeof error.message !== "string" || error.param !== null) {
+      return;
+    }
+    return error.code;
+  } catch {
+    return;
+  }
+}
+function healthFingerprint(response) {
+  return Boolean(response) && response.status === 200 && response.body === '{"status":"ok"}' && response.headers.get("cache-control") === "no-store" && response.headers.get("x-content-type-options") === "nosniff";
+}
+function modelListing(body, model) {
+  try {
+    const data = JSON.parse(body).data;
+    if (!Array.isArray(data) || data.length === 0)
+      return { listed: false };
+    const entry = data.find((item) => item.id === model);
+    const allowance = entry?.oa_request_limit_micro_usd;
+    return typeof allowance === "number" && Number.isInteger(allowance) && allowance > 0 ? { listed: true, allowance } : { listed: true };
+  } catch {
+    return { listed: false };
+  }
+}
+function inspectLoopbackListener(port) {
+  let pids;
+  if (process.platform === "darwin") {
+    try {
+      const out = execFileSync2("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
+        encoding: "utf8",
+        timeout: 5000,
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      pids = [...new Set(out.split(`
+`).filter((line) => /^p\d+$/.test(line)).map((line) => Number(line.slice(1))))];
+    } catch (error) {
+      return error.status === 1 ? { kind: "not_visible" } : { kind: "unavailable" };
+    }
+  } else if (process.platform === "linux") {
+    const found = linuxListenerPids(port);
+    if (!Array.isArray(found))
+      return found;
+    pids = found;
+  } else {
+    return { kind: "unavailable" };
+  }
+  if (pids.length === 0)
+    return { kind: "not_visible" };
+  const pgids = new Set(pids.map((pid) => processGroupOf(pid)));
+  const [pgid] = [...pgids];
+  return pgids.size === 1 && pgid !== undefined ? { kind: "found", pid: pids[0], pgid } : { kind: "found", pid: pids[0] };
+}
+function linuxListenerPids(port) {
+  const inodes = new Set;
+  const hexPort = port.toString(16).toUpperCase().padStart(4, "0");
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text;
+    try {
+      text = readFileSync29(table, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split(`
+`).slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 10 || fields[3] !== "0A" || !fields[1]?.endsWith(`:${hexPort}`))
+        continue;
+      if (fields[9] && fields[9] !== "0")
+        inodes.add(fields[9]);
+    }
+  }
+  if (inodes.size === 0)
+    return { kind: "not_visible" };
+  let entries;
+  try {
+    entries = readdirSync6("/proc").filter((name) => /^\d+$/.test(name));
+  } catch {
+    return { kind: "unavailable" };
+  }
+  const owners = new Set;
+  const seen = new Set;
+  for (const pid of entries) {
+    let fds;
+    try {
+      fds = readdirSync6(`/proc/${pid}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        const match = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`));
+        if (match && inodes.has(match[1])) {
+          owners.add(Number(pid));
+          seen.add(match[1]);
+        }
+      } catch {}
+    }
+  }
+  if (seen.size !== inodes.size)
+    return { kind: "unavailable" };
+  return [...owners];
+}
+function resolveZkapiExecutable(name, explicit, env) {
+  if (!explicit) {
+    const managed = managedToolExecutable(name, { env });
+    if (managed)
+      return managed;
+  }
+  return resolveExecutable(name, explicit, env);
+}
+async function zkapiConsultReadiness(options) {
+  const now = (options.now ?? (() => new Date))();
+  const env = options.env ?? process.env;
+  const settings = options.settings;
+  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const money = zkapiMoneyStatus(settings, now);
+  const blockers = settingsBlockers(money);
+  const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
+  if (!apiKeyConfigured)
+    blockers.push("daemon_api_key_missing");
+  const daemonExecutable = resolveZkapiExecutable("zkapi-clientd", settings.daemonExecutable, env);
+  let daemonVersion;
+  if (!daemonExecutable) {
+    blockers.push("daemon_not_found");
+  } else {
+    try {
+      const out = execFileSync2(daemonExecutable, ["--version"], {
+        encoding: "utf8",
+        timeout: 5000,
+        env: childEnvironment(env),
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      daemonVersion = /^zkapi-clientd (\S+)/.exec(out.trim())?.[1];
+    } catch {
+      daemonVersion = undefined;
+    }
+    if (!versionSupported(daemonVersion))
+      blockers.push("daemon_version_unsupported");
+  }
+  const torExecutable = settings.tor === "per_consult" ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
+  if (settings.tor === "per_consult" && !torExecutable)
+    blockers.push("tor_not_found");
+  const daemonPort = await portAnswers(Number(new URL(options.baseUrl).port || 80)) ? "in_use" : "free";
+  if (daemonPort === "in_use")
+    blockers.push("daemon_already_running");
+  const torPort = settings.tor === "per_consult" ? await portAnswers(settings.torSocksPort) ? "in_use" : "free" : "not_used";
+  if (torPort === "in_use")
+    blockers.push("tor_port_busy");
+  const statePath = options.statePath ?? defaultZkapiStatePath();
+  let usage = { count: 0, reservedMicroUsd: 0 };
+  let lastSession;
+  let unresolvedSession = false;
+  const currentScope = zkapiFenceScope({ env });
+  let fences = [];
+  let stranded;
+  try {
+    const state = readState5(statePath);
+    usage = zkapiUsageToday(statePath, now);
+    lastSession = zkapiLastSession(statePath);
+    fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));
+    unresolvedSession = fences.length > 0;
+    if (state?.running) {
+      const supervisorRunning = supervisorAlive(state.running.supervisor);
+      const outcome = supervisorRunning ? "busy" : await recoverStrandedGroups(statePath, now);
+      if (outcome !== "clear") {
+        const recordedBoot = state.running.supervisor.instance?.bootId;
+        stranded = {
+          supervisorPid: state.running.supervisor.pid,
+          supervisorRunning,
+          groups: state.running.groups.map((group) => ({ role: group.role, pgid: group.pgid, state: recordedGroupState(group, recordedBoot) }))
+        };
+      }
+    }
+  } catch {
+    blockers.push("state_unavailable");
+  }
+  if (fences.some((fence) => fence.thisWallet))
+    blockers.push("unresolved_session");
+  if (fences.some((fence) => !fence.thisWallet))
+    blockers.push("unresolved_session_other_wallet");
+  if (stranded && !stranded.supervisorRunning)
+    blockers.push("stranded_processes");
+  const limit = ownerLimits(settings);
+  if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
+    blockers.push("daily_cap_reached");
+  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
+    blockers.push("spend_cap_reached");
+  }
+  return {
+    ...daemonExecutable ? { daemonExecutable } : {},
+    ...daemonVersion ? { daemonVersion } : {},
+    ...torExecutable ? { torExecutable } : {},
+    tor: settings.tor,
+    confinement: { level: confinement.level, limit: confinement.limit },
+    daemonPort,
+    torPort,
+    apiKeyConfigured,
+    money,
+    requestsToday: { count: usage.count, ...settings.dailyRequestCap !== undefined ? { cap: settings.dailyRequestCap } : {} },
+    spendToday: {
+      reservedUsd: usage.reservedMicroUsd / 1e6,
+      ...settings.dailySpendCapUsd !== undefined ? { capUsd: settings.dailySpendCapUsd } : {}
+    },
+    unresolvedSession,
+    fences,
+    ...stranded ? { stranded } : {},
+    ...lastSession ? { lastSession } : {},
+    routeLabel: lastSession ? zkapiRouteLabel(lastSession) : settings.tor === "off" ? "payment privacy only (network address visible); not yet verified by a consult" : `not yet verified by a consult; on this platform: ${confinement.limit}`,
+    blockers
+  };
+}
+function deferred() {
+  let settled = false;
+  let resolve9;
+  const promise = new Promise((done) => {
+    resolve9 = (value) => {
+      if (settled)
+        return;
+      settled = true;
+      done(value);
+    };
+  });
+  return { promise, resolve: resolve9, settled: () => settled };
+}
+async function openZkapiConsultSession(options, control = {}) {
+  return openSession(options, control, false);
+}
+async function sendZkapiConsult(question, options, control = {}) {
+  const initialIdentity = options.settings.tor === "off" ? "visible" : "not_verified";
+  if (typeof question !== "string" || !validQuestion(question)) {
+    return failure("invalid_question", "not_sent", initialIdentity);
+  }
+  return oneShot(question, false, options, control.signal);
+}
+async function recoverZkapiSession(options, control = {}) {
+  return oneShot(RECOVERY_QUESTION, true, options, control.signal);
+}
+async function oneShot(question, recovery, options, signal) {
+  const opened = await openSession(options, { signal }, recovery);
+  if (!opened.ok)
+    return opened;
+  await opened.session.send(question, { signal });
+  const result = await opened.session.finished;
+  if (signal?.aborted && (result.ok || result.error.outcome !== "not_sent" && !SESSION_OWNED_FAILURES.has(result.error.code))) {
+    const receipt = result.ok ? result.receipt : result.error.receipt;
+    const identity = result.ok ? result.networkIdentity : result.error.networkIdentity;
+    return failure("aborted", "unknown", identity, receipt ? { receipt } : {});
+  }
+  return result;
+}
+async function openSession(options, control, recovery) {
+  const initialIdentity = options.settings.tor === "off" ? "visible" : "not_verified";
+  if (zkapiConsultInFlight)
+    return failure("busy", "not_sent", initialIdentity);
+  zkapiConsultInFlight = true;
+  const statePath = options.statePath ?? defaultZkapiStatePath();
+  const sent = { dispatched: false };
+  const clock = options.clock ?? (() => performance.now());
+  const startedAt = sampleClock(clock);
+  const bridge = {
+    state: "opening",
+    openSignal: control.signal,
+    readyTimeoutMs: control.readyTimeoutMs ?? ZKAPI_SESSION_READY_TIMEOUT_MS,
+    cancelRequested: undefined,
+    cancel: undefined,
+    ready: deferred(),
+    dispatch: deferred(),
+    reply: deferred()
+  };
+  const requestCancel = (reason) => {
+    if (bridge.cancel)
+      bridge.cancel(reason);
+    else
+      bridge.cancelRequested ??= reason;
+  };
+  const openDeadline = control.deadlineMs !== undefined ? setTimeout(() => {
+    if (bridge.state === "opening")
+      requestCancel("deadline");
+  }, control.deadlineMs) : undefined;
+  let leaseHeld = false;
+  const finished = (async () => {
+    try {
+      mkdirSync24(dirname33(statePath), { recursive: true, mode: 448 });
+      const result2 = await withFileLease(`${statePath}.session`, () => {
+        leaseHeld = true;
+        return runSession(recovery, options, statePath, bridge, sent, clock, startedAt);
+      }, { acquireTimeoutMs: 50 });
+      const receipt = result2.ok ? result2.receipt : result2.error.receipt;
+      if (receipt && receipt.stageMs?.totalMs === undefined) {
+        receipt.stageMs = withTiming(receipt.stageMs ?? {}, "totalMs", elapsedMs(clock, startedAt));
+        if (Object.keys(receipt.stageMs).length === 0)
+          delete receipt.stageMs;
+      }
+      return result2;
+    } catch (error) {
+      const total = elapsedMs(clock, startedAt);
+      let stageMs = withTiming({}, "totalMs", total);
+      if (!leaseHeld)
+        stageMs = withTiming(stageMs, "leaseAcquireMs", total);
+      const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
+      if (error instanceof FileLeaseBusyError)
+        return failure("busy", "not_sent", initialIdentity, timed);
+      return failure("internal_error", sent.dispatched ? "unknown" : "not_sent", initialIdentity, timed);
+    } finally {
+      zkapiConsultInFlight = false;
+    }
+  })().then((result2) => {
+    clearTimeout(openDeadline);
+    bridge.state = sent.dispatched ? "finished" : "cancelled";
+    if (!result2.ok)
+      bridge.reply.resolve({ kind: "failed", error: result2.error });
+    return result2;
+  });
+  const session = {
+    get state() {
+      return bridge.state;
+    },
+    finished,
+    cancel: () => requestCancel("cancel"),
+    send: async (question, sendControl = {}) => {
+      if (typeof question !== "string" || !validQuestion(question)) {
+        return { kind: "failed", error: failure("invalid_question", "not_sent", initialIdentity).error };
+      }
+      if (bridge.state !== "ready") {
+        return { kind: "failed", error: failure("session_spent", "not_sent", initialIdentity).error };
+      }
+      bridge.state = "authorizing";
+      const deadlineAt = sendControl.deadlineMs !== undefined ? performance.now() + sendControl.deadlineMs : undefined;
+      bridge.dispatch.resolve({
+        question,
+        signal: sendControl.signal,
+        authorize: sendControl.authorize,
+        deadlineAt
+      });
+      return bridge.reply.promise;
+    }
+  };
+  const ready = await Promise.race([
+    bridge.ready.promise.then(() => true),
+    finished.then(() => false)
+  ]);
+  if (ready) {
+    clearTimeout(openDeadline);
+    return { ok: true, session };
+  }
+  const result = await finished;
+  return result.ok ? failure("internal_error", "unknown", result.networkIdentity, { receipt: result.receipt }) : result;
+}
+async function runSession(recovery, options, statePath, bridge, sent, clock, startedAt) {
+  let timings = withTiming({}, "leaseAcquireMs", elapsedMs(clock, startedAt));
+  let openStage;
+  let lastSampleAt;
+  const stage = (key) => {
+    const at = sampleClock(clock);
+    lastSampleAt = at;
+    if (openStage)
+      timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
+    openStage = key ? { key, at } : undefined;
+  };
+  const now = options.now ?? (() => new Date);
+  const settings = options.settings;
+  const env = options.env ?? process.env;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const inspect = options.inspectListener ?? inspectLoopbackListener;
+  const confinement = options.confinement ?? defaultZkapiConfinement();
+  const origin = new URL(options.baseUrl).origin;
+  const daemonPort = Number(new URL(options.baseUrl).port || 80);
+  const perConsultTor = settings.tor === "per_consult";
+  const receipt = {
+    recovery,
+    keyReuse: "not_verified",
+    inferenceAuth: "not_verified",
+    tor: perConsultTor ? "per_consult" : "off",
+    freshTorClient: false,
+    confinement: perConsultTor ? confinement.level : "none",
+    confinementSelfTest: "not_run",
+    postStopProbe: "not_run",
+    settlement: "no_lease",
+    fence: "clear"
+  };
+  const snapshot = () => Object.keys(timings).length > 0 ? { ...receipt, stageMs: { ...timings } } : { ...receipt };
+  const pendingSnapshot3 = () => ({ ...snapshot(), settlement: "pending", fence: "held" });
+  const identity = () => perConsultTor ? networkIdentityFor(receipt) : "visible";
+  const fail = (code, extra = {}) => failure(code, sent.dispatched ? extra.httpStatus ? "sent_failed" : "unknown" : "not_sent", identity(), { ...extra, receipt: snapshot() });
+  const sessionAbort = new AbortController;
+  const sessionSignal = sessionAbort.signal;
+  let abortCause = "aborted";
+  const cancelBeforeDispatch = (reason) => {
+    if (sessionSignal.aborted)
+      return;
+    abortCause = reason === "deadline" ? "timeout" : "aborted";
+    sessionAbort.abort();
+  };
+  let detachCaller;
+  bridge.cancel = (reason) => {
+    if (sent.dispatched)
+      detachCaller?.();
+    else
+      cancelBeforeDispatch(reason);
+  };
+  const onCallerAbort = () => bridge.cancel("cancel");
+  bridge.openSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  if (bridge.openSignal?.aborted)
+    cancelBeforeDispatch("cancel");
+  if (bridge.cancelRequested)
+    cancelBeforeDispatch(bridge.cancelRequested);
+  let sendSignal;
+  const cleanupCallerSignals = () => {
+    bridge.openSignal?.removeEventListener("abort", onCallerAbort);
+    sendSignal?.removeEventListener("abort", onCallerAbort);
+  };
+  const scope = zkapiFenceScope({ env });
+  let fences;
+  try {
+    fences = zkapiOutstandingFences(statePath);
+  } catch {
+    cleanupCallerSignals();
+    return fail("state_unavailable");
+  }
+  const fenced = Boolean(fences[scope]);
+  const fencedElsewhere = Object.keys(fences).some((key) => key !== scope);
+  if (fenced || fencedElsewhere)
+    receipt.fence = "held";
+  if (fenced)
+    receipt.settlement = "not_confirmed";
+  const refuse2 = (code) => {
+    cleanupCallerSignals();
+    return fail(code);
+  };
+  const blocked = settingsBlockers(zkapiMoneyStatus(settings, now()))[0];
+  if (blocked)
+    return refuse2(blocked);
+  if (!options.apiKey)
+    return refuse2("daemon_api_key_missing");
+  const daemonExecutable = resolveZkapiExecutable("zkapi-clientd", settings.daemonExecutable, env);
+  if (!daemonExecutable)
+    return refuse2("daemon_not_found");
+  const torExecutable = perConsultTor ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
+  if (perConsultTor && !torExecutable)
+    return refuse2("tor_not_found");
+  try {
+    const stranded = await recoverStrandedGroups(statePath, now());
+    if (stranded === "busy")
+      return refuse2("busy");
+    if (stranded === "stranded")
+      return refuse2("stranded_processes");
+    if (!recovery && fenced)
+      return refuse2("unresolved_session");
+    if (fencedElsewhere && !fenced)
+      return refuse2("unresolved_session_other_wallet");
+    if (!fenced && recovery)
+      return refuse2("no_unresolved_session");
+    const usage = zkapiUsageToday(statePath, now());
+    const limit = ownerLimits(settings);
+    if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
+      return refuse2("daily_cap_reached");
+    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
+      return refuse2("spend_cap_reached");
+    }
+  } catch {
+    return refuse2("state_unavailable");
+  }
+  if (await portAnswers(daemonPort))
+    return refuse2("daemon_already_running");
+  if (perConsultTor && await portAnswers(settings.torSocksPort))
+    return refuse2("tor_port_busy");
+  if (sessionSignal.aborted)
+    return refuse2(abortCause);
+  const sessionId = randomUUID17();
+  const workDir = mkdtempSync(join48(tmpdir3(), "olympus-zkapi-"));
+  chmodSync14(workDir, 448);
+  const watchdog = join48(workDir, "watchdog.cjs");
+  const childEnv = childEnvironment(env);
+  const groups = [];
+  let tor;
+  let daemon;
+  let result = failure("internal_error", "not_sent", "not_verified");
+  const unexpectedExit = () => groups.some((group) => (group.leaderExited || group.childExited) && !group.deliberate);
+  const onChildExit = (handle) => {
+    if (!handle.deliberate)
+      sessionAbort.abort();
+  };
+  const interrupted = () => unexpectedExit() ? "session_process_exited" : abortCause;
+  let sendDeadline;
+  result = await (async () => {
+    try {
+      writeFileSync10(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
+      const supervisorInstance = processInstanceIdentity(process.pid);
+      updateState(statePath, now(), (state) => ({
+        ...state,
+        running: { sessionId, supervisor: { pid: process.pid, ...supervisorInstance ? { instance: supervisorInstance } : {} }, workDir, groups: [] }
+      }));
+      const recordAndStart = (handle) => {
+        groups.push(handle);
+        const leader = handle.leader;
+        updateState(statePath, now(), (state) => ({
+          ...state,
+          ...state.running ? { running: { ...state.running, groups: [...state.running.groups, { role: handle.role, pgid: handle.pgid, ...leader ? { leader } : {} }] } } : {}
+        }));
+        handle.go();
+      };
+      const anyExited = unexpectedExit;
+      if (perConsultTor) {
+        stage("confinementSelfTestMs");
+        if (await confinement.selfTest(workDir, childEnv)) {
+          receipt.confinementSelfTest = "passed";
+        } else if (confinement.level !== "none") {
+          receipt.confinementSelfTest = "failed";
+          return result = fail("confinement_self_test_failed");
+        }
+        if (sessionSignal.aborted)
+          return result = fail(interrupted());
+        const torDataDir = join48(workDir, "tor");
+        mkdirSync24(torDataDir, { mode: 448 });
+        let bootstrapped = false;
+        stage("torBootstrapMs");
+        tor = supervise("tor", watchdog, [
+          torExecutable,
+          "--ClientOnly",
+          "1",
+          "--PublishServerDescriptor",
+          "0",
+          "--DataDirectory",
+          torDataDir,
+          "--SocksPort",
+          `127.0.0.1:${settings.torSocksPort}`,
+          "--SafeLogging",
+          "1",
+          "--__OwningControllerProcess",
+          String(process.pid)
+        ], childEnv, (line) => {
+          if (line.includes("Bootstrapped 100"))
+            bootstrapped = true;
+        }, onChildExit);
+        recordAndStart(tor);
+        if (!await waitFor(() => bootstrapped, settings.torBootstrapTimeoutMs, { signal: sessionSignal, giveUp: anyExited })) {
+          return result = fail(sessionSignal.aborted ? interrupted() : "tor_bootstrap_failed");
+        }
+        receipt.freshTorClient = true;
+      }
+      const facts = { requests: new Map, settled: new Map };
+      const daemonArgv = [daemonExecutable, "serve"];
+      stage("daemonReadyMs");
+      daemon = supervise("daemon", watchdog, perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv, daemonEnvironment(childEnv, daemonExecutable), (line) => parseDaemonLine(facts, line), onChildExit);
+      recordAndStart(daemon);
+      const daemonGone = () => daemon.leaderExited || daemon.childExited;
+      const owned = async (includeTor = true) => {
+        if (includeTor ? anyExited() : daemonGone())
+          return false;
+        const listener = await inspect(daemonPort);
+        if (listener.kind !== "found" || listener.pgid !== daemon.pgid)
+          return false;
+        if (tor && includeTor) {
+          const socks = await inspect(settings.torSocksPort);
+          if (socks.kind !== "found" || socks.pgid !== tor.pgid)
+            return false;
+        }
+        return includeTor ? !anyExited() : !daemonGone();
+      };
+      const guard = async () => {
+        if (sessionSignal.aborted)
+          return interrupted();
+        if (anyExited())
+          return "session_process_exited";
+        if (await owned())
+          return;
+        await sleep2(300);
+        return anyExited() ? "session_process_exited" : "daemon_identity_failed";
+      };
+      const ready = await waitFor(async (remainingMs) => Boolean(facts.listen) && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: "GET" }, sessionSignal, Math.min(2000, remainingMs))), settings.daemonReadyTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: 250 });
+      if (!ready)
+        return result = fail(sessionSignal.aborted ? interrupted() : "daemon_start_failed");
+      stage("daemonVerifyMs");
+      receipt.daemonVersion = facts.version;
+      if (!versionSupported(facts.version))
+        return result = fail("daemon_version_unsupported");
+      if (facts.listen !== new URL(options.baseUrl).host)
+        return result = fail("daemon_identity_failed");
+      const expectedTransport = perConsultTor ? "SOCKS5 proxy required" : "direct HTTPS (network proxy off)";
+      if (facts.transport !== expectedTransport)
+        return result = fail("relay_mismatch");
+      if (facts.keyReuse === "on")
+        return result = fail("key_reuse_on");
+      if (facts.keyReuse !== "off")
+        return result = fail("key_reuse_unverified");
+      receipt.keyReuse = "verified_off";
+      if (facts.inferenceAuth !== "required")
+        return result = fail("daemon_keyless");
+      let problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      const unauthenticated = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "POST" }, sessionSignal);
+      if (!unauthenticated || unauthenticated.status !== 401 || daemonErrorEnvelope(unauthenticated.body) !== "invalid_api_key" || unauthenticated.headers.get("www-authenticate") !== "Bearer") {
+        return result = fail(unauthenticated?.status === 405 ? "daemon_keyless" : "daemon_identity_failed");
+      }
+      const authorization = { Authorization: `Bearer ${options.apiKey}` };
+      problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      const status = await probeRequest(fetchImpl, `${origin}/admin/status`, { method: "GET", headers: authorization }, sessionSignal);
+      if (sessionSignal.aborted)
+        return result = fail(interrupted());
+      if (!status || status.status === 401)
+        return result = fail("daemon_api_key_rejected");
+      const network = adminStatusNetwork(status);
+      if (!network)
+        return result = fail("daemon_identity_failed");
+      receipt.inferenceAuth = "verified";
+      receipt.network = network;
+      let listing = { listed: false };
+      let guardProblem;
+      stage("policyWarmMs");
+      await waitFor(async (remainingMs) => {
+        guardProblem = await guard();
+        if (guardProblem)
+          return true;
+        const models = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "GET", headers: authorization }, sessionSignal, Math.min(MODELS_PROBE_TIMEOUT_MS, remainingMs));
+        if (models?.status !== 200)
+          return false;
+        listing = modelListing(models.body, options.model);
+        return listing.listed;
+      }, settings.policyWarmTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: POLICY_POLL_MS });
+      if (guardProblem)
+        return result = fail(guardProblem);
+      if (!listing.listed)
+        return result = fail(sessionSignal.aborted ? interrupted() : "policy_unavailable");
+      if (listing.allowance === undefined)
+        return result = fail("model_unavailable");
+      const allowanceMicroUsd = Math.min(listing.allowance, ZKAPI_MAX_ALLOWANCE_MICRO_USD);
+      receipt.listedAllowanceUsd = listing.allowance / 1e6;
+      stage(undefined);
+      timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
+      bridge.state = "ready";
+      bridge.ready.resolve();
+      const aborted = new Promise((resolve9) => {
+        if (sessionSignal.aborted)
+          resolve9(undefined);
+        else
+          sessionSignal.addEventListener("abort", () => resolve9(undefined), { once: true });
+      });
+      const readyTimer = setTimeout(() => cancelBeforeDispatch("deadline"), bridge.readyTimeoutMs);
+      const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
+      clearTimeout(readyTimer);
+      if (!dispatch || sessionSignal.aborted)
+        return result = fail(interrupted());
+      stage("reservationMs");
+      const prepared = prepareCompletionRequest(dispatch.question, options, origin);
+      sendSignal = dispatch.signal;
+      sendSignal?.addEventListener("abort", onCallerAbort, { once: true });
+      if (sendSignal?.aborted)
+        cancelBeforeDispatch("cancel");
+      const deadlineAt = dispatch.deadlineAt;
+      const pastDeadline = () => deadlineAt !== undefined && performance.now() >= deadlineAt;
+      if (pastDeadline())
+        return result = fail("timeout");
+      if (deadlineAt !== undefined)
+        sendDeadline = setTimeout(() => cancelBeforeDispatch("deadline"), Math.max(0, deadlineAt - performance.now()));
+      problem = await guard();
+      if (problem)
+        return result = fail(problem);
+      let authorized = true;
+      if (dispatch.authorize) {
+        let pending;
+        try {
+          pending = Promise.resolve(dispatch.authorize(sessionSignal));
+        } catch {
+          return result = fail("internal_error");
+        }
+        const settled = await Promise.race([
+          pending.then((value) => ({ ok: true, value }), () => ({ ok: false })),
+          aborted.then(() => {
+            return;
+          })
+        ]);
+        if (settled === undefined) {
+          pending.catch(() => {
+            return;
+          });
+          return result = fail(interrupted());
+        }
+        if (!settled.ok)
+          return result = fail("internal_error");
+        authorized = settled.value;
+      }
+      if (sessionSignal.aborted)
+        return result = fail(interrupted());
+      if (pastDeadline())
+        return result = fail("timeout");
+      if (!authorized)
+        return result = fail("authorization_refused");
+      if (anyExited())
+        return result = fail("session_process_exited");
+      clearTimeout(sendDeadline);
+      let reservation;
+      try {
+        reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
+          scope,
+          configDir: zkapiWalletDirectory(env),
+          daemonExecutable,
+          daemonPort
+        }, allowanceMicroUsd);
+      } catch {
+        return result = fail("state_unavailable");
+      }
+      if (!reservation.reserved)
+        return result = fail(reservation.reason);
+      receipt.reservedUsd = allowanceMicroUsd / 1e6;
+      receipt.fence = "held";
+      const requestsBefore = new Set(facts.requests.keys());
+      sent.dispatched = true;
+      bridge.state = "dispatched";
+      detachCaller = () => bridge.reply.resolve({ kind: "failed", error: failure("aborted", "unknown", identity(), { receipt: pendingSnapshot3() }).error });
+      const completion = await sendCompletion(prepared, options, sessionSignal, stage, pastDeadline);
+      if (!completion.ok && completion.error.outcome === "not_sent") {
+        sent.dispatched = false;
+        detachCaller = undefined;
+        try {
+          releaseZkapiReservation(statePath, scope, fences[scope], now(), allowanceMicroUsd);
+          delete receipt.reservedUsd;
+          receipt.fence = fenced || fencedElsewhere ? "held" : "clear";
+        } catch {}
+        return result = fail(completion.error.code);
+      }
+      if (completion.ok)
+        timings = withTiming(timings, "replyHandedOverAtMs", durationMs(startedAt, lastSampleAt));
+      bridge.state = "replied";
+      bridge.reply.resolve(completion.ok ? {
+        kind: "reply",
+        text: completion.text,
+        routeLabel: zkapiRouteLabel(pendingSnapshot3()),
+        networkIdentity: identity(),
+        receipt: pendingSnapshot3(),
+        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
+        elapsedMs: completion.elapsedMs
+      } : {
+        kind: "failed",
+        error: failure(completion.error.code, completion.error.outcome, identity(), {
+          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
+          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
+          receipt: pendingSnapshot3()
+        }).error
+      });
+      stage("correlationWaitMs");
+      const correlated = await waitFor(() => {
+        const ours2 = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
+        return ours2.length === 1 && ours2[0][1].finished !== undefined;
+      }, settings.settleTimeoutMs, { giveUp: unexpectedExit });
+      const ours = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
+      const request = correlated && ours.length === 1 ? ours[0][1] : undefined;
+      if (request && request.keys.some((key) => key.source !== "fresh"))
+        receipt.keyReuse = "not_verified";
+      const keyRef = request?.keys.length === 1 ? request.keys[0].keyRef : undefined;
+      let fenceClears = false;
+      if (keyRef !== undefined) {
+        stage("settlementWaitMs");
+        receipt.settlement = await waitFor(() => facts.settled.get(keyRef) === true, settings.settleTimeoutMs, { giveUp: unexpectedExit }) ? "confirmed" : "not_confirmed";
+        fenceClears = receipt.settlement === "confirmed" && request.keys[0].source === "fresh";
+      } else {
+        const preLease = !recovery && request !== undefined && request.keys.length === 0 && request.finished?.status === 400 && !completion.ok && (completion.error.daemonCode === "invalid_model" || completion.error.daemonCode === "model_budget_unavailable");
+        receipt.settlement = preLease ? "no_lease" : "not_confirmed";
+        fenceClears = preLease;
+      }
+      stage(undefined);
+      if (fenceClears) {
+        try {
+          updateState(statePath, now(), (state) => {
+            const { [scope]: _cleared, ...others } = state.fences ?? {};
+            const { fences: _all, ...rest } = state;
+            return Object.keys(others).length > 0 ? { ...rest, fences: others } : rest;
+          });
+          receipt.fence = "clear";
+        } catch {}
+      }
+      if (perConsultTor && !unexpectedExit()) {
+        tor.deliberate = true;
+        stage("torStopMs");
+        const torStopped = await stopOwned(tor);
+        stage(undefined);
+        let after;
+        if (torStopped && !daemonGone() && await owned(false)) {
+          stage("postStopProbeMs");
+          after = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "GET", headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS);
+          stage(undefined);
+        }
+        receipt.postStopProbe = after?.status === 200 ? "still_reachable" : after?.status === 502 && daemonErrorEnvelope(after.body) === "models_unavailable" ? "route_lost" : "inconclusive";
+      }
+      if (unexpectedExit())
+        return result = fail("session_process_exited");
+      if (!completion.ok) {
+        result = failure(completion.error.code, completion.error.outcome, identity(), {
+          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
+          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
+          receipt: snapshot()
+        });
+        return result;
+      }
+      result = {
+        ok: true,
+        text: completion.text,
+        routeLabel: zkapiRouteLabel(receipt),
+        networkIdentity: identity(),
+        receipt: snapshot(),
+        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
+        elapsedMs: completion.elapsedMs
+      };
+      return result;
+    } catch {
+      return result = fail("internal_error");
+    }
+  })();
+  clearTimeout(sendDeadline);
+  cleanupCallerSignals();
+  stage("teardownMs");
+  let allStopped = true;
+  for (const group of [...groups].reverse()) {
+    group.deliberate = true;
+    try {
+      if (!await stopOwned(group))
+        allStopped = false;
+    } catch {
+      allStopped = false;
+    }
+  }
+  if (allStopped) {
+    try {
+      rmSync12(workDir, { recursive: true, force: true });
+    } catch {}
+  } else {
+    result = fail("teardown_incomplete");
+  }
+  stage(undefined);
+  timings = withTiming(timings, "totalMs", elapsedMs(clock, startedAt));
+  const final = result;
+  const finalReceipt = final.ok ? final.receipt : final.error.receipt;
+  if (finalReceipt && Object.keys(timings).length > 0)
+    finalReceipt.stageMs = { ...timings };
+  try {
+    updateState(statePath, now(), (state) => {
+      const { running, ...rest } = state;
+      return {
+        ...rest,
+        ...allStopped ? {} : running ? { running } : {},
+        lastSession: { ...snapshot(), at: now().toISOString(), result: final.ok ? "ok" : final.error.code }
+      };
+    });
+  } catch {}
+  return final;
+}
+function releaseZkapiReservation(path, scope, earlierFence, now, allowanceMicroUsd) {
+  updateState(path, now, (state) => {
+    const { [scope]: _ours, ...others } = state.fences ?? {};
+    const fences = earlierFence ? { ...others, [scope]: earlierFence } : others;
+    const { fences: _all, ...rest } = state;
+    return {
+      ...rest,
+      count: Math.max(0, state.count - 1),
+      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - allowanceMicroUsd),
+      ...Object.keys(fences).length > 0 ? { fences } : {}
+    };
+  });
+}
+function sampleClock(clock) {
+  try {
+    const value = clock();
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return;
+  }
+}
+function durationMs(from, to) {
+  if (from === undefined || to === undefined)
+    return;
+  const ms = Math.round(to - from);
+  return Number.isFinite(ms) ? Math.max(0, ms) : undefined;
+}
+function elapsedMs(clock, since) {
+  return since === undefined ? undefined : durationMs(since, sampleClock(clock));
+}
+function withTiming(timings, key, ms) {
+  return ms === undefined ? timings : { ...timings, [key]: ms };
+}
+function adminStatusNetwork(response) {
+  if (response.status !== 200)
+    return;
+  try {
+    const parsed = JSON.parse(response.body);
+    if (parsed.backend !== "zkapi")
+      return;
+    return parsed.network === "mainnet" || parsed.network === "sepolia" ? parsed.network : undefined;
+  } catch {
+    return;
+  }
+}
+function prepareCompletionRequest(question, options, origin) {
+  return {
+    url: `${origin}/v1/chat/completions`,
+    init: {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${options.apiKey}`
+      },
+      body: JSON.stringify({
+        model: options.model,
+        messages: [{ role: "user", content: question }],
+        stream: false
+      })
+    }
+  };
+}
+async function sendCompletion(prepared, options, signal, stage, pastDeadline = () => false) {
+  const settings = options.settings;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const started = Date.now();
+  const controller = new AbortController;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, settings.timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const bad = (code, outcome, extra = {}) => ({ ok: false, error: { code, outcome, ...extra } });
+  try {
+    let response;
+    stage("dispatchToFirstByteMs");
+    if (pastDeadline())
+      return bad("timeout", "not_sent");
+    try {
+      response = await fetchImpl(prepared.url, { ...prepared.init, signal: controller.signal });
+    } catch (error) {
+      if (timedOut)
+        return bad("timeout", "unknown");
+      if (controller.signal.aborted)
+        return bad("aborted", "unknown");
+      if (isRedirectError(error))
+        return bad("redirect_refused", "unknown");
+      return bad("transport_failed", "unknown");
+    }
+    stage("firstByteToCompletionMs");
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => {
+        return;
+      });
+      return bad("redirect_refused", "unknown", { httpStatus: response.status });
+    }
+    const body = await readBounded(response, settings.maxResponseBytes).catch(() => {
+      return;
+    });
+    stage(undefined);
+    if (!body) {
+      if (timedOut)
+        return bad("timeout", "unknown");
+      if (controller.signal.aborted)
+        return bad("aborted", "unknown");
+      return bad("transport_failed", "unknown");
+    }
+    if (!body.ok)
+      return bad("response_too_large", "unknown", { httpStatus: response.status });
+    if (response.status < 200 || response.status >= 300) {
+      return bad("daemon_error", "sent_failed", {
+        httpStatus: response.status,
+        daemonCode: knownDaemonCode(daemonErrorEnvelope(body.text))
+      });
+    }
+    const text = completionText(body.text);
+    if (text === undefined)
+      return bad("invalid_response", "unknown", { httpStatus: response.status });
+    const verification = response.headers.get("x-oa-verification-status");
+    return {
+      ok: true,
+      text,
+      ...verification === "verified" || verification === "verifier-unavailable" ? { providerVerification: verification } : {},
+      elapsedMs: Date.now() - started
+    };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function validZkapiConsultQuestion(question) {
+  return typeof question === "string" && validQuestion(question);
+}
+function validQuestion(question) {
+  if (!question.trim())
+    return false;
+  if (new TextEncoder().encode(question).byteLength > MAX_QUESTION_BYTES)
+    return false;
+  return !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(question);
+}
+function knownDaemonCode(code) {
+  return KNOWN_DAEMON_ERROR_CODES.includes(code ?? "") ? code : "unrecognized";
+}
+function completionText(body) {
+  try {
+    const parsed = JSON.parse(body);
+    if (!Array.isArray(parsed.choices) || parsed.choices.length !== 1)
+      return;
+    const choice = parsed.choices[0];
+    const content = choice.message?.content;
+    if (choice.message?.role !== undefined && choice.message.role !== "assistant")
+      return;
+    return typeof content === "string" && content.trim() ? content : undefined;
+  } catch {
+    return;
+  }
+}
+function isRedirectError(error) {
+  const seen = new Set;
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const record = current;
+    if (record.code === "UnexpectedRedirect")
+      return true;
+    if (typeof record.message === "string" && /redirect/i.test(record.message))
+      return true;
+    current = record.cause;
+  }
+  return false;
+}
+async function readBounded(response, maxBytes) {
+  const reader = response.body?.getReader();
+  if (!reader)
+    return { ok: true, text: "" };
+  const chunks = [];
+  let total = 0;
+  for (;; ) {
+    const { done, value } = await reader.read();
+    if (done)
+      break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {
+        return;
+      });
+      return { ok: false };
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(joined) };
+}
+var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
+const net = require('node:net');
+const dgram = require('node:dgram');
+const loopback = () => new Promise((resolve) => {
+  const server = net.createServer((c) => c.end());
+  server.listen(0, '127.0.0.1', () => {
+    const s = net.createConnection({ host: '127.0.0.1', port: server.address().port });
+    s.once('connect', () => { s.destroy(); server.close(); resolve('connected'); });
+    s.once('error', () => { server.close(); resolve('failed'); });
+  });
+});
+const tcp = () => new Promise((resolve) => {
+  const started = Date.now();
+  const s = net.createConnection({ host: '192.0.2.1', port: 9 });
+  s.setTimeout(3000, () => { s.destroy(); resolve('timeout'); });
+  s.once('connect', () => { s.destroy(); resolve('connected'); });
+  s.once('error', () => resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'));
+});
+const udp = () => new Promise((resolve) => {
+  const s = dgram.createSocket('udp4');
+  s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'failed' : 'sent'); });
+});
+const resolver = () => new Promise((resolve) => {
+  const s = net.createConnection({ path: '/private/var/run/mDNSResponder' });
+  s.once('connect', () => { s.destroy(); resolve('connected'); });
+  s.once('error', () => resolve('failed'));
+});
+(async () => {
+  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
+  process.stdout.write(JSON.stringify(result));
+})();
+`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, DEFAULT_EXECUTABLE_TRUST, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES;
+var init_consult_transport_zkapi = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_managed_tools();
+  init_zkapi_consult_settings();
+  DAY_MS = 24 * 60 * 60 * 1000;
+  PROBE_MAX_BYTES = 64 * 1024;
+  MAX_QUESTION_BYTES = 8 * 1024;
+  ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6"];
+  CHILD_ENV_KEYS = [
+    "HOME",
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "ZKAPI_CLIENTD_CONFIG_DIR",
+    "OA_CHAT_CONFIG_DIR"
+  ];
+  KNOWN_DAEMON_ERROR_CODES = [
+    "busy",
+    "request_cancelled",
+    "funding_required",
+    "model_budget_unavailable",
+    "model_policy_unavailable",
+    "invalid_model",
+    "anonymous_access_failed",
+    "upstream_error",
+    "invalid_upstream_response",
+    "withdrawal_pending",
+    "wallet_conflict",
+    "invalid_request_error",
+    "invalid_body",
+    "testnet_password_required",
+    "invalid_api_key",
+    "local_connection_required",
+    "browser_origin_denied"
+  ];
+  ZKAPI_STAGE_LABELS = [
+    ["leaseAcquireMs", "lease acquire"],
+    ["confinementSelfTestMs", "confinement self-test"],
+    ["torBootstrapMs", "Tor start to bootstrapped"],
+    ["daemonReadyMs", "daemon start to ready"],
+    ["daemonVerifyMs", "daemon verification"],
+    ["policyWarmMs", "models/policy warm"],
+    ["warmTotalMs", "warm total"],
+    ["reservationMs", "reservation"],
+    ["dispatchToFirstByteMs", "dispatch to first byte"],
+    ["firstByteToCompletionMs", "first byte to completion"],
+    ["replyHandedOverAtMs", "reply handed over at"],
+    ["correlationWaitMs", "request correlation wait"],
+    ["settlementWaitMs", "settlement wait"],
+    ["torStopMs", "Tor stop"],
+    ["postStopProbeMs", "post-stop probe"],
+    ["teardownMs", "teardown"],
+    ["totalMs", "total"]
+  ];
+  MESSAGES = {
+    invalid_question: "The consult question is empty, too long, or contains control characters.",
+    busy: "Another zkAPI consult is in flight; consults are sent one at a time.",
+    acknowledgements_incomplete: "The zkAPI risk acknowledgements are not all accepted for the current version.",
+    funding_date_missing: "No owner-confirmed funding date is recorded, so the note expiry cannot be estimated.",
+    funding_date_invalid: "The recorded funding date is in the future.",
+    note_expired: "By the owner-confirmed funding date, the note is past its estimated 30-day expiry.",
+    daemon_api_key_missing: "No local API key for the daemon is configured in Olympus.",
+    daemon_not_found: "The zkapi-clientd executable was not found.",
+    tor_not_found: 'The tor executable was not found; install Tor or set tor to "off".',
+    unresolved_session: "An earlier zkAPI session may have left a lease unsettled; run a recovery-only session before another consult.",
+    unresolved_session_other_wallet: "An unresolved zkAPI session belongs to another wallet directory; recover it there, or abandon it explicitly, before another consult.",
+    no_unresolved_session: "There is no unresolved zkAPI session to recover.",
+    stranded_processes: "Processes from an earlier zkAPI session could not be confirmed stopped.",
+    daemon_already_running: "Something already serves on the zkAPI port; stop your own zkapi-clientd serve, because Olympus runs and verifies its own for each consult.",
+    tor_port_busy: "Something already listens on the zkAPI Tor port; Olympus needs it free to start a fresh Tor client.",
+    tor_bootstrap_failed: "The per-consult Tor client did not finish bootstrapping.",
+    daemon_start_failed: "zkapi-clientd serve did not become ready.",
+    daemon_version_unsupported: "This zkapi-clientd version is not a reviewed version (0.1.5 or 0.1.6).",
+    relay_mismatch: "The daemon is not configured for the expected route (SOCKS5 when Tor is on, direct when Tor is off).",
+    key_reuse_on: "The daemon key-reuse window is on, so requests would be linkable; Olympus refuses to send.",
+    key_reuse_unverified: "The daemon did not confirm a fresh key for every request.",
+    daemon_keyless: "The daemon accepts inference without a local API key, so any local process can spend the balance.",
+    daemon_identity_failed: "A port of this session is not held by the process group Olympus started.",
+    daemon_api_key_rejected: "The daemon rejected the configured local API key.",
+    session_process_exited: "The Tor client or the daemon of this session stopped unexpectedly.",
+    confinement_self_test_failed: "The network confinement for this platform did not pass its self-test, so the session was refused.",
+    policy_unavailable: "The daemon could not load the model policy in time.",
+    model_unavailable: "The selected model is not in the daemon's live model list.",
+    daily_cap_reached: "The daily zkAPI request limit you set is reached.",
+    spend_cap_reached: "Another request would exceed the daily zkAPI spend limit you set (each question counts the amount zkAPI holds for its model).",
+    state_unavailable: "The persistent zkAPI session ledger could not be read or written.",
+    timeout: "The zkAPI consult timed out; it may still have been charged.",
+    aborted: "The zkAPI consult was cancelled; it may still have been charged.",
+    redirect_refused: "The daemon answered with a redirect, which is never followed.",
+    response_too_large: "The zkAPI response exceeded the size limit and was cut off.",
+    invalid_response: "The zkAPI response was not a single non-empty chat completion.",
+    daemon_error: "The zkAPI daemon returned an error.",
+    transport_failed: "The request to the zkAPI daemon failed.",
+    teardown_incomplete: "The session's processes could not be confirmed stopped; the next session will not start until they are.",
+    authorization_refused: "The final authorization immediately before dispatch refused the consult; nothing was reserved or sent.",
+    session_spent: "This zkAPI session has already sent, was cancelled, or has ended; each session sends at most once.",
+    internal_error: "The zkAPI session failed inside Olympus."
+  };
+  DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "any" };
+  WATCHDOG_SCRIPT = `
+const { spawn, execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const [, , expectedParentText, ...argv] = process.argv;
+const expectedParent = Number(expectedParentText);
+const self = process.pid;
+if (process.ppid !== expectedParent) process.exit(70);
+let child;
+let cleaning = false;
+let exitCode = 0;
+const othersInGroup = () => {
+  if (process.platform === 'linux') {
+    let count = 0;
+    for (const name of fs.readdirSync('/proc')) {
+      if (!/^\\d+$/.test(name) || Number(name) === self) continue;
+      try {
+        const stat = fs.readFileSync('/proc/' + name + '/stat', 'utf8');
+        const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\\s+/);
+        if (Number(fields[2]) === self && fields[0] !== 'Z') count += 1;
+      } catch {}
+    }
+    return count;
+  }
+  try {
+    const out = execFileSync('/usr/bin/pgrep', ['-g', String(self)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return out.split('\\n').filter((line) => line.trim() && Number(line) !== self).length;
+  } catch (error) {
+    return error && error.status === 1 ? 0 : Infinity;
+  }
+};
+const cleanup = () => {
+  if (cleaning) return;
+  cleaning = true;
+  try { process.kill(-self, 'SIGTERM'); } catch {}
+  const deadline = Date.now() + 5000;
+  const tick = () => {
+    if (othersInGroup() === 0) process.exit(exitCode);
+    if (Date.now() >= deadline) { try { process.kill(-self, 'SIGKILL'); } catch {} return; }
+    setTimeout(tick, 100);
+  };
+  setTimeout(tick, 50);
+};
+process.on('SIGTERM', cleanup);
+process.on('SIGINT', cleanup);
+// With the supervisor gone its pipes are broken: a failed write must never
+// take the watchdog down before the group is clean.
+process.on('SIGPIPE', () => {});
+process.stdout.on('error', () => {});
+process.stderr.on('error', () => {});
+process.on('uncaughtException', () => cleanup());
+const start = () => {
+  child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] });
+  const report = () => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED}\\n'); } catch {} };
+  child.on('exit', (code) => { exitCode = code === null ? 1 : code; report(); cleanup(); });
+  child.on('error', () => { exitCode = 127; report(); cleanup(); });
+};
+let received = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { received += chunk; if (!child && !cleaning && received.includes('go\\n')) start(); });
+process.stdin.on('end', () => { if (!child) process.exit(71); });
+setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
+`;
+  DEFAULT_EXECUTABLE_TRUST = {
+    realpath: (path) => realpathSync4(path),
+    stat: (path) => statSync17(path),
+    executable: (path) => {
+      try {
+        accessSync5(path, constants4.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    uid: () => typeof process.getuid === "function" ? process.getuid() : undefined
+  };
+  SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomplete"]);
+});
+
 // src/core/engine-service.ts
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { createHash as createHash35, randomBytes as randomBytes8 } from "node:crypto";
-import { existsSync as existsSync30, lstatSync as lstatSync14, readdirSync as readdirSync5, readFileSync as readFileSync28, renameSync as renameSync10, statSync as statSync16 } from "node:fs";
-import { homedir as homedir35, platform as osPlatform3 } from "node:os";
-import { basename as basename7, dirname as dirname32, isAbsolute as isAbsolute10, join as join47, resolve as resolvePath } from "node:path";
+import { createHash as createHash37, randomBytes as randomBytes8 } from "node:crypto";
+import { existsSync as existsSync31, lstatSync as lstatSync15, readdirSync as readdirSync7, readFileSync as readFileSync30, renameSync as renameSync11, statSync as statSync18 } from "node:fs";
+import { homedir as homedir37, platform as osPlatform3 } from "node:os";
+import { basename as basename7, dirname as dirname34, isAbsolute as isAbsolute12, join as join49, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
   const home2 = absolute(homeDir, "home directory");
-  const logDir = join47(home2, "Library", "Logs", "Olympus");
-  const appSupportDir = join47(home2, "Library", "Application Support", "Olympus");
+  const logDir = join49(home2, "Library", "Logs", "Olympus");
+  const appSupportDir = join49(home2, "Library", "Application Support", "Olympus");
   const dataEnv = { HOME: home2 };
   return {
     label: ENGINE_LABEL,
-    plistPath: join47(home2, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
+    plistPath: join49(home2, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
-    logPath: join47(logDir, "engine.log"),
-    errorLogPath: join47(logDir, "engine.err"),
-    configPath: join47(home2, ".olympus", "engine.json"),
-    sovereigntyPath: join47(home2, ".olympus", "sovereignty.json"),
+    logPath: join49(logDir, "engine.log"),
+    errorLogPath: join49(logDir, "engine.err"),
+    configPath: join49(home2, ".olympus", "engine.json"),
+    sovereigntyPath: join49(home2, ".olympus", "sovereignty.json"),
     appSupportDir,
-    appDir: join47(appSupportDir, "app"),
-    previousAppDir: join47(appSupportDir, "app.previous"),
-    runtimeDir: join47(appSupportDir, "runtime"),
-    workerEnvPath: join47(home2, ".config", "olympus", "worker.env"),
+    appDir: join49(appSupportDir, "app"),
+    previousAppDir: join49(appSupportDir, "app.previous"),
+    runtimeDir: join49(appSupportDir, "runtime"),
+    workerEnvPath: join49(home2, ".config", "olympus", "worker.env"),
     statusPath: engineStatusPath(dataEnv),
     childrenPath: engineChildrenPath(dataEnv),
-    modelsDir: join47(olympusDataDir(dataEnv), "models"),
+    modelsDir: join49(olympusDataDir(dataEnv), "models"),
     remoteAccessDir: remoteAccessDir(dataEnv)
   };
 }
 function engineStatusPath(env = process.env) {
-  return join47(olympusDataDir(env), "engine", "status.json");
+  return join49(olympusDataDir(env), "engine", "status.json");
 }
 function engineBuildIdentity(packageRoot) {
   let version = "unknown";
   try {
-    const manifest = JSON.parse(readFileSync28(join47(packageRoot, "package.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync30(join49(packageRoot, "package.json"), "utf8"));
     if (typeof manifest.version === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(manifest.version))
       version = manifest.version;
   } catch {}
-  const hash = createHash35("sha256");
+  const hash = createHash37("sha256");
   for (const name of BUILD_DIGEST_FILES) {
     try {
-      const bytes = readFileSync28(join47(packageRoot, "dist", name));
+      const bytes = readFileSync30(join49(packageRoot, "dist", name));
       hash.update(`${name}\x00${bytes.length}\x00`);
       hash.update(bytes);
     } catch {
@@ -51101,9 +53831,9 @@ function engineBuildIdentity(packageRoot) {
 function resolveEngineProgram(options = {}) {
   const runtimePath = resolveBun2(options.bunBin);
   if (options.fromCheckout !== undefined) {
-    const root2 = resolvePath(options.cwd ?? process.cwd(), options.fromCheckout);
+    const root2 = resolvePath2(options.cwd ?? process.cwd(), options.fromCheckout);
     assertOlympusPackage(root2, "--from-checkout");
-    const entryPath2 = join47(root2, "dist", "cli.js");
+    const entryPath2 = join49(root2, "dist", "cli.js");
     assertFile(entryPath2, `${entryPath2} is missing; run bun run build in the checkout first.`);
     return { runtimePath, entryPath: entryPath2, workingDirectory: root2, source: "checkout", build: engineBuildIdentity(root2) };
   }
@@ -51113,13 +53843,13 @@ function resolveEngineProgram(options = {}) {
   } catch {
     throw new OperationError("config_error", "The installed Olympus package could not be found.", "Pass --from-checkout <path> to install from a local checkout.");
   }
-  const entryPath = join47(root, "dist", "cli.js");
+  const entryPath = join49(root, "dist", "cli.js");
   assertFile(entryPath, `The installed Olympus package has no ${entryPath}.`);
   return { runtimePath, entryPath, workingDirectory: root, source: "package", build: engineBuildIdentity(root) };
 }
 function renderEnginePlist(input) {
   const { paths, program } = input;
-  const path = [dirname32(program.runtimePath), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].filter((entry, index, all) => all.indexOf(entry) === index).join(":");
+  const path = [dirname34(program.runtimePath), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].filter((entry, index, all) => all.indexOf(entry) === index).join(":");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -51174,11 +53904,11 @@ function defaultEngineConfig() {
   };
 }
 function readEngineConfig(path) {
-  if (!existsSync30(path))
+  if (!existsSync31(path))
     return;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync28(path, "utf8"));
+    parsed = JSON.parse(readFileSync30(path, "utf8"));
   } catch {
     throw new OperationError("config_error", `${path} is not valid JSON.`, "Fix or remove it, then run olympus engine install again.");
   }
@@ -51213,9 +53943,27 @@ function reconcileEngineConfig(path) {
 `);
   return { wrote: true, config: next };
 }
+function waitForQuietEngine(options) {
+  if (options.now)
+    return { waited_ms: 0 };
+  const inFlight = options.consultInFlight ?? (() => zkapiConsultInFlightOnDisk(defaultZkapiStatePath(absolute(options.homeDir ?? homedir37(), "home directory"))));
+  const sleep3 = options.sleepMs ?? sleepSync3;
+  const bound = options.quietWaitMs ?? ENGINE_QUIET_WAIT_MS;
+  let waited = 0;
+  let current = inFlight();
+  while (current && waited < bound) {
+    sleep3(ENGINE_QUIET_POLL_MS);
+    waited += ENGINE_QUIET_POLL_MS;
+    current = inFlight();
+  }
+  if (current) {
+    throw new OperationError("config_error", `A zkAPI question has been in flight since ${current.since}; stopping the engine now would strand its payment.`, "Wait for it to finish and run this again, or add --now to stop it anyway.");
+  }
+  return { waited_ms: waited };
+}
 function installEngine(options = {}) {
   assertDarwin(options.platform);
-  const homeDir = absolute(options.homeDir ?? homedir35(), "home directory");
+  const homeDir = absolute(options.homeDir ?? homedir37(), "home directory");
   const paths = enginePaths(homeDir);
   const program = resolveEngineProgram({
     ...options.fromCheckout !== undefined ? { fromCheckout: options.fromCheckout } : {},
@@ -51224,7 +53972,7 @@ function installEngine(options = {}) {
   });
   const plist = renderEnginePlist({ paths, program, homeDir });
   const warnings = engineConflictWarnings(homeDir);
-  const sovereigntyBlocker = existsSync30(paths.sovereigntyPath) ? undefined : engineSovereigntySeedBlocker({ homeDir, workerEnvPath: paths.workerEnvPath, env: options.env ?? process.env });
+  const sovereigntyBlocker = existsSync31(paths.sovereigntyPath) ? undefined : engineSovereigntySeedBlocker({ homeDir, workerEnvPath: paths.workerEnvPath, env: options.env ?? process.env });
   const base = {
     ok: true,
     label: paths.label,
@@ -51243,15 +53991,15 @@ function installEngine(options = {}) {
       wrote_plist: false,
       wrote_config: false,
       wrote_worker_env: false,
-      sovereignty: existsSync30(paths.sovereigntyPath) ? { action: "present", path: paths.sovereigntyPath } : sovereigntyBlocker ? { action: "skipped", path: paths.sovereigntyPath, reason: sovereigntyBlocker } : { action: "would_seed", path: paths.sovereigntyPath, preset: STANDALONE_SOVEREIGNTY_PRESET },
+      sovereignty: existsSync31(paths.sovereigntyPath) ? { action: "present", path: paths.sovereigntyPath } : sovereigntyBlocker ? { action: "skipped", path: paths.sovereigntyPath, reason: sovereigntyBlocker } : { action: "would_seed", path: paths.sovereigntyPath, preset: STANDALONE_SOVEREIGNTY_PRESET },
       action: "dry_run"
     };
   }
   preflightEnginePaths(homeDir, paths);
   ensurePrivateRootDirectorySync(homeDir);
-  ensurePrivateDirectoryTreeSync(homeDir, dirname32(paths.plistPath));
+  ensurePrivateDirectoryTreeSync(homeDir, dirname34(paths.plistPath));
   ensurePrivateDirectoryTreeSync(homeDir, paths.logDir);
-  ensurePrivateDirectoryTreeSync(homeDir, dirname32(paths.configPath));
+  ensurePrivateDirectoryTreeSync(homeDir, dirname34(paths.configPath));
   const config = reconcileEngineConfig(paths.configPath);
   let sovereignty;
   if (sovereigntyBlocker) {
@@ -51274,11 +54022,13 @@ function installEngine(options = {}) {
   const loaded = launchctlLoaded(exec, target);
   let action = "unchanged";
   if (loaded && wrotePlist) {
+    waitForQuietEngine(options);
     mustSucceed(exec("launchctl", ["bootout", target]), "unload the previous engine agent");
     action = "reloaded";
   } else if (!loaded) {
     action = "bootstrapped";
   } else if (options.restart || runningBuildDiffers(paths.statusPath, program.build)) {
+    waitForQuietEngine(options);
     mustSucceed(exec("launchctl", ["kickstart", "-k", target]), "restart the engine agent");
     action = "restarted";
   }
@@ -51298,7 +54048,7 @@ function installEngine(options = {}) {
 }
 async function waitForEngineHealthy(input, deps = {}) {
   const now = deps.now ?? Date.now;
-  const sleep2 = deps.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
+  const sleep3 = deps.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
   const timeoutMs = deps.timeoutMs ?? ENGINE_HEALTH_TIMEOUT_MS;
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -51316,14 +54066,14 @@ async function waitForEngineHealthy(input, deps = {}) {
     last = { ...await checkEngineHealthOnce(input, pidAlive, fetchImpl), waited_ms: now() - started };
     if (last.ok || now() - started >= timeoutMs)
       return last;
-    await sleep2(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - started))));
+    await sleep3(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - started))));
   }
 }
 async function checkEngineHealthOnce(input, pidAlive, fetchImpl) {
   const base = { ok: false, expected_build: input.expectedBuild, running_build: null, pid: null, worker: "not_ready" };
   let status;
   try {
-    status = JSON.parse(readFileSync28(input.paths.statusPath, "utf8"));
+    status = JSON.parse(readFileSync30(input.paths.statusPath, "utf8"));
   } catch {
     return { ...base, reason: "the engine has not written its status yet" };
   }
@@ -51394,7 +54144,7 @@ async function installEngineVerified(options = {}) {
   if (result.action === "dry_run")
     return result;
   const health = await waitForEngineHealthy({
-    paths: enginePaths(absolute(options.homeDir ?? homedir35(), "home directory")),
+    paths: enginePaths(absolute(options.homeDir ?? homedir37(), "home directory")),
     expectedBuild: result.program.build ?? null,
     ...result.action === "unchanged" ? {} : { since }
   }, options.health);
@@ -51402,7 +54152,7 @@ async function installEngineVerified(options = {}) {
 }
 function installedEngineBuild(plistPath) {
   try {
-    const text = readFileSync28(plistPath, "utf8");
+    const text = readFileSync30(plistPath, "utf8");
     const match = new RegExp(`<key>${ENGINE_BUILD_ENV}</key>\\s*<string>([^<]*)</string>`).exec(text);
     return match ? unxml(match[1]) : null;
   } catch {
@@ -51411,8 +54161,8 @@ function installedEngineBuild(plistPath) {
 }
 async function verifyEngine(options = {}) {
   assertDarwin(options.platform);
-  const paths = enginePaths(absolute(options.homeDir ?? homedir35(), "home directory"));
-  if (!existsSync30(paths.plistPath)) {
+  const paths = enginePaths(absolute(options.homeDir ?? homedir37(), "home directory"));
+  if (!existsSync31(paths.plistPath)) {
     throw new OperationError("config_error", "The engine is not installed.", "Run olympus engine install.");
   }
   const expectedBuild = expectedEngineBuild(options);
@@ -51439,7 +54189,7 @@ function expectedEngineBuild(options) {
   }
   let root;
   if (options.expectPackage !== undefined) {
-    root = resolvePath(options.expectPackage);
+    root = resolvePath2(options.expectPackage);
   } else {
     try {
       root = olympusPackageRoot();
@@ -51448,7 +54198,7 @@ function expectedEngineBuild(options) {
     }
   }
   assertOlympusPackage(root, "--expect-package");
-  assertFile(join47(root, "dist", "cli.js"), `${root} has no dist/cli.js, so it is not a runnable Olympus package.`);
+  assertFile(join49(root, "dist", "cli.js"), `${root} has no dist/cli.js, so it is not a runnable Olympus package.`);
   return engineBuildIdentity(root);
 }
 function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = process.getuid?.()) {
@@ -51463,7 +54213,7 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     let problem;
     try {
       assertManagedPathParentsSync(homeDir, dir, label);
-      const stat3 = existsSync30(dir) || isSymlink(dir) ? lstatSync14(dir) : undefined;
+      const stat3 = existsSync31(dir) || isSymlink(dir) ? lstatSync15(dir) : undefined;
       if (stat3 && (stat3.isSymbolicLink() || !stat3.isDirectory()))
         problem = `${dir} is not a real folder (a symbolic link or a file).`;
       else if (stat3 && ownerUid !== undefined && stat3.uid !== ownerUid)
@@ -51488,9 +54238,9 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     } catch (error) {
       throw new OperationError("config_error", `Olympus cannot install here: ${error instanceof Error ? error.message : String(error)}`, `Olympus keeps ${label} files in real directories it can lock down. Replace the symbolic link or file at that path with a directory (or remove it), then run olympus engine install again. Nothing was changed.`);
     }
-    if (!existsSync30(path))
+    if (!existsSync31(path))
       continue;
-    const stat3 = lstatSync14(path);
+    const stat3 = lstatSync15(path);
     if (!stat3.isFile() || stat3.isSymbolicLink()) {
       throw new OperationError("config_error", `Olympus cannot install here: ${path} is not a regular file.`, "Remove it by hand, then run olympus engine install again. Nothing was changed.");
     }
@@ -51500,7 +54250,7 @@ function runningBuildDiffers(statusPath, build) {
   if (!build)
     return false;
   try {
-    const status = JSON.parse(readFileSync28(statusPath, "utf8"));
+    const status = JSON.parse(readFileSync30(statusPath, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || status.state !== "running")
       return false;
     return status.build !== build;
@@ -51509,15 +54259,15 @@ function runningBuildDiffers(statusPath, build) {
   }
 }
 function seedEngineSovereignty(path) {
-  if (existsSync30(path))
+  if (existsSync31(path))
     return;
   writeSovereigntyConfigFile({ config: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET), path });
   return STANDALONE_SOVEREIGNTY_PRESET;
 }
 function engineSovereigntySeedBlocker(input) {
   try {
-    if (existsSync30(input.workerEnvPath)) {
-      const key = ENV_POLICY_KEY.exec(readFileSync28(input.workerEnvPath, "utf8"))?.[1];
+    if (existsSync31(input.workerEnvPath)) {
+      const key = ENV_POLICY_KEY.exec(readFileSync30(input.workerEnvPath, "utf8"))?.[1];
       if (key)
         return `${input.workerEnvPath} already sets ${key}, which chooses this worker's models and privacy routes.`;
     }
@@ -51525,27 +54275,27 @@ function engineSovereigntySeedBlocker(input) {
     return `${input.workerEnvPath} could not be read to check for an existing policy.`;
   }
   const legacy = workerServicePaths("darwin", input.homeDir).unitPath;
-  if (existsSync30(legacy))
+  if (existsSync31(legacy))
     return `the worker LaunchAgent from olympus worker install (${legacy}) already runs Olympus with its own environment.`;
   const openclawConfig = openClawConfigPath(input.homeDir, input.env ?? process.env);
-  if (existsSync30(openclawConfig)) {
+  if (existsSync31(openclawConfig)) {
     let text;
     try {
-      text = readFileSync28(openclawConfig, "utf8");
+      text = readFileSync30(openclawConfig, "utf8");
     } catch {
       return `${openclawConfig} could not be read to check for an OpenClaw-hosted Olympus.`;
     }
-    if (openClawConfigHasOlympus(text, dirname32(openclawConfig)))
+    if (openClawConfigHasOlympus(text, dirname34(openclawConfig)))
       return `OpenClaw is configured to run Olympus (${openclawConfig}).`;
   }
   return;
 }
 function openClawConfigPath(homeDir, env) {
   const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
-  if (explicit && isAbsolute10(explicit))
+  if (explicit && isAbsolute12(explicit))
     return explicit;
   const stateDir = env.OPENCLAW_STATE_DIR?.trim();
-  return join47(stateDir && isAbsolute10(stateDir) ? stateDir : join47(homeDir, ".openclaw"), "openclaw.json");
+  return join49(stateDir && isAbsolute12(stateDir) ? stateDir : join49(homeDir, ".openclaw"), "openclaw.json");
 }
 function openClawConfigHasOlympus(text, stateDir) {
   try {
@@ -51558,14 +54308,14 @@ function openClawConfigHasOlympus(text, stateDir) {
       return false;
     const installed = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
     const loaded = Array.isArray(plugins?.load?.paths) && plugins.load.paths.some((path) => typeof path === "string" && /olympus/i.test(path));
-    return installed || loaded || existsSync30(join47(stateDir, "extensions", "olympus"));
+    return installed || loaded || existsSync31(join49(stateDir, "extensions", "olympus"));
   } catch {
     return /["']?\bolympus\b["']?\s*:/.test(text);
   }
 }
 function uninstallEngine(options = {}) {
   assertDarwin(options.platform);
-  const homeDir = absolute(options.homeDir ?? homedir35(), "home directory");
+  const homeDir = absolute(options.homeDir ?? homedir37(), "home directory");
   const paths = enginePaths(homeDir);
   const exec = options.exec ?? defaultExec2;
   const target = serviceTarget(options.uid);
@@ -51573,8 +54323,8 @@ function uninstallEngine(options = {}) {
   if (loaded)
     mustSucceed(exec("launchctl", ["bootout", target]), "unload the engine agent");
   let removed = false;
-  if (existsSync30(paths.plistPath)) {
-    const stat3 = lstatSync14(paths.plistPath);
+  if (existsSync31(paths.plistPath)) {
+    const stat3 = lstatSync15(paths.plistPath);
     if (!stat3.isFile() || stat3.isSymbolicLink()) {
       throw new OperationError("config_error", `${paths.plistPath} is not a regular file; remove it by hand.`);
     }
@@ -51603,22 +54353,22 @@ function engineKeptItems(paths) {
     { path: paths.modelsDir, what: "downloaded built-in models", bytes: directoryBytes(paths.modelsDir) },
     { path: paths.remoteAccessDir, what: "this Mac's relay registration and keys; ChatGPT stays linked until you disconnect it or delete this data" }
   ];
-  return candidates.filter((item) => existsSync30(item.path));
+  return candidates.filter((item) => existsSync31(item.path));
 }
 function directoryBytes(path, budget = { entries: 20000 }) {
   let total = 0;
   let entries;
   try {
-    entries = readdirSync5(path);
+    entries = readdirSync7(path);
   } catch {
     return 0;
   }
   for (const name of entries) {
     if (--budget.entries < 0)
       break;
-    const child = join47(path, name);
+    const child = join49(path, name);
     try {
-      const stat3 = lstatSync14(child);
+      const stat3 = lstatSync15(child);
       if (stat3.isDirectory())
         total += directoryBytes(child, budget);
       else if (stat3.isFile())
@@ -51629,11 +54379,13 @@ function directoryBytes(path, budget = { entries: 20000 }) {
 }
 function stopEngine(options = {}) {
   assertDarwin(options.platform);
-  const homeDir = absolute(options.homeDir ?? homedir35(), "home directory");
+  const homeDir = absolute(options.homeDir ?? homedir37(), "home directory");
   const paths = enginePaths(homeDir);
   const exec = options.exec ?? defaultExec2;
   const target = serviceTarget(options.uid);
   const loaded = launchctlLoaded(exec, target);
+  if (loaded)
+    waitForQuietEngine(options);
   if (loaded)
     mustSucceed(exec("launchctl", ["bootout", target]), "stop the engine agent");
   mustSucceed(exec("launchctl", ["disable", target]), "keep the engine agent from starting at login");
@@ -51647,9 +54399,9 @@ function stopEngine(options = {}) {
 }
 function startEngine(options = {}) {
   assertDarwin(options.platform);
-  const homeDir = absolute(options.homeDir ?? homedir35(), "home directory");
+  const homeDir = absolute(options.homeDir ?? homedir37(), "home directory");
   const paths = enginePaths(homeDir);
-  if (!existsSync30(paths.plistPath)) {
+  if (!existsSync31(paths.plistPath)) {
     throw new OperationError("config_error", "The engine is not installed.", "Run olympus engine install.");
   }
   const exec = options.exec ?? defaultExec2;
@@ -51662,10 +54414,10 @@ function startEngine(options = {}) {
 }
 async function rollbackEngine(options = {}) {
   assertDarwin(options.platform);
-  const homeDir = absolute(options.homeDir ?? homedir35(), "home directory");
+  const homeDir = absolute(options.homeDir ?? homedir37(), "home directory");
   const paths = enginePaths(homeDir);
   const installed = installedProgram(paths.plistPath);
-  const appEntry = join47(paths.appDir, "dist", "cli.js");
+  const appEntry = join49(paths.appDir, "dist", "cli.js");
   if (!installed) {
     throw new OperationError("config_error", "The engine is not installed, so there is nothing to roll back.", "Run the Olympus installer.");
   }
@@ -51674,7 +54426,7 @@ async function rollbackEngine(options = {}) {
   }
   preflightEnginePaths(homeDir, paths);
   assertOlympusPackage(paths.previousAppDir, "The previous app");
-  assertFile(join47(paths.previousAppDir, "dist", "cli.js"), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
+  assertFile(join49(paths.previousAppDir, "dist", "cli.js"), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
   const bunBin = options.bunBin ?? installed.runtimePath;
   swapAppDirectories(paths);
   const reinstall = () => installEngineVerified({
@@ -51734,28 +54486,28 @@ async function rollbackEngine(options = {}) {
 }
 function swapAppDirectories(paths) {
   const parking = `${paths.appDir}.rollback-${process.pid}-${randomBytes8(4).toString("hex")}`;
-  renameSync10(paths.appDir, parking);
+  renameSync11(paths.appDir, parking);
   try {
-    renameSync10(paths.previousAppDir, paths.appDir);
+    renameSync11(paths.previousAppDir, paths.appDir);
   } catch (error) {
-    renameSync10(parking, paths.appDir);
+    renameSync11(parking, paths.appDir);
     throw error;
   }
   try {
-    renameSync10(parking, paths.previousAppDir);
+    renameSync11(parking, paths.previousAppDir);
   } catch (error) {
-    renameSync10(paths.appDir, paths.previousAppDir);
-    renameSync10(parking, paths.appDir);
+    renameSync11(paths.appDir, paths.previousAppDir);
+    renameSync11(parking, paths.appDir);
     throw error;
   }
 }
 function installedProgram(plistPath) {
   let text;
   try {
-    const stat3 = lstatSync14(plistPath);
+    const stat3 = lstatSync15(plistPath);
     if (!stat3.isFile() || stat3.isSymbolicLink())
       return;
-    text = readFileSync28(plistPath, "utf8");
+    text = readFileSync30(plistPath, "utf8");
   } catch {
     return;
   }
@@ -51770,15 +54522,15 @@ function installedProgram(plistPath) {
   return { runtimePath, entryPath };
 }
 function inspectEngine(options = {}) {
-  const homeDir = absolute(options.homeDir ?? homedir35(), "home directory");
+  const homeDir = absolute(options.homeDir ?? homedir37(), "home directory");
   const paths = enginePaths(homeDir);
-  const installed = existsSync30(paths.plistPath);
+  const installed = existsSync31(paths.plistPath);
   const base = {
     label: paths.label,
     installed,
     plist_path: paths.plistPath,
     config_path: paths.configPath,
-    config_present: existsSync30(paths.configPath),
+    config_present: existsSync31(paths.configPath),
     log_path: paths.logPath,
     error_log_path: paths.errorLogPath
   };
@@ -51821,6 +54573,7 @@ function restartEngine(options = {}) {
   if (!launchctlLoaded(exec, target)) {
     throw new OperationError("config_error", "The engine agent is not loaded.", "Run olympus engine install.");
   }
+  waitForQuietEngine(options);
   const command = ["launchctl", "kickstart", "-k", target];
   mustSucceed(exec(command[0], command.slice(1)), "restart the engine agent");
   return { ok: true, command };
@@ -51836,7 +54589,7 @@ function parseLaunchctlPrint(text) {
   };
 }
 function readEngineLogs(options = {}) {
-  const paths = enginePaths(absolute(options.homeDir ?? homedir35(), "home directory"));
+  const paths = enginePaths(absolute(options.homeDir ?? homedir37(), "home directory"));
   const lines = Math.max(1, Math.min(options.lines ?? 100, 5000));
   return {
     log_path: paths.logPath,
@@ -51847,7 +54600,7 @@ function readEngineLogs(options = {}) {
 }
 function tailLines(path, lines) {
   try {
-    const text = readFileSync28(path);
+    const text = readFileSync30(path);
     const slice = text.subarray(Math.max(0, text.length - LOG_TAIL_BYTES)).toString("utf8");
     return slice.split(/\r?\n/).filter(Boolean).slice(-lines).map(redactLogLine);
   } catch {
@@ -51857,7 +54610,7 @@ function tailLines(path, lines) {
 function engineConflictWarnings(homeDir) {
   const warnings = [];
   const legacy = workerServicePaths("darwin", homeDir).unitPath;
-  if (existsSync30(legacy)) {
+  if (existsSync31(legacy)) {
     warnings.push(`The worker LaunchAgent from olympus worker install is present (${legacy}); it serves the same port. Run olympus worker uninstall so the engine owns the worker.`);
   }
   return warnings;
@@ -51868,13 +54621,13 @@ function guiDomain(uid) {
 function serviceTarget(uid) {
   return `${guiDomain(uid)}/${ENGINE_LABEL}`;
 }
-function bootstrapAgent(exec, target, domain, plistPath, afterBootout, sleep2 = sleepSync3) {
+function bootstrapAgent(exec, target, domain, plistPath, afterBootout, sleep3 = sleepSync3) {
   if (afterBootout)
     for (let waited = 0;waited < 1e4 && launchctlLoaded(exec, target); waited += 250)
-      sleep2(250);
+      sleep3(250);
   let result = exec("launchctl", ["bootstrap", domain, plistPath]);
   for (let attempt = 1;result.status !== 0 && attempt < 8 && /\b5: Input\/output error\b/.test(`${result.stderr ?? ""}`); attempt += 1) {
-    sleep2(500);
+    sleep3(500);
     if (launchctlLoaded(exec, target))
       return;
     result = exec("launchctl", ["bootstrap", domain, plistPath]);
@@ -51913,12 +54666,12 @@ function defaultExec2(command, args) {
   };
 }
 function writeIfChanged(path, text) {
-  if (existsSync30(path)) {
-    const stat3 = lstatSync14(path);
+  if (existsSync31(path)) {
+    const stat3 = lstatSync15(path);
     if (!stat3.isFile() || stat3.isSymbolicLink()) {
       throw new OperationError("config_error", `${path} is not a regular file; remove it by hand.`);
     }
-    if (readFileSync28(path, "utf8") === text)
+    if (readFileSync30(path, "utf8") === text)
       return false;
   }
   writePrivateFileAtomicSync(path, text);
@@ -51929,16 +54682,16 @@ function resolveBun2(explicit) {
     explicit,
     isBunName(process.execPath) ? process.execPath : undefined,
     typeof Bun !== "undefined" ? Bun.which("bun") ?? undefined : undefined,
-    process.env.BUN_INSTALL ? join47(process.env.BUN_INSTALL, "bin", "bun") : undefined,
-    join47(homedir35(), ".bun", "bin", "bun"),
+    process.env.BUN_INSTALL ? join49(process.env.BUN_INSTALL, "bin", "bun") : undefined,
+    join49(homedir37(), ".bun", "bin", "bun"),
     "/opt/homebrew/bin/bun",
     "/usr/local/bin/bun"
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute10(candidate) || !isBunName(candidate))
+    if (!candidate || !isAbsolute12(candidate) || !isBunName(candidate))
       continue;
     try {
-      if (statSync16(candidate).isFile())
+      if (statSync18(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -51946,7 +54699,7 @@ function resolveBun2(explicit) {
 }
 function isSymlink(path) {
   try {
-    return lstatSync14(path).isSymbolicLink();
+    return lstatSync15(path).isSymbolicLink();
   } catch {
     return false;
   }
@@ -51956,7 +54709,7 @@ function isBunName(path) {
 }
 function assertOlympusPackage(root, label) {
   try {
-    const manifest = JSON.parse(readFileSync28(join47(root, "package.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync30(join49(root, "package.json"), "utf8"));
     if (typeof manifest.name === "string" && PACKAGE_NAMES.has(manifest.name))
       return;
   } catch {}
@@ -51964,7 +54717,7 @@ function assertOlympusPackage(root, label) {
 }
 function assertFile(path, message) {
   try {
-    if (statSync16(path).isFile())
+    if (statSync18(path).isFile())
       return;
   } catch {}
   throw new OperationError("config_error", message);
@@ -51979,7 +54732,7 @@ function normalizedPlatform(platform2) {
 }
 function absolute(value, label) {
   const trimmed2 = value.trim();
-  if (trimmed2 && isAbsolute10(trimmed2) && !/[\0\r\n]/.test(trimmed2))
+  if (trimmed2 && isAbsolute12(trimmed2) && !/[\0\r\n]/.test(trimmed2))
     return trimmed2;
   throw new OperationError("config_error", `Could not resolve an absolute ${label} path.`);
 }
@@ -52000,7 +54753,7 @@ function unxml(value) {
 function xml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
-var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "no-sensitive", ENV_POLICY_KEY, LOG_TAIL_BYTES;
+var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "no-sensitive", ENV_POLICY_KEY, LOG_TAIL_BYTES;
 var init_engine_service = __esm(() => {
   init_atomic_file();
   init_engine_children();
@@ -52010,6 +54763,7 @@ var init_engine_service = __esm(() => {
   init_sovereignty();
   init_worker_auth();
   init_worker_service();
+  init_consult_transport_zkapi();
   BUILD_DIGEST_FILES = ["cli.js", "index.js", "embedding-drain.js", "litert-helper.js"];
   PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
   ENV_POLICY_KEY = /^\s*(?:export\s+)?(OLYMPUS_SOVEREIGNTY_CONFIG(?:_PATH)?|OLYMPUS_ARGUS_[A-Z_]+|OLYMPUS_SOURCE_INDEX_(?:CLOUD_ANALYST|VENICE|GEMINI|EMBEDDING)_[A-Z_]+|VENICE_API_KEY|API_KEY_VENICE|Venice-API-Key|GEMINI_API_KEY)=/m;
@@ -52017,7 +54771,7 @@ var init_engine_service = __esm(() => {
 });
 
 // src/core/setup-preflight.ts
-import { existsSync as existsSync31 } from "node:fs";
+import { existsSync as existsSync32 } from "node:fs";
 async function setupPreflight(options) {
   const env = environmentWithWorkerSetupEnv({
     ...options.env ? { env: options.env } : {},
@@ -52025,7 +54779,7 @@ async function setupPreflight(options) {
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
   const inputEnv = options.env ?? process.env;
-  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync31(workerSetupEnvPath(options));
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync32(workerSetupEnvPath(options));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
@@ -52119,7 +54873,7 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash36 } from "node:crypto";
+import { createHash as createHash38 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -52131,7 +54885,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash36("sha256").update(material, "utf8").digest("hex");
+  return createHash38("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -52189,34 +54943,34 @@ class WorkerBootSecretResolver {
     }));
   }
   status() {
-    return [...this.failures.values()].map((failure) => {
+    return [...this.failures.values()].map((failure2) => {
       const item = {
         kind: "worker_credential_degraded",
-        display_name: failure.context.displayName,
-        state: failure.state,
+        display_name: failure2.context.displayName,
+        state: failure2.state,
         status_label: "Credential unavailable - needs your attention",
-        hint: failure.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT,
-        attempts: failure.attempts,
-        max_attempts: failure.maxAttempts
+        hint: failure2.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT,
+        attempts: failure2.attempts,
+        max_attempts: failure2.maxAttempts
       };
-      if (failure.nextRetryAt)
-        item.next_retry_at = failure.nextRetryAt;
-      if (failure.context.affectedProfiles?.length)
-        item.affected_profiles = [...failure.context.affectedProfiles];
-      if (failure.context.affectedCapabilities?.length)
-        item.affected_capabilities = [...failure.context.affectedCapabilities];
+      if (failure2.nextRetryAt)
+        item.next_retry_at = failure2.nextRetryAt;
+      if (failure2.context.affectedProfiles?.length)
+        item.affected_profiles = [...failure2.context.affectedProfiles];
+      if (failure2.context.affectedCapabilities?.length)
+        item.affected_capabilities = [...failure2.context.affectedCapabilities];
       return item;
     });
   }
   recheckNow() {
-    for (const failure of this.failures.values()) {
-      this.tryResolveFailure(failure);
+    for (const failure2 of this.failures.values()) {
+      this.tryResolveFailure(failure2);
     }
     return this.status();
   }
   recordFailure(secretRef, env, context) {
     const existing = this.failures.get(secretRef);
-    const failure = existing ?? {
+    const failure2 = existing ?? {
       secretRef,
       env,
       context,
@@ -52225,13 +54979,13 @@ class WorkerBootSecretResolver {
       state: "retrying",
       scheduled: false
     };
-    failure.context = mergeContext(failure.context, context);
-    this.failures.set(secretRef, failure);
-    this.warn(`Olympus worker credential unavailable: ${failure.context.displayName}. The affected lane is disabled.`);
+    failure2.context = mergeContext(failure2.context, context);
+    this.failures.set(secretRef, failure2);
+    this.warn(`Olympus worker credential unavailable: ${failure2.context.displayName}. The affected lane is disabled.`);
     if (existing)
       return;
-    failure.attempts += 1;
-    this.scheduleRetry(failure);
+    failure2.attempts += 1;
+    this.scheduleRetry(failure2);
   }
   recordResolved(secretRef, context) {
     for (const binding of context.profileBindings ?? []) {
@@ -52249,51 +55003,51 @@ class WorkerBootSecretResolver {
         this.resolved.delete(profileId);
     }
   }
-  scheduleRetry(failure) {
-    if (failure.attempts >= failure.maxAttempts) {
-      failure.state = "stopped";
-      delete failure.nextRetryAt;
-      failure.scheduled = false;
-      this.cancelScheduledRetry(failure);
+  scheduleRetry(failure2) {
+    if (failure2.attempts >= failure2.maxAttempts) {
+      failure2.state = "stopped";
+      delete failure2.nextRetryAt;
+      failure2.scheduled = false;
+      this.cancelScheduledRetry(failure2);
       return;
     }
-    if (failure.scheduled)
+    if (failure2.scheduled)
       return;
-    const delayMs = this.retryDelaysMs[Math.min(failure.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
+    const delayMs = this.retryDelaysMs[Math.min(failure2.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
     const nextRetryAt = new Date(this.now().getTime() + delayMs).toISOString();
-    failure.state = "retrying";
-    failure.nextRetryAt = nextRetryAt;
-    failure.scheduled = true;
-    failure.retryHandle = this.schedule(() => {
-      failure.scheduled = false;
-      delete failure.retryHandle;
-      this.tryResolveFailure(failure);
+    failure2.state = "retrying";
+    failure2.nextRetryAt = nextRetryAt;
+    failure2.scheduled = true;
+    failure2.retryHandle = this.schedule(() => {
+      failure2.scheduled = false;
+      delete failure2.retryHandle;
+      this.tryResolveFailure(failure2);
     }, delayMs);
   }
-  cancelScheduledRetry(failure) {
-    if (failure.retryHandle === undefined)
+  cancelScheduledRetry(failure2) {
+    if (failure2.retryHandle === undefined)
       return;
-    const handle = failure.retryHandle;
-    delete failure.retryHandle;
+    const handle = failure2.retryHandle;
+    delete failure2.retryHandle;
     this.cancel(handle);
   }
-  tryResolveFailure(failure) {
-    if (!this.failures.has(failure.secretRef))
+  tryResolveFailure(failure2) {
+    if (!this.failures.has(failure2.secretRef))
       return;
     try {
-      const value = this.resolveSecretRefValueSync(failure.secretRef, failure.env)?.trim();
-      failure.attempts += 1;
+      const value = this.resolveSecretRefValueSync(failure2.secretRef, failure2.env)?.trim();
+      failure2.attempts += 1;
       if (value) {
-        failure.state = "resolved_restart_required";
-        delete failure.nextRetryAt;
-        failure.scheduled = false;
-        this.clearResolved(failure.context, failure.secretRef);
+        failure2.state = "resolved_restart_required";
+        delete failure2.nextRetryAt;
+        failure2.scheduled = false;
+        this.clearResolved(failure2.context, failure2.secretRef);
         return;
       }
     } catch {
-      failure.attempts += 1;
+      failure2.attempts += 1;
     }
-    this.scheduleRetry(failure);
+    this.scheduleRetry(failure2);
   }
 }
 function mergeContext(existing, next) {
@@ -52648,10 +55402,10 @@ function dashboardCheckedLabel(generatedAt, now) {
   const relative6 = dashboardRelativeFromMs(now.getTime() - at);
   return relative6 ? `checked ${relative6}` : "";
 }
-function dashboardRelativeFromMs(elapsedMs) {
-  if (!Number.isFinite(elapsedMs))
+function dashboardRelativeFromMs(elapsedMs2) {
+  if (!Number.isFinite(elapsedMs2))
     return "";
-  const seconds = Math.round(Math.max(0, elapsedMs) / 1000);
+  const seconds = Math.round(Math.max(0, elapsedMs2) / 1000);
   if (seconds < 1)
     return "just now";
   if (seconds < 60)
@@ -53745,7 +56499,7 @@ var init_vocabulary = __esm(() => {
       note_expired: "Your balance is past its estimated 30-day expiry.",
       unresolved_session: "An earlier question has not finished paying. Use Recover under Unfinished payment.",
       unresolved_session_other_wallet: "An unfinished payment belongs to another zkAPI wallet. Finish it there, or abandon it under Unfinished payment.",
-      stranded_processes: "Programs from an earlier question may still be running.",
+      stranded_processes: "Tor or the zkAPI app from an earlier question is still running and Olympus could not stop it. Restart Olympus to clear it (olympus engine restart).",
       daemon_already_running: "Another copy of the zkAPI app is already running. Close it; Olympus starts its own for each question.",
       tor_port_busy: "Another program is using the connection Olympus needs to hide your network address.",
       daily_cap_reached: "Today's question limit is reached. Raise or remove it under Balance and limits.",
@@ -54136,16 +56890,16 @@ var init_phases = __esm(() => {
 });
 
 // src/workers/credential-health.ts
-import { mkdirSync as mkdirSync23, readFileSync as readFileSync29 } from "node:fs";
-import { homedir as homedir36, uptime } from "node:os";
-import { dirname as dirname33, join as join48 } from "node:path";
+import { mkdirSync as mkdirSync25, readFileSync as readFileSync31 } from "node:fs";
+import { homedir as homedir38, uptime } from "node:os";
+import { dirname as dirname35, join as join50 } from "node:path";
 function defaultCredentialHealthReportPath() {
-  return join48(homedir36(), ".local", "state", "olympus", "credential-health", "current.json");
+  return join50(homedir38(), ".local", "state", "olympus", "credential-health", "current.json");
 }
 function readCredentialHealthReport(path = defaultCredentialHealthReportPath()) {
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync29(path, "utf8"));
+    parsed = JSON.parse(readFileSync31(path, "utf8"));
   } catch {
     return;
   }
@@ -54294,9 +57048,9 @@ var init_embedding_cost_estimates = __esm(() => {
 
 // src/workers/classification/secret-locations.ts
 import { Database as Database9 } from "bun:sqlite";
-import { createHash as createHash37 } from "node:crypto";
-import { chmodSync as chmodSync13, closeSync as closeSync10, existsSync as existsSync32, mkdirSync as mkdirSync24, openSync as openSync10 } from "node:fs";
-import { dirname as dirname34 } from "node:path";
+import { createHash as createHash39 } from "node:crypto";
+import { chmodSync as chmodSync15, closeSync as closeSync10, existsSync as existsSync33, mkdirSync as mkdirSync26, openSync as openSync10 } from "node:fs";
+import { dirname as dirname36 } from "node:path";
 
 class SecretLocationsIndex {
   dbPath;
@@ -54312,10 +57066,10 @@ class SecretLocationsIndex {
     }
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
-      mkdirSync24(dirname34(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync32(this.dbPath))
+      mkdirSync26(dirname36(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync33(this.dbPath))
         closeSync10(openSync10(this.dbPath, "a", 384));
-      chmodSync13(this.dbPath, 384);
+      chmodSync15(this.dbPath, 384);
     }
     this.db = new Database9(this.dbPath, { create: true });
     try {
@@ -54337,7 +57091,7 @@ class SecretLocationsIndex {
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
     const locator = input.locator?.trim() && detectSecretFindingKinds(input.locator).length === 0 ? input.locator.trim().slice(0, 1000) : null;
     const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash37("sha256").update(input.text, "utf8").digest("hex") : null;
+    const contentHash = input.text !== undefined ? createHash39("sha256").update(input.text, "utf8").digest("hex") : null;
     const existing = this.get(input.identity);
     if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
       return false;
@@ -54407,7 +57161,7 @@ class SecretLocationsIndex {
   }
 }
 function secretLocationRef(location) {
-  return `secret:${createHash37("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+  return `secret:${createHash39("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
 }
 function secretLocationWithinScope(location, scope) {
   if (scope.accountScope && location.accountScope !== scope.accountScope)
@@ -54538,7 +57292,7 @@ var init_secret_locations = __esm(() => {
 });
 
 // src/workers/source-index/status.ts
-import { existsSync as existsSync33 } from "node:fs";
+import { existsSync as existsSync34 } from "node:fs";
 function createSourceIndexStatusHandler(options = {}) {
   const staticRegistry = typeof options.corpusDefinitions === "function" ? undefined : buildSourceIndexCorpusRegistry(options.corpusDefinitions ?? defaultCorpusDefinitions());
   const currentRegistry = () => staticRegistry ?? buildSourceIndexCorpusRegistry(options.corpusDefinitions());
@@ -54685,7 +57439,7 @@ function secretLocationCount(store) {
   if (store.trustDomain !== "secure_local" || store.dbPath === ":memory:")
     return;
   const path = secretLocationsPathForStore(store.dbPath);
-  if (!existsSync33(path))
+  if (!existsSync34(path))
     return;
   let index;
   try {
@@ -54871,9 +57625,9 @@ var init_status = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { mkdirSync as mkdirSync25 } from "node:fs";
-import { homedir as homedir37 } from "node:os";
-import { dirname as dirname35, join as join49 } from "node:path";
+import { mkdirSync as mkdirSync27 } from "node:fs";
+import { homedir as homedir39 } from "node:os";
+import { dirname as dirname37, join as join51 } from "node:path";
 import { Database as Database10 } from "bun:sqlite";
 function dashboardSchedulerTaskFailing(task) {
   if (task.consecutive_failures <= 0)
@@ -54951,8 +57705,8 @@ function dashboardGuidedSessionAgentPrompt(source) {
   return "Connect WhatsApp to Olympus using the packaged olympus connect whatsapp --pair command. The dashboard has no Connect/Pair button or QR display; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.";
 }
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join49(homedir37(), ".local", "share");
-  return join49(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join51(homedir39(), ".local", "share");
+  return join51(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 function phaseAtParity(sample, counter, value) {
   if (sample.settled_pass !== true)
@@ -54973,7 +57727,7 @@ class SqliteSourceDashboardHistory {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync25(dirname35(dbPath), { recursive: true });
+      mkdirSync27(dirname37(dbPath), { recursive: true });
     this.db = new Database10(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
@@ -57119,9 +59873,9 @@ __export(exports_source_ingestion_ledger, {
   buildSourceIngestionLedgerSnapshot: () => buildSourceIngestionLedgerSnapshot,
   SqliteSourceIngestionLedgerStore: () => SqliteSourceIngestionLedgerStore
 });
-import { existsSync as existsSync34, mkdirSync as mkdirSync26 } from "node:fs";
-import { homedir as homedir38 } from "node:os";
-import { dirname as dirname36, join as join50 } from "node:path";
+import { existsSync as existsSync35, mkdirSync as mkdirSync28 } from "node:fs";
+import { homedir as homedir40 } from "node:os";
+import { dirname as dirname38, join as join52 } from "node:path";
 import { Database as Database11 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
@@ -57179,7 +59933,7 @@ class SqliteSourceIngestionLedgerStore {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync26(dirname36(dbPath), { recursive: true });
+      mkdirSync28(dirname38(dbPath), { recursive: true });
     this.db = new Database11(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
@@ -57325,7 +60079,7 @@ async function collectLocalSourceIngestionLedger(options = {}) {
   ]);
   const exclusionSources = [];
   for (const store of localConnectorStores(env)) {
-    if (!existsSync34(store.dbPath))
+    if (!existsSync35(store.dbPath))
       continue;
     const gated = store.family === "file";
     const matcher = driveCorpusIds.has(store.corpusId) ? driveExclusions : sharedExclusions;
@@ -57973,7 +60727,7 @@ function mergeConnectorStoreDefinitions(stores) {
   return Array.from(byCorpusId.values());
 }
 function whatsappConnectorStoreDbPath(env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join50(env.XDG_DATA_HOME?.trim() || join50(homedir38(), ".local", "share"), "olympus", "whatsapp-live", "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join52(env.XDG_DATA_HOME?.trim() || join52(homedir40(), ".local", "share"), "olympus", "whatsapp-live", "connector-store.db");
 }
 function number(value) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
@@ -58100,2711 +60854,6 @@ var init_source_ingestion_ledger = __esm(() => {
     }
   };
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
-});
-
-// src/core/managed-tools.ts
-var exports_managed_tools = {};
-__export(exports_managed_tools, {
-  parseTarArchive: () => parseTarArchive,
-  managedToolsState: () => managedToolsState,
-  managedToolsRoot: () => managedToolsRoot,
-  managedToolsPlatform: () => managedToolsPlatform,
-  managedToolsBase: () => managedToolsBase,
-  managedToolExecutable: () => managedToolExecutable,
-  installManagedTools: () => installManagedTools,
-  defaultVersionCheck: () => defaultVersionCheck,
-  defaultCommandRunner: () => defaultCommandRunner,
-  createManagedToolsJob: () => createManagedToolsJob,
-  ManagedToolsError: () => ManagedToolsError,
-  MANAGED_TOOL_PINS: () => MANAGED_TOOL_PINS,
-  MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
-});
-import { execFile } from "node:child_process";
-import { createHash as createHash38, randomUUID as randomUUID16 } from "node:crypto";
-import {
-  accessSync as accessSync4,
-  constants as constants3,
-  lstatSync as lstatSync15,
-  mkdirSync as mkdirSync27,
-  readFileSync as readFileSync30,
-  readdirSync as readdirSync6,
-  realpathSync as realpathSync3,
-  renameSync as renameSync11,
-  rmSync as rmSync11,
-  statSync as statSync17,
-  symlinkSync,
-  writeFileSync as writeFileSync9,
-  chmodSync as chmodSync14
-} from "node:fs";
-import { open as open4 } from "node:fs/promises";
-import { homedir as homedir39 } from "node:os";
-import { dirname as dirname37, isAbsolute as isAbsolute11, join as join51, posix, sep as sep6 } from "node:path";
-import { gunzip } from "node:zlib";
-function zkapiAsset(name, sha2563, bytes) {
-  return { url: `${ZKAPI_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "bin/zkapi-clientd", required: ZKAPI_REQUIRED, rename: ZKAPI_RENAME };
-}
-function torMacAsset(name, sha2563, bytes, adhocSign) {
-  return { url: `${TOR_RELEASE}/${name}`, sha256: sha2563, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"], ...adhocSign ? { adhocSign } : {} };
-}
-function torLinuxAsset(name, sha2563, bytes) {
-  return {
-    url: `${TOR_RELEASE}/${name}`,
-    sha256: sha2563,
-    bytes,
-    executable: "bin/tor",
-    required: ["tor/tor", "tor/libevent-2.1.so.7", "tor/libssl.so.3", "tor/libcrypto.so.3"],
-    skip: ["debug/"],
-    launcher: { path: "bin/tor", target: "tor/tor", libraryDir: "tor" }
-  };
-}
-function managedToolsPlatform(platform2 = process.platform, arch = process.arch) {
-  if (platform2 === "darwin" && (arch === "arm64" || arch === "x64"))
-    return `darwin-${arch}`;
-  if (platform2 === "linux" && (arch === "arm64" || arch === "x64" || arch === "ia32"))
-    return `linux-${arch}`;
-  return;
-}
-function managedToolsBase(host = {}) {
-  const env = host.env ?? process.env;
-  const platform2 = host.platform ?? process.platform;
-  const home2 = env.HOME?.trim() || (host.env ? undefined : homedir39());
-  if (platform2 === "darwin")
-    return home2 && isAbsolute11(home2) ? join51(home2, "Library", "Application Support", "Olympus") : undefined;
-  if (platform2 === "linux") {
-    const xdg = env.XDG_DATA_HOME?.trim();
-    if (xdg && isAbsolute11(xdg))
-      return join51(xdg, "olympus");
-    return home2 && isAbsolute11(home2) ? join51(home2, ".local", "share", "olympus") : undefined;
-  }
-  return;
-}
-function managedToolsRoot(host = {}) {
-  const base = managedToolsBase(host);
-  return base ? join51(base, "tools") : undefined;
-}
-function currentUid(host) {
-  return host.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
-}
-function privatelyOwned(path, uid, kind) {
-  try {
-    const stats = statSync17(path);
-    if (kind === "dir" ? !stats.isDirectory() : !stats.isFile())
-      return false;
-    if (uid !== undefined && stats.uid !== uid)
-      return false;
-    return (stats.mode & 18) === 0;
-  } catch {
-    return false;
-  }
-}
-function within(parent, child) {
-  return child.startsWith(parent.endsWith(sep6) ? parent : `${parent}${sep6}`);
-}
-function readManifest(path, uid) {
-  try {
-    const stats = lstatSync15(path);
-    if (!stats.isFile() || uid !== undefined && stats.uid !== uid || (stats.mode & 18) !== 0)
-      return;
-    const parsed = JSON.parse(readFileSync30(path, "utf8"));
-    if (parsed.schema !== 1 || typeof parsed.tool !== "string" || typeof parsed.version !== "string" || typeof parsed.sha256 !== "string")
-      return;
-    return parsed;
-  } catch {
-    return;
-  }
-}
-function managedToolExecutable(tool, host = {}) {
-  const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
-  const platformKey = managedToolsPlatform(host.platform, host.arch);
-  const asset = platformKey && pin ? pin.assets[platformKey] : undefined;
-  const base = managedToolsBase(host);
-  if (!pin || !asset || !base)
-    return;
-  const uid = currentUid(host);
-  const root = join51(base, "tools");
-  const versionDir = join51(root, tool, pin.version);
-  for (const dir of [base, root, join51(root, tool), versionDir]) {
-    try {
-      if (lstatSync15(dir).isSymbolicLink())
-        return;
-    } catch {
-      return;
-    }
-    if (!privatelyOwned(dir, uid, "dir"))
-      return;
-  }
-  const manifest = readManifest(join51(versionDir, MANIFEST_FILE), uid);
-  if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
-    return;
-  try {
-    const realDir = realpathSync3(versionDir);
-    for (const required3 of new Set([...asset.required, asset.executable])) {
-      if (!trustedInside(realDir, join51(versionDir, required3), uid, versionDir))
-        return;
-    }
-    const real = realpathSync3(join51(versionDir, asset.executable));
-    accessSync4(real, constants3.X_OK);
-    return real;
-  } catch {
-    return;
-  }
-}
-function trustedInside(realDir, path, uid, versionDir) {
-  if (versionDir) {
-    const parts = path.slice(versionDir.length + 1).split(sep6);
-    for (let index = 1;index <= parts.length; index += 1) {
-      let stats;
-      try {
-        stats = lstatSync15(join51(versionDir, ...parts.slice(0, index)));
-      } catch {
-        return false;
-      }
-      if (uid !== undefined && stats.uid !== uid && stats.uid !== 0)
-        return false;
-      if (!stats.isSymbolicLink() && (stats.mode & 18) !== 0)
-        return false;
-    }
-  }
-  let real;
-  try {
-    real = realpathSync3(path);
-  } catch {
-    return false;
-  }
-  if (!within(realDir, real) || !privatelyOwned(real, uid, "file"))
-    return false;
-  for (let dir = dirname37(real);dir !== realDir; dir = dirname37(dir)) {
-    if (!within(realDir, dir) || !privatelyOwned(dir, uid, "dir"))
-      return false;
-  }
-  return true;
-}
-function managedToolsState(host = {}) {
-  const platformKey = managedToolsPlatform(host.platform, host.arch);
-  return MANAGED_TOOL_ORDER.map((tool) => {
-    const pin = (host.pins ?? MANAGED_TOOL_PINS)[tool];
-    const executable = managedToolExecutable(tool, host);
-    return {
-      tool,
-      label: pin.label,
-      version: pin.version,
-      offered: platformKey !== undefined && pin.assets[platformKey] !== undefined,
-      installed: executable !== undefined,
-      ...executable ? { executable } : {}
-    };
-  });
-}
-async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) {
-  if (platformKey !== "darwin-arm64" || !asset.adhocSign?.length)
-    return [];
-  const realStaging = realpathSync3(staging);
-  const signed = [];
-  for (const relative6 of asset.adhocSign) {
-    const file = join51(staging, relative6);
-    let real;
-    try {
-      real = realpathSync3(file);
-    } catch {
-      throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${relative6}, so nothing was installed.`, tool);
-    }
-    if (!within(realStaging, real) || !lstatSync15(file).isFile()) {
-      throw new ManagedToolsError("unsafe_archive", `The ${label} download has an unexpected ${relative6}, so nothing was installed.`, tool);
-    }
-    const inspect = await run(CODESIGN, ["-dv", real]);
-    if (inspect.error)
-      throw new ManagedToolsError("signing_failed", `Olympus could not find the macOS code-signing tool, so ${label} was not installed.`, tool);
-    if (inspect.code === 0)
-      continue;
-    if (!/code object is not signed at all/.test(`${inspect.stderr}
-${inspect.stdout}`)) {
-      throw new ManagedToolsError("signing_failed", `macOS could not read the signature of ${label}'s ${relative6}, so it was not installed.`, tool);
-    }
-    const sign = await run(CODESIGN, ["--force", "--sign", "-", real]);
-    if (sign.error || sign.code !== 0) {
-      throw new ManagedToolsError("signing_failed", `macOS could not prepare ${label} to run on this Mac (signing ${relative6} failed), so it was not installed.`, tool);
-    }
-    signed.push(relative6);
-  }
-  return signed;
-}
-async function defaultClearQuarantine(dir) {
-  await new Promise((resolve9) => {
-    execFile("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve9());
-  });
-}
-function ensureOwnedDirectory(path, uid, label) {
-  try {
-    mkdirSync27(path, { mode: 448 });
-  } catch (error) {
-    if (error.code !== "EEXIST")
-      throw new ManagedToolsError("folder_unsafe", `Olympus could not create ${label}.`);
-  }
-  let stats;
-  try {
-    stats = lstatSync15(path);
-  } catch {
-    throw new ManagedToolsError("folder_unsafe", `Olympus could not read ${label}.`);
-  }
-  if (stats.isSymbolicLink() || !stats.isDirectory())
-    throw new ManagedToolsError("folder_unsafe", `${label} is not a plain folder.`);
-  if (uid !== undefined && stats.uid !== uid)
-    throw new ManagedToolsError("folder_unsafe", `${label} belongs to another user.`);
-  if ((stats.mode & 18) !== 0)
-    throw new ManagedToolsError("folder_unsafe", `${label} can be changed by other users.`);
-}
-async function installManagedTools(options = {}) {
-  const pins = options.pins ?? MANAGED_TOOL_PINS;
-  const tools = options.tools ?? MANAGED_TOOL_ORDER;
-  const platformKey = managedToolsPlatform(options.platform, options.arch);
-  const base = managedToolsBase(options);
-  if (!platformKey || !base) {
-    return {
-      ok: false,
-      tools: tools.map((tool) => ({ tool, version: pins[tool].version, outcome: "failed", code: "unsupported_platform", message: "Olympus has no downloads for this kind of computer." }))
-    };
-  }
-  const uid = currentUid(options);
-  const root = join51(base, "tools");
-  try {
-    mkdirSync27(dirname37(base), { recursive: true, mode: 448 });
-    ensureOwnedDirectory(base, uid, "The Olympus folder");
-    ensureOwnedDirectory(root, uid, "The Olympus tools folder");
-  } catch (error) {
-    const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("folder_unsafe", "Olympus could not prepare its tools folder.");
-    return { ok: false, root, tools: tools.map((tool) => ({ tool, version: pins[tool].version, outcome: "failed", code: failure.code, message: failure.message })) };
-  }
-  try {
-    return await withFileLease(join51(root, "install"), async (lease) => {
-      const results = [];
-      for (const tool of tools) {
-        try {
-          results.push(await installOne(tool, pins[tool], platformKey, root, uid, options, lease));
-        } catch (error) {
-          if (!(error instanceof FileLeaseLostError))
-            throw error;
-          for (const rest of tools.slice(results.length)) {
-            results.push({ tool: rest, version: pins[rest].version, outcome: "failed", code: "lease_lost", message: "Another install took over, so this one stopped without changing anything more." });
-          }
-          break;
-        }
-      }
-      return { ok: results.every((result) => result.outcome !== "failed"), root, tools: results };
-    }, { acquireTimeoutMs: 500, staleAfterMs: 60000 });
-  } catch (error) {
-    if (error instanceof FileLeaseBusyError) {
-      return { ok: false, root, tools: tools.map((tool) => ({ tool, version: pins[tool].version, outcome: "failed", code: "busy", message: "Another install is already running." })) };
-    }
-    throw error;
-  }
-}
-async function installOne(tool, pin, platformKey, root, uid, options, lease) {
-  const commit = (write) => lease.commit(write);
-  const asset = pin.assets[platformKey];
-  if (!asset) {
-    return { tool, version: pin.version, outcome: "not_offered", message: `${pin.label} publishes no build for this computer.` };
-  }
-  const host = { ...options, ...uid !== undefined ? { uid } : {} };
-  const existing = managedToolExecutable(tool, host);
-  if (existing)
-    return { tool, version: pin.version, outcome: "already_installed", executable: existing };
-  const toolDir = join51(root, tool);
-  const versionDir = join51(toolDir, pin.version);
-  const id = randomUUID16();
-  const download = join51(toolDir, `.download-${id}`);
-  const staging = join51(toolDir, `.staging-${id}`);
-  try {
-    await commit(async () => {
-      ensureOwnedDirectory(toolDir, uid, `The ${pin.label} folder`);
-      for (const entry of readdirSync6(toolDir)) {
-        if (/^\.(download|staging|old)-/.test(entry))
-          rmSync11(join51(toolDir, entry), { recursive: true, force: true });
-      }
-    });
-    options.onProgress?.({ tool, phase: "downloading", receivedBytes: 0, totalBytes: asset.bytes });
-    const sha2563 = await downloadTo(download, asset, options, (receivedBytes) => options.onProgress?.({ tool, phase: "downloading", receivedBytes, totalBytes: asset.bytes }), tool, pin.label);
-    options.onProgress?.({ tool, phase: "checking" });
-    if (sha2563 !== asset.sha256) {
-      throw new ManagedToolsError("hash_mismatch", `The ${pin.label} download did not match its pinned fingerprint, so nothing was installed.`, tool);
-    }
-    options.onProgress?.({ tool, phase: "installing" });
-    await lease.assertOwned();
-    mkdirSync27(staging, { mode: 448 });
-    await extractVerifiedArchive(download, staging, asset, tool);
-    rmSync11(download, { force: true });
-    for (const required3 of asset.required) {
-      if (!privatelyOwned(join51(staging, required3), uid, "file")) {
-        throw new ManagedToolsError("archive_incomplete", `The ${pin.label} download is missing ${required3}, so nothing was installed.`, tool);
-      }
-    }
-    if ((options.platform ?? process.platform) === "darwin")
-      await (options.clearQuarantine ?? defaultClearQuarantine)(staging);
-    const adhocSigned = await adhocSignUnsigned(staging, asset, platformKey, options.runCommand ?? defaultCommandRunner, pin.label, tool);
-    const check = await (options.versionCheck ?? defaultVersionCheck)(join51(staging, asset.executable), {
-      cwd: staging,
-      env: { PATH: "/usr/bin:/bin", ...options.env?.HOME ? { HOME: options.env.HOME } : process.env.HOME ? { HOME: process.env.HOME } : {} }
-    });
-    if (!check.ok || !pin.versionLine.test(check.stdout.trim())) {
-      const detail = check.ok ? `it reported "${check.stdout.trim().split(`
-`)[0]?.slice(0, 80) ?? ""}"` : check.detail;
-      throw new ManagedToolsError("will_not_run", `${pin.label} was downloaded and its fingerprint matched, but this computer would not run it (${detail}), so it was not installed.`, tool);
-    }
-    const manifest = {
-      schema: 1,
-      tool,
-      version: pin.version,
-      platform: platformKey,
-      asset: asset.url.slice(asset.url.lastIndexOf("/") + 1),
-      sha256: asset.sha256,
-      installedAt: (options.now ?? (() => new Date))().toISOString(),
-      ...adhocSigned.length > 0 ? { adhocSigned } : {}
-    };
-    writeFileSync9(join51(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}
-`, { mode: 384, flag: "wx" });
-    await commit(async () => {
-      let old;
-      try {
-        lstatSync15(versionDir);
-        old = join51(toolDir, `.old-${id}`);
-        renameSync11(versionDir, old);
-      } catch (error) {
-        if (error.code !== "ENOENT")
-          throw error;
-      }
-      renameSync11(staging, versionDir);
-      if (old)
-        rmSync11(old, { recursive: true, force: true });
-    });
-    const executable = managedToolExecutable(tool, host);
-    if (!executable)
-      throw new ManagedToolsError("install_failed", `${pin.label} was installed but could not be found afterwards.`, tool);
-    return { tool, version: pin.version, outcome: "installed", executable };
-  } catch (error) {
-    rmSync11(download, { force: true });
-    rmSync11(staging, { recursive: true, force: true });
-    if (error instanceof FileLeaseLostError)
-      throw error;
-    const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("install_failed", `${pin.label} could not be installed: ${error.message}`, tool);
-    return { tool, version: pin.version, outcome: "failed", code: failure.code, message: failure.message };
-  }
-}
-async function downloadTo(path, asset, options, onBytes, tool, label) {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
-  let response;
-  try {
-    response = await fetchImpl(asset.url, { signal, redirect: "follow" });
-  } catch {
-    throw new ManagedToolsError("download_failed", `${label} could not be downloaded. Check the connection and try again.`, tool);
-  }
-  if (!response.ok || !response.body) {
-    throw new ManagedToolsError("download_failed", `${label} could not be downloaded (HTTP ${response.status}). Try again later.`, tool);
-  }
-  const declared = Number(response.headers.get("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > 0 && declared !== asset.bytes) {
-    await response.body.cancel().catch(() => {
-      return;
-    });
-    throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
-  }
-  const hash = createHash38("sha256");
-  const file = await open4(path, "wx", 384);
-  let received = 0;
-  let lastReport = 0;
-  try {
-    const reader = response.body.getReader();
-    for (;; ) {
-      const chunk = await reader.read().catch(() => {
-        throw new ManagedToolsError("download_failed", `The ${label} download stopped part way. Try again.`, tool);
-      });
-      if (chunk.done)
-        break;
-      received += chunk.value.byteLength;
-      if (received > asset.bytes) {
-        await reader.cancel().catch(() => {
-          return;
-        });
-        throw new ManagedToolsError("size_mismatch", `The ${label} download is larger than the pinned size, so nothing was installed.`, tool);
-      }
-      hash.update(chunk.value);
-      await file.write(chunk.value);
-      if (received - lastReport >= 1024 * 1024) {
-        lastReport = received;
-        onBytes(received);
-      }
-    }
-  } finally {
-    await file.close();
-  }
-  onBytes(received);
-  if (received !== asset.bytes) {
-    throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
-  }
-  return hash.digest("hex");
-}
-function octal(field) {
-  const text = field.toString("latin1").replace(/\0.*$/s, "").trim();
-  if (text === "")
-    return 0;
-  if (!/^[0-7]+$/.test(text))
-    throw new ManagedToolsError("unsafe_archive", "The archive has a malformed header.");
-  return Number.parseInt(text, 8);
-}
-function cString2(field) {
-  const end = field.indexOf(0);
-  return field.subarray(0, end === -1 ? field.length : end).toString("utf8");
-}
-function parsePax(data) {
-  const out = {};
-  let offset = 0;
-  while (offset < data.length) {
-    const space = data.indexOf(32, offset);
-    if (space === -1)
-      break;
-    const length = Number.parseInt(data.subarray(offset, space).toString("latin1"), 10);
-    if (!Number.isSafeInteger(length) || length <= 0 || offset + length > data.length)
-      throw new ManagedToolsError("unsafe_archive", "The archive has a malformed extended header.");
-    const record = data.subarray(space + 1, offset + length - 1).toString("utf8");
-    const equals = record.indexOf("=");
-    if (equals > 0)
-      out[record.slice(0, equals)] = record.slice(equals + 1);
-    offset += length;
-  }
-  return out;
-}
-function parseTarArchive(tar) {
-  const entries = [];
-  let offset = 0;
-  let pax = {};
-  let longName;
-  let longLink;
-  while (offset + 512 <= tar.length) {
-    const header = tar.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0))
-      break;
-    const stored = octal(header.subarray(148, 156));
-    let sum2 = 0;
-    for (let index = 0;index < 512; index += 1)
-      sum2 += index >= 148 && index < 156 ? 32 : header[index];
-    if (sum2 !== stored)
-      throw new ManagedToolsError("unsafe_archive", "The archive has a header with a bad checksum.");
-    const typeflag = String.fromCharCode(header[156]);
-    const size = octal(header.subarray(124, 136));
-    const dataStart = offset + 512;
-    const dataEnd = dataStart + size;
-    if (dataEnd > tar.length)
-      throw new ManagedToolsError("unsafe_archive", "The archive is truncated.");
-    const data = tar.subarray(dataStart, dataEnd);
-    offset = dataStart + Math.ceil(size / 512) * 512;
-    if (typeflag === "x") {
-      pax = parsePax(data);
-      continue;
-    }
-    if (typeflag === "g")
-      continue;
-    if (typeflag === "L") {
-      longName = cString2(data);
-      continue;
-    }
-    if (typeflag === "K") {
-      longLink = cString2(data);
-      continue;
-    }
-    const magic = header.subarray(257, 263).toString("latin1");
-    const prefix = magic === "ustar\x00" ? cString2(header.subarray(345, 500)) : "";
-    const baseName = cString2(header.subarray(0, 100));
-    const name = pax.path ?? longName ?? (prefix ? `${prefix}/${baseName}` : baseName);
-    const link = pax.linkpath ?? longLink ?? cString2(header.subarray(157, 257));
-    const mode = octal(header.subarray(100, 108));
-    pax = {};
-    longName = undefined;
-    longLink = undefined;
-    if (typeflag === "0" || typeflag === "\x00" || typeflag === "7") {
-      entries.push({ path: name, type: "file", mode, data: Buffer.from(data) });
-    } else if (typeflag === "5") {
-      entries.push({ path: name, type: "dir", mode });
-    } else if (typeflag === "2") {
-      entries.push({ path: name, type: "symlink", mode, linkTarget: link });
-    } else if (typeflag === "1") {
-      throw new ManagedToolsError("unsafe_archive", `The archive has a hard link (${name}).`);
-    } else {
-      throw new ManagedToolsError("unsafe_archive", `The archive has a special file (${name}).`);
-    }
-  }
-  return entries;
-}
-function safeRelativePath(raw) {
-  if (raw.includes("\x00") || raw.includes("\\"))
-    throw new ManagedToolsError("unsafe_archive", `The archive has an unsafe path (${raw}).`);
-  if (raw.startsWith("/") || /^[A-Za-z]:/.test(raw))
-    throw new ManagedToolsError("unsafe_archive", `The archive has an absolute path (${raw}).`);
-  const trimmed2 = raw.replace(/^(\.\/)+/, "").replace(/\/+$/, "");
-  if (trimmed2 === "" || trimmed2 === ".")
-    return "";
-  if (trimmed2.split("/").some((part) => part === ".."))
-    throw new ManagedToolsError("unsafe_archive", `The archive has a path that leaves its folder (${raw}).`);
-  const normal = posix.normalize(trimmed2);
-  if (normal.startsWith("../") || normal === ".." || posix.isAbsolute(normal))
-    throw new ManagedToolsError("unsafe_archive", `The archive has a path that leaves its folder (${raw}).`);
-  return normal;
-}
-async function extractVerifiedArchive(archivePath, staging, asset, tool) {
-  const compressed = readFileSync30(archivePath);
-  let tar;
-  try {
-    tar = await new Promise((resolve9, reject) => gunzip(compressed, { maxOutputLength: MAX_UNPACKED_BYTES }, (error, out) => error ? reject(error) : resolve9(out)));
-  } catch {
-    throw new ManagedToolsError("unsafe_archive", "The archive could not be unpacked.", tool);
-  }
-  let entries;
-  try {
-    entries = parseTarArchive(tar);
-  } catch (error) {
-    if (error instanceof ManagedToolsError)
-      throw new ManagedToolsError(error.code, error.message, tool);
-    throw error;
-  }
-  const planned = [];
-  const seen = new Set;
-  for (const entry of entries) {
-    const relative6 = safeRelativePath(entry.path);
-    if (relative6 === "")
-      continue;
-    if (asset.skip?.some((prefix) => relative6 === prefix.replace(/\/$/, "") || relative6.startsWith(prefix)))
-      continue;
-    const target = asset.rename?.[relative6] ?? relative6;
-    if (seen.has(target) && entry.type !== "dir")
-      throw new ManagedToolsError("unsafe_archive", `The archive names ${target} twice.`, tool);
-    seen.add(target);
-    if (entry.type === "symlink") {
-      const link = entry.linkTarget ?? "";
-      if (link === "" || link.includes("\x00") || posix.isAbsolute(link))
-        throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
-      const resolved = posix.normalize(posix.join(posix.dirname(target), link));
-      if (resolved === ".." || resolved.startsWith("../"))
-        throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
-    }
-    planned.push({ ...entry, target });
-  }
-  for (const pathName of [...seen]) {
-    const parts = pathName.split("/");
-    for (let index = 1;index < parts.length; index += 1) {
-      const parent = parts.slice(0, index).join("/");
-      if (planned.some((entry) => entry.type === "symlink" && entry.target === parent)) {
-        throw new ManagedToolsError("unsafe_archive", `The archive writes through a link (${pathName}).`, tool);
-      }
-    }
-  }
-  const mkdirs = (relative6) => {
-    mkdirSync27(join51(staging, relative6), { recursive: true, mode: 448 });
-  };
-  for (const entry of planned) {
-    if (entry.type === "dir")
-      mkdirs(entry.target);
-  }
-  for (const entry of planned) {
-    if (entry.type !== "file")
-      continue;
-    mkdirs(posix.dirname(entry.target));
-    const destination = join51(staging, entry.target);
-    writeFileSync9(destination, entry.data ?? Buffer.alloc(0), { flag: "wx", mode: entry.mode & 64 ? 448 : 384 });
-    chmodSync14(destination, entry.mode & 64 ? 448 : 384);
-  }
-  for (const entry of planned) {
-    if (entry.type !== "symlink")
-      continue;
-    mkdirs(posix.dirname(entry.target));
-    symlinkSync(entry.linkTarget, join51(staging, entry.target));
-  }
-  const realStaging = realpathSync3(staging);
-  for (const entry of planned) {
-    if (entry.type !== "symlink")
-      continue;
-    let real;
-    try {
-      real = realpathSync3(join51(staging, entry.target));
-    } catch {
-      throw new ManagedToolsError("unsafe_archive", `The archive has a link that leads nowhere (${entry.path}).`, tool);
-    }
-    if (!within(realStaging, real))
-      throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
-  }
-  if (asset.launcher) {
-    mkdirs(posix.dirname(asset.launcher.path));
-    const launcher = [
-      "#!/bin/sh",
-      "# Written by Olympus: runs the bundled Tor with its own libraries.",
-      "# No external command: the folder comes from $0 by parameter expansion.",
-      'case "$0" in',
-      '  */*) here="${0%/*}/.." ;;',
-      '  *) echo "olympus tor launcher: run it by its path (with a /), not a bare PATH lookup" >&2; exit 127 ;;',
-      "esac",
-      `LD_LIBRARY_PATH="$here/${asset.launcher.libraryDir}" exec "$here/${asset.launcher.target}" "$@"`,
-      ""
-    ].join(`
-`);
-    writeFileSync9(join51(staging, asset.launcher.path), launcher, { flag: "wx", mode: 448 });
-    chmodSync14(join51(staging, asset.launcher.path), 448);
-  }
-  for (const entry of planned) {
-    if (entry.type === "dir")
-      chmodSync14(join51(staging, entry.target), 448);
-  }
-}
-function createManagedToolsJob(options = {}) {
-  const now = options.now ?? (() => new Date);
-  let state = { state: "idle" };
-  let current = Promise.resolve();
-  return {
-    start() {
-      if (state.state === "running")
-        return "running";
-      const startedAt = now().toISOString();
-      state = { state: "running", tool: (options.tools ?? MANAGED_TOOL_ORDER)[0], phase: "downloading", startedAt };
-      current = installManagedTools({
-        ...options,
-        onProgress: (event) => {
-          state = { state: "running", tool: event.tool, phase: event.phase, ...event.receivedBytes !== undefined ? { receivedBytes: event.receivedBytes } : {}, ...event.totalBytes !== undefined ? { totalBytes: event.totalBytes } : {}, startedAt };
-          options.onProgress?.(event);
-        }
-      }).then((result) => {
-        const failed = result.tools.find((tool) => tool.outcome === "failed");
-        state = failed ? { state: "failed", at: now().toISOString(), tool: failed.tool, code: failed.code ?? "install_failed", message: failed.message ?? "The install did not finish.", result } : { state: "done", at: now().toISOString(), result };
-      }, (error) => {
-        state = { state: "failed", at: now().toISOString(), code: "install_failed", message: `The install did not finish: ${error.message}` };
-      });
-      return "started";
-    },
-    progress: () => state,
-    settled: () => current
-  };
-}
-var ZKAPI_RELEASE = "https://github.com/ethereum/zkapi/releases/download/clientd-v0.1.6", ZKAPI_REQUIRED, ZKAPI_RENAME, TOR_RELEASE = "https://dist.torproject.org/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve9) => {
-  execFile(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
-    if (!error) {
-      resolve9({ code: 0, stdout, stderr });
-      return;
-    }
-    const failure = error;
-    if (typeof failure.code === "string")
-      resolve9({ code: null, stdout: stdout ?? "", stderr: stderr ?? "", error: failure.code });
-    else
-      resolve9({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
-  });
-}), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve9) => {
-  execFile(executable, ["--version"], { cwd: options.cwd, env: options.env, timeout: VERSION_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (error, stdout) => {
-    if (error) {
-      const failure = error;
-      const detail = failure.signal ? `stopped by ${failure.signal}` : failure.code !== undefined ? `exit ${String(failure.code)}` : failure.message;
-      resolve9({ ok: false, detail });
-      return;
-    }
-    resolve9({ ok: true, stdout });
-  });
-});
-var init_managed_tools = __esm(() => {
-  init_file_lease();
-  ZKAPI_REQUIRED = [
-    "bin/zkapi-clientd",
-    "bin/zkapi-walletd",
-    "share/zkapi-clientd/build-info.json",
-    "share/zkapi-clientd/proof-setup/manifest.json",
-    "share/zkapi-clientd/proof-setup/request.pk",
-    "share/zkapi-clientd/proof-setup/request.vk",
-    "share/zkapi-clientd/proof-setup/withdrawal.pk",
-    "share/zkapi-clientd/proof-setup/withdrawal.vk"
-  ];
-  ZKAPI_RENAME = { "zkapi-clientd": "bin/zkapi-clientd", "zkapi-walletd": "bin/zkapi-walletd" };
-  MANAGED_TOOL_PINS = {
-    tor: {
-      tool: "tor",
-      label: "Tor",
-      version: "15.0.24",
-      versionLine: /^Tor version \d+\.\d+\.\d+/,
-      assets: {
-        "darwin-arm64": torMacAsset("tor-expert-bundle-macos-aarch64-15.0.24.tar.gz", "d47afd04b6c751129978390ad003d74ac8b88adfbb939350f0f89999e6570644", 18724201, ["tor/tor", "tor/libevent-2.1.7.dylib"]),
-        "darwin-x64": torMacAsset("tor-expert-bundle-macos-x86_64-15.0.24.tar.gz", "8acb0b590f6be34084dcb6d84009ac0c61cc7c5261b7a19d2ab94845aa9bd5b6", 19356806),
-        "linux-x64": torLinuxAsset("tor-expert-bundle-linux-x86_64-15.0.24.tar.gz", "8e012ec6815d7899cb64011582e2dade88e74119c6661068a2a3252de0ccd7f2", 32348376),
-        "linux-ia32": torLinuxAsset("tor-expert-bundle-linux-i686-15.0.24.tar.gz", "7537fea3478d05b8af25d7f8199c031b281f7015c32bb4177bef71f8e5100d9b", 25964591)
-      }
-    },
-    "zkapi-clientd": {
-      tool: "zkapi-clientd",
-      label: "zkAPI",
-      version: "0.1.6",
-      versionLine: /^zkapi-clientd 0\.1\.6(\s|$)/,
-      assets: {
-        "darwin-arm64": zkapiAsset("zkapi-clientd_0.1.6_darwin_arm64.tar.gz", "0e045245332fbe5d832d73f4ec1633bada2a5058032dd137b9e447f83bdc86c4", 22904346),
-        "darwin-x64": zkapiAsset("zkapi-clientd_0.1.6_darwin_amd64.tar.gz", "ac9bb3f0f64c3f9c5c271291f38065cb1b008b5d8b2eb5e998ea9b615fc54a12", 23547367),
-        "linux-x64": zkapiAsset("zkapi-clientd_0.1.6_linux_amd64.tar.gz", "41f9df6c24fd1e1491bc21fcc5be89289525c01f5a850bd64326a85152bbff95", 23826995),
-        "linux-arm64": zkapiAsset("zkapi-clientd_0.1.6_linux_arm64.tar.gz", "41549a752cdffdace74cdabd872ad71190d7509a9b307e54f5ee0e5f863b7cdf", 23612951)
-      }
-    }
-  };
-  MANAGED_TOOL_ORDER = ["tor", "zkapi-clientd"];
-  MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
-  DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
-  ManagedToolsError = class ManagedToolsError extends Error {
-    code;
-    tool;
-    constructor(code, message, tool) {
-      super(message);
-      this.code = code;
-      this.tool = tool;
-    }
-  };
-});
-
-// src/core/consult-transport-zkapi.ts
-var exports_consult_transport_zkapi = {};
-__export(exports_consult_transport_zkapi, {
-  zkapiWalletDirectory: () => zkapiWalletDirectory,
-  zkapiUsageToday: () => zkapiUsageToday,
-  zkapiUnresolvedSession: () => zkapiUnresolvedSession,
-  zkapiStageRows: () => zkapiStageRows,
-  zkapiRouteLabel: () => zkapiRouteLabel,
-  zkapiOutstandingFences: () => zkapiOutstandingFences,
-  zkapiMoneyStatus: () => zkapiMoneyStatus,
-  zkapiLastSession: () => zkapiLastSession,
-  zkapiFenceScope: () => zkapiFenceScope,
-  zkapiConsultReadiness: () => zkapiConsultReadiness,
-  validZkapiConsultQuestion: () => validZkapiConsultQuestion,
-  trustedFallbackExecutable: () => trustedFallbackExecutable,
-  standardExecutableDirectories: () => standardExecutableDirectories,
-  sendZkapiConsult: () => sendZkapiConsult,
-  resolveZkapiExecutable: () => resolveZkapiExecutable,
-  resolveZkapiConsultTransport: () => resolveZkapiConsultTransport,
-  resolveExecutable: () => resolveExecutable,
-  reserveZkapiRequest: () => reserveZkapiRequest,
-  recoverZkapiSession: () => recoverZkapiSession,
-  openZkapiConsultSession: () => openZkapiConsultSession,
-  inspectLoopbackListener: () => inspectLoopbackListener,
-  formatZkapiStageTable: () => formatZkapiStageTable,
-  defaultZkapiStatePath: () => defaultZkapiStatePath,
-  defaultZkapiConfinement: () => defaultZkapiConfinement,
-  darwinSandboxProfile: () => darwinSandboxProfile,
-  daemonEnvironment: () => daemonEnvironment,
-  confinementStatement: () => confinementStatement,
-  confinementLevel: () => confinementLevel,
-  abandonZkapiFence: () => abandonZkapiFence,
-  ZKAPI_SUPPORTED_DAEMON_VERSIONS: () => ZKAPI_SUPPORTED_DAEMON_VERSIONS,
-  ZKAPI_STAGE_LABELS: () => ZKAPI_STAGE_LABELS,
-  ZKAPI_SESSION_READY_TIMEOUT_MS: () => ZKAPI_SESSION_READY_TIMEOUT_MS,
-  ZKAPI_MAX_ALLOWANCE_MICRO_USD: () => ZKAPI_MAX_ALLOWANCE_MICRO_USD,
-  DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
-});
-import { spawn as spawn4, execFileSync as execFileSync2 } from "node:child_process";
-import { createHash as createHash39, randomUUID as randomUUID17 } from "node:crypto";
-import { accessSync as accessSync5, chmodSync as chmodSync15, constants as constants4, existsSync as existsSync35, mkdirSync as mkdirSync28, mkdtempSync, readdirSync as readdirSync7, readFileSync as readFileSync31, readlinkSync, realpathSync as realpathSync4, rmSync as rmSync12, statSync as statSync18, writeFileSync as writeFileSync10 } from "node:fs";
-import { createConnection } from "node:net";
-import { homedir as homedir40, tmpdir as tmpdir3 } from "node:os";
-import { delimiter as delimiter4, dirname as dirname38, isAbsolute as isAbsolute12, join as join52, resolve as resolvePath2 } from "node:path";
-function zkapiStageRows(timings) {
-  if (!timings)
-    return [];
-  return ZKAPI_STAGE_LABELS.filter(([key]) => typeof timings[key] === "number").map(([key, label]) => ({ label, ms: timings[key] }));
-}
-function formatZkapiStageTable(timings) {
-  const rows = zkapiStageRows(timings);
-  if (rows.length === 0)
-    return "no stage timings recorded";
-  const width = Math.max(...rows.map((row) => row.label.length));
-  const msWidth = Math.max(...rows.map((row) => String(row.ms).length));
-  return rows.map((row) => `${row.label.padEnd(width)}  ${String(row.ms).padStart(msWidth)} ms`).join(`
-`);
-}
-function resolveZkapiConsultTransport(profiles, resolveSecret, extra = {}) {
-  const routes = Object.values(profiles).filter((profile) => profile.provider === "zkapi" && profile.zkapi && profile.baseUrl);
-  if (routes.length !== 1)
-    return;
-  const route = routes[0];
-  let apiKey;
-  try {
-    apiKey = resolveSecret(route.secretRef);
-  } catch {
-    apiKey = undefined;
-  }
-  return {
-    baseUrl: route.baseUrl,
-    model: extra.model ?? route.model ?? "",
-    ...apiKey ? { apiKey } : {},
-    settings: route.zkapi,
-    ...extra.env ? { env: extra.env } : {},
-    ...extra.statePath ? { statePath: extra.statePath } : {}
-  };
-}
-function failure(code, outcome, networkIdentity, extra = {}) {
-  return { ok: false, error: { code, message: MESSAGES[code], outcome, networkIdentity, ...extra } };
-}
-function zkapiRouteLabel(receipt) {
-  if (receipt.keyReuse !== "verified_off" || receipt.inferenceAuth !== "verified") {
-    return "not anonymous: key isolation or local authentication not confirmed";
-  }
-  if (receipt.tor === "off")
-    return "payment privacy only (network address visible)";
-  if (receipt.postStopProbe === "still_reachable") {
-    return "payment privacy only: the daemon still reached the network after Tor stopped (Tor bypass observed)";
-  }
-  const confined = receipt.confinementSelfTest === "passed" ? receipt.confinement : "none";
-  if (confined === "loopback_filtered" && receipt.freshTorClient && receipt.settlement !== "not_confirmed" && receipt.settlement !== "pending") {
-    return "anonymous route (payment, key and network identity hidden)";
-  }
-  const unsettled = receipt.settlement === "not_confirmed" ? "; lease settlement not confirmed" : receipt.settlement === "pending" ? "; lease settlement pending" : "";
-  return `payment privacy; a fresh Tor client was started and the daemon reports SOCKS5 mode, but the actual route is not verified; ${confinementStatement(confined)}${unsettled}`;
-}
-function networkIdentityFor(receipt) {
-  if (receipt.tor === "off" || receipt.postStopProbe === "still_reachable")
-    return "visible";
-  return zkapiRouteLabel(receipt).startsWith("anonymous route") ? "hidden" : "not_verified";
-}
-function zkapiMoneyStatus(settings, now) {
-  const required3 = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((item) => item.id);
-  const currentVersion = settings.acknowledgements.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION;
-  const accepted = currentVersion ? required3.filter((id) => settings.acknowledgements.accepted.includes(id)).length : 0;
-  return {
-    acknowledgements: { complete: accepted === required3.length, accepted, required: required3.length },
-    expiryEstimate: expiryEstimate(settings.fundingDate, now),
-    depositAboveSuggestedCeiling: (settings.depositUsd ?? 0) > ZKAPI_SUGGESTED_DEPOSIT_CEILING_USD
-  };
-}
-function expiryEstimate(fundingDate, now) {
-  if (!fundingDate)
-    return { state: "unknown", notice: "unknown" };
-  const funded = parseIsoDate(fundingDate);
-  const today = parseIsoDate(now.toISOString().slice(0, 10));
-  if (!funded || !today || funded.getTime() > today.getTime()) {
-    return { state: "invalid", fundingDate, notice: "unknown" };
-  }
-  const expiry = new Date(funded.getTime() + ZKAPI_NOTE_TTL_DAYS * DAY_MS);
-  const daysLeft = Math.round((expiry.getTime() - today.getTime()) / DAY_MS);
-  const expiryDate = expiry.toISOString().slice(0, 10);
-  if (daysLeft <= 0)
-    return { state: "expired", fundingDate, expiryDate, daysLeft: 0, notice: "expired" };
-  const [ten, five, two] = ZKAPI_EXPIRY_NOTICE_DAYS;
-  const notice = daysLeft <= two ? "two_days" : daysLeft <= five ? "five_days" : daysLeft <= ten ? "ten_days" : "none";
-  return { state: "active", fundingDate, expiryDate, daysLeft, notice };
-}
-function settingsBlockers(money) {
-  const blockers = [];
-  if (!money.acknowledgements.complete)
-    blockers.push("acknowledgements_incomplete");
-  if (money.expiryEstimate.state === "unknown")
-    blockers.push("funding_date_missing");
-  if (money.expiryEstimate.state === "invalid")
-    blockers.push("funding_date_invalid");
-  if (money.expiryEstimate.state === "expired")
-    blockers.push("note_expired");
-  return blockers;
-}
-function versionSupported(version) {
-  const normalized = version?.replace(/^v/, "");
-  return ZKAPI_SUPPORTED_DAEMON_VERSIONS.includes(normalized ?? "");
-}
-function confinementLevel(policy) {
-  if (policy.nonLoopback !== "denied" || policy.unixSockets !== "denied")
-    return "none";
-  return policy.loopbackOutbound === "session_ports_only" ? "loopback_filtered" : "non_loopback_blocked";
-}
-function confinementStatement(level) {
-  if (level === "loopback_filtered") {
-    return "network confinement allowed only this session's Tor and daemon ports";
-  }
-  if (level === "non_loopback_blocked") {
-    return "in this session's sandbox probe, a TCP connection to a non-routable address failed at once inside the sandbox but not outside it, the system resolver socket was unreachable inside but reachable outside, and a UDP send was refused inside but accepted locally outside; loopback is not port-filtered";
-  }
-  return "no network confinement";
-}
-function darwinSandboxProfile(policy, ports) {
-  const rules = ["(version 1)", "(allow default)"];
-  if (policy.nonLoopback === "denied" || policy.unixSockets === "denied") {
-    rules.push("(deny network*)");
-    rules.push('(allow network-bind (local ip "localhost:*"))');
-    rules.push('(allow network-inbound (local ip "localhost:*"))');
-    if (policy.loopbackOutbound === "any") {
-      rules.push('(allow network-outbound (remote ip "localhost:*"))');
-    } else {
-      rules.push(`(allow network-outbound (remote ip "localhost:${ports.tor}"))`);
-      rules.push(`(allow network-outbound (remote ip "localhost:${ports.daemon}"))`);
-    }
-  }
-  return rules.join("");
-}
-function runSelfTestProbe(argv, env) {
-  try {
-    return JSON.parse(execFileSync2(argv[0], argv.slice(1), {
-      encoding: "utf8",
-      timeout: 1e4,
-      env,
-      stdio: ["ignore", "pipe", "ignore"]
-    }));
-  } catch {
-    return;
-  }
-}
-function defaultZkapiConfinement() {
-  if (process.platform === "darwin" && existsSync35("/usr/bin/sandbox-exec")) {
-    const level = confinementLevel(DARWIN_POLICY);
-    return {
-      level,
-      limit: `macOS sandbox available; each session self-tests it, and when that passes: ${confinementStatement(level)}`,
-      wrap: (argv, ports) => ["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), ...argv],
-      selfTest: async (workDir, env) => {
-        const script = join52(workDir, "confinement-self-test.cjs");
-        writeFileSync10(script, SELF_TEST_SCRIPT, { mode: 384 });
-        const outside = runSelfTestProbe([process.execPath, script], env);
-        const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, { tor: 1, daemon: 1 }), process.execPath, script], env);
-        return outside?.loopback === "connected" && outside.udp === "sent" && outside.resolver === "connected" && (outside.tcp === "timeout" || outside.tcp === "failed_slow") && inside?.loopback === "connected" && inside.udp === "failed" && inside.resolver === "failed" && inside.tcp === "failed_fast";
-      }
-    };
-  }
-  return {
-    level: "none",
-    limit: "no network confinement is implemented on this platform",
-    wrap: (argv) => [...argv],
-    selfTest: async () => false
-  };
-}
-function defaultZkapiStatePath(home2 = homedir40()) {
-  return join52(home2, ".olympus", "zkapi-consult-state.json");
-}
-function utcDay(now) {
-  return now.toISOString().slice(0, 10);
-}
-function readState5(path) {
-  if (!existsSync35(path))
-    return;
-  const parsed = JSON.parse(readFileSync31(path, "utf8"));
-  if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
-    throw new Error("zkAPI state record is malformed");
-  }
-  return parsed;
-}
-function zkapiUsageToday(path, now) {
-  const state = readState5(path);
-  return state && state.day === utcDay(now) ? { count: state.count, reservedMicroUsd: state.reservedMicroUsd } : { count: 0, reservedMicroUsd: 0 };
-}
-function zkapiLastSession(path) {
-  return readState5(path)?.lastSession;
-}
-function zkapiOutstandingFences(path) {
-  return readState5(path)?.fences ?? {};
-}
-function zkapiUnresolvedSession(path, scope) {
-  const fences = zkapiOutstandingFences(path);
-  return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
-}
-function zkapiWalletDirectory(env) {
-  const home2 = env.HOME?.trim() || homedir40();
-  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join52(home2, "Library", "Application Support", "zkapi-clientd") : join52(env.XDG_CONFIG_HOME?.trim() || join52(home2, ".config"), "zkapi-clientd"));
-  const absolute2 = resolvePath2(configured);
-  try {
-    return realpathSync4(absolute2);
-  } catch {
-    return absolute2;
-  }
-}
-function zkapiFenceScope(input) {
-  return createHash39("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
-}
-function abandonZkapiFence(path, scope, now) {
-  let found = false;
-  updateState(path, now, (state) => {
-    const fence = state.fences?.[scope];
-    if (!fence)
-      return;
-    found = true;
-    const { [scope]: _abandoned, ...others } = state.fences ?? {};
-    const { fences: _all, ...rest } = state;
-    return {
-      ...rest,
-      ...Object.keys(others).length > 0 ? { fences: others } : {},
-      abandonedFences: { ...state.abandonedFences, [scope]: { ...fence, abandonedAt: now.toISOString() } }
-    };
-  });
-  return found;
-}
-function updateState(path, now, mutate) {
-  mkdirSync28(dirname38(path), { recursive: true, mode: 448 });
-  return withFileLeaseSync(path, (lease) => {
-    const day = utcDay(now);
-    const current = readState5(path);
-    const base = current && current.day === day ? current : {
-      version: 1,
-      day,
-      count: 0,
-      reservedMicroUsd: 0,
-      ...current?.lastSession ? { lastSession: current.lastSession } : {},
-      ...current?.fences ? { fences: current.fences } : {},
-      ...current?.abandonedFences ? { abandonedFences: current.abandonedFences } : {},
-      ...current?.running ? { running: current.running } : {}
-    };
-    const next = mutate(base);
-    if (!next)
-      return base;
-    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify(next)}
-`));
-    return next;
-  }, { acquireTimeoutMs: 5000 });
-}
-function ownerLimits(settings) {
-  return {
-    ...settings.dailyRequestCap !== undefined ? { requestCap: settings.dailyRequestCap } : {},
-    ...settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1e6) } : {}
-  };
-}
-function reserveZkapiRequest(path, limits, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
-  let refusal;
-  updateState(path, now, (state) => {
-    if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
-      refusal = "daily_cap_reached";
-      return;
-    }
-    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits.spendCapMicroUsd) {
-      refusal = "spend_cap_reached";
-      return;
-    }
-    return {
-      ...state,
-      count: state.count + 1,
-      reservedMicroUsd: state.reservedMicroUsd + allowanceMicroUsd,
-      fences: (() => {
-        const { scope, ...facts } = fence;
-        return { ...state.fences, [scope]: { ...facts, at: now.toISOString() } };
-      })()
-    };
-  });
-  return refusal ? { reserved: false, reason: refusal } : { reserved: true };
-}
-function supervise(role, watchdog, argv, env, onLine, onExit) {
-  const child = spawn4(process.execPath, [watchdog, String(process.pid), ...argv], { env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
-  const handle = {
-    role,
-    child,
-    pgid: child.pid ?? -1,
-    leader: child.pid ? processInstanceIdentity(child.pid) : undefined,
-    gone: false,
-    leaderExited: false,
-    childExited: false,
-    deliberate: false,
-    go: () => {
-      child.stdin?.write(`go
-`);
-    }
-  };
-  let reported = false;
-  const report = () => {
-    if (reported)
-      return;
-    reported = true;
-    onExit(handle);
-  };
-  const exited = () => {
-    handle.leaderExited = true;
-    report();
-  };
-  child.on("exit", exited);
-  child.on("error", exited);
-  child.stdin?.on("error", () => {
-    return;
-  });
-  for (const stream of [child.stdout, child.stderr]) {
-    let pending = "";
-    stream?.setEncoding("utf8");
-    stream?.on("data", (chunk) => {
-      pending += chunk;
-      let index = pending.indexOf(`
-`);
-      while (index >= 0) {
-        const line = pending.slice(0, index);
-        if (line === WATCHDOG_CHILD_EXITED) {
-          handle.childExited = true;
-          report();
-        } else {
-          onLine(line);
-        }
-        pending = pending.slice(index + 1);
-        index = pending.indexOf(`
-`);
-      }
-      if (pending.length > 64 * 1024)
-        pending = "";
-    });
-  }
-  return handle;
-}
-function groupAlive(pgid) {
-  if (pgid <= 0)
-    return false;
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-async function stopGroup(pgid, stillOurs = () => true) {
-  if (!groupAlive(pgid))
-    return true;
-  if (!stillOurs())
-    return false;
-  try {
-    process.kill(-pgid, "SIGTERM");
-  } catch {}
-  const deadline = Date.now() + STOP_GRACE_MS;
-  while (groupAlive(pgid) && Date.now() < deadline)
-    await sleep2(POLL_MS);
-  if (!groupAlive(pgid))
-    return true;
-  if (!stillOurs())
-    return false;
-  try {
-    process.kill(-pgid, "SIGKILL");
-  } catch {}
-  const killDeadline = Date.now() + KILL_GRACE_MS;
-  while (groupAlive(pgid) && Date.now() < killDeadline)
-    await sleep2(POLL_MS);
-  return !groupAlive(pgid);
-}
-function activeGroupIsOurs(handle) {
-  if (!handle.leader)
-    return false;
-  try {
-    process.kill(handle.pgid, 0);
-  } catch (error) {
-    if (error.code !== "EPERM")
-      return false;
-  }
-  const current = processInstanceIdentity(handle.pgid);
-  if (!current)
-    return false;
-  if (handle.leader.bootId && current.bootId && handle.leader.bootId !== current.bootId)
-    return false;
-  return current.platform === handle.leader.platform && current.mechanism === handle.leader.mechanism && current.startTime === handle.leader.startTime;
-}
-async function stopOwned(handle) {
-  if (handle.gone)
-    return true;
-  const stopped = await stopGroup(handle.pgid, () => activeGroupIsOurs(handle));
-  if (stopped)
-    handle.gone = true;
-  return stopped;
-}
-function currentBootId() {
-  return processInstanceIdentity(process.pid)?.bootId;
-}
-function recordedGroupState(group, recordedBootId) {
-  const boot = currentBootId();
-  const groupBoot = group.leader?.bootId ?? recordedBootId;
-  if (groupBoot && boot && groupBoot !== boot)
-    return "gone";
-  if (!groupAlive(group.pgid))
-    return "gone";
-  let leaderAlive = true;
-  try {
-    process.kill(group.pgid, 0);
-  } catch (error) {
-    leaderAlive = error.code === "EPERM";
-  }
-  if (!leaderAlive)
-    return "unknown";
-  const current = processInstanceIdentity(group.pgid);
-  if (!group.leader || !current)
-    return "unknown";
-  if (group.leader.platform !== current.platform || group.leader.mechanism !== current.mechanism)
-    return "unknown";
-  return group.leader.startTime === current.startTime ? "ours" : "gone";
-}
-function supervisorAlive(supervisor) {
-  if (supervisor.pid === process.pid)
-    return false;
-  const boot = currentBootId();
-  if (supervisor.instance?.bootId && boot && supervisor.instance.bootId !== boot)
-    return false;
-  try {
-    process.kill(supervisor.pid, 0);
-  } catch (error) {
-    if (error.code !== "EPERM")
-      return false;
-  }
-  const current = processInstanceIdentity(supervisor.pid);
-  if (!supervisor.instance || !current)
-    return true;
-  return supervisor.instance.mechanism !== current.mechanism || supervisor.instance.startTime === current.startTime;
-}
-async function recoverStrandedGroups(statePath, now) {
-  const running = readState5(statePath)?.running;
-  if (!running)
-    return "clear";
-  if (supervisorAlive(running.supervisor))
-    return "busy";
-  const recordedBoot = running.supervisor.instance?.bootId;
-  let allGone = true;
-  for (const group of running.groups) {
-    const state = recordedGroupState(group, recordedBoot);
-    if (state === "unknown") {
-      allGone = false;
-      continue;
-    }
-    if (state === "ours" && !await stopGroup(group.pgid, () => recordedGroupState(group, recordedBoot) === "ours")) {
-      allGone = false;
-    }
-  }
-  if (!allGone)
-    return "stranded";
-  if (running.workDir) {
-    try {
-      rmSync12(running.workDir, { recursive: true, force: true });
-    } catch {}
-  }
-  updateState(statePath, now, (state) => {
-    const { running: _gone, ...rest } = state;
-    return rest;
-  });
-  return "clear";
-}
-function processGroupOf(pid) {
-  try {
-    if (process.platform === "linux") {
-      const stat3 = readFileSync31(`/proc/${pid}/stat`, "utf8");
-      const fields = stat3.slice(stat3.lastIndexOf(")") + 1).trim().split(/\s+/);
-      const pgrp = Number(fields[2]);
-      return Number.isInteger(pgrp) ? pgrp : undefined;
-    }
-    const out = execFileSync2("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
-      encoding: "utf8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim();
-    return /^\d+$/.test(out) ? Number(out) : undefined;
-  } catch {
-    return;
-  }
-}
-function childEnvironment(env) {
-  const out = {};
-  for (const key of CHILD_ENV_KEYS) {
-    const value = env[key];
-    if (value)
-      out[key] = value;
-  }
-  return out;
-}
-function daemonEnvironment(base, daemonExecutable) {
-  let real = daemonExecutable;
-  try {
-    real = realpathSync4(daemonExecutable);
-  } catch {}
-  const installBin = dirname38(real);
-  const rest = (base.PATH ?? "").split(delimiter4).filter((entry) => entry && entry !== installBin);
-  return { ...base, PATH: [installBin, ...rest].join(delimiter4) };
-}
-function standardExecutableDirectories(env, platform2 = process.platform) {
-  const home2 = env.HOME?.trim();
-  const local = home2 && isAbsolute12(home2) ? [join52(home2, ".local", "bin")] : [];
-  if (platform2 === "darwin")
-    return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
-  if (platform2 === "linux")
-    return [...local, "/usr/local/bin"];
-  return local;
-}
-function trustedChain(path, probe, uid) {
-  for (let current = path;; current = dirname38(current)) {
-    const stats = probe.stat(current);
-    if (current !== path && !stats.isDirectory())
-      return false;
-    if (stats.uid !== uid && stats.uid !== 0)
-      return false;
-    if ((stats.mode & 18) !== 0)
-      return false;
-    if (dirname38(current) === current)
-      return true;
-  }
-}
-function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) {
-  const uid = probe.uid();
-  if (uid === undefined)
-    return;
-  try {
-    const real = probe.realpath(candidate);
-    const target = probe.stat(real);
-    if (!target.isFile() || !probe.executable(real))
-      return;
-    if (!trustedChain(real, probe, uid))
-      return;
-    if (!trustedChain(probe.realpath(dirname38(candidate)), probe, uid))
-      return;
-    return real;
-  } catch {
-    return;
-  }
-}
-function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
-  const pathDirectories = (env.PATH ?? "").split(delimiter4).filter(Boolean);
-  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join52(dir, name));
-  for (const candidate of candidates) {
-    try {
-      accessSync5(candidate, constants4.X_OK);
-      if (statSync18(candidate).isFile())
-        return candidate;
-    } catch {}
-  }
-  if (explicit)
-    return;
-  for (const dir of standardExecutableDirectories(env, platform2)) {
-    if (pathDirectories.includes(dir))
-      continue;
-    const found = trustedFallbackExecutable(join52(dir, name), trust);
-    if (found)
-      return found;
-  }
-  return;
-}
-function sleep2(ms) {
-  return new Promise((resolve9) => setTimeout(resolve9, ms));
-}
-async function waitFor(condition, timeoutMs, options = {}) {
-  const deadline = Date.now() + timeoutMs;
-  for (;; ) {
-    if (await condition(Math.max(0, deadline - Date.now())))
-      return true;
-    if (options.signal?.aborted || options.giveUp?.())
-      return false;
-    if (Date.now() >= deadline)
-      return false;
-    await sleep2(Math.min(options.pollMs ?? POLL_MS, Math.max(0, deadline - Date.now())));
-  }
-}
-function portAnswers(port) {
-  return new Promise((resolve9) => {
-    const socket = createConnection({ host: "127.0.0.1", port });
-    const done = (value) => {
-      socket.destroy();
-      resolve9(value);
-    };
-    socket.setTimeout(1000, () => done(false));
-    socket.once("connect", () => done(true));
-    socket.once("error", () => done(false));
-  });
-}
-function parseDaemonLine(facts, line) {
-  let match = /zkAPI client (\S+) listening at http:\/\/(\S+)\/v1 \(zkapi\); (.+)$/.exec(line);
-  if (match) {
-    facts.version = match[1];
-    facts.listen = match[2];
-    facts.transport = match[3].trim();
-    return;
-  }
-  if (line.includes("Ephemeral key isolation: fresh OpenRouter key for every completion")) {
-    facts.keyReuse = "off";
-    return;
-  }
-  if (/Ephemeral key reuse enabled for up to \d+ seconds/.test(line)) {
-    facts.keyReuse = "on";
-    return;
-  }
-  if (line.includes("Use zkapi-clientd config --api-key to configure your client")) {
-    facts.inferenceAuth = "required";
-    return;
-  }
-  if (line.includes("Localhost inference needs no API key")) {
-    facts.inferenceAuth = "not_required";
-    return;
-  }
-  match = /request started method=\S+ route=(\S+) request=(\d+)/.exec(line);
-  if (match) {
-    facts.requests.set(Number(match[2]), { route: match[1], keys: [] });
-    return;
-  }
-  match = /request key selected request=(\d+) key_ref=(\d+) source=(fresh|reused)/.exec(line);
-  if (match) {
-    facts.requests.get(Number(match[1]))?.keys.push({ keyRef: Number(match[2]), source: match[3] });
-    return;
-  }
-  match = /request \S+ method=\S+ route=\S+ status=(\d+) duration=\S+ request=(\d+)/.exec(line);
-  if (match) {
-    const request = facts.requests.get(Number(match[2]));
-    if (request)
-      request.finished = { status: Number(match[1]) };
-    return;
-  }
-  match = /automatic settlement result key_ref=(\d+) ready=(true|false)/.exec(line);
-  if (match)
-    facts.settled.set(Number(match[1]), match[2] === "true");
-}
-async function probeRequest(fetchImpl, url, init, signal, timeoutMs = PROBE_TIMEOUT_MS) {
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const onAbort = () => controller.abort();
-  signal?.addEventListener("abort", onAbort, { once: true });
-  try {
-    const response = await fetchImpl(url, { ...init, redirect: "error", signal: controller.signal });
-    const body = await readBounded(response, PROBE_MAX_BYTES);
-    return { status: response.status, headers: response.headers, body: body.ok ? body.text : "" };
-  } catch {
-    return;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-function daemonErrorEnvelope(body) {
-  try {
-    const error = JSON.parse(body).error;
-    if (!error || typeof error.code !== "string" || error.type !== error.code || typeof error.message !== "string" || error.param !== null) {
-      return;
-    }
-    return error.code;
-  } catch {
-    return;
-  }
-}
-function healthFingerprint(response) {
-  return Boolean(response) && response.status === 200 && response.body === '{"status":"ok"}' && response.headers.get("cache-control") === "no-store" && response.headers.get("x-content-type-options") === "nosniff";
-}
-function modelListing(body, model) {
-  try {
-    const data = JSON.parse(body).data;
-    if (!Array.isArray(data) || data.length === 0)
-      return { listed: false };
-    const entry = data.find((item) => item.id === model);
-    const allowance = entry?.oa_request_limit_micro_usd;
-    return typeof allowance === "number" && Number.isInteger(allowance) && allowance > 0 ? { listed: true, allowance } : { listed: true };
-  } catch {
-    return { listed: false };
-  }
-}
-function inspectLoopbackListener(port) {
-  let pids;
-  if (process.platform === "darwin") {
-    try {
-      const out = execFileSync2("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
-        encoding: "utf8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "ignore"]
-      });
-      pids = [...new Set(out.split(`
-`).filter((line) => /^p\d+$/.test(line)).map((line) => Number(line.slice(1))))];
-    } catch (error) {
-      return error.status === 1 ? { kind: "not_visible" } : { kind: "unavailable" };
-    }
-  } else if (process.platform === "linux") {
-    const found = linuxListenerPids(port);
-    if (!Array.isArray(found))
-      return found;
-    pids = found;
-  } else {
-    return { kind: "unavailable" };
-  }
-  if (pids.length === 0)
-    return { kind: "not_visible" };
-  const pgids = new Set(pids.map((pid) => processGroupOf(pid)));
-  const [pgid] = [...pgids];
-  return pgids.size === 1 && pgid !== undefined ? { kind: "found", pid: pids[0], pgid } : { kind: "found", pid: pids[0] };
-}
-function linuxListenerPids(port) {
-  const inodes = new Set;
-  const hexPort = port.toString(16).toUpperCase().padStart(4, "0");
-  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
-    let text;
-    try {
-      text = readFileSync31(table, "utf8");
-    } catch {
-      continue;
-    }
-    for (const line of text.split(`
-`).slice(1)) {
-      const fields = line.trim().split(/\s+/);
-      if (fields.length < 10 || fields[3] !== "0A" || !fields[1]?.endsWith(`:${hexPort}`))
-        continue;
-      if (fields[9] && fields[9] !== "0")
-        inodes.add(fields[9]);
-    }
-  }
-  if (inodes.size === 0)
-    return { kind: "not_visible" };
-  let entries;
-  try {
-    entries = readdirSync7("/proc").filter((name) => /^\d+$/.test(name));
-  } catch {
-    return { kind: "unavailable" };
-  }
-  const owners = new Set;
-  const seen = new Set;
-  for (const pid of entries) {
-    let fds;
-    try {
-      fds = readdirSync7(`/proc/${pid}/fd`);
-    } catch {
-      continue;
-    }
-    for (const fd of fds) {
-      try {
-        const match = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`));
-        if (match && inodes.has(match[1])) {
-          owners.add(Number(pid));
-          seen.add(match[1]);
-        }
-      } catch {}
-    }
-  }
-  if (seen.size !== inodes.size)
-    return { kind: "unavailable" };
-  return [...owners];
-}
-function resolveZkapiExecutable(name, explicit, env) {
-  if (!explicit) {
-    const managed = managedToolExecutable(name, { env });
-    if (managed)
-      return managed;
-  }
-  return resolveExecutable(name, explicit, env);
-}
-async function zkapiConsultReadiness(options) {
-  const now = (options.now ?? (() => new Date))();
-  const env = options.env ?? process.env;
-  const settings = options.settings;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
-  const money = zkapiMoneyStatus(settings, now);
-  const blockers = settingsBlockers(money);
-  const apiKeyConfigured = Boolean(options.apiKey) || options.apiKeyPresent === true;
-  if (!apiKeyConfigured)
-    blockers.push("daemon_api_key_missing");
-  const daemonExecutable = resolveZkapiExecutable("zkapi-clientd", settings.daemonExecutable, env);
-  let daemonVersion;
-  if (!daemonExecutable) {
-    blockers.push("daemon_not_found");
-  } else {
-    try {
-      const out = execFileSync2(daemonExecutable, ["--version"], {
-        encoding: "utf8",
-        timeout: 5000,
-        env: childEnvironment(env),
-        stdio: ["ignore", "pipe", "ignore"]
-      });
-      daemonVersion = /^zkapi-clientd (\S+)/.exec(out.trim())?.[1];
-    } catch {
-      daemonVersion = undefined;
-    }
-    if (!versionSupported(daemonVersion))
-      blockers.push("daemon_version_unsupported");
-  }
-  const torExecutable = settings.tor === "per_consult" ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
-  if (settings.tor === "per_consult" && !torExecutable)
-    blockers.push("tor_not_found");
-  const daemonPort = await portAnswers(Number(new URL(options.baseUrl).port || 80)) ? "in_use" : "free";
-  if (daemonPort === "in_use")
-    blockers.push("daemon_already_running");
-  const torPort = settings.tor === "per_consult" ? await portAnswers(settings.torSocksPort) ? "in_use" : "free" : "not_used";
-  if (torPort === "in_use")
-    blockers.push("tor_port_busy");
-  const statePath = options.statePath ?? defaultZkapiStatePath();
-  let usage = { count: 0, reservedMicroUsd: 0 };
-  let lastSession;
-  let unresolvedSession = false;
-  const currentScope = zkapiFenceScope({ env });
-  let fences = [];
-  let stranded;
-  try {
-    const state = readState5(statePath);
-    usage = zkapiUsageToday(statePath, now);
-    lastSession = zkapiLastSession(statePath);
-    fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));
-    unresolvedSession = fences.length > 0;
-    if (state?.running) {
-      stranded = {
-        supervisorPid: state.running.supervisor.pid,
-        supervisorRunning: supervisorAlive(state.running.supervisor),
-        groups: state.running.groups.map((group) => ({ role: group.role, pgid: group.pgid }))
-      };
-    }
-  } catch {
-    blockers.push("state_unavailable");
-  }
-  if (fences.some((fence) => fence.thisWallet))
-    blockers.push("unresolved_session");
-  if (fences.some((fence) => !fence.thisWallet))
-    blockers.push("unresolved_session_other_wallet");
-  if (stranded && !stranded.supervisorRunning)
-    blockers.push("stranded_processes");
-  const limit = ownerLimits(settings);
-  if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
-    blockers.push("daily_cap_reached");
-  if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
-    blockers.push("spend_cap_reached");
-  }
-  return {
-    ...daemonExecutable ? { daemonExecutable } : {},
-    ...daemonVersion ? { daemonVersion } : {},
-    ...torExecutable ? { torExecutable } : {},
-    tor: settings.tor,
-    confinement: { level: confinement.level, limit: confinement.limit },
-    daemonPort,
-    torPort,
-    apiKeyConfigured,
-    money,
-    requestsToday: { count: usage.count, ...settings.dailyRequestCap !== undefined ? { cap: settings.dailyRequestCap } : {} },
-    spendToday: {
-      reservedUsd: usage.reservedMicroUsd / 1e6,
-      ...settings.dailySpendCapUsd !== undefined ? { capUsd: settings.dailySpendCapUsd } : {}
-    },
-    unresolvedSession,
-    fences,
-    ...stranded ? { stranded } : {},
-    ...lastSession ? { lastSession } : {},
-    routeLabel: lastSession ? zkapiRouteLabel(lastSession) : settings.tor === "off" ? "payment privacy only (network address visible); not yet verified by a consult" : `not yet verified by a consult; on this platform: ${confinement.limit}`,
-    blockers
-  };
-}
-function deferred() {
-  let settled = false;
-  let resolve9;
-  const promise = new Promise((done) => {
-    resolve9 = (value) => {
-      if (settled)
-        return;
-      settled = true;
-      done(value);
-    };
-  });
-  return { promise, resolve: resolve9, settled: () => settled };
-}
-async function openZkapiConsultSession(options, control = {}) {
-  return openSession(options, control, false);
-}
-async function sendZkapiConsult(question, options, control = {}) {
-  const initialIdentity = options.settings.tor === "off" ? "visible" : "not_verified";
-  if (typeof question !== "string" || !validQuestion(question)) {
-    return failure("invalid_question", "not_sent", initialIdentity);
-  }
-  return oneShot(question, false, options, control.signal);
-}
-async function recoverZkapiSession(options, control = {}) {
-  return oneShot(RECOVERY_QUESTION, true, options, control.signal);
-}
-async function oneShot(question, recovery, options, signal) {
-  const opened = await openSession(options, { signal }, recovery);
-  if (!opened.ok)
-    return opened;
-  await opened.session.send(question, { signal });
-  const result = await opened.session.finished;
-  if (signal?.aborted && (result.ok || result.error.outcome !== "not_sent" && !SESSION_OWNED_FAILURES.has(result.error.code))) {
-    const receipt = result.ok ? result.receipt : result.error.receipt;
-    const identity = result.ok ? result.networkIdentity : result.error.networkIdentity;
-    return failure("aborted", "unknown", identity, receipt ? { receipt } : {});
-  }
-  return result;
-}
-async function openSession(options, control, recovery) {
-  const initialIdentity = options.settings.tor === "off" ? "visible" : "not_verified";
-  if (zkapiConsultInFlight)
-    return failure("busy", "not_sent", initialIdentity);
-  zkapiConsultInFlight = true;
-  const statePath = options.statePath ?? defaultZkapiStatePath();
-  const sent = { dispatched: false };
-  const clock = options.clock ?? (() => performance.now());
-  const startedAt = sampleClock(clock);
-  const bridge = {
-    state: "opening",
-    openSignal: control.signal,
-    readyTimeoutMs: control.readyTimeoutMs ?? ZKAPI_SESSION_READY_TIMEOUT_MS,
-    cancelRequested: undefined,
-    cancel: undefined,
-    ready: deferred(),
-    dispatch: deferred(),
-    reply: deferred()
-  };
-  const requestCancel = (reason) => {
-    if (bridge.cancel)
-      bridge.cancel(reason);
-    else
-      bridge.cancelRequested ??= reason;
-  };
-  const openDeadline = control.deadlineMs !== undefined ? setTimeout(() => {
-    if (bridge.state === "opening")
-      requestCancel("deadline");
-  }, control.deadlineMs) : undefined;
-  let leaseHeld = false;
-  const finished = (async () => {
-    try {
-      mkdirSync28(dirname38(statePath), { recursive: true, mode: 448 });
-      const result2 = await withFileLease(`${statePath}.session`, () => {
-        leaseHeld = true;
-        return runSession(recovery, options, statePath, bridge, sent, clock, startedAt);
-      }, { acquireTimeoutMs: 50 });
-      const receipt = result2.ok ? result2.receipt : result2.error.receipt;
-      if (receipt && receipt.stageMs?.totalMs === undefined) {
-        receipt.stageMs = withTiming(receipt.stageMs ?? {}, "totalMs", elapsedMs(clock, startedAt));
-        if (Object.keys(receipt.stageMs).length === 0)
-          delete receipt.stageMs;
-      }
-      return result2;
-    } catch (error) {
-      const total = elapsedMs(clock, startedAt);
-      let stageMs = withTiming({}, "totalMs", total);
-      if (!leaseHeld)
-        stageMs = withTiming(stageMs, "leaseAcquireMs", total);
-      const timed = Object.keys(stageMs).length > 0 ? { stageMs } : {};
-      if (error instanceof FileLeaseBusyError)
-        return failure("busy", "not_sent", initialIdentity, timed);
-      return failure("internal_error", sent.dispatched ? "unknown" : "not_sent", initialIdentity, timed);
-    } finally {
-      zkapiConsultInFlight = false;
-    }
-  })().then((result2) => {
-    clearTimeout(openDeadline);
-    bridge.state = sent.dispatched ? "finished" : "cancelled";
-    if (!result2.ok)
-      bridge.reply.resolve({ kind: "failed", error: result2.error });
-    return result2;
-  });
-  const session = {
-    get state() {
-      return bridge.state;
-    },
-    finished,
-    cancel: () => requestCancel("cancel"),
-    send: async (question, sendControl = {}) => {
-      if (typeof question !== "string" || !validQuestion(question)) {
-        return { kind: "failed", error: failure("invalid_question", "not_sent", initialIdentity).error };
-      }
-      if (bridge.state !== "ready") {
-        return { kind: "failed", error: failure("session_spent", "not_sent", initialIdentity).error };
-      }
-      bridge.state = "authorizing";
-      const deadlineAt = sendControl.deadlineMs !== undefined ? performance.now() + sendControl.deadlineMs : undefined;
-      bridge.dispatch.resolve({
-        question,
-        signal: sendControl.signal,
-        authorize: sendControl.authorize,
-        deadlineAt
-      });
-      return bridge.reply.promise;
-    }
-  };
-  const ready = await Promise.race([
-    bridge.ready.promise.then(() => true),
-    finished.then(() => false)
-  ]);
-  if (ready) {
-    clearTimeout(openDeadline);
-    return { ok: true, session };
-  }
-  const result = await finished;
-  return result.ok ? failure("internal_error", "unknown", result.networkIdentity, { receipt: result.receipt }) : result;
-}
-async function runSession(recovery, options, statePath, bridge, sent, clock, startedAt) {
-  let timings = withTiming({}, "leaseAcquireMs", elapsedMs(clock, startedAt));
-  let openStage;
-  let lastSampleAt;
-  const stage = (key) => {
-    const at = sampleClock(clock);
-    lastSampleAt = at;
-    if (openStage)
-      timings = withTiming(timings, openStage.key, durationMs(openStage.at, at));
-    openStage = key ? { key, at } : undefined;
-  };
-  const now = options.now ?? (() => new Date);
-  const settings = options.settings;
-  const env = options.env ?? process.env;
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const inspect = options.inspectListener ?? inspectLoopbackListener;
-  const confinement = options.confinement ?? defaultZkapiConfinement();
-  const origin = new URL(options.baseUrl).origin;
-  const daemonPort = Number(new URL(options.baseUrl).port || 80);
-  const perConsultTor = settings.tor === "per_consult";
-  const receipt = {
-    recovery,
-    keyReuse: "not_verified",
-    inferenceAuth: "not_verified",
-    tor: perConsultTor ? "per_consult" : "off",
-    freshTorClient: false,
-    confinement: perConsultTor ? confinement.level : "none",
-    confinementSelfTest: "not_run",
-    postStopProbe: "not_run",
-    settlement: "no_lease",
-    fence: "clear"
-  };
-  const snapshot = () => Object.keys(timings).length > 0 ? { ...receipt, stageMs: { ...timings } } : { ...receipt };
-  const pendingSnapshot3 = () => ({ ...snapshot(), settlement: "pending", fence: "held" });
-  const identity = () => perConsultTor ? networkIdentityFor(receipt) : "visible";
-  const fail = (code, extra = {}) => failure(code, sent.dispatched ? extra.httpStatus ? "sent_failed" : "unknown" : "not_sent", identity(), { ...extra, receipt: snapshot() });
-  const sessionAbort = new AbortController;
-  const sessionSignal = sessionAbort.signal;
-  let abortCause = "aborted";
-  const cancelBeforeDispatch = (reason) => {
-    if (sessionSignal.aborted)
-      return;
-    abortCause = reason === "deadline" ? "timeout" : "aborted";
-    sessionAbort.abort();
-  };
-  let detachCaller;
-  bridge.cancel = (reason) => {
-    if (sent.dispatched)
-      detachCaller?.();
-    else
-      cancelBeforeDispatch(reason);
-  };
-  const onCallerAbort = () => bridge.cancel("cancel");
-  bridge.openSignal?.addEventListener("abort", onCallerAbort, { once: true });
-  if (bridge.openSignal?.aborted)
-    cancelBeforeDispatch("cancel");
-  if (bridge.cancelRequested)
-    cancelBeforeDispatch(bridge.cancelRequested);
-  let sendSignal;
-  const cleanupCallerSignals = () => {
-    bridge.openSignal?.removeEventListener("abort", onCallerAbort);
-    sendSignal?.removeEventListener("abort", onCallerAbort);
-  };
-  const scope = zkapiFenceScope({ env });
-  let fences;
-  try {
-    fences = zkapiOutstandingFences(statePath);
-  } catch {
-    cleanupCallerSignals();
-    return fail("state_unavailable");
-  }
-  const fenced = Boolean(fences[scope]);
-  const fencedElsewhere = Object.keys(fences).some((key) => key !== scope);
-  if (fenced || fencedElsewhere)
-    receipt.fence = "held";
-  if (fenced)
-    receipt.settlement = "not_confirmed";
-  const refuse2 = (code) => {
-    cleanupCallerSignals();
-    return fail(code);
-  };
-  const blocked = settingsBlockers(zkapiMoneyStatus(settings, now()))[0];
-  if (blocked)
-    return refuse2(blocked);
-  if (!options.apiKey)
-    return refuse2("daemon_api_key_missing");
-  const daemonExecutable = resolveZkapiExecutable("zkapi-clientd", settings.daemonExecutable, env);
-  if (!daemonExecutable)
-    return refuse2("daemon_not_found");
-  const torExecutable = perConsultTor ? resolveZkapiExecutable("tor", settings.torExecutable, env) : undefined;
-  if (perConsultTor && !torExecutable)
-    return refuse2("tor_not_found");
-  try {
-    const stranded = await recoverStrandedGroups(statePath, now());
-    if (stranded === "busy")
-      return refuse2("busy");
-    if (stranded === "stranded")
-      return refuse2("stranded_processes");
-    if (!recovery && fenced)
-      return refuse2("unresolved_session");
-    if (fencedElsewhere && !fenced)
-      return refuse2("unresolved_session_other_wallet");
-    if (!fenced && recovery)
-      return refuse2("no_unresolved_session");
-    const usage = zkapiUsageToday(statePath, now());
-    const limit = ownerLimits(settings);
-    if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
-      return refuse2("daily_cap_reached");
-    if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
-      return refuse2("spend_cap_reached");
-    }
-  } catch {
-    return refuse2("state_unavailable");
-  }
-  if (await portAnswers(daemonPort))
-    return refuse2("daemon_already_running");
-  if (perConsultTor && await portAnswers(settings.torSocksPort))
-    return refuse2("tor_port_busy");
-  if (sessionSignal.aborted)
-    return refuse2(abortCause);
-  const sessionId = randomUUID17();
-  const workDir = mkdtempSync(join52(tmpdir3(), "olympus-zkapi-"));
-  chmodSync15(workDir, 448);
-  const watchdog = join52(workDir, "watchdog.cjs");
-  const childEnv = childEnvironment(env);
-  const groups = [];
-  let tor;
-  let daemon;
-  let result = failure("internal_error", "not_sent", "not_verified");
-  const unexpectedExit = () => groups.some((group) => (group.leaderExited || group.childExited) && !group.deliberate);
-  const onChildExit = (handle) => {
-    if (!handle.deliberate)
-      sessionAbort.abort();
-  };
-  const interrupted = () => unexpectedExit() ? "session_process_exited" : abortCause;
-  let sendDeadline;
-  result = await (async () => {
-    try {
-      writeFileSync10(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
-      const supervisorInstance = processInstanceIdentity(process.pid);
-      updateState(statePath, now(), (state) => ({
-        ...state,
-        running: { sessionId, supervisor: { pid: process.pid, ...supervisorInstance ? { instance: supervisorInstance } : {} }, workDir, groups: [] }
-      }));
-      const recordAndStart = (handle) => {
-        groups.push(handle);
-        const leader = handle.leader;
-        updateState(statePath, now(), (state) => ({
-          ...state,
-          ...state.running ? { running: { ...state.running, groups: [...state.running.groups, { role: handle.role, pgid: handle.pgid, ...leader ? { leader } : {} }] } } : {}
-        }));
-        handle.go();
-      };
-      const anyExited = unexpectedExit;
-      if (perConsultTor) {
-        stage("confinementSelfTestMs");
-        if (await confinement.selfTest(workDir, childEnv)) {
-          receipt.confinementSelfTest = "passed";
-        } else if (confinement.level !== "none") {
-          receipt.confinementSelfTest = "failed";
-          return result = fail("confinement_self_test_failed");
-        }
-        if (sessionSignal.aborted)
-          return result = fail(interrupted());
-        const torDataDir = join52(workDir, "tor");
-        mkdirSync28(torDataDir, { mode: 448 });
-        let bootstrapped = false;
-        stage("torBootstrapMs");
-        tor = supervise("tor", watchdog, [
-          torExecutable,
-          "--ClientOnly",
-          "1",
-          "--PublishServerDescriptor",
-          "0",
-          "--DataDirectory",
-          torDataDir,
-          "--SocksPort",
-          `127.0.0.1:${settings.torSocksPort}`,
-          "--SafeLogging",
-          "1",
-          "--__OwningControllerProcess",
-          String(process.pid)
-        ], childEnv, (line) => {
-          if (line.includes("Bootstrapped 100"))
-            bootstrapped = true;
-        }, onChildExit);
-        recordAndStart(tor);
-        if (!await waitFor(() => bootstrapped, settings.torBootstrapTimeoutMs, { signal: sessionSignal, giveUp: anyExited })) {
-          return result = fail(sessionSignal.aborted ? interrupted() : "tor_bootstrap_failed");
-        }
-        receipt.freshTorClient = true;
-      }
-      const facts = { requests: new Map, settled: new Map };
-      const daemonArgv = [daemonExecutable, "serve"];
-      stage("daemonReadyMs");
-      daemon = supervise("daemon", watchdog, perConsultTor ? confinement.wrap(daemonArgv, { tor: settings.torSocksPort, daemon: daemonPort }) : daemonArgv, daemonEnvironment(childEnv, daemonExecutable), (line) => parseDaemonLine(facts, line), onChildExit);
-      recordAndStart(daemon);
-      const daemonGone = () => daemon.leaderExited || daemon.childExited;
-      const owned = async (includeTor = true) => {
-        if (includeTor ? anyExited() : daemonGone())
-          return false;
-        const listener = await inspect(daemonPort);
-        if (listener.kind !== "found" || listener.pgid !== daemon.pgid)
-          return false;
-        if (tor && includeTor) {
-          const socks = await inspect(settings.torSocksPort);
-          if (socks.kind !== "found" || socks.pgid !== tor.pgid)
-            return false;
-        }
-        return includeTor ? !anyExited() : !daemonGone();
-      };
-      const guard = async () => {
-        if (sessionSignal.aborted)
-          return interrupted();
-        if (anyExited())
-          return "session_process_exited";
-        if (await owned())
-          return;
-        await sleep2(300);
-        return anyExited() ? "session_process_exited" : "daemon_identity_failed";
-      };
-      const ready = await waitFor(async (remainingMs) => Boolean(facts.listen) && healthFingerprint(await probeRequest(fetchImpl, `${origin}/healthz`, { method: "GET" }, sessionSignal, Math.min(2000, remainingMs))), settings.daemonReadyTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: 250 });
-      if (!ready)
-        return result = fail(sessionSignal.aborted ? interrupted() : "daemon_start_failed");
-      stage("daemonVerifyMs");
-      receipt.daemonVersion = facts.version;
-      if (!versionSupported(facts.version))
-        return result = fail("daemon_version_unsupported");
-      if (facts.listen !== new URL(options.baseUrl).host)
-        return result = fail("daemon_identity_failed");
-      const expectedTransport = perConsultTor ? "SOCKS5 proxy required" : "direct HTTPS (network proxy off)";
-      if (facts.transport !== expectedTransport)
-        return result = fail("relay_mismatch");
-      if (facts.keyReuse === "on")
-        return result = fail("key_reuse_on");
-      if (facts.keyReuse !== "off")
-        return result = fail("key_reuse_unverified");
-      receipt.keyReuse = "verified_off";
-      if (facts.inferenceAuth !== "required")
-        return result = fail("daemon_keyless");
-      let problem = await guard();
-      if (problem)
-        return result = fail(problem);
-      const unauthenticated = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "POST" }, sessionSignal);
-      if (!unauthenticated || unauthenticated.status !== 401 || daemonErrorEnvelope(unauthenticated.body) !== "invalid_api_key" || unauthenticated.headers.get("www-authenticate") !== "Bearer") {
-        return result = fail(unauthenticated?.status === 405 ? "daemon_keyless" : "daemon_identity_failed");
-      }
-      const authorization = { Authorization: `Bearer ${options.apiKey}` };
-      problem = await guard();
-      if (problem)
-        return result = fail(problem);
-      const status = await probeRequest(fetchImpl, `${origin}/admin/status`, { method: "GET", headers: authorization }, sessionSignal);
-      if (sessionSignal.aborted)
-        return result = fail(interrupted());
-      if (!status || status.status === 401)
-        return result = fail("daemon_api_key_rejected");
-      const network = adminStatusNetwork(status);
-      if (!network)
-        return result = fail("daemon_identity_failed");
-      receipt.inferenceAuth = "verified";
-      receipt.network = network;
-      let listing = { listed: false };
-      let guardProblem;
-      stage("policyWarmMs");
-      await waitFor(async (remainingMs) => {
-        guardProblem = await guard();
-        if (guardProblem)
-          return true;
-        const models = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "GET", headers: authorization }, sessionSignal, Math.min(MODELS_PROBE_TIMEOUT_MS, remainingMs));
-        if (models?.status !== 200)
-          return false;
-        listing = modelListing(models.body, options.model);
-        return listing.listed;
-      }, settings.policyWarmTimeoutMs, { signal: sessionSignal, giveUp: anyExited, pollMs: POLICY_POLL_MS });
-      if (guardProblem)
-        return result = fail(guardProblem);
-      if (!listing.listed)
-        return result = fail(sessionSignal.aborted ? interrupted() : "policy_unavailable");
-      if (listing.allowance === undefined)
-        return result = fail("model_unavailable");
-      const allowanceMicroUsd = Math.min(listing.allowance, ZKAPI_MAX_ALLOWANCE_MICRO_USD);
-      receipt.listedAllowanceUsd = listing.allowance / 1e6;
-      stage(undefined);
-      timings = withTiming(timings, "warmTotalMs", durationMs(startedAt, lastSampleAt));
-      bridge.state = "ready";
-      bridge.ready.resolve();
-      const aborted = new Promise((resolve9) => {
-        if (sessionSignal.aborted)
-          resolve9(undefined);
-        else
-          sessionSignal.addEventListener("abort", () => resolve9(undefined), { once: true });
-      });
-      const readyTimer = setTimeout(() => cancelBeforeDispatch("deadline"), bridge.readyTimeoutMs);
-      const dispatch = await Promise.race([bridge.dispatch.promise, aborted]);
-      clearTimeout(readyTimer);
-      if (!dispatch || sessionSignal.aborted)
-        return result = fail(interrupted());
-      stage("reservationMs");
-      const prepared = prepareCompletionRequest(dispatch.question, options, origin);
-      sendSignal = dispatch.signal;
-      sendSignal?.addEventListener("abort", onCallerAbort, { once: true });
-      if (sendSignal?.aborted)
-        cancelBeforeDispatch("cancel");
-      const deadlineAt = dispatch.deadlineAt;
-      const pastDeadline = () => deadlineAt !== undefined && performance.now() >= deadlineAt;
-      if (pastDeadline())
-        return result = fail("timeout");
-      if (deadlineAt !== undefined)
-        sendDeadline = setTimeout(() => cancelBeforeDispatch("deadline"), Math.max(0, deadlineAt - performance.now()));
-      problem = await guard();
-      if (problem)
-        return result = fail(problem);
-      let authorized = true;
-      if (dispatch.authorize) {
-        let pending;
-        try {
-          pending = Promise.resolve(dispatch.authorize(sessionSignal));
-        } catch {
-          return result = fail("internal_error");
-        }
-        const settled = await Promise.race([
-          pending.then((value) => ({ ok: true, value }), () => ({ ok: false })),
-          aborted.then(() => {
-            return;
-          })
-        ]);
-        if (settled === undefined) {
-          pending.catch(() => {
-            return;
-          });
-          return result = fail(interrupted());
-        }
-        if (!settled.ok)
-          return result = fail("internal_error");
-        authorized = settled.value;
-      }
-      if (sessionSignal.aborted)
-        return result = fail(interrupted());
-      if (pastDeadline())
-        return result = fail("timeout");
-      if (!authorized)
-        return result = fail("authorization_refused");
-      if (anyExited())
-        return result = fail("session_process_exited");
-      clearTimeout(sendDeadline);
-      let reservation;
-      try {
-        reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
-          scope,
-          configDir: zkapiWalletDirectory(env),
-          daemonExecutable,
-          daemonPort
-        }, allowanceMicroUsd);
-      } catch {
-        return result = fail("state_unavailable");
-      }
-      if (!reservation.reserved)
-        return result = fail(reservation.reason);
-      receipt.reservedUsd = allowanceMicroUsd / 1e6;
-      receipt.fence = "held";
-      const requestsBefore = new Set(facts.requests.keys());
-      sent.dispatched = true;
-      bridge.state = "dispatched";
-      detachCaller = () => bridge.reply.resolve({ kind: "failed", error: failure("aborted", "unknown", identity(), { receipt: pendingSnapshot3() }).error });
-      const completion = await sendCompletion(prepared, options, sessionSignal, stage, pastDeadline);
-      if (!completion.ok && completion.error.outcome === "not_sent") {
-        sent.dispatched = false;
-        detachCaller = undefined;
-        try {
-          releaseZkapiReservation(statePath, scope, fences[scope], now(), allowanceMicroUsd);
-          delete receipt.reservedUsd;
-          receipt.fence = fenced || fencedElsewhere ? "held" : "clear";
-        } catch {}
-        return result = fail(completion.error.code);
-      }
-      if (completion.ok)
-        timings = withTiming(timings, "replyHandedOverAtMs", durationMs(startedAt, lastSampleAt));
-      bridge.state = "replied";
-      bridge.reply.resolve(completion.ok ? {
-        kind: "reply",
-        text: completion.text,
-        routeLabel: zkapiRouteLabel(pendingSnapshot3()),
-        networkIdentity: identity(),
-        receipt: pendingSnapshot3(),
-        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
-        elapsedMs: completion.elapsedMs
-      } : {
-        kind: "failed",
-        error: failure(completion.error.code, completion.error.outcome, identity(), {
-          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
-          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
-          receipt: pendingSnapshot3()
-        }).error
-      });
-      stage("correlationWaitMs");
-      const correlated = await waitFor(() => {
-        const ours2 = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
-        return ours2.length === 1 && ours2[0][1].finished !== undefined;
-      }, settings.settleTimeoutMs, { giveUp: unexpectedExit });
-      const ours = [...facts.requests.entries()].filter(([id, request2]) => !requestsBefore.has(id) && request2.route === "/v1/chat/completions");
-      const request = correlated && ours.length === 1 ? ours[0][1] : undefined;
-      if (request && request.keys.some((key) => key.source !== "fresh"))
-        receipt.keyReuse = "not_verified";
-      const keyRef = request?.keys.length === 1 ? request.keys[0].keyRef : undefined;
-      let fenceClears = false;
-      if (keyRef !== undefined) {
-        stage("settlementWaitMs");
-        receipt.settlement = await waitFor(() => facts.settled.get(keyRef) === true, settings.settleTimeoutMs, { giveUp: unexpectedExit }) ? "confirmed" : "not_confirmed";
-        fenceClears = receipt.settlement === "confirmed" && request.keys[0].source === "fresh";
-      } else {
-        const preLease = !recovery && request !== undefined && request.keys.length === 0 && request.finished?.status === 400 && !completion.ok && (completion.error.daemonCode === "invalid_model" || completion.error.daemonCode === "model_budget_unavailable");
-        receipt.settlement = preLease ? "no_lease" : "not_confirmed";
-        fenceClears = preLease;
-      }
-      stage(undefined);
-      if (fenceClears) {
-        try {
-          updateState(statePath, now(), (state) => {
-            const { [scope]: _cleared, ...others } = state.fences ?? {};
-            const { fences: _all, ...rest } = state;
-            return Object.keys(others).length > 0 ? { ...rest, fences: others } : rest;
-          });
-          receipt.fence = "clear";
-        } catch {}
-      }
-      if (perConsultTor && !unexpectedExit()) {
-        tor.deliberate = true;
-        stage("torStopMs");
-        const torStopped = await stopOwned(tor);
-        stage(undefined);
-        let after;
-        if (torStopped && !daemonGone() && await owned(false)) {
-          stage("postStopProbeMs");
-          after = await probeRequest(fetchImpl, `${origin}/v1/models`, { method: "GET", headers: authorization }, undefined, MODELS_PROBE_TIMEOUT_MS);
-          stage(undefined);
-        }
-        receipt.postStopProbe = after?.status === 200 ? "still_reachable" : after?.status === 502 && daemonErrorEnvelope(after.body) === "models_unavailable" ? "route_lost" : "inconclusive";
-      }
-      if (unexpectedExit())
-        return result = fail("session_process_exited");
-      if (!completion.ok) {
-        result = failure(completion.error.code, completion.error.outcome, identity(), {
-          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
-          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
-          receipt: snapshot()
-        });
-        return result;
-      }
-      result = {
-        ok: true,
-        text: completion.text,
-        routeLabel: zkapiRouteLabel(receipt),
-        networkIdentity: identity(),
-        receipt: snapshot(),
-        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
-        elapsedMs: completion.elapsedMs
-      };
-      return result;
-    } catch {
-      return result = fail("internal_error");
-    }
-  })();
-  clearTimeout(sendDeadline);
-  cleanupCallerSignals();
-  stage("teardownMs");
-  let allStopped = true;
-  for (const group of [...groups].reverse()) {
-    group.deliberate = true;
-    try {
-      if (!await stopOwned(group))
-        allStopped = false;
-    } catch {
-      allStopped = false;
-    }
-  }
-  if (allStopped) {
-    try {
-      rmSync12(workDir, { recursive: true, force: true });
-    } catch {}
-  } else {
-    result = fail("teardown_incomplete");
-  }
-  stage(undefined);
-  timings = withTiming(timings, "totalMs", elapsedMs(clock, startedAt));
-  const final = result;
-  const finalReceipt = final.ok ? final.receipt : final.error.receipt;
-  if (finalReceipt && Object.keys(timings).length > 0)
-    finalReceipt.stageMs = { ...timings };
-  try {
-    updateState(statePath, now(), (state) => {
-      const { running, ...rest } = state;
-      return {
-        ...rest,
-        ...allStopped ? {} : running ? { running } : {},
-        lastSession: { ...snapshot(), at: now().toISOString(), result: final.ok ? "ok" : final.error.code }
-      };
-    });
-  } catch {}
-  return final;
-}
-function releaseZkapiReservation(path, scope, earlierFence, now, allowanceMicroUsd) {
-  updateState(path, now, (state) => {
-    const { [scope]: _ours, ...others } = state.fences ?? {};
-    const fences = earlierFence ? { ...others, [scope]: earlierFence } : others;
-    const { fences: _all, ...rest } = state;
-    return {
-      ...rest,
-      count: Math.max(0, state.count - 1),
-      reservedMicroUsd: Math.max(0, state.reservedMicroUsd - allowanceMicroUsd),
-      ...Object.keys(fences).length > 0 ? { fences } : {}
-    };
-  });
-}
-function sampleClock(clock) {
-  try {
-    const value = clock();
-    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-  } catch {
-    return;
-  }
-}
-function durationMs(from, to) {
-  if (from === undefined || to === undefined)
-    return;
-  const ms = Math.round(to - from);
-  return Number.isFinite(ms) ? Math.max(0, ms) : undefined;
-}
-function elapsedMs(clock, since) {
-  return since === undefined ? undefined : durationMs(since, sampleClock(clock));
-}
-function withTiming(timings, key, ms) {
-  return ms === undefined ? timings : { ...timings, [key]: ms };
-}
-function adminStatusNetwork(response) {
-  if (response.status !== 200)
-    return;
-  try {
-    const parsed = JSON.parse(response.body);
-    if (parsed.backend !== "zkapi")
-      return;
-    return parsed.network === "mainnet" || parsed.network === "sepolia" ? parsed.network : undefined;
-  } catch {
-    return;
-  }
-}
-function prepareCompletionRequest(question, options, origin) {
-  return {
-    url: `${origin}/v1/chat/completions`,
-    init: {
-      method: "POST",
-      redirect: "error",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Authorization: `Bearer ${options.apiKey}`
-      },
-      body: JSON.stringify({
-        model: options.model,
-        messages: [{ role: "user", content: question }],
-        stream: false
-      })
-    }
-  };
-}
-async function sendCompletion(prepared, options, signal, stage, pastDeadline = () => false) {
-  const settings = options.settings;
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const started = Date.now();
-  const controller = new AbortController;
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, settings.timeoutMs);
-  const onAbort = () => controller.abort();
-  signal?.addEventListener("abort", onAbort, { once: true });
-  const bad = (code, outcome, extra = {}) => ({ ok: false, error: { code, outcome, ...extra } });
-  try {
-    let response;
-    stage("dispatchToFirstByteMs");
-    if (pastDeadline())
-      return bad("timeout", "not_sent");
-    try {
-      response = await fetchImpl(prepared.url, { ...prepared.init, signal: controller.signal });
-    } catch (error) {
-      if (timedOut)
-        return bad("timeout", "unknown");
-      if (controller.signal.aborted)
-        return bad("aborted", "unknown");
-      if (isRedirectError(error))
-        return bad("redirect_refused", "unknown");
-      return bad("transport_failed", "unknown");
-    }
-    stage("firstByteToCompletionMs");
-    if (response.status >= 300 && response.status < 400) {
-      await response.body?.cancel().catch(() => {
-        return;
-      });
-      return bad("redirect_refused", "unknown", { httpStatus: response.status });
-    }
-    const body = await readBounded(response, settings.maxResponseBytes).catch(() => {
-      return;
-    });
-    stage(undefined);
-    if (!body) {
-      if (timedOut)
-        return bad("timeout", "unknown");
-      if (controller.signal.aborted)
-        return bad("aborted", "unknown");
-      return bad("transport_failed", "unknown");
-    }
-    if (!body.ok)
-      return bad("response_too_large", "unknown", { httpStatus: response.status });
-    if (response.status < 200 || response.status >= 300) {
-      return bad("daemon_error", "sent_failed", {
-        httpStatus: response.status,
-        daemonCode: knownDaemonCode(daemonErrorEnvelope(body.text))
-      });
-    }
-    const text = completionText(body.text);
-    if (text === undefined)
-      return bad("invalid_response", "unknown", { httpStatus: response.status });
-    const verification = response.headers.get("x-oa-verification-status");
-    return {
-      ok: true,
-      text,
-      ...verification === "verified" || verification === "verifier-unavailable" ? { providerVerification: verification } : {},
-      elapsedMs: Date.now() - started
-    };
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-function validZkapiConsultQuestion(question) {
-  return typeof question === "string" && validQuestion(question);
-}
-function validQuestion(question) {
-  if (!question.trim())
-    return false;
-  if (new TextEncoder().encode(question).byteLength > MAX_QUESTION_BYTES)
-    return false;
-  return !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(question);
-}
-function knownDaemonCode(code) {
-  return KNOWN_DAEMON_ERROR_CODES.includes(code ?? "") ? code : "unrecognized";
-}
-function completionText(body) {
-  try {
-    const parsed = JSON.parse(body);
-    if (!Array.isArray(parsed.choices) || parsed.choices.length !== 1)
-      return;
-    const choice = parsed.choices[0];
-    const content = choice.message?.content;
-    if (choice.message?.role !== undefined && choice.message.role !== "assistant")
-      return;
-    return typeof content === "string" && content.trim() ? content : undefined;
-  } catch {
-    return;
-  }
-}
-function isRedirectError(error) {
-  const seen = new Set;
-  let current = error;
-  while (current && typeof current === "object" && !seen.has(current)) {
-    seen.add(current);
-    const record = current;
-    if (record.code === "UnexpectedRedirect")
-      return true;
-    if (typeof record.message === "string" && /redirect/i.test(record.message))
-      return true;
-    current = record.cause;
-  }
-  return false;
-}
-async function readBounded(response, maxBytes) {
-  const reader = response.body?.getReader();
-  if (!reader)
-    return { ok: true, text: "" };
-  const chunks = [];
-  let total = 0;
-  for (;; ) {
-    const { done, value } = await reader.read();
-    if (done)
-      break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel().catch(() => {
-        return;
-      });
-      return { ok: false };
-    }
-    chunks.push(value);
-  }
-  const joined = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { ok: true, text: new TextDecoder().decode(joined) };
-}
-var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
-const net = require('node:net');
-const dgram = require('node:dgram');
-const loopback = () => new Promise((resolve) => {
-  const server = net.createServer((c) => c.end());
-  server.listen(0, '127.0.0.1', () => {
-    const s = net.createConnection({ host: '127.0.0.1', port: server.address().port });
-    s.once('connect', () => { s.destroy(); server.close(); resolve('connected'); });
-    s.once('error', () => { server.close(); resolve('failed'); });
-  });
-});
-const tcp = () => new Promise((resolve) => {
-  const started = Date.now();
-  const s = net.createConnection({ host: '192.0.2.1', port: 9 });
-  s.setTimeout(3000, () => { s.destroy(); resolve('timeout'); });
-  s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve(Date.now() - started < 1000 ? 'failed_fast' : 'failed_slow'));
-});
-const udp = () => new Promise((resolve) => {
-  const s = dgram.createSocket('udp4');
-  s.send(Buffer.from([0]), 53, '192.0.2.1', (e) => { s.close(); resolve(e ? 'failed' : 'sent'); });
-});
-const resolver = () => new Promise((resolve) => {
-  const s = net.createConnection({ path: '/private/var/run/mDNSResponder' });
-  s.once('connect', () => { s.destroy(); resolve('connected'); });
-  s.once('error', () => resolve('failed'));
-});
-(async () => {
-  const result = { loopback: await loopback(), udp: await udp(), resolver: await resolver(), tcp: await tcp() };
-  process.stdout.write(JSON.stringify(result));
-})();
-`, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, DEFAULT_EXECUTABLE_TRUST, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES;
-var init_consult_transport_zkapi = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_managed_tools();
-  init_zkapi_consult_settings();
-  DAY_MS = 24 * 60 * 60 * 1000;
-  PROBE_MAX_BYTES = 64 * 1024;
-  MAX_QUESTION_BYTES = 8 * 1024;
-  ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6"];
-  CHILD_ENV_KEYS = [
-    "HOME",
-    "PATH",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "TMPDIR",
-    "XDG_CONFIG_HOME",
-    "ZKAPI_CLIENTD_CONFIG_DIR",
-    "OA_CHAT_CONFIG_DIR"
-  ];
-  KNOWN_DAEMON_ERROR_CODES = [
-    "busy",
-    "request_cancelled",
-    "funding_required",
-    "model_budget_unavailable",
-    "model_policy_unavailable",
-    "invalid_model",
-    "anonymous_access_failed",
-    "upstream_error",
-    "invalid_upstream_response",
-    "withdrawal_pending",
-    "wallet_conflict",
-    "invalid_request_error",
-    "invalid_body",
-    "testnet_password_required",
-    "invalid_api_key",
-    "local_connection_required",
-    "browser_origin_denied"
-  ];
-  ZKAPI_STAGE_LABELS = [
-    ["leaseAcquireMs", "lease acquire"],
-    ["confinementSelfTestMs", "confinement self-test"],
-    ["torBootstrapMs", "Tor start to bootstrapped"],
-    ["daemonReadyMs", "daemon start to ready"],
-    ["daemonVerifyMs", "daemon verification"],
-    ["policyWarmMs", "models/policy warm"],
-    ["warmTotalMs", "warm total"],
-    ["reservationMs", "reservation"],
-    ["dispatchToFirstByteMs", "dispatch to first byte"],
-    ["firstByteToCompletionMs", "first byte to completion"],
-    ["replyHandedOverAtMs", "reply handed over at"],
-    ["correlationWaitMs", "request correlation wait"],
-    ["settlementWaitMs", "settlement wait"],
-    ["torStopMs", "Tor stop"],
-    ["postStopProbeMs", "post-stop probe"],
-    ["teardownMs", "teardown"],
-    ["totalMs", "total"]
-  ];
-  MESSAGES = {
-    invalid_question: "The consult question is empty, too long, or contains control characters.",
-    busy: "Another zkAPI consult is in flight; consults are sent one at a time.",
-    acknowledgements_incomplete: "The zkAPI risk acknowledgements are not all accepted for the current version.",
-    funding_date_missing: "No owner-confirmed funding date is recorded, so the note expiry cannot be estimated.",
-    funding_date_invalid: "The recorded funding date is in the future.",
-    note_expired: "By the owner-confirmed funding date, the note is past its estimated 30-day expiry.",
-    daemon_api_key_missing: "No local API key for the daemon is configured in Olympus.",
-    daemon_not_found: "The zkapi-clientd executable was not found.",
-    tor_not_found: 'The tor executable was not found; install Tor or set tor to "off".',
-    unresolved_session: "An earlier zkAPI session may have left a lease unsettled; run a recovery-only session before another consult.",
-    unresolved_session_other_wallet: "An unresolved zkAPI session belongs to another wallet directory; recover it there, or abandon it explicitly, before another consult.",
-    no_unresolved_session: "There is no unresolved zkAPI session to recover.",
-    stranded_processes: "Processes from an earlier zkAPI session could not be confirmed stopped.",
-    daemon_already_running: "Something already serves on the zkAPI port; stop your own zkapi-clientd serve, because Olympus runs and verifies its own for each consult.",
-    tor_port_busy: "Something already listens on the zkAPI Tor port; Olympus needs it free to start a fresh Tor client.",
-    tor_bootstrap_failed: "The per-consult Tor client did not finish bootstrapping.",
-    daemon_start_failed: "zkapi-clientd serve did not become ready.",
-    daemon_version_unsupported: "This zkapi-clientd version is not a reviewed version (0.1.5 or 0.1.6).",
-    relay_mismatch: "The daemon is not configured for the expected route (SOCKS5 when Tor is on, direct when Tor is off).",
-    key_reuse_on: "The daemon key-reuse window is on, so requests would be linkable; Olympus refuses to send.",
-    key_reuse_unverified: "The daemon did not confirm a fresh key for every request.",
-    daemon_keyless: "The daemon accepts inference without a local API key, so any local process can spend the balance.",
-    daemon_identity_failed: "A port of this session is not held by the process group Olympus started.",
-    daemon_api_key_rejected: "The daemon rejected the configured local API key.",
-    session_process_exited: "The Tor client or the daemon of this session stopped unexpectedly.",
-    confinement_self_test_failed: "The network confinement for this platform did not pass its self-test, so the session was refused.",
-    policy_unavailable: "The daemon could not load the model policy in time.",
-    model_unavailable: "The selected model is not in the daemon's live model list.",
-    daily_cap_reached: "The daily zkAPI request limit you set is reached.",
-    spend_cap_reached: "Another request would exceed the daily zkAPI spend limit you set (each question counts the amount zkAPI holds for its model).",
-    state_unavailable: "The persistent zkAPI session ledger could not be read or written.",
-    timeout: "The zkAPI consult timed out; it may still have been charged.",
-    aborted: "The zkAPI consult was cancelled; it may still have been charged.",
-    redirect_refused: "The daemon answered with a redirect, which is never followed.",
-    response_too_large: "The zkAPI response exceeded the size limit and was cut off.",
-    invalid_response: "The zkAPI response was not a single non-empty chat completion.",
-    daemon_error: "The zkAPI daemon returned an error.",
-    transport_failed: "The request to the zkAPI daemon failed.",
-    teardown_incomplete: "The session's processes could not be confirmed stopped; the next session will not start until they are.",
-    authorization_refused: "The final authorization immediately before dispatch refused the consult; nothing was reserved or sent.",
-    session_spent: "This zkAPI session has already sent, was cancelled, or has ended; each session sends at most once.",
-    internal_error: "The zkAPI session failed inside Olympus."
-  };
-  DARWIN_POLICY = { nonLoopback: "denied", unixSockets: "denied", loopbackOutbound: "any" };
-  WATCHDOG_SCRIPT = `
-const { spawn, execFileSync } = require('node:child_process');
-const fs = require('node:fs');
-const [, , expectedParentText, ...argv] = process.argv;
-const expectedParent = Number(expectedParentText);
-const self = process.pid;
-if (process.ppid !== expectedParent) process.exit(70);
-let child;
-let cleaning = false;
-let exitCode = 0;
-const othersInGroup = () => {
-  if (process.platform === 'linux') {
-    let count = 0;
-    for (const name of fs.readdirSync('/proc')) {
-      if (!/^\\d+$/.test(name) || Number(name) === self) continue;
-      try {
-        const stat = fs.readFileSync('/proc/' + name + '/stat', 'utf8');
-        const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\\s+/);
-        if (Number(fields[2]) === self && fields[0] !== 'Z') count += 1;
-      } catch {}
-    }
-    return count;
-  }
-  try {
-    const out = execFileSync('/usr/bin/pgrep', ['-g', String(self)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    return out.split('\\n').filter((line) => line.trim() && Number(line) !== self).length;
-  } catch (error) {
-    return error && error.status === 1 ? 0 : Infinity;
-  }
-};
-const cleanup = () => {
-  if (cleaning) return;
-  cleaning = true;
-  try { process.kill(-self, 'SIGTERM'); } catch {}
-  const deadline = Date.now() + 5000;
-  const tick = () => {
-    if (othersInGroup() === 0) process.exit(exitCode);
-    if (Date.now() >= deadline) { try { process.kill(-self, 'SIGKILL'); } catch {} return; }
-    setTimeout(tick, 100);
-  };
-  setTimeout(tick, 50);
-};
-process.on('SIGTERM', cleanup);
-process.on('SIGINT', cleanup);
-// With the supervisor gone its pipes are broken: a failed write must never
-// take the watchdog down before the group is clean.
-process.on('SIGPIPE', () => {});
-process.stdout.on('error', () => {});
-process.stderr.on('error', () => {});
-process.on('uncaughtException', () => cleanup());
-const start = () => {
-  child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] });
-  const report = () => { try { process.stdout.write('\\n${WATCHDOG_CHILD_EXITED}\\n'); } catch {} };
-  child.on('exit', (code) => { exitCode = code === null ? 1 : code; report(); cleanup(); });
-  child.on('error', () => { exitCode = 127; report(); cleanup(); });
-};
-let received = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => { received += chunk; if (!child && !cleaning && received.includes('go\\n')) start(); });
-process.stdin.on('end', () => { if (!child) process.exit(71); });
-setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
-`;
-  DEFAULT_EXECUTABLE_TRUST = {
-    realpath: (path) => realpathSync4(path),
-    stat: (path) => statSync18(path),
-    executable: (path) => {
-      try {
-        accessSync5(path, constants4.X_OK);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    uid: () => typeof process.getuid === "function" ? process.getuid() : undefined
-  };
-  SESSION_OWNED_FAILURES = new Set(["session_process_exited", "teardown_incomplete"]);
 });
 
 // src/core/consult-gate.ts
@@ -134940,12 +134989,12 @@ init_openclaw_executable();
 init_operation_error();
 init_remote_access();
 var ENGINE_CLI_USAGE = {
-  "engine install": "olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--dry-run]",
+  "engine install": "olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--now] [--dry-run]",
   "engine uninstall": "olympus engine uninstall",
   "engine status": "olympus engine status",
   "engine start": "olympus engine start",
-  "engine stop": "olympus engine stop",
-  "engine restart": "olympus engine restart",
+  "engine stop": "olympus engine stop [--now]",
+  "engine restart": "olympus engine restart [--now]",
   "engine rollback": "olympus engine rollback",
   "engine verify": "olympus engine verify [--expect-package <path> | --expect-build <build>]",
   "engine logs": "olympus engine logs [--lines <n>] [--follow]"
@@ -134986,12 +135035,10 @@ async function runEngineCommand(args, deps = {}) {
     return handler ? { ...result, open_handler: handler } : result;
   }
   if (command === "restart") {
-    expectNoArgs("restart", rest);
-    return restartEngine(service);
+    return restartEngine({ ...service, ...parseNowArg("restart", rest) });
   }
   if (command === "stop") {
-    expectNoArgs("stop", rest);
-    return stopEngine(service);
+    return stopEngine({ ...service, ...parseNowArg("stop", rest) });
   }
   if (command === "start") {
     expectNoArgs("start", rest);
@@ -135117,6 +135164,13 @@ async function followEngineLogs(homeDir, lines) {
   reader.on("line", (line) => console.log(redactLogLine(line)));
   await new Promise((resolve9) => child.once("exit", () => resolve9()));
 }
+function parseNowArg(command, args) {
+  if (args.length === 0)
+    return {};
+  if (args.length === 1 && args[0] === "--now")
+    return { now: true };
+  throw new OperationError("invalid_params", `Unknown engine ${command} option: ${args.find((arg) => arg !== "--now") ?? args[0]}`);
+}
 function parseInstallArgs(args) {
   const options = {};
   for (let index = 0;index < args.length; index += 1) {
@@ -135125,6 +135179,8 @@ function parseInstallArgs(args) {
       options.dryRun = true;
     else if (arg === "--restart")
       options.restart = true;
+    else if (arg === "--now")
+      options.now = true;
     else if (arg === "--from-checkout" || arg === "--bun") {
       const value = args[index + 1];
       if (!value || value.startsWith("--"))

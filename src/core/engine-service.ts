@@ -35,6 +35,7 @@ import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
 import { loadSovereigntyPreset, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
 import { workerAuthTokenFromSetupEnv } from './worker-auth.ts';
 import { ensureManagedWorkerEnvironment, workerServicePaths } from './worker-service.ts';
+import { defaultZkapiStatePath, zkapiConsultInFlightOnDisk } from './consult-transport-zkapi.ts';
 
 export const ENGINE_LABEL = 'ai.olympusplugin.engine';
 /** The one public relay host for standalone (ChatGPT) installs. */
@@ -281,6 +282,51 @@ export interface EngineServiceOptions {
   uid?: number;
   /** Test seam; the engine is macOS-only. */
   platform?: string;
+  /** Stop or restart at once, even while a zkAPI question is in flight (`--now`). */
+  now?: boolean;
+  /** Test seams for the in-flight guard: what is in flight, and a blocking sleep. */
+  consultInFlight?: () => { since: string } | undefined;
+  sleepMs?: (ms: number) => void;
+  /** How long a stop or restart waits for an in-flight question (default ENGINE_QUIET_WAIT_MS). */
+  quietWaitMs?: number;
+}
+
+/**
+ * A stop or restart waits this long for a zkAPI question in flight to settle,
+ * then refuses rather than kill it: a question killed between its reservation
+ * and its settlement strands the hold (incident 2026-10-10 17:09Z). A session
+ * takes about two minutes end to end, so three is the bound.
+ */
+export const ENGINE_QUIET_WAIT_MS = 180_000;
+const ENGINE_QUIET_POLL_MS = 2_000;
+
+/**
+ * Waits for the engine to be quiet (no zkAPI question in flight) before a
+ * stop or restart, up to the bound; `now` skips the wait. Throws when the
+ * question is still running at the bound: the caller tries again later or
+ * passes --now, and the engine keeps running meanwhile.
+ */
+export function waitForQuietEngine(options: EngineServiceOptions): { waited_ms: number } {
+  if (options.now) return { waited_ms: 0 };
+  const inFlight = options.consultInFlight
+    ?? (() => zkapiConsultInFlightOnDisk(defaultZkapiStatePath(absolute(options.homeDir ?? homedir(), 'home directory'))));
+  const sleep = options.sleepMs ?? sleepSync;
+  const bound = options.quietWaitMs ?? ENGINE_QUIET_WAIT_MS;
+  let waited = 0;
+  let current = inFlight();
+  while (current && waited < bound) {
+    sleep(ENGINE_QUIET_POLL_MS);
+    waited += ENGINE_QUIET_POLL_MS;
+    current = inFlight();
+  }
+  if (current) {
+    throw new OperationError(
+      'config_error',
+      `A zkAPI question has been in flight since ${current.since}; stopping the engine now would strand its payment.`,
+      'Wait for it to finish and run this again, or add --now to stop it anyway.',
+    );
+  }
+  return { waited_ms: waited };
 }
 
 export interface EngineInstallOptions extends EngineServiceOptions {
@@ -401,6 +447,7 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
   const loaded = launchctlLoaded(exec, target);
   let action: EngineInstallResult['action'] = 'unchanged';
   if (loaded && wrotePlist) {
+    waitForQuietEngine(options);
     mustSucceed(exec('launchctl', ['bootout', target]), 'unload the previous engine agent');
     action = 'reloaded';
   } else if (!loaded) {
@@ -408,6 +455,7 @@ export function installEngine(options: EngineInstallOptions = {}): EngineInstall
   } else if (options.restart || runningBuildDiffers(paths.statusPath, program.build)) {
     // Same plist, but the host launchd is running is another build (or the
     // caller just swapped the package): restart it in place.
+    waitForQuietEngine(options);
     mustSucceed(exec('launchctl', ['kickstart', '-k', target]), 'restart the engine agent');
     action = 'restarted';
   }
@@ -941,6 +989,7 @@ export function stopEngine(options: EngineServiceOptions & { reap?: EngineChildR
   const exec = options.exec ?? defaultExec;
   const target = serviceTarget(options.uid);
   const loaded = launchctlLoaded(exec, target);
+  if (loaded) waitForQuietEngine(options);
   if (loaded) mustSucceed(exec('launchctl', ['bootout', target]), 'stop the engine agent');
   mustSucceed(exec('launchctl', ['disable', target]), 'keep the engine agent from starting at login');
   const reaped: EngineChildReapResult = reapRecordedEngineChildren(paths.childrenPath, options.reap);
@@ -1199,6 +1248,7 @@ export function restartEngine(options: EngineServiceOptions = {}): { ok: true; c
   if (!launchctlLoaded(exec, target)) {
     throw new OperationError('config_error', 'The engine agent is not loaded.', 'Run olympus engine install.');
   }
+  waitForQuietEngine(options);
   const command = ['launchctl', 'kickstart', '-k', target];
   mustSucceed(exec(command[0]!, command.slice(1)), 'restart the engine agent');
   return { ok: true, command };

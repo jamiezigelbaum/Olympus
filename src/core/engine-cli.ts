@@ -32,12 +32,12 @@ import { OperationError } from './operation-error.ts';
 import { readRemoteAccessStatus, relayProcessRunning, remoteAccessDirForCli, resolveRemoteAccessMode } from './remote-access.ts';
 
 export const ENGINE_CLI_USAGE = {
-  'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--dry-run]',
+  'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--now] [--dry-run]',
   'engine uninstall': 'olympus engine uninstall',
   'engine status': 'olympus engine status',
   'engine start': 'olympus engine start',
-  'engine stop': 'olympus engine stop',
-  'engine restart': 'olympus engine restart',
+  'engine stop': 'olympus engine stop [--now]',
+  'engine restart': 'olympus engine restart [--now]',
   'engine rollback': 'olympus engine rollback',
   'engine verify': 'olympus engine verify [--expect-package <path> | --expect-build <build>]',
   'engine logs': 'olympus engine logs [--lines <n>] [--follow]',
@@ -106,12 +106,10 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     return handler ? { ...result, open_handler: handler } : result;
   }
   if (command === 'restart') {
-    expectNoArgs('restart', rest);
-    return restartEngine(service);
+    return restartEngine({ ...service, ...parseNowArg('restart', rest) });
   }
   if (command === 'stop') {
-    expectNoArgs('stop', rest);
-    return stopEngine(service);
+    return stopEngine({ ...service, ...parseNowArg('stop', rest) });
   }
   if (command === 'start') {
     expectNoArgs('start', rest);
@@ -244,12 +242,20 @@ async function followEngineLogs(homeDir: string, lines: number): Promise<void> {
   await new Promise<void>((resolve) => child.once('exit', () => resolve()));
 }
 
-export function parseInstallArgs(args: string[]): { fromCheckout?: string; bunBin?: string; dryRun?: boolean; restart?: boolean } {
-  const options: { fromCheckout?: string; bunBin?: string; dryRun?: boolean; restart?: boolean } = {};
+/** `--now`: stop or restart even while a zkAPI question is in flight (the default waits, then refuses). */
+function parseNowArg(command: string, args: string[]): { now?: boolean } {
+  if (args.length === 0) return {};
+  if (args.length === 1 && args[0] === '--now') return { now: true };
+  throw new OperationError('invalid_params', `Unknown engine ${command} option: ${args.find((arg) => arg !== '--now') ?? args[0]}`);
+}
+
+export function parseInstallArgs(args: string[]): { fromCheckout?: string; bunBin?: string; dryRun?: boolean; restart?: boolean; now?: boolean } {
+  const options: { fromCheckout?: string; bunBin?: string; dryRun?: boolean; restart?: boolean; now?: boolean } = {};
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--restart') options.restart = true;
+    else if (arg === '--now') options.now = true;
     else if (arg === '--from-checkout' || arg === '--bun') {
       const value = args[index + 1];
       if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${arg} needs a path.`);

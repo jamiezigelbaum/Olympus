@@ -432,8 +432,12 @@ export interface ZkapiConsultReadiness {
   unresolvedSession: boolean;
   /** Every outstanding fence, with its recorded facts; any one blocks consults. */
   fences: Array<ZkapiFence & { thisWallet: boolean }>;
-  /** A process record an earlier session left; it blocks until cleared. */
-  stranded?: { supervisorPid: number; supervisorRunning: boolean; groups: Array<{ role: 'tor' | 'daemon'; pgid: number }> };
+  /**
+   * A process record an earlier session left whose groups could not all be
+   * confirmed stopped (a live supervisor is a question in flight instead).
+   * Each group says whether it is ours (alive), gone, or unknown.
+   */
+  stranded?: { supervisorPid: number; supervisorRunning: boolean; groups: Array<{ role: 'tor' | 'daemon'; pgid: number; state: 'ours' | 'gone' | 'unknown' }> };
   lastSession?: ZkapiLastSession;
   routeLabel: string;
   blockers: ZkapiConsultErrorCode[];
@@ -1183,6 +1187,33 @@ function recordedGroupState(group: OwnedGroup, recordedBootId: string | undefine
   return group.leader.startTime === current.startTime ? 'ours' : 'gone';
 }
 
+/**
+ * Whether a zkAPI question is in flight on this computer, read from the state
+ * file: a `running` record whose supervisor process is alive. For the engine's
+ * stop and restart (incident 2026-10-10 17:09Z: a restart six seconds after a
+ * reservation stranded its hold). A record whose supervisor is gone is not in
+ * flight; readiness and the next ask clear it.
+ */
+export function zkapiConsultInFlightOnDisk(statePath: string): { since: string } | undefined {
+  let state: ZkapiState | undefined;
+  try {
+    state = readState(statePath);
+  } catch {
+    return undefined;
+  }
+  const running = state?.running;
+  if (!running || !supervisorAlive(running.supervisor)) return undefined;
+  return { since: zkapiRunningSince(statePath) };
+}
+
+function zkapiRunningSince(statePath: string): string {
+  try {
+    return statSync(statePath).mtime.toISOString();
+  } catch {
+    return 'an unknown time';
+  }
+}
+
 function supervisorAlive(supervisor: { pid: number; instance?: ProcessInstanceIdentity }): boolean {
   if (supervisor.pid === process.pid) return false;
   const boot = currentBootId();
@@ -1723,11 +1754,21 @@ export async function zkapiConsultReadiness(
     fences = Object.entries(state?.fences ?? {}).map(([scope, fence]) => ({ ...fence, thisWallet: scope === currentScope }));
     unresolvedSession = fences.length > 0;
     if (state?.running) {
-      stranded = {
-        supervisorPid: state.running.supervisor.pid,
-        supervisorRunning: supervisorAlive(state.running.supervisor),
-        groups: state.running.groups.map((group) => ({ role: group.role, pgid: group.pgid })),
-      };
+      // A live supervisor is a question in flight, not a problem. A dead one
+      // leaves a record whose process groups are checked here (and stopped
+      // when they are ours), exactly as the next ask would: the record is
+      // cleared when every group is gone, and only groups still alive or
+      // unidentifiable are reported, by name.
+      const supervisorRunning = supervisorAlive(state.running.supervisor);
+      const outcome = supervisorRunning ? 'busy' : await recoverStrandedGroups(statePath, now);
+      if (outcome !== 'clear') {
+        const recordedBoot = state.running.supervisor.instance?.bootId;
+        stranded = {
+          supervisorPid: state.running.supervisor.pid,
+          supervisorRunning,
+          groups: state.running.groups.map((group) => ({ role: group.role, pgid: group.pgid, state: recordedGroupState(group, recordedBoot) })),
+        };
+      }
     }
   } catch {
     blockers.push('state_unavailable');

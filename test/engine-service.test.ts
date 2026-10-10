@@ -24,6 +24,7 @@ import {
   readEngineLogs,
   reconcileEngineConfig,
   renderEnginePlist,
+  restartEngine,
   rollbackEngine,
   startEngine,
   stopEngine,
@@ -645,6 +646,40 @@ describe('engine upgrades restart the engine on the new build', () => {
     writeStatus(first.program.build);
     expect(installEngine({ ...options, restart: true }).action).toBe('restarted');
     expect(parseInstallArgs(['--restart'])).toEqual({ restart: true });
+    expect(parseInstallArgs(['--restart', '--now'])).toEqual({ restart: true, now: true });
+  });
+
+  test('a stop or restart waits for a zkAPI question in flight, refuses at the bound, and --now skips the wait', () => {
+    const { home, checkout, bun } = fixture();
+    const launchctl = fakeLaunchctl();
+    const options = { platform: 'darwin', homeDir: home, uid: 501, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun };
+    installEngine(options);
+    const slept: number[] = [];
+    const sleepMs = (ms: number) => { slept.push(ms); };
+    // In flight for two polls, then settled: the restart waits, then kicks.
+    let polls = 0;
+    const settles = () => (polls++ < 2 ? { since: '2026-10-10T17:09:01.821Z' } : undefined);
+    launchctl.calls.length = 0;
+    expect(restartEngine({ ...options, consultInFlight: settles, sleepMs })).toMatchObject({ ok: true });
+    expect(slept).toEqual([2_000, 2_000]);
+    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'kickstart']);
+    // Still in flight at the bound: refused with the reason and the way out; nothing was kicked.
+    launchctl.calls.length = 0;
+    const stuck = () => ({ since: '2026-10-10T17:09:01.821Z' });
+    expect(() => restartEngine({ ...options, consultInFlight: stuck, sleepMs, quietWaitMs: 4_000 })).toThrow(/in flight since 2026-10-10T17:09:01.821Z.*strand its payment/);
+    expect(launchctl.calls.map((call) => call[1])).toEqual(['print']);
+    expect(() => installEngine({ ...options, restart: true, consultInFlight: stuck, sleepMs, quietWaitMs: 0 })).toThrow(/strand its payment/);
+    expect(() => stopEngine({ ...options, consultInFlight: stuck, sleepMs, quietWaitMs: 0 })).toThrow(/strand its payment/);
+    expect(launchctl.loaded()).toBe(true);
+    // --now: no wait, no question asked.
+    launchctl.calls.length = 0;
+    expect(restartEngine({ ...options, consultInFlight: stuck, sleepMs, now: true })).toMatchObject({ ok: true });
+    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'kickstart']);
+    // Nothing in flight (no state file in this home): no wait at all.
+    launchctl.calls.length = 0;
+    slept.length = 0;
+    expect(restartEngine({ ...options, sleepMs })).toMatchObject({ ok: true });
+    expect(slept).toEqual([]);
   });
 
   test('rollback swaps in the previous app and reloads the agent onto it; a second rollback swaps back', async () => {

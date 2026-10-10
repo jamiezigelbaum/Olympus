@@ -2358,7 +2358,7 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
     note_expired: 'Your balance is past its estimated 30-day expiry.',
     unresolved_session: 'An earlier question has not finished paying. Use Recover under Unfinished payment.',
     unresolved_session_other_wallet: 'An unfinished payment belongs to another zkAPI wallet. Finish it there, or abandon it under Unfinished payment.',
-    stranded_processes: 'Programs from an earlier question may still be running.',
+    stranded_processes: 'Tor or the zkAPI app from an earlier question is still running and Olympus could not stop it. Restart Olympus to clear it (olympus engine restart).',
     daemon_already_running: 'Another copy of the zkAPI app is already running. Close it; Olympus starts its own for each question.',
     tor_port_busy: 'Another program is using the connection Olympus needs to hide your network address.',
     daily_cap_reached: 'Today\'s question limit is reached. Raise or remove it under Balance and limits.',
